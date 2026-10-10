@@ -1,0 +1,14 @@
+# 001 — Stack e entrega
+
+| Tema | Decisão |
+|---|---|
+| Frontend | Template da skill `purple-skills-public:web-interface-admin-with-canva`: React 19, Vite, TypeScript, Tailwind 4, React Flow, cmdk, lucide. Seguir as regras de design da skill (tokens, sem hex em componentes, um acento roxo, sem sombra em superfície fixa). |
+| Backend | Node + TypeScript, Fastify, Drizzle ORM (só consultas; schema gerado do banco), Zod. |
+| Banco | PostgreSQL 18 + pgvector, em `database/`, gerido pelo agente DBA ([016](016-banco-de-dados.md)). Migrations SQL com dbmate, testes pgTAP. Anexos também no Postgres (`bytea`, tabela própria, limite por arquivo). |
+| Repositório | Monorepo pnpm em `github.com/patrickbrandao/moneyflow`: `apps/web`, `apps/server` (modos `api` e `worker`), `packages/shared` (schemas Zod, tipos, definições das tools dos agentes), `packages/db` (schema Drizzle gerado do banco). O banco fica em `database/`, fora dos workspaces. |
+| Qualidade | Biome (lint/format), pgTAP no banco, Vitest + Testcontainers (Postgres 18 real) para regras financeiras, Playwright nos fluxos principais. |
+| Imagem | Imagem única `tmsoftbrasil/moneyflow`: a API serve o SPA compilado; o mesmo artefato roda como `api` ou `worker`. |
+| Ambiente local | Docker Compose: o compose da aplicação inclui `database/docker-compose.yml` (Postgres 18 + pgvector) e sobe `api` e `worker`. |
+| CI/CD | GitHub Actions: lint, typecheck, testes e build em PRs/main. Em tag `v*`: build multi-arch (amd64+arm64) e push `:X.Y.Z` e `:latest` (secrets `DOCKERHUB_USERNAME` e `DOCKERHUB_TOKEN`). `make release` para push local (conta `tmsoftbrasil` autorizada na máquina). |
+| Locale | Interface pt-BR com strings centralizadas (i18n-ready), fuso `America/Sao_Paulo`, `dd/mm/aaaa`, `R$ 1.234,56`. Código e banco em inglês. |
+| Moeda | Só BRL, valores em centavos (`bigint`). |

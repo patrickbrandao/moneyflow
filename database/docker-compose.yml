@@ -1,0 +1,45 @@
+name: moneyflow-db
+
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: moneyflow-postgres:dev
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-moneyflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-moneyflow}
+      POSTGRES_DB: ${POSTGRES_DB:-moneyflow}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-moneyflow_app}
+      TZ: America/Sao_Paulo
+    ports:
+      - "${MONEYFLOW_DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./tests:/tests:ro
+    healthcheck:
+      # Via TCP: durante o initdb o servidor temporário só escuta no socket, então
+      # o container não fica "healthy" antes de os scripts de docker/initdb rodarem.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Ferramenta de migrations (só roda sob demanda: `make migrate`).
+  dbmate:
+    image: ghcr.io/amacneil/dbmate:2
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-moneyflow}:${POSTGRES_PASSWORD:-moneyflow}@postgres:5432/${POSTGRES_DB:-moneyflow}?sslmode=disable
+      TEST_DATABASE_URL: postgres://${POSTGRES_USER:-moneyflow}:${POSTGRES_PASSWORD:-moneyflow}@postgres:5432/${POSTGRES_DB:-moneyflow}_test?sslmode=disable
+      DBMATE_MIGRATIONS_DIR: /db/migrations
+      DBMATE_NO_DUMP_SCHEMA: "true"
+      DBMATE_STRICT: "true"
+    volumes:
+      - ./migrations:/db/migrations:ro
+
+volumes:
+  pgdata:
