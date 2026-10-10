@@ -1,0 +1,34 @@
+/** Configuração por variáveis de ambiente (veja .env.example na raiz). */
+export type Config = {
+  databaseUrl: string;
+  host: string;
+  port: number;
+  cookieSecure: boolean;
+  sessionDays: number;
+  webDist: string | null;
+  admin: { username: string; email: string; password: string } | null;
+  workerIntervalMs: number;
+  lookupTimeoutMs: number;
+  logLevel: string;
+};
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const databaseUrl = env.DATABASE_URL;
+  if (!databaseUrl) throw new Error('DATABASE_URL não definida (conexão como moneyflow_app).');
+  const admin =
+    env.ADMIN_USERNAME && env.ADMIN_EMAIL && env.ADMIN_PASSWORD
+      ? { username: env.ADMIN_USERNAME, email: env.ADMIN_EMAIL, password: env.ADMIN_PASSWORD }
+      : null;
+  return {
+    databaseUrl,
+    host: env.HOST ?? '0.0.0.0',
+    port: Number(env.PORT ?? 3001),
+    cookieSecure: env.COOKIE_SECURE === 'true',
+    sessionDays: Number(env.SESSION_DAYS ?? 30),
+    webDist: env.WEB_DIST ?? null,
+    admin,
+    workerIntervalMs: Number(env.WORKER_INTERVAL_MS ?? 60 * 60 * 1000),
+    lookupTimeoutMs: Number(env.LOOKUP_TIMEOUT_MS ?? 5000),
+    logLevel: env.LOG_LEVEL ?? 'info',
+  };
+}

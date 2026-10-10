@@ -1,0 +1,27 @@
+{
+  "name": "moneyflow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @moneyflow/server --filter @moneyflow/web dev",
+    "dev:worker": "pnpm --filter @moneyflow/server dev:worker",
+    "build": "pnpm --filter @moneyflow/web build && pnpm --filter @moneyflow/server build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "pnpm -r test",
+    "test:unit": "pnpm --filter @moneyflow/shared test",
+    "test:integration": "pnpm --filter @moneyflow/server test",
+    "e2e": "pnpm --filter @moneyflow/e2e test",
+    "db:pull": "pnpm --filter @moneyflow/db db:pull"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "typescript": "7.0.2"
+  }
+}

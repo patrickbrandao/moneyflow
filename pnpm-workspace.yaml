@@ -1,0 +1,4 @@
+# O banco (database/) fica fora dos workspaces: é gerido pelo agente DBA.
+packages:
+  - apps/*
+  - packages/*
