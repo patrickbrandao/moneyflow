@@ -193,6 +193,31 @@ $$;
 
 
 --
+-- Name: financial_account_balance_at(uuid, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.financial_account_balance_at(p_account_id uuid, p_on date) RETURNS bigint
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT CASE WHEN p_on < a.opening_date THEN NULL
+              ELSE a.opening_balance_cents
+                   + coalesce((SELECT sum(m.amount_cents)
+                                 FROM movements m
+                                WHERE m.financial_account_id = a.id AND m.occurred_on <= p_on), 0)
+         END::bigint
+    FROM financial_accounts a
+   WHERE a.id = p_account_id
+$$;
+
+
+--
+-- Name: FUNCTION financial_account_balance_at(p_account_id uuid, p_on date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.financial_account_balance_at(p_account_id uuid, p_on date) IS 'Saldo da conta ao fim do dia p_on (saldo inicial + movimentos até a data). NULL antes da abertura ou se a conta não existe.';
+
+
+--
 -- Name: financial_accounts_validate(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -203,6 +228,31 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM caixas c WHERE c.id = NEW.caixa_id AND c.kind = 'general') THEN
     RAISE EXCEPTION 'financial_accounts: caixa % must be a general caixa', NEW.caixa_id
       USING ERRCODE = 'check_violation', CONSTRAINT = 'financial_accounts_caixa_kind_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: financial_accounts_validate_history(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.financial_accounts_validate_history() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.caixa_id <> OLD.caixa_id
+     AND (EXISTS (SELECT 1 FROM movements m WHERE m.financial_account_id = OLD.id)
+          OR EXISTS (SELECT 1 FROM settlements s WHERE s.financial_account_id = OLD.id)) THEN
+    RAISE EXCEPTION 'financial_accounts: account % has history and cannot change caixa', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'financial_accounts_caixa_history_check';
+  END IF;
+  IF NEW.opening_date > OLD.opening_date
+     AND EXISTS (SELECT 1 FROM movements m
+                  WHERE m.financial_account_id = OLD.id AND m.occurred_on < NEW.opening_date) THEN
+    RAISE EXCEPTION 'financial_accounts: account % has movements before %', OLD.id, NEW.opening_date
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'movements_opening_date_check';
   END IF;
   RETURN NEW;
 END
@@ -294,6 +344,79 @@ COMMENT ON FUNCTION public.is_valid_cpf(cpf text) IS 'Valida os dígitos verific
 
 
 --
+-- Name: movements_integrity_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.movements_integrity_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('UPDATE', 'DELETE') THEN
+    IF OLD.settlement_id IS NOT NULL THEN PERFORM settlement_assert_movements(OLD.settlement_id); END IF;
+    IF OLD.transfer_id IS NOT NULL THEN PERFORM transfer_assert_movements(OLD.transfer_id); END IF;
+  END IF;
+  IF TG_OP IN ('INSERT', 'UPDATE') THEN
+    IF NEW.settlement_id IS NOT NULL THEN PERFORM settlement_assert_movements(NEW.settlement_id); END IF;
+    IF NEW.transfer_id IS NOT NULL THEN PERFORM transfer_assert_movements(NEW.transfer_id); END IF;
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: movements_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.movements_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  opening  date;
+  cat_kind text;
+BEGIN
+  SELECT a.opening_date INTO opening FROM financial_accounts a WHERE a.id = NEW.financial_account_id;
+  IF NEW.occurred_on < opening THEN
+    RAISE EXCEPTION 'movements: date % is before the opening date % of account %',
+      NEW.occurred_on, opening, NEW.financial_account_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'movements_opening_date_check';
+  END IF;
+
+  IF NEW.category_id IS NOT NULL THEN
+    SELECT c.kind INTO cat_kind FROM categories c WHERE c.id = NEW.category_id;
+    IF cat_kind <> (CASE WHEN NEW.amount_cents > 0 THEN 'income' ELSE 'expense' END) THEN
+      RAISE EXCEPTION 'movements: % movement requires % category, got %',
+        CASE WHEN NEW.amount_cents > 0 THEN 'incoming' ELSE 'outgoing' END,
+        CASE WHEN NEW.amount_cents > 0 THEN 'income' ELSE 'expense' END, cat_kind
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'movements_category_kind_check';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: recurrence_rules_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.recurrence_rules_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.installments_total IS NOT NULL
+     AND EXISTS (SELECT 1 FROM titles t
+                  WHERE t.recurrence_rule_id = NEW.id AND t.occurrence > NEW.installments_total) THEN
+    RAISE EXCEPTION 'recurrence_rules: rule % has occurrences above %', NEW.id, NEW.installments_total
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_occurrence_total_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: set_updated_at(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -312,6 +435,473 @@ $$;
 --
 
 COMMENT ON FUNCTION public.set_updated_at() IS 'Trigger BEFORE UPDATE: mantém updated_at = now() (início da transação).';
+
+
+--
+-- Name: settlement_assert_movements(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.settlement_assert_movements(p_settlement_id uuid) RETURNS void
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+  s      settlements;
+  dir    text;
+  signed bigint;
+  n      int;
+  n_orig int;
+  n_rev  int;
+  same   boolean;
+  want   int;
+BEGIN
+  SELECT * INTO s FROM settlements WHERE id = p_settlement_id;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+  SELECT t.direction INTO dir FROM titles t WHERE t.id = s.title_id;
+  signed := (s.amount_cents + s.interest_cents + s.fine_cents - s.discount_cents)
+            * CASE dir WHEN 'payable' THEN -1 ELSE 1 END;
+
+  SELECT count(*),
+         count(*) FILTER (WHERE m.amount_cents = signed AND m.occurred_on = s.settled_on),
+         count(*) FILTER (WHERE m.amount_cents = -signed AND m.occurred_on >= s.settled_on),
+         coalesce(bool_and(m.financial_account_id = s.financial_account_id), true)
+    INTO n, n_orig, n_rev, same
+    FROM movements m WHERE m.settlement_id = s.id;
+
+  IF s.financial_account_id IS NULL OR signed = 0 THEN
+    want := 0;
+  ELSIF s.reversed_at IS NULL THEN
+    want := 1;
+  ELSE
+    want := 2;
+  END IF;
+
+  IF n <> want OR NOT same
+     OR (want >= 1 AND n_orig < 1)
+     OR (want = 2 AND (n_rev < 1 OR n_orig + n_rev < 2)) THEN
+    RAISE EXCEPTION 'movements: settlement % requires % movement(s) of % cents on its account (found %)',
+      s.id, want, signed, n
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'movements_settlement_check';
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION settlement_assert_movements(p_settlement_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.settlement_assert_movements(p_settlement_id uuid) IS 'Erro 23514 (movements_settlement_check) se os movimentos da baixa não batem com ela. Usada pelos triggers deferidos.';
+
+
+--
+-- Name: settlements_mirror_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.settlements_mirror_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  s settlements;
+  o settlements;
+BEGIN
+  SELECT * INTO s FROM settlements WHERE id = NEW.id;
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  IF s.mirror_settlement_id IS NULL THEN
+    IF EXISTS (SELECT 1 FROM settlements x WHERE x.mirror_settlement_id = s.id) THEN
+      RAISE EXCEPTION 'settlements: mirror link to % is not reciprocal', s.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_mirror_reciprocal_check';
+    END IF;
+    RETURN NULL;
+  END IF;
+
+  SELECT * INTO o FROM settlements WHERE id = s.mirror_settlement_id;
+  IF NOT FOUND THEN
+    RETURN NULL;  -- a FK (também deferida) reporta o erro.
+  END IF;
+
+  IF o.mirror_settlement_id IS DISTINCT FROM s.id THEN
+    RAISE EXCEPTION 'settlements: mirror link % -> % is not reciprocal', s.id, o.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_mirror_reciprocal_check';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM titles t WHERE t.id = s.title_id AND t.mirror_title_id = o.title_id) THEN
+    RAISE EXCEPTION 'settlements: legs % / % are not on a mirrored title pair', s.id, o.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_mirror_title_check';
+  END IF;
+
+  IF s.settled_on <> o.settled_on OR s.amount_cents <> o.amount_cents
+     OR s.interest_cents <> o.interest_cents OR s.fine_cents <> o.fine_cents
+     OR s.discount_cents <> o.discount_cents
+     OR (s.reversed_at IS NULL) <> (o.reversed_at IS NULL) THEN
+    RAISE EXCEPTION 'settlements: legs % / % must have the same date, amounts and reversal state', s.id, o.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_mirror_match_check';
+  END IF;
+
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: settlements_movements_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.settlements_movements_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM settlement_assert_movements(NEW.id);
+  PERFORM transfer_assert_movements(tr.id) FROM transfers tr WHERE tr.settlement_id = NEW.id;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: settlements_refresh_title_status(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.settlements_refresh_title_status() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  tid uuid := CASE TG_OP WHEN 'DELETE' THEN OLD.title_id ELSE NEW.title_id END;
+BEGIN
+  UPDATE titles t
+     SET status = CASE WHEN x.settled = 0 THEN 'open'
+                       WHEN x.settled < t.amount_cents THEN 'partial'
+                       ELSE 'paid' END
+    FROM (SELECT title_settled_cents(tid) AS settled) x
+   WHERE t.id = tid
+     AND t.status <> 'canceled'
+     AND t.status <> CASE WHEN x.settled = 0 THEN 'open'
+                          WHEN x.settled < t.amount_cents THEN 'partial'
+                          ELSE 'paid' END;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: settlements_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.settlements_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  t       titles;
+  acc_ok  boolean;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    -- Bloqueia o título: baixas concorrentes do mesmo título ficam em série.
+    SELECT * INTO t FROM titles WHERE id = NEW.title_id FOR UPDATE;
+    IF NOT FOUND THEN
+      RETURN NEW;  -- a FK reporta o erro.
+    END IF;
+    IF NEW.reversed_at IS NOT NULL THEN
+      RAISE EXCEPTION 'settlements: a settlement cannot be created already reversed'
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_reversal_check';
+    END IF;
+    IF t.status = 'canceled' THEN
+      RAISE EXCEPTION 'settlements: title % is canceled', t.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_title_canceled_check';
+    END IF;
+    IF title_settled_cents(t.id) + NEW.amount_cents > t.amount_cents THEN
+      RAISE EXCEPTION 'settlements: amount % exceeds open balance % of title %',
+        NEW.amount_cents, t.amount_cents - title_settled_cents(t.id), t.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_overpayment_check';
+    END IF;
+  ELSE
+    IF NEW.title_id <> OLD.title_id OR NEW.settled_on <> OLD.settled_on
+       OR NEW.amount_cents <> OLD.amount_cents OR NEW.interest_cents <> OLD.interest_cents
+       OR NEW.fine_cents <> OLD.fine_cents OR NEW.discount_cents <> OLD.discount_cents THEN
+      RAISE EXCEPTION 'settlements: title, date and amounts of settlement % cannot change (reverse it instead)', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_immutable_check';
+    END IF;
+    IF OLD.reversed_at IS NOT NULL
+       AND (NEW.reversed_at IS DISTINCT FROM OLD.reversed_at OR NEW.reversal_reason IS DISTINCT FROM OLD.reversal_reason) THEN
+      RAISE EXCEPTION 'settlements: reversal of settlement % cannot be undone or changed', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_immutable_check';
+    END IF;
+    IF NEW.financial_account_id IS DISTINCT FROM OLD.financial_account_id
+       AND (OLD.financial_account_id IS NOT NULL OR NEW.reversed_at IS NOT NULL) THEN
+      RAISE EXCEPTION 'settlements: account of settlement % can only be set once, while active', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_account_immutable_check';
+    END IF;
+    SELECT * INTO t FROM titles WHERE id = NEW.title_id;
+  END IF;
+
+  IF NEW.financial_account_id IS NOT NULL THEN
+    SELECT a.caixa_id = t.caixa_id INTO acc_ok FROM financial_accounts a WHERE a.id = NEW.financial_account_id;
+    IF acc_ok IS NOT TRUE AND acc_ok IS NOT NULL THEN
+      RAISE EXCEPTION 'settlements: account % does not belong to caixa % of the title', NEW.financial_account_id, t.caixa_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_account_caixa_check';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: title_settled_cents(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.title_settled_cents(p_title_id uuid) RETURNS bigint
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT coalesce(sum(s.amount_cents), 0)::bigint
+    FROM settlements s
+   WHERE s.title_id = p_title_id AND s.reversed_at IS NULL
+$$;
+
+
+--
+-- Name: FUNCTION title_settled_cents(p_title_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.title_settled_cents(p_title_id uuid) IS 'Soma do principal das baixas ativas (não estornadas) do título.';
+
+
+--
+-- Name: titles_mirror_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.titles_mirror_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  t titles;
+  m titles;
+  holder uuid;
+BEGIN
+  SELECT * INTO t FROM titles WHERE id = NEW.id;
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  IF t.mirror_title_id IS NULL THEN
+    IF EXISTS (SELECT 1 FROM titles x WHERE x.mirror_title_id = t.id) THEN
+      RAISE EXCEPTION 'titles: mirror link to % is not reciprocal', t.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_reciprocal_check';
+    END IF;
+    RETURN NULL;
+  END IF;
+
+  SELECT * INTO m FROM titles WHERE id = t.mirror_title_id;
+  IF NOT FOUND THEN
+    RETURN NULL;  -- a FK (também deferida) reporta o erro.
+  END IF;
+
+  IF m.mirror_title_id IS DISTINCT FROM t.id THEN
+    RAISE EXCEPTION 'titles: mirror link % -> % is not reciprocal', t.id, m.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_reciprocal_check';
+  END IF;
+
+  IF m.caixa_id IS DISTINCT FROM t.counterparty_caixa_id THEN
+    RAISE EXCEPTION 'titles: mirror % is not in counterparty caixa %', m.id, t.counterparty_caixa_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_caixa_check';
+  END IF;
+
+  SELECT c.holder_entity_id INTO holder FROM caixas c WHERE c.id = m.caixa_id;
+  IF holder IS DISTINCT FROM t.entity_id THEN
+    RAISE EXCEPTION 'titles: counterparty caixa % is not held by entity %', m.caixa_id, t.entity_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_caixa_check';
+  END IF;
+
+  IF m.direction = t.direction OR m.amount_cents <> t.amount_cents OR m.due_date <> t.due_date THEN
+    RAISE EXCEPTION 'titles: mirror pair % / % must have opposite direction, same amount and due date', t.id, m.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_match_check';
+  END IF;
+
+  IF m.origin <> t.origin
+     OR m.recurrence_rule_id IS DISTINCT FROM t.recurrence_rule_id
+     OR m.occurrence IS DISTINCT FROM t.occurrence THEN
+    RAISE EXCEPTION 'titles: mirror pair % / % must share origin and recurrence occurrence', t.id, m.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_match_check';
+  END IF;
+
+  IF (t.mirror_status IS NULL) = (m.mirror_status IS NULL) THEN
+    RAISE EXCEPTION 'titles: exactly one title of pair % / % must carry mirror_status', t.id, m.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_side_check';
+  END IF;
+
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: titles_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.titles_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  caixa_kind text;
+  cat_kind   text;
+  total      smallint;
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.direction IS DISTINCT FROM OLD.direction THEN
+    RAISE EXCEPTION 'titles: direction cannot change (title %)', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_direction_immutable_check';
+  END IF;
+
+  -- Caixa de cartão só recebe a fatura-título (F2), nunca título manual ou recorrente.
+  SELECT c.kind INTO caixa_kind FROM caixas c WHERE c.id = NEW.caixa_id;
+  IF caixa_kind = 'credit_card' AND NEW.origin <> 'card_invoice' THEN
+    RAISE EXCEPTION 'titles: credit card caixa % only accepts card_invoice titles', NEW.caixa_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_card_caixa_origin_check';
+  END IF;
+
+  SELECT c.kind INTO cat_kind FROM categories c WHERE c.id = NEW.category_id;
+  IF cat_kind IS NOT NULL
+     AND cat_kind <> (CASE NEW.direction WHEN 'payable' THEN 'expense' ELSE 'income' END) THEN
+    RAISE EXCEPTION 'titles: % title requires % category, got %', NEW.direction,
+      CASE NEW.direction WHEN 'payable' THEN 'expense' ELSE 'income' END, cat_kind
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_category_kind_check';
+  END IF;
+
+  IF NEW.recurrence_rule_id IS NOT NULL THEN
+    SELECT r.installments_total INTO total FROM recurrence_rules r WHERE r.id = NEW.recurrence_rule_id;
+    IF NEW.occurrence > total THEN
+      RAISE EXCEPTION 'titles: occurrence % exceeds installments total %', NEW.occurrence, total
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_occurrence_total_check';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: titles_validate_status(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.titles_validate_status() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  settled  bigint := 0;
+  expected text;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    settled := title_settled_cents(NEW.id);
+    IF NEW.caixa_id <> OLD.caixa_id AND EXISTS (SELECT 1 FROM settlements s WHERE s.title_id = OLD.id) THEN
+      RAISE EXCEPTION 'titles: title % has settlements and cannot change caixa', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_caixa_settled_check';
+    END IF;
+  END IF;
+
+  IF NEW.amount_cents < settled THEN
+    RAISE EXCEPTION 'titles: amount % is below settled %', NEW.amount_cents, settled
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_amount_settled_check';
+  END IF;
+
+  expected := CASE WHEN settled = 0 THEN 'open'
+                   WHEN settled < NEW.amount_cents THEN 'partial'
+                   ELSE 'paid' END;
+
+  IF NEW.status = 'canceled' THEN
+    IF settled > 0 THEN
+      RAISE EXCEPTION 'titles: title % has active settlements and cannot be canceled', NEW.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_cancel_settled_check';
+    END IF;
+  ELSIF TG_OP = 'INSERT' OR NEW.status IS DISTINCT FROM OLD.status THEN
+    -- Mudança explícita de status precisa bater com as baixas.
+    IF NEW.status <> expected THEN
+      RAISE EXCEPTION 'titles: status % does not match settlements (expected %)', NEW.status, expected
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_status_settlements_check';
+    END IF;
+  ELSE
+    -- Status não tocado: acompanha a mudança de valor.
+    NEW.status := expected;
+  END IF;
+
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: transfer_assert_movements(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.transfer_assert_movements(p_transfer_id uuid) RETURNS void
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+  tr     transfers;
+  n      int;
+  n_from int;
+  n_to   int;
+  s      settlements;
+  dir    text;
+  cash   bigint;
+BEGIN
+  SELECT * INTO tr FROM transfers WHERE id = p_transfer_id;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  SELECT count(*),
+         count(*) FILTER (WHERE m.financial_account_id = tr.from_account_id AND m.amount_cents = -tr.amount_cents),
+         count(*) FILTER (WHERE m.financial_account_id = tr.to_account_id AND m.amount_cents = tr.amount_cents)
+    INTO n, n_from, n_to
+    FROM movements m
+   WHERE m.transfer_id = tr.id AND m.occurred_on = tr.transferred_on;
+
+  IF n <> 2 OR n_from <> 1 OR n_to <> 1
+     OR (SELECT count(*) FROM movements m WHERE m.transfer_id = tr.id) <> 2 THEN
+    RAISE EXCEPTION 'movements: transfer % requires exactly two movements (-% on %, +% on %) on %',
+      tr.id, tr.amount_cents, tr.from_account_id, tr.amount_cents, tr.to_account_id, tr.transferred_on
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'movements_transfer_check';
+  END IF;
+
+  IF tr.settlement_id IS NOT NULL THEN
+    SELECT * INTO s FROM settlements WHERE id = tr.settlement_id;
+    SELECT t.direction INTO dir FROM titles t WHERE t.id = s.title_id;
+    cash := s.amount_cents + s.interest_cents + s.fine_cents - s.discount_cents;
+    IF tr.amount_cents <> cash
+       OR s.financial_account_id IS DISTINCT FROM
+          (CASE dir WHEN 'payable' THEN tr.to_account_id ELSE tr.from_account_id END) THEN
+      RAISE EXCEPTION 'transfers: transfer % does not fund settlement % (amount % / account %)',
+        tr.id, s.id, cash, s.financial_account_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'transfers_settlement_check';
+    END IF;
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION transfer_assert_movements(p_transfer_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.transfer_assert_movements(p_transfer_id uuid) IS 'Erro 23514 (movements_transfer_check / transfers_settlement_check) se a transferência não tem exatamente os dois movimentos que somam zero ou não bate com a baixa que a originou. Usada pelos triggers deferidos.';
+
+
+--
+-- Name: transfers_integrity_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.transfers_integrity_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM transfer_assert_movements(NEW.id);
+  RETURN NULL;
+END
+$$;
 
 
 --
@@ -482,12 +1072,12 @@ CREATE TABLE public.categories (
     kind text NOT NULL,
     parent_id uuid,
     name text NOT NULL,
-    color text,
     icon text,
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT categories_color_check CHECK ((color = ANY (ARRAY['slate'::text, 'gray'::text, 'zinc'::text, 'stone'::text, 'red'::text, 'orange'::text, 'amber'::text, 'yellow'::text, 'lime'::text, 'green'::text, 'emerald'::text, 'teal'::text, 'cyan'::text, 'sky'::text, 'blue'::text, 'indigo'::text, 'violet'::text, 'purple'::text, 'fuchsia'::text, 'pink'::text, 'rose'::text]))),
+    color_slot smallint,
+    CONSTRAINT categories_color_slot_check CHECK (((color_slot >= 1) AND (color_slot <= 12))),
     CONSTRAINT categories_icon_check CHECK ((icon ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text)),
     CONSTRAINT categories_kind_check CHECK ((kind = ANY (ARRAY['income'::text, 'expense'::text]))),
     CONSTRAINT categories_name_check CHECK (((btrim(name) <> ''::text) AND (name = btrim(name)))),
@@ -510,17 +1100,17 @@ COMMENT ON COLUMN public.categories.kind IS 'income (receita) ou expense (despes
 
 
 --
--- Name: COLUMN categories.color; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.categories.color IS 'Nome de cor da paleta do Tailwind (ex.: violet), não hex: o front mapeia para tokens.';
-
-
---
 -- Name: COLUMN categories.icon; Type: COMMENT; Schema: public; Owner: -
 --
 
 COMMENT ON COLUMN public.categories.icon IS 'Nome de ícone lucide em kebab-case (ex.: shopping-cart).';
+
+
+--
+-- Name: COLUMN categories.color_slot; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.categories.color_slot IS 'Slot de cor do design system (1–12); o front mapeia para o token CSS --port-N. Nulo = cor neutra.';
 
 
 --
@@ -864,6 +1454,165 @@ COMMENT ON COLUMN public.financial_accounts.opening_balance_cents IS 'Saldo inic
 
 
 --
+-- Name: movements; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.movements (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    financial_account_id uuid NOT NULL,
+    occurred_on date NOT NULL,
+    amount_cents bigint NOT NULL,
+    kind text NOT NULL,
+    settlement_id uuid,
+    transfer_id uuid,
+    description text,
+    entity_id uuid,
+    category_id uuid,
+    notes text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT movements_amount_cents_check CHECK ((amount_cents <> 0)),
+    CONSTRAINT movements_kind_check CHECK ((kind = ANY (ARRAY['settlement'::text, 'transfer'::text, 'adjustment'::text]))),
+    CONSTRAINT movements_kind_links_check CHECK (
+CASE kind
+    WHEN 'settlement'::text THEN ((settlement_id IS NOT NULL) AND (transfer_id IS NULL) AND (category_id IS NULL))
+    WHEN 'transfer'::text THEN ((transfer_id IS NOT NULL) AND (settlement_id IS NULL) AND (category_id IS NULL))
+    WHEN 'adjustment'::text THEN ((settlement_id IS NULL) AND (transfer_id IS NULL))
+    ELSE NULL::boolean
+END)
+);
+
+
+--
+-- Name: TABLE movements; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.movements IS 'Entradas (+) e saídas (−) numa conta financeira: de baixa, de transferência ou ajuste/avulso. Saldo da conta = opening_balance_cents + soma dos movimentos.';
+
+
+--
+-- Name: COLUMN movements.amount_cents; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.movements.amount_cents IS 'Valor assinado em centavos: positivo entra, negativo sai (≠ 0).';
+
+
+--
+-- Name: COLUMN movements.kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.movements.kind IS 'settlement (ligado a settlement_id), transfer (ligado a transfer_id) ou adjustment (ajuste de contagem, rendimento, tarifa avulsa…).';
+
+
+--
+-- Name: COLUMN movements.category_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.movements.category_id IS 'Só em adjustment (opcional): categoria income se entra, expense se sai. Baixas usam a categoria do título.';
+
+
+--
+-- Name: financial_account_balances; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.financial_account_balances WITH (security_invoker='true') AS
+ SELECT a.id AS financial_account_id,
+    a.caixa_id,
+    a.opening_date,
+    a.opening_balance_cents,
+    (COALESCE(m.movements_cents, (0)::numeric))::bigint AS movements_cents,
+    (((a.opening_balance_cents)::numeric + COALESCE(m.movements_cents, (0)::numeric)))::bigint AS balance_cents,
+    a.archived_at
+   FROM (public.financial_accounts a
+     LEFT JOIN LATERAL ( SELECT sum(x.amount_cents) AS movements_cents
+           FROM public.movements x
+          WHERE (x.financial_account_id = a.id)) m ON (true));
+
+
+--
+-- Name: VIEW financial_account_balances; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.financial_account_balances IS 'Saldo de cada conta: opening_balance_cents + soma de todos os movimentos (inclusive datados no futuro). Saldo numa data: financial_account_balance_at(conta, data).';
+
+
+--
+-- Name: recurrence_rules; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.recurrence_rules (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    frequency text NOT NULL,
+    interval_count smallint DEFAULT 1 NOT NULL,
+    anchor_day smallint NOT NULL,
+    starts_on date NOT NULL,
+    ends_on date,
+    installments_total smallint,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT recurrence_rules_anchor_day_check CHECK (
+CASE frequency
+    WHEN 'weekly'::text THEN ((anchor_day >= 1) AND (anchor_day <= 7))
+    ELSE ((anchor_day >= 1) AND (anchor_day <= 31))
+END),
+    CONSTRAINT recurrence_rules_end_check CHECK (((ends_on IS NULL) OR (installments_total IS NULL))),
+    CONSTRAINT recurrence_rules_ends_on_check CHECK ((ends_on >= starts_on)),
+    CONSTRAINT recurrence_rules_frequency_check CHECK ((frequency = ANY (ARRAY['weekly'::text, 'monthly'::text, 'yearly'::text]))),
+    CONSTRAINT recurrence_rules_installments_total_check CHECK (((installments_total >= 2) AND (installments_total <= 999))),
+    CONSTRAINT recurrence_rules_interval_count_check CHECK (((interval_count >= 1) AND (interval_count <= 366)))
+);
+
+
+--
+-- Name: TABLE recurrence_rules; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.recurrence_rules IS 'Calendário de uma série de títulos (recorrência ou parcelamento). Os títulos apontam para a regra com titles.occurrence; o worker materializa até 12 meses à frente (spec 005).';
+
+
+--
+-- Name: COLUMN recurrence_rules.frequency; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.frequency IS 'weekly, monthly ou yearly.';
+
+
+--
+-- Name: COLUMN recurrence_rules.interval_count; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.interval_count IS 'A cada N períodos (1 = todo período; 2 = quinzenal/bimestral…).';
+
+
+--
+-- Name: COLUMN recurrence_rules.anchor_day; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.anchor_day IS 'weekly: dia da semana ISO (1 = segunda … 7 = domingo). monthly/yearly: dia do mês (1–31; em meses curtos a aplicação usa o último dia). yearly usa o mês de starts_on.';
+
+
+--
+-- Name: COLUMN recurrence_rules.starts_on; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.starts_on IS 'Data de referência da primeira ocorrência.';
+
+
+--
+-- Name: COLUMN recurrence_rules.ends_on; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.ends_on IS 'Recorrência: última data possível (nulo = sem fim). Exclusivo com installments_total.';
+
+
+--
+-- Name: COLUMN recurrence_rules.installments_total; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.installments_total IS 'Parcelamento: total de parcelas N (2–999). Exclusivo com ends_on.';
+
+
+--
 -- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -901,6 +1650,239 @@ COMMENT ON TABLE public.sessions IS 'Sessões de login (cookie httpOnly). Não t
 --
 
 COMMENT ON COLUMN public.sessions.id IS 'Identificador opaco gerado pela aplicação (32 a 128 caracteres; ex.: hash SHA-256 em hex do token do cookie).';
+
+
+--
+-- Name: settlements; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.settlements (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    title_id uuid NOT NULL,
+    settled_on date NOT NULL,
+    amount_cents bigint NOT NULL,
+    interest_cents bigint DEFAULT 0 NOT NULL,
+    fine_cents bigint DEFAULT 0 NOT NULL,
+    discount_cents bigint DEFAULT 0 NOT NULL,
+    financial_account_id uuid,
+    mirror_settlement_id uuid,
+    notes text,
+    reversed_at timestamp with time zone,
+    reversal_reason text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT settlements_amount_cents_check CHECK ((amount_cents > 0)),
+    CONSTRAINT settlements_charges_check CHECK (((interest_cents >= 0) AND (fine_cents >= 0) AND (discount_cents >= 0))),
+    CONSTRAINT settlements_discount_check CHECK ((discount_cents <= ((amount_cents + interest_cents) + fine_cents))),
+    CONSTRAINT settlements_mirror_self_check CHECK ((mirror_settlement_id <> id)),
+    CONSTRAINT settlements_reversal_check CHECK ((((reversed_at IS NULL) = (reversal_reason IS NULL)) AND (btrim(reversal_reason) <> ''::text)))
+);
+
+
+--
+-- Name: TABLE settlements; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.settlements IS 'Baixas de títulos (spec 005). Valor em dinheiro = principal + juros + multa − desconto. Estorno por reversed_at.';
+
+
+--
+-- Name: COLUMN settlements.amount_cents; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.settlements.amount_cents IS 'Principal abatido do título (> 0). A soma das baixas ativas nunca passa do valor do título.';
+
+
+--
+-- Name: COLUMN settlements.financial_account_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.settlements.financial_account_id IS 'Conta (da caixa do título) onde o dinheiro entrou/saiu. Nulo = "baixado, conta a definir" (lado sem acesso do espelho); pode ser preenchido depois, uma única vez.';
+
+
+--
+-- Name: COLUMN settlements.mirror_settlement_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.settlements.mirror_settlement_id IS 'Outra perna da baixa única de um par espelhado (ligação recíproca, mesmos valores e data; checada no COMMIT).';
+
+
+--
+-- Name: COLUMN settlements.reversed_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.settlements.reversed_at IS 'Estorno: a baixa deixa de contar. Irreversível; exige reversal_reason.';
+
+
+--
+-- Name: titles; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.titles (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    caixa_id uuid NOT NULL,
+    direction text NOT NULL,
+    entity_id uuid NOT NULL,
+    category_id uuid NOT NULL,
+    description text NOT NULL,
+    competence_date date NOT NULL,
+    due_date date NOT NULL,
+    amount_cents bigint NOT NULL,
+    status text DEFAULT 'open'::text NOT NULL,
+    origin text DEFAULT 'manual'::text NOT NULL,
+    recurrence_rule_id uuid,
+    occurrence smallint,
+    counterparty_caixa_id uuid,
+    mirror_title_id uuid,
+    mirror_status text,
+    notes text,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT titles_amount_cents_check CHECK ((amount_cents > 0)),
+    CONSTRAINT titles_counterparty_caixa_check CHECK ((counterparty_caixa_id <> caixa_id)),
+    CONSTRAINT titles_description_check CHECK ((btrim(description) <> ''::text)),
+    CONSTRAINT titles_direction_check CHECK ((direction = ANY (ARRAY['payable'::text, 'receivable'::text]))),
+    CONSTRAINT titles_mirror_fields_check CHECK ((((counterparty_caixa_id IS NULL) = (mirror_title_id IS NULL)) AND ((mirror_status IS NULL) OR (mirror_title_id IS NOT NULL)))),
+    CONSTRAINT titles_mirror_self_check CHECK ((mirror_title_id <> id)),
+    CONSTRAINT titles_mirror_status_check CHECK ((mirror_status = ANY (ARRAY['pending'::text, 'accepted'::text, 'disputed'::text]))),
+    CONSTRAINT titles_occurrence_check CHECK ((occurrence >= 1)),
+    CONSTRAINT titles_origin_check CHECK ((origin = ANY (ARRAY['manual'::text, 'recurrence'::text, 'card_invoice'::text]))),
+    CONSTRAINT titles_recurrence_check CHECK ((((recurrence_rule_id IS NULL) = (occurrence IS NULL)) AND ((origin = 'recurrence'::text) = (recurrence_rule_id IS NOT NULL)))),
+    CONSTRAINT titles_status_check CHECK ((status = ANY (ARRAY['open'::text, 'partial'::text, 'paid'::text, 'canceled'::text])))
+);
+
+
+--
+-- Name: TABLE titles; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.titles IS 'Títulos a pagar/receber de uma caixa (spec 005), liquidados por baixas; espelhados na caixa da contraparte (spec 006).';
+
+
+--
+-- Name: COLUMN titles.direction; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.direction IS 'payable (a pagar, categoria expense) ou receivable (a receber, categoria income). Imutável.';
+
+
+--
+-- Name: COLUMN titles.entity_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.entity_id IS 'Contraparte: a quem pagamos (payable) ou de quem recebemos (receivable).';
+
+
+--
+-- Name: COLUMN titles.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.status IS 'open | partial | paid: derivado da soma das baixas ativas (mantido por trigger); canceled: definido pela aplicação, só sem baixas ativas.';
+
+
+--
+-- Name: COLUMN titles.origin; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.origin IS 'manual, recurrence (gerado por recurrence_rules) ou card_invoice (fatura de cartão, F2). O espelho herda a origem do original.';
+
+
+--
+-- Name: COLUMN titles.occurrence; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.occurrence IS 'Número da ocorrência/parcela n na série (N = recurrence_rules.installments_total).';
+
+
+--
+-- Name: COLUMN titles.counterparty_caixa_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.counterparty_caixa_id IS 'Caixa do outro lado do espelho (titular = entity_id). Nulo = sem espelho.';
+
+
+--
+-- Name: COLUMN titles.mirror_title_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.mirror_title_id IS 'Título espelho (ligação 1:1 recíproca, checada no COMMIT).';
+
+
+--
+-- Name: COLUMN titles.mirror_status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.mirror_status IS 'Só no lado espelho (o criado na caixa da contraparte): pending (aguarda aceite), accepted ou disputed. Nulo no original.';
+
+
+--
+-- Name: title_balances; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.title_balances WITH (security_invoker='true') AS
+ SELECT t.id AS title_id,
+    t.caixa_id,
+    t.direction,
+    t.status,
+    t.entity_id,
+    t.category_id,
+    t.description,
+    t.competence_date,
+    t.due_date,
+    t.amount_cents,
+    (COALESCE(s.settled_cents, (0)::numeric))::bigint AS settled_cents,
+    (
+        CASE
+            WHEN (t.status = 'canceled'::text) THEN (0)::numeric
+            ELSE ((t.amount_cents)::numeric - COALESCE(s.settled_cents, (0)::numeric))
+        END)::bigint AS open_cents,
+    t.archived_at
+   FROM (public.titles t
+     LEFT JOIN LATERAL ( SELECT sum(x.amount_cents) AS settled_cents
+           FROM public.settlements x
+          WHERE ((x.title_id = t.id) AND (x.reversed_at IS NULL))) s ON (true));
+
+
+--
+-- Name: VIEW title_balances; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.title_balances IS 'Títulos com principal baixado (baixas ativas) e saldo aberto (amount − baixado; 0 se cancelado). Títulos em aberto: open_cents > 0.';
+
+
+--
+-- Name: transfers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.transfers (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    from_account_id uuid NOT NULL,
+    to_account_id uuid NOT NULL,
+    amount_cents bigint NOT NULL,
+    transferred_on date NOT NULL,
+    description text,
+    settlement_id uuid,
+    notes text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT transfers_accounts_check CHECK ((from_account_id <> to_account_id)),
+    CONSTRAINT transfers_amount_cents_check CHECK ((amount_cents > 0))
+);
+
+
+--
+-- Name: TABLE transfers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.transfers IS 'Transferência entre contas (inclusive de caixas diferentes): exatamente dois movimentos ligados que somam zero. Não conta como receita nem despesa.';
+
+
+--
+-- Name: COLUMN transfers.settlement_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.transfers.settlement_id IS 'Baixa que originou a transferência ("pagar título da caixa B com conta da caixa A"): a perna na conta da baixa (destino se o título é payable, origem se receivable) e o valor = valor em dinheiro da baixa.';
 
 
 --
@@ -1103,6 +2085,22 @@ ALTER TABLE ONLY public.financial_accounts
 
 
 --
+-- Name: movements movements_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.movements
+    ADD CONSTRAINT movements_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: recurrence_rules recurrence_rules_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recurrence_rules
+    ADD CONSTRAINT recurrence_rules_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: schema_migrations schema_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1116,6 +2114,38 @@ ALTER TABLE ONLY public.schema_migrations
 
 ALTER TABLE ONLY public.sessions
     ADD CONSTRAINT sessions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: settlements settlements_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.settlements
+    ADD CONSTRAINT settlements_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: titles titles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.titles
+    ADD CONSTRAINT titles_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: transfers transfers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transfers
+    ADD CONSTRAINT transfers_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: transfers transfers_settlement_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transfers
+    ADD CONSTRAINT transfers_settlement_id_key UNIQUE (settlement_id);
 
 
 --
@@ -1262,6 +2292,41 @@ CREATE INDEX financial_accounts_caixa_id_idx ON public.financial_accounts USING 
 
 
 --
+-- Name: movements_category_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX movements_category_id_idx ON public.movements USING btree (category_id);
+
+
+--
+-- Name: movements_entity_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX movements_entity_id_idx ON public.movements USING btree (entity_id);
+
+
+--
+-- Name: movements_financial_account_id_occurred_on_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX movements_financial_account_id_occurred_on_idx ON public.movements USING btree (financial_account_id, occurred_on);
+
+
+--
+-- Name: movements_settlement_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX movements_settlement_id_idx ON public.movements USING btree (settlement_id);
+
+
+--
+-- Name: movements_transfer_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX movements_transfer_id_idx ON public.movements USING btree (transfer_id);
+
+
+--
 -- Name: sessions_expires_at_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1273,6 +2338,111 @@ CREATE INDEX sessions_expires_at_idx ON public.sessions USING btree (expires_at)
 --
 
 CREATE INDEX sessions_user_id_idx ON public.sessions USING btree (user_id);
+
+
+--
+-- Name: settlements_financial_account_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX settlements_financial_account_id_idx ON public.settlements USING btree (financial_account_id);
+
+
+--
+-- Name: settlements_mirror_settlement_id_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX settlements_mirror_settlement_id_key ON public.settlements USING btree (mirror_settlement_id);
+
+
+--
+-- Name: settlements_settled_on_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX settlements_settled_on_idx ON public.settlements USING btree (settled_on);
+
+
+--
+-- Name: settlements_title_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX settlements_title_id_idx ON public.settlements USING btree (title_id);
+
+
+--
+-- Name: titles_caixa_id_competence_date_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_caixa_id_competence_date_idx ON public.titles USING btree (caixa_id, competence_date);
+
+
+--
+-- Name: titles_caixa_id_due_date_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_caixa_id_due_date_idx ON public.titles USING btree (caixa_id, due_date);
+
+
+--
+-- Name: titles_caixa_id_status_due_date_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_caixa_id_status_due_date_idx ON public.titles USING btree (caixa_id, status, due_date);
+
+
+--
+-- Name: titles_category_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_category_id_idx ON public.titles USING btree (category_id);
+
+
+--
+-- Name: titles_counterparty_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_counterparty_caixa_id_idx ON public.titles USING btree (counterparty_caixa_id);
+
+
+--
+-- Name: titles_due_date_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_due_date_idx ON public.titles USING btree (due_date) WHERE (status = ANY (ARRAY['open'::text, 'partial'::text]));
+
+
+--
+-- Name: titles_entity_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_entity_id_idx ON public.titles USING btree (entity_id);
+
+
+--
+-- Name: titles_mirror_title_id_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX titles_mirror_title_id_key ON public.titles USING btree (mirror_title_id);
+
+
+--
+-- Name: titles_recurrence_occurrence_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX titles_recurrence_occurrence_key ON public.titles USING btree (recurrence_rule_id, caixa_id, occurrence);
+
+
+--
+-- Name: transfers_from_account_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX transfers_from_account_id_idx ON public.transfers USING btree (from_account_id);
+
+
+--
+-- Name: transfers_to_account_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX transfers_to_account_id_idx ON public.transfers USING btree (to_account_id);
 
 
 --
@@ -1371,6 +2541,125 @@ CREATE TRIGGER financial_accounts_set_updated_at BEFORE UPDATE ON public.financi
 --
 
 CREATE TRIGGER financial_accounts_validate BEFORE INSERT OR UPDATE OF caixa_id ON public.financial_accounts FOR EACH ROW EXECUTE FUNCTION public.financial_accounts_validate();
+
+
+--
+-- Name: financial_accounts financial_accounts_validate_history; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER financial_accounts_validate_history BEFORE UPDATE OF caixa_id, opening_date ON public.financial_accounts FOR EACH ROW EXECUTE FUNCTION public.financial_accounts_validate_history();
+
+
+--
+-- Name: movements movements_integrity_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER movements_integrity_check AFTER INSERT OR DELETE OR UPDATE ON public.movements DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.movements_integrity_check();
+
+
+--
+-- Name: movements movements_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER movements_set_updated_at BEFORE UPDATE ON public.movements FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: movements movements_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER movements_validate BEFORE INSERT OR UPDATE ON public.movements FOR EACH ROW EXECUTE FUNCTION public.movements_validate();
+
+
+--
+-- Name: recurrence_rules recurrence_rules_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER recurrence_rules_set_updated_at BEFORE UPDATE ON public.recurrence_rules FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: recurrence_rules recurrence_rules_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER recurrence_rules_validate BEFORE UPDATE OF installments_total ON public.recurrence_rules FOR EACH ROW EXECUTE FUNCTION public.recurrence_rules_validate();
+
+
+--
+-- Name: settlements settlements_mirror_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER settlements_mirror_check AFTER INSERT OR UPDATE OF mirror_settlement_id, reversed_at ON public.settlements DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.settlements_mirror_check();
+
+
+--
+-- Name: settlements settlements_movements_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER settlements_movements_check AFTER INSERT OR UPDATE OF financial_account_id, reversed_at ON public.settlements DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.settlements_movements_check();
+
+
+--
+-- Name: settlements settlements_refresh_title_status; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER settlements_refresh_title_status AFTER INSERT OR DELETE OR UPDATE OF reversed_at ON public.settlements FOR EACH ROW EXECUTE FUNCTION public.settlements_refresh_title_status();
+
+
+--
+-- Name: settlements settlements_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER settlements_set_updated_at BEFORE UPDATE ON public.settlements FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: settlements settlements_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER settlements_validate BEFORE INSERT OR UPDATE ON public.settlements FOR EACH ROW EXECUTE FUNCTION public.settlements_validate();
+
+
+--
+-- Name: titles titles_mirror_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER titles_mirror_check AFTER INSERT OR UPDATE OF caixa_id, direction, entity_id, amount_cents, due_date, origin, recurrence_rule_id, occurrence, counterparty_caixa_id, mirror_title_id, mirror_status ON public.titles DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.titles_mirror_check();
+
+
+--
+-- Name: titles titles_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER titles_set_updated_at BEFORE UPDATE ON public.titles FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: titles titles_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER titles_validate BEFORE INSERT OR UPDATE ON public.titles FOR EACH ROW EXECUTE FUNCTION public.titles_validate();
+
+
+--
+-- Name: titles titles_validate_status; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER titles_validate_status BEFORE INSERT OR UPDATE OF caixa_id, amount_cents, status ON public.titles FOR EACH ROW EXECUTE FUNCTION public.titles_validate_status();
+
+
+--
+-- Name: transfers transfers_integrity_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER transfers_integrity_check AFTER INSERT OR UPDATE ON public.transfers DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.transfers_integrity_check();
+
+
+--
+-- Name: transfers transfers_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER transfers_set_updated_at BEFORE UPDATE ON public.transfers FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -1500,11 +2789,147 @@ ALTER TABLE ONLY public.financial_accounts
 
 
 --
+-- Name: movements movements_category_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.movements
+    ADD CONSTRAINT movements_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.categories(id);
+
+
+--
+-- Name: movements movements_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.movements
+    ADD CONSTRAINT movements_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(id);
+
+
+--
+-- Name: movements movements_financial_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.movements
+    ADD CONSTRAINT movements_financial_account_id_fkey FOREIGN KEY (financial_account_id) REFERENCES public.financial_accounts(id);
+
+
+--
+-- Name: movements movements_settlement_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.movements
+    ADD CONSTRAINT movements_settlement_id_fkey FOREIGN KEY (settlement_id) REFERENCES public.settlements(id);
+
+
+--
+-- Name: movements movements_transfer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.movements
+    ADD CONSTRAINT movements_transfer_id_fkey FOREIGN KEY (transfer_id) REFERENCES public.transfers(id) ON DELETE CASCADE;
+
+
+--
 -- Name: sessions sessions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.sessions
     ADD CONSTRAINT sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: settlements settlements_financial_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.settlements
+    ADD CONSTRAINT settlements_financial_account_id_fkey FOREIGN KEY (financial_account_id) REFERENCES public.financial_accounts(id);
+
+
+--
+-- Name: settlements settlements_mirror_settlement_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.settlements
+    ADD CONSTRAINT settlements_mirror_settlement_id_fkey FOREIGN KEY (mirror_settlement_id) REFERENCES public.settlements(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: settlements settlements_title_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.settlements
+    ADD CONSTRAINT settlements_title_id_fkey FOREIGN KEY (title_id) REFERENCES public.titles(id);
+
+
+--
+-- Name: titles titles_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.titles
+    ADD CONSTRAINT titles_caixa_id_fkey FOREIGN KEY (caixa_id) REFERENCES public.caixas(id);
+
+
+--
+-- Name: titles titles_category_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.titles
+    ADD CONSTRAINT titles_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.categories(id);
+
+
+--
+-- Name: titles titles_counterparty_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.titles
+    ADD CONSTRAINT titles_counterparty_caixa_id_fkey FOREIGN KEY (counterparty_caixa_id) REFERENCES public.caixas(id);
+
+
+--
+-- Name: titles titles_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.titles
+    ADD CONSTRAINT titles_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(id);
+
+
+--
+-- Name: titles titles_mirror_title_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.titles
+    ADD CONSTRAINT titles_mirror_title_id_fkey FOREIGN KEY (mirror_title_id) REFERENCES public.titles(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: titles titles_recurrence_rule_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.titles
+    ADD CONSTRAINT titles_recurrence_rule_id_fkey FOREIGN KEY (recurrence_rule_id) REFERENCES public.recurrence_rules(id);
+
+
+--
+-- Name: transfers transfers_from_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transfers
+    ADD CONSTRAINT transfers_from_account_id_fkey FOREIGN KEY (from_account_id) REFERENCES public.financial_accounts(id);
+
+
+--
+-- Name: transfers transfers_settlement_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transfers
+    ADD CONSTRAINT transfers_settlement_id_fkey FOREIGN KEY (settlement_id) REFERENCES public.settlements(id);
+
+
+--
+-- Name: transfers transfers_to_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transfers
+    ADD CONSTRAINT transfers_to_account_id_fkey FOREIGN KEY (to_account_id) REFERENCES public.financial_accounts(id);
 
 
 --

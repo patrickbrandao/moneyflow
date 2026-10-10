@@ -3,34 +3,35 @@
 -- Sem usuários: o primeiro admin nasce no boot da aplicação (spec 002).
 BEGIN;
 
--- Grupos ------------------------------------------------------------------------------
-INSERT INTO categories (kind, name, color, icon) VALUES
+-- Grupos (cor = slot 1–12 do design system, token --port-N) -------------------------
+INSERT INTO categories (kind, name, color_slot, icon) VALUES
   -- Despesas
-  ('expense', 'Moradia',                 'blue',    'house'),
-  ('expense', 'Alimentação',             'orange',  'utensils'),
-  ('expense', 'Transporte',              'amber',   'car'),
-  ('expense', 'Saúde',                   'red',     'heart-pulse'),
-  ('expense', 'Educação',                'indigo',  'graduation-cap'),
-  ('expense', 'Lazer',                   'pink',    'party-popper'),
-  ('expense', 'Vestuário e cuidados',    'fuchsia', 'shirt'),
-  ('expense', 'Família e pets',          'rose',    'users'),
-  ('expense', 'Assinaturas e serviços',  'violet',  'repeat'),
-  ('expense', 'Impostos e taxas',        'slate',   'landmark'),
-  ('expense', 'Encargos financeiros',    'stone',   'percent'),
-  ('expense', 'Pessoal',                 'teal',    'id-card'),
-  ('expense', 'Operacional',             'cyan',    'building-2'),
-  ('expense', 'Comercial e marketing',   'purple',  'megaphone'),
-  ('expense', 'Serviços profissionais',  'sky',     'briefcase'),
-  ('expense', 'Tributos da empresa',     'zinc',    'receipt'),
-  ('expense', 'Outras despesas',         'gray',    'circle-ellipsis'),
+  ('expense', 'Moradia',                  1, 'house'),
+  ('expense', 'Alimentação',              2, 'utensils'),
+  ('expense', 'Transporte',               3, 'car'),
+  ('expense', 'Saúde',                    4, 'heart-pulse'),
+  ('expense', 'Educação',                 5, 'graduation-cap'),
+  ('expense', 'Lazer',                    6, 'party-popper'),
+  ('expense', 'Vestuário e cuidados',     7, 'shirt'),
+  ('expense', 'Família e pets',           8, 'users'),
+  ('expense', 'Assinaturas e serviços',   9, 'repeat'),
+  ('expense', 'Impostos e taxas',        10, 'landmark'),
+  ('expense', 'Encargos financeiros',    11, 'percent'),
+  ('expense', 'Pessoal',                 12, 'id-card'),
+  ('expense', 'Operacional',              1, 'building-2'),
+  ('expense', 'Comercial e marketing',    2, 'megaphone'),
+  ('expense', 'Serviços profissionais',   3, 'briefcase'),
+  ('expense', 'Tributos da empresa',      4, 'receipt'),
+  ('expense', 'Outras despesas',          5, 'circle-ellipsis'),
   -- Receitas
-  ('income',  'Trabalho',                'green',   'wallet'),
-  ('income',  'Vendas e serviços',       'emerald', 'store'),
-  ('income',  'Investimentos',           'lime',    'trending-up'),
-  ('income',  'Aluguéis recebidos',      'teal',    'key-round'),
-  ('income',  'Reembolsos',              'sky',     'undo-2'),
-  ('income',  'Outras receitas',         'gray',    'circle-ellipsis')
-ON CONFLICT (kind, parent_id, lower(name)) DO NOTHING;
+  ('income',  'Trabalho',                7, 'wallet'),
+  ('income',  'Vendas e serviços',       8, 'store'),
+  ('income',  'Investimentos',           9, 'trending-up'),
+  ('income',  'Aluguéis recebidos',     10, 'key-round'),
+  ('income',  'Reembolsos',             11, 'undo-2'),
+  ('income',  'Outras receitas',        12, 'circle-ellipsis')
+ON CONFLICT (kind, parent_id, lower(name)) DO UPDATE
+  SET color_slot = EXCLUDED.color_slot, icon = EXCLUDED.icon;
 
 -- Subcategorias -------------------------------------------------------------------------
 INSERT INTO categories (kind, parent_id, name)

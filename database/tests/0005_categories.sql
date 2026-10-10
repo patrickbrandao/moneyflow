@@ -1,4 +1,4 @@
--- Testes de 0005_categories: plano de categorias em dois níveis e categorias ocultas por caixa.
+-- Testes de 0005_categories (com a cor por slot da 0006): plano de categorias em dois níveis e categorias ocultas por caixa.
 BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgtap;
 SELECT * FROM no_plan();
@@ -6,7 +6,7 @@ SELECT * FROM no_plan();
 -- Estrutura
 SELECT has_table('categories');
 SELECT has_table('caixa_hidden_categories');
-SELECT columns_are('categories', ARRAY['id', 'kind', 'parent_id', 'name', 'color', 'icon', 'archived_at',
+SELECT columns_are('categories', ARRAY['id', 'kind', 'parent_id', 'name', 'color_slot', 'icon', 'archived_at',
                                        'created_at', 'updated_at']);
 SELECT fk_ok('categories', 'parent_id', 'categories', 'id');
 SELECT fk_ok('caixa_hidden_categories', 'caixa_id', 'caixas', 'id');
@@ -18,10 +18,10 @@ SELECT has_trigger('categories', 'categories_validate');
 SELECT has_trigger('categories', 'categories_set_updated_at');
 
 -- Dados
-INSERT INTO categories (id, kind, name, color, icon) VALUES
-  ('00000000-0000-7000-8000-00000000ca01', 'expense', 'Moradia', 'blue', 'house'),
-  ('00000000-0000-7000-8000-00000000ca02', 'expense', 'Transporte', 'amber', 'car'),
-  ('00000000-0000-7000-8000-00000000ca03', 'income', 'Salário', 'green', 'wallet'),
+INSERT INTO categories (id, kind, name, color_slot, icon) VALUES
+  ('00000000-0000-7000-8000-00000000ca01', 'expense', 'Moradia', 8, 'house'),
+  ('00000000-0000-7000-8000-00000000ca02', 'expense', 'Transporte', 3, 'car'),
+  ('00000000-0000-7000-8000-00000000ca03', 'income', 'Salário', 5, 'wallet'),
   ('00000000-0000-7000-8000-00000000ca05', 'income', 'Outros', NULL, NULL),
   ('00000000-0000-7000-8000-00000000ca06', 'expense', 'Outros', NULL, NULL);
 INSERT INTO categories (id, kind, parent_id, name) VALUES
@@ -38,11 +38,9 @@ SELECT throws_ok($$INSERT INTO categories (kind, parent_id, name) VALUES ('expen
 SELECT throws_ok($$INSERT INTO categories (kind, name) VALUES ('transfer', 'X')$$, '23514', NULL, 'kind só income|expense');
 SELECT throws_ok($$INSERT INTO categories (kind, name) VALUES ('expense', ' X')$$, '23514', NULL, 'nome sem espaços nas pontas');
 SELECT throws_ok($$INSERT INTO categories (kind, name) VALUES ('expense', '')$$, '23514', NULL, 'nome não vazio');
-SELECT throws_ok($$INSERT INTO categories (kind, name, color) VALUES ('expense', 'X', '#ff0000')$$,
-                 '23514', NULL, 'cor é nome da paleta, não hex');
 SELECT throws_ok($$INSERT INTO categories (kind, name, icon) VALUES ('expense', 'X', 'Shopping Cart')$$,
                  '23514', NULL, 'ícone em kebab-case');
-SELECT lives_ok($$INSERT INTO categories (kind, name, color, icon) VALUES ('expense', 'Compras', 'violet', 'shopping-cart')$$,
+SELECT lives_ok($$INSERT INTO categories (kind, name, color_slot, icon) VALUES ('expense', 'Compras', 10, 'shopping-cart')$$,
                 'cor e ícone válidos');
 
 -- Dois níveis e mesmo kind (trigger)
