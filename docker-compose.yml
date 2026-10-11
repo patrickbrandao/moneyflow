@@ -21,6 +21,9 @@ x-app: &app
     # TELEGRAM_API_BASE=http://host.docker.internal:18081 docker compose up -d
     TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-https://api.telegram.org}
     APP_URL: ${APP_URL:-}
+    # Agentes de IA (spec 011): agente dos fluxos (leitura de documento, sugestões da conciliação), pelo nome;
+    # vazio = o primeiro agente ativo.
+    AI_FLOW_AGENT: ${AI_FLOW_AGENT:-}
   # host.docker.internal também no Linux (a Bot API falsa dos e2e roda no host).
   extra_hosts:
     - "host.docker.internal:host-gateway"
@@ -61,6 +64,7 @@ services:
       SESSION_DAYS: ${SESSION_DAYS:-30}
       LOOKUP_TIMEOUT_MS: ${LOOKUP_TIMEOUT_MS:-5000}
       LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-10}
+      AI_DOCUMENT_TIMEOUT_MS: ${AI_DOCUMENT_TIMEOUT_MS:-120000}
     ports:
       - "${APP_PORT:-3000}:3000"
 
@@ -74,6 +78,9 @@ services:
       CARD_AUTO_CLOSE: ${CARD_AUTO_CLOSE:-false}
       MESSAGE_INTERVAL_MS: ${MESSAGE_INTERVAL_MS:-30000}
       NOTIFY_AT: ${NOTIFY_AT:-08:00}
+      AGENT_POLL_MS: ${AGENT_POLL_MS:-1000}
+      AGENT_CONCURRENCY: ${AGENT_CONCURRENCY:-4}
+      AGENT_MAINTENANCE_MS: ${AGENT_MAINTENANCE_MS:-300000}
     depends_on:
       migrate:
         condition: service_completed_successfully
