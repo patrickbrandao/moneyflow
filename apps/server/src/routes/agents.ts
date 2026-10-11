@@ -100,6 +100,7 @@ export async function agentRoutes(app: FastifyInstance) {
       }
       running = true;
       try {
+        // Repete enquanto chegarem avisos durante a leitura (nenhum NOTIFY se perde).
         do {
           again = false;
           const events = await conversations.runEvents(app.db, runId, last);
@@ -111,14 +112,23 @@ export async function agentRoutes(app: FastifyInstance) {
               return;
             }
           }
-          if (events.length === 500) again = true;
+          if (events.length === 500) {
+            again = true;
+            continue;
+          }
+          // Execução já terminada sem o "done" (eventos expurgados): encerra com o estado final.
+          const current = await conversations.getRun(r.ctx, runId);
+          if (FINAL.has(current.status) && !again) {
+            const tail = await conversations.runEvents(app.db, runId, last);
+            if (tail.length > 0) {
+              again = true;
+              continue;
+            }
+            res.write(formatSse({ event: 'done', data: { type: 'done', status: current.status, error: current.error } }));
+            close();
+            return;
+          }
         } while (again && !closed);
-        // Execução já terminada sem o "done" (eventos expurgados): encerra com o estado final.
-        const current = await conversations.getRun(r.ctx, runId);
-        if (FINAL.has(current.status)) {
-          res.write(formatSse({ event: 'done', data: { type: 'done', status: current.status, error: current.error } }));
-          close();
-        }
       } catch (error) {
         r.log.warn({ err: error, runId }, 'sse: falha ao ler eventos');
         close();
@@ -127,9 +137,14 @@ export async function agentRoutes(app: FastifyInstance) {
       }
     };
     unsubscribe = app.runEvents.subscribe(runId, () => void pump());
+    // Ping a cada 15 s e, por segurança (conexão de LISTEN caindo), uma releitura a cada 5 s.
+    let ticks = 0;
     ping = setInterval(() => {
-      if (!closed) res.write(': ping\n\n');
-    }, 15_000);
+      if (closed) return;
+      ticks += 1;
+      if (ticks % 3 === 0) res.write(': ping\n\n');
+      void pump();
+    }, 5_000);
     r.raw.on('close', close);
     void run;
     await pump();

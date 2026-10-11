@@ -91,7 +91,8 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   // Os outros arquivos de teste usam o mesmo banco e esperam "sem agente configurado".
-  for (const a of await admin.get('/api/admin/ai/agents')) if (a.isActive) await admin.patch(`/api/admin/ai/agents/${a.id}`, { isActive: false });
+  for (const a of await admin.get('/api/admin/ai/agents'))
+    if (a.isActive) await admin.patch(`/api/admin/ai/agents/${a.id}`, { isActive: false });
   await h.close();
   await llm.close();
   await mcp.close();
