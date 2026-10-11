@@ -46,6 +46,8 @@ jobs:
       ADMIN_USERNAME: admin
       ADMIN_EMAIL: admin@moneyflow.local
       ADMIN_PASSWORD: ci-admin-password
+      # Bot API falsa do e2e de mensagens (sobe no runner; a pilha a alcança por host.docker.internal)
+      TELEGRAM_API_BASE: http://host.docker.internal:18081
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
