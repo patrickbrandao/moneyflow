@@ -10,3 +10,4 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 | 004 | [Aviso de conclusão do agente com várias réplicas da API](004-aviso-de-conclusao-multi-replica.md) | aberta | debito-tecnico | — | agente |
 | 005 | [Rastro de ator nas sugestões do agente em linhas de extrato](005-auditoria-das-sugestoes-no-extrato.md) | aberta | banco | — | agente |
 | 006 | [Cobrir no e2e os fluxos do agente ainda sem teste contra a API real](006-front-sem-teste-contra-api-real.md) | aberta | debito-tecnico | — | agente |
+| 007 | [Trocar as cores de tom roxo para tom azul em todo o frontend](007-acento-roxo-para-azul.md) | concluida | melhoria | app | usuario |

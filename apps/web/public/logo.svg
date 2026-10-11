@@ -2,8 +2,8 @@
   <title>MoneyFlow</title>
   <defs>
     <linearGradient id="g" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#b48ae6"/>
-      <stop offset="1" stop-color="#5712a5"/>
+      <stop offset="0" stop-color="#6fa3ea"/>
+      <stop offset="1" stop-color="#0b4fb3"/>
     </linearGradient>
   </defs>
   <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#g)"/>

@@ -2,7 +2,7 @@
 
 | Tema | Decisão |
 |---|---|
-| Frontend | Template da skill `purple-skills-public:web-interface-admin-with-canva`: React 19, Vite, TypeScript, Tailwind 4, React Flow, cmdk, lucide. Seguir as regras de design da skill (tokens, sem hex em componentes, um acento roxo, sem sombra em superfície fixa). |
+| Frontend | Template da skill `purple-skills-public:web-interface-admin-with-canva`: React 19, Vite, TypeScript, Tailwind 4, React Flow, cmdk, lucide. Seguir as regras de design da skill (tokens, sem hex em componentes, um único acento, sem sombra em superfície fixa). O acento é azul nos dois temas (o roxo do template foi trocado em 2026-10-11, tarefa 007); nenhuma cor da interface, do logo ou da paleta de categorias `--port-1`…`--port-12` fica na faixa roxa (matiz 250°–320°). |
 | Backend | Node + TypeScript, Fastify, Drizzle ORM (só consultas; schema gerado do banco), Zod. |
 | Banco | PostgreSQL 18 + pgvector, em `database/`, gerido pelo agente DBA ([016](016-banco-de-dados.md)). Migrations SQL com dbmate, testes pgTAP. Anexos também no Postgres (`bytea`, tabela própria, limite por arquivo). |
 | Repositório | Monorepo pnpm em `github.com/patrickbrandao/moneyflow`: `apps/web`, `apps/server` (modos `api` e `worker`), `packages/shared` (schemas Zod, tipos, definições das tools dos agentes), `packages/db` (schema Drizzle gerado do banco). O banco fica em `database/`, fora dos workspaces. |

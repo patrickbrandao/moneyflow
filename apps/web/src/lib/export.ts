@@ -27,11 +27,11 @@ export function downloadCsv(table: ExportTable) {
 /** O PDF usa as fontes padrão (WinAnsi): troca o que não existe nelas. */
 const pdfText = (text: string) => text.replace(/−/g, '-').replace(/[  ]/g, ' ');
 
-/** Tons neutros do PDF (impresso em papel branco; não é interface, não usa tokens). */
-const PDF_INK: [number, number, number] = [32, 32, 40];
-const PDF_MUTED: [number, number, number] = [110, 110, 122];
-const PDF_HEAD: [number, number, number] = [236, 234, 242];
-const PDF_LINE: [number, number, number] = [214, 212, 222];
+/** Tons neutros do PDF, frios como os da interface e sem roxo (impresso em papel branco; não é interface, não usa tokens). */
+const PDF_INK: [number, number, number] = [31, 33, 38];
+const PDF_MUTED: [number, number, number] = [108, 111, 120];
+const PDF_HEAD: [number, number, number] = [233, 235, 241];
+const PDF_LINE: [number, number, number] = [211, 213, 221];
 
 export async function downloadPdf(table: ExportTable) {
   const [{ jsPDF }, { autoTable }] = await Promise.all([import('jspdf'), import('jspdf-autotable')]);

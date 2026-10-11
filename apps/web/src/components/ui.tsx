@@ -239,11 +239,20 @@ export function initials(text: string): string {
   return (words[0] ?? '?').slice(0, 2).toUpperCase();
 }
 
-/** Matiz estável a partir do texto; saturação e luz fixas para ler bem nos dois temas. */
+/** Matizes roxos (250°–320°) ficam de fora: o acento é azul e o roxo não é cor da marca. */
+const PURPLE_HUE_START = 250;
+const PURPLE_HUE_SPAN = 70;
+
+/**
+ * Matiz estável a partir do texto, fora da faixa roxa; saturação e luz fixas
+ * para ler bem nos dois temas.
+ */
 export function monogramColor(text: string): string {
   let hash = 0;
   for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) | 0;
-  return `hsl(${Math.abs(hash) % 360} 42% 40%)`;
+  const raw = Math.abs(hash) % (360 - PURPLE_HUE_SPAN);
+  const hue = raw < PURPLE_HUE_START ? raw : raw + PURPLE_HUE_SPAN;
+  return `hsl(${hue} 42% 40%)`;
 }
 
 /**

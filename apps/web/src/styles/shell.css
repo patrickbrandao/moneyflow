@@ -1208,7 +1208,7 @@ img.avatar {
   background: transparent;
   text-align: left;
 }
-/* `--text`, não o roxo: `--accent-soft` fica abaixo de 4,5:1 no painel escuro. */
+/* `--text`, não o acento: `--accent-soft` fica no limite de 4,5:1 no painel escuro. */
 .notif .ni .act {
   display: block;
   margin-top: 4px;
