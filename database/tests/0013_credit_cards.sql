@@ -419,8 +419,8 @@ SELECT lives_ok($$
 $$, 'restante rola para 11/2026 com juros do emissor');
 SELECT results_eq($$SELECT status, total_cents, billed_cents, settled_cents, open_cents, carried_out_cents FROM card_invoice_summaries
                      WHERE card_invoice_id = '00000000-0000-7000-8000-00000001a610'$$,
-                  $$VALUES ('closed', 147000::bigint, 100000::bigint, 100000::bigint, 0::bigint, 47000::bigint)$$,
-                  '10/2026: paga em parte, saldo rolado');
+                  $$VALUES ('carried_over', 147000::bigint, 100000::bigint, 100000::bigint, 0::bigint, 47000::bigint)$$,
+                  '10/2026: paga em parte, saldo rolado (status carried_over desde a 0022)');
 SELECT is((SELECT status FROM titles WHERE id = '00000000-0000-7000-8000-00000001c102'), 'paid', 'título reduzido ao pago fica quitado');
 SELECT throws_ok($$UPDATE card_invoices SET closed_at = NULL WHERE id = '00000000-0000-7000-8000-00000001a610'$$,
                  '23514', NULL, 'fatura com saldo rolado não reabre');

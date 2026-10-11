@@ -16,7 +16,9 @@ SELECT has_function('audit_write', ARRAY['text', 'text', 'jsonb', 'jsonb', 'text
 SELECT is_empty($$
   SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
    WHERE n.nspname = 'public' AND c.relkind = 'r'
-     AND c.relname NOT IN ('sessions', 'audit_log', 'schema_migrations')
+     -- Estado de login, de interface e fila operacional ficam fora (0019–0021).
+     AND c.relname NOT IN ('sessions', 'audit_log', 'schema_migrations', 'canvas_node_positions', 'notifications',
+                           'message_outbox')
      AND NOT EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid = c.oid AND t.tgname = c.relname || '_audit')
 $$, 'todas as tabelas de negócio têm trigger <tabela>_audit');
 

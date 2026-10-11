@@ -207,6 +207,7 @@ CREATE FUNCTION public.audit_row() RETURNS trigger
     AS $$
 DECLARE
   quiet   text[] := coalesce(string_to_array(nullif(TG_ARGV[0], ''), ','), '{}');
+  secrets constant text[] := ARRAY['password', 'bot_token'];
   o       jsonb;
   n       jsonb;
   changed text[];
@@ -223,7 +224,7 @@ BEGIN
     END IF;
   END IF;
 
-  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o - 'password', n - 'password', changed);
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o - secrets, n - secrets, changed);
   RETURN NULL;
 END
 $$;
@@ -233,7 +234,7 @@ $$;
 -- Name: FUNCTION audit_row(); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de auditoria. Remove a coluna password; TG_ARGV[0] = colunas que sozinhas não geram linha.';
+COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de auditoria. Remove os segredos (password, bot_token): a troca aparece só em changed_columns, sem o valor. TG_ARGV[0] = colunas que sozinhas não geram linha.';
 
 
 --
@@ -419,7 +420,7 @@ $$;
 -- Name: calendar_items(uuid[], date, date, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.calendar_items(p_caixa_ids uuid[], p_from date, p_to date, p_today date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date) RETURNS TABLE(item_kind text, title_id uuid, card_invoice_id uuid, caixa_id uuid, counterparty_caixa_id uuid, direction text, due_date date, reference_month date, description text, entity_id uuid, category_id uuid, amount_cents bigint, open_cents bigint, status text, calendar_status text)
+CREATE FUNCTION public.calendar_items(p_caixa_ids uuid[], p_from date, p_to date, p_today date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date) RETURNS TABLE(item_kind text, title_id uuid, card_invoice_id uuid, caixa_id uuid, counterparty_caixa_id uuid, direction text, due_date date, reference_month date, description text, entity_id uuid, category_id uuid, amount_cents bigint, open_cents bigint, status text, calendar_status text, mirror_side text, mirror_status text)
     LANGUAGE plpgsql STABLE
     AS $$
 BEGIN
@@ -446,7 +447,11 @@ BEGIN
          t.status,
          CASE WHEN t.status = 'paid' THEN 'paid'
               WHEN t.due_date < p_today THEN 'overdue'
-              ELSE t.direction END
+              ELSE t.direction END,
+         CASE WHEN t.mirror_title_id IS NULL THEN NULL
+              WHEN t.mirror_status IS NOT NULL THEN 'mirror'
+              ELSE 'original' END,
+         t.mirror_status
     FROM titles t
     JOIN title_balances b ON b.title_id = t.id
     LEFT JOIN card_invoices v ON v.id = t.card_invoice_id
@@ -472,7 +477,10 @@ BEGIN
          (x.items_cents - x.settled_cents)::bigint,
          (x.items_cents - x.settled_cents)::bigint,
          'open'::text,
-         CASE WHEN x.due_date < p_today THEN 'overdue' ELSE side.direction END
+         CASE WHEN x.due_date < p_today THEN 'overdue' ELSE side.direction END,
+         -- O título da fatura terá o lado "a receber" no cartão (original) e o "a pagar" na pagadora (espelho).
+         CASE side.direction WHEN 'payable' THEN 'mirror' ELSE 'original' END,
+         NULL::text
     FROM card_invoice_payer_totals x
     JOIN card_invoices v ON v.id = x.card_invoice_id AND v.closed_at IS NULL
     JOIN caixas card ON card.id = x.card_caixa_id
@@ -493,7 +501,7 @@ $$;
 -- Name: FUNCTION calendar_items(p_caixa_ids uuid[], p_from date, p_to date, p_today date); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.calendar_items(p_caixa_ids uuid[], p_from date, p_to date, p_today date) IS 'Itens do calendário por vencimento nas caixas pedidas: títulos não cancelados nem arquivados (item_kind = title; faturas fechadas aparecem como seus títulos card_invoice) e faturas abertas (item_kind = card_invoice: previsão = itens − antecipações pagas, como a pagar na pagadora e a receber no cartão). calendar_status: paid, overdue (vencido em aberto), payable ou receivable. Período de até 1100 dias (erro 22023).';
+COMMENT ON FUNCTION public.calendar_items(p_caixa_ids uuid[], p_from date, p_to date, p_today date) IS 'Itens do calendário por vencimento nas caixas pedidas: títulos não cancelados nem arquivados (item_kind = title; faturas fechadas aparecem como seus títulos card_invoice) e faturas abertas (item_kind = card_invoice: previsão = itens − antecipações pagas, como a pagar na pagadora e a receber no cartão). calendar_status: paid, overdue (vencido em aberto), payable ou receivable. mirror_side: original | mirror (lado criado na caixa da contraparte, o que tem mirror_status) | nulo sem espelho; na previsão da fatura aberta, mirror na pagadora e original no cartão. mirror_status: pending | accepted | disputed no lado espelho (nulo nos demais e na previsão). Período de até 1100 dias (erro 22023).';
 
 
 --
@@ -1052,6 +1060,208 @@ $$;
 
 
 --
+-- Name: flow_graph_edges(uuid[], date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.flow_graph_edges(p_caixa_ids uuid[], p_from date, p_to date) RETURNS TABLE(source_kind text, source_id uuid, target_kind text, target_id uuid, edge_kind text, payer_caixa_id uuid, realized_cents bigint, forecast_cents bigint, lines integer)
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT l.source_kind, l.source_id, l.target_kind, l.target_id, l.edge_kind, l.payer_caixa_id,
+         sum(l.realized_cents)::bigint, sum(l.forecast_cents)::bigint, count(*)::int
+    FROM flow_graph_lines(p_caixa_ids, p_from, p_to) l
+   GROUP BY 1, 2, 3, 4, 5, 6
+   ORDER BY 5, 1, 2, 3, 4, 6
+$$;
+
+
+--
+-- Name: FUNCTION flow_graph_edges(p_caixa_ids uuid[], p_from date, p_to date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.flow_graph_edges(p_caixa_ids uuid[], p_from date, p_to date) IS 'Arestas agregadas do canvas (spec 014): soma de flow_graph_lines por origem, destino, edge_kind e pagadora (payer_caixa_id separa as compras de um cartão por pagadora, para o rastreio pagadora → cartão → lojista; nulo nos outros tipos). realized_cents (traço contínuo) e forecast_cents (tracejado).';
+
+
+--
+-- Name: flow_graph_lines(uuid[], date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.flow_graph_lines(p_caixa_ids uuid[], p_from date, p_to date) RETURNS TABLE(source_kind text, source_id uuid, target_kind text, target_id uuid, edge_kind text, payer_caixa_id uuid, category_id uuid, ref_kind text, ref_id uuid, occurred_on date, realized_cents bigint, forecast_cents bigint)
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+  IF p_from IS NULL OR p_to IS NULL OR p_to < p_from OR p_to - p_from > 3660 THEN
+    RAISE EXCEPTION 'flow_graph: invalid period % .. % (max 3660 days)', p_from, p_to
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  RETURN QUERY
+  WITH
+  -- Títulos que representam o fluxo: o lado a receber de um par cuja outra caixa está na lista é pulado.
+  tt AS (
+    SELECT t.*, cp.holder_entity_id AS cp_holder, (cp.id = ANY (p_caixa_ids)) AS cp_in
+      FROM titles t
+      LEFT JOIN caixas cp ON cp.id = t.counterparty_caixa_id
+     WHERE t.caixa_id = ANY (p_caixa_ids)
+       AND NOT (t.direction = 'receivable' AND coalesce(cp.id = ANY (p_caixa_ids), false))
+  ),
+  title_ends AS (
+    SELECT tt.*,
+           CASE WHEN tt.direction = 'payable' THEN 'caixa'
+                ELSE 'entity' END AS s_kind,
+           CASE WHEN tt.direction = 'payable' THEN tt.caixa_id
+                ELSE tt.entity_id END AS s_id,
+           CASE WHEN tt.direction = 'receivable' THEN 'caixa'
+                WHEN coalesce(tt.cp_in, false) THEN 'caixa'
+                ELSE 'entity' END AS t_kind,
+           CASE WHEN tt.direction = 'receivable' THEN tt.caixa_id
+                WHEN coalesce(tt.cp_in, false) THEN tt.counterparty_caixa_id
+                ELSE tt.entity_id END AS t_id,
+           CASE WHEN tt.origin = 'card_invoice' THEN 'card_invoice'
+                WHEN tt.direction = 'payable' THEN 'payment'
+                ELSE 'receipt' END AS e_kind,
+           CASE WHEN tt.origin = 'card_invoice'
+                THEN CASE tt.direction WHEN 'payable' THEN tt.caixa_id ELSE tt.counterparty_caixa_id END
+           END AS payer_id
+      FROM tt
+  )
+  -- Realizado: baixas ativas no período.
+  SELECT e.s_kind, e.s_id, e.t_kind, e.t_id, e.e_kind, e.payer_id, e.category_id,
+         'settlement'::text, s.id, s.settled_on,
+         (s.amount_cents + s.interest_cents + s.fine_cents - s.discount_cents)::bigint, 0::bigint
+    FROM title_ends e
+    JOIN settlements s ON s.title_id = e.id
+   WHERE s.reversed_at IS NULL AND s.settled_on BETWEEN p_from AND p_to
+  UNION ALL
+  -- Previsto: saldo aberto dos títulos que vencem no período (antecipação de fatura aberta está na previsão dela).
+  SELECT e.s_kind, e.s_id, e.t_kind, e.t_id, e.e_kind, e.payer_id, e.category_id,
+         'title'::text, e.id, e.due_date, 0::bigint, b.open_cents
+    FROM title_ends e
+    JOIN title_balances b ON b.title_id = e.id
+    LEFT JOIN card_invoices v ON v.id = e.card_invoice_id
+   WHERE b.open_cents > 0 AND e.archived_at IS NULL AND e.due_date BETWEEN p_from AND p_to
+     AND (v.id IS NULL OR v.closed_at IS NOT NULL)
+  UNION ALL
+  -- Faturas abertas: previsão por pagadora (itens − antecipações).
+  SELECT CASE WHEN x.payer_caixa_id = ANY (p_caixa_ids) THEN 'caixa' ELSE 'entity' END,
+         CASE WHEN x.payer_caixa_id = ANY (p_caixa_ids) THEN x.payer_caixa_id ELSE payer.holder_entity_id END,
+         CASE WHEN x.card_caixa_id = ANY (p_caixa_ids) THEN 'caixa' ELSE 'entity' END,
+         CASE WHEN x.card_caixa_id = ANY (p_caixa_ids) THEN x.card_caixa_id ELSE card.holder_entity_id END,
+         'card_invoice'::text, x.payer_caixa_id, NULL::uuid,
+         'card_invoice'::text, x.card_invoice_id, x.due_date, 0::bigint, (x.items_cents - x.settled_cents)::bigint
+    FROM card_invoice_payer_totals x
+    JOIN card_invoices v ON v.id = x.card_invoice_id AND v.closed_at IS NULL
+    JOIN caixas payer ON payer.id = x.payer_caixa_id
+    JOIN caixas card ON card.id = x.card_caixa_id
+   WHERE (x.payer_caixa_id = ANY (p_caixa_ids) OR x.card_caixa_id = ANY (p_caixa_ids))
+     AND x.due_date BETWEEN p_from AND p_to
+     AND x.items_cents - x.settled_cents > 0
+  UNION ALL
+  -- Compras do cartão: cartão → recebedor final.
+  SELECT 'caixa'::text, p.card_caixa_id, 'entity'::text, p.entity_id, 'card_purchase'::text, p.payer_caixa_id,
+         p.category_id, 'card_purchase'::text, p.id, p.purchased_on,
+         (CASE p.kind WHEN 'refund' THEN -p.amount_cents ELSE p.amount_cents END)::bigint, 0::bigint
+    FROM card_purchases p
+   WHERE p.card_caixa_id = ANY (p_caixa_ids) AND p.purchased_on BETWEEN p_from AND p_to
+  UNION ALL
+  -- Transferências entre caixas diferentes.
+  SELECT CASE WHEN fa.caixa_id = ANY (p_caixa_ids) THEN 'caixa' ELSE 'entity' END,
+         CASE WHEN fa.caixa_id = ANY (p_caixa_ids) THEN fa.caixa_id ELSE fc.holder_entity_id END,
+         CASE WHEN ta.caixa_id = ANY (p_caixa_ids) THEN 'caixa' ELSE 'entity' END,
+         CASE WHEN ta.caixa_id = ANY (p_caixa_ids) THEN ta.caixa_id ELSE tc.holder_entity_id END,
+         'transfer'::text, NULL::uuid, NULL::uuid, 'transfer'::text, tr.id, tr.transferred_on,
+         tr.amount_cents, 0::bigint
+    FROM transfers tr
+    JOIN financial_accounts fa ON fa.id = tr.from_account_id
+    JOIN financial_accounts ta ON ta.id = tr.to_account_id
+    JOIN caixas fc ON fc.id = fa.caixa_id
+    JOIN caixas tc ON tc.id = ta.caixa_id
+   WHERE fa.caixa_id <> ta.caixa_id
+     AND (fa.caixa_id = ANY (p_caixa_ids) OR ta.caixa_id = ANY (p_caixa_ids))
+     AND tr.transferred_on BETWEEN p_from AND p_to
+  UNION ALL
+  -- Ajustes com entidade.
+  SELECT CASE WHEN m.amount_cents < 0 THEN 'caixa' ELSE 'entity' END,
+         CASE WHEN m.amount_cents < 0 THEN a.caixa_id ELSE m.entity_id END,
+         CASE WHEN m.amount_cents < 0 THEN 'entity' ELSE 'caixa' END,
+         CASE WHEN m.amount_cents < 0 THEN m.entity_id ELSE a.caixa_id END,
+         CASE WHEN m.amount_cents < 0 THEN 'payment' ELSE 'receipt' END,
+         NULL::uuid, m.category_id, 'movement'::text, m.id, m.occurred_on, abs(m.amount_cents)::bigint, 0::bigint
+    FROM movements m
+    JOIN financial_accounts a ON a.id = m.financial_account_id
+   WHERE m.kind = 'adjustment' AND m.entity_id IS NOT NULL
+     AND a.caixa_id = ANY (p_caixa_ids) AND m.occurred_on BETWEEN p_from AND p_to;
+END
+$$;
+
+
+--
+-- Name: FUNCTION flow_graph_lines(p_caixa_ids uuid[], p_from date, p_to date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.flow_graph_lines(p_caixa_ids uuid[], p_from date, p_to date) IS 'Linhas do canvas de fluxo (spec 014), uma por registro: origem e destino (source_kind/target_kind = caixa | entity), edge_kind (payment | receipt | transfer | card_invoice | card_purchase), payer_caixa_id (pagadora, só em card_invoice e card_purchase), categoria, registro de origem (ref_kind = settlement | title | card_invoice | card_purchase | transfer | movement, ref_id), data e valor realizado ou previsto. É o detalhe da gaveta de uma aresta. Caixa fora de p_caixa_ids vira o nó do titular. Erro 22023: período inválido (até 3660 dias).';
+
+
+--
+-- Name: flow_graph_nodes(uuid[], date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.flow_graph_nodes(p_caixa_ids uuid[], p_from date, p_to date) RETURNS TABLE(node_kind text, node_id uuid, name text, caixa_kind text, entity_kind text, holder_entity_id uuid, balance_cents bigint, card_used_cents bigint, main_category_id uuid, main_group_category_id uuid, realized_in_cents bigint, realized_out_cents bigint, forecast_in_cents bigint, forecast_out_cents bigint)
+    LANGUAGE sql STABLE
+    AS $$
+  WITH l AS (
+    SELECT * FROM flow_graph_lines(p_caixa_ids, p_from, p_to)
+  ),
+  ends AS (
+    SELECT l.target_kind AS k, l.target_id AS id, l.realized_cents AS r_in, 0::bigint AS r_out,
+           l.forecast_cents AS f_in, 0::bigint AS f_out, l.category_id
+      FROM l
+    UNION ALL
+    SELECT l.source_kind, l.source_id, 0, l.realized_cents, 0, l.forecast_cents, l.category_id
+      FROM l
+  ),
+  totals AS (
+    SELECT e.k, e.id, sum(e.r_in) AS r_in, sum(e.r_out) AS r_out, sum(e.f_in) AS f_in, sum(e.f_out) AS f_out
+      FROM ends e GROUP BY 1, 2
+  ),
+  -- Categoria principal da entidade (para agrupar folhas): a de maior volume nas linhas dela.
+  main_cat AS (
+    SELECT DISTINCT ON (e.id) e.id, e.category_id
+      FROM ends e
+     WHERE e.k = 'entity' AND e.category_id IS NOT NULL
+     GROUP BY e.id, e.category_id
+     ORDER BY e.id, sum(abs(e.r_in) + abs(e.r_out) + abs(e.f_in) + abs(e.f_out)) DESC, e.category_id
+  )
+  SELECT 'caixa'::text, c.id, c.name, c.kind, NULL::text, c.holder_entity_id,
+         CASE WHEN c.kind = 'general' THEN
+           coalesce((SELECT sum(financial_account_balance_at(a.id, p_to)) FROM financial_accounts a WHERE a.caixa_id = c.id), 0)
+         END::bigint,
+         (SELECT cl.used_cents FROM card_limits cl WHERE cl.card_caixa_id = c.id)::bigint,
+         NULL::uuid, NULL::uuid,
+         coalesce(t.r_in, 0)::bigint, coalesce(t.r_out, 0)::bigint, coalesce(t.f_in, 0)::bigint, coalesce(t.f_out, 0)::bigint
+    FROM caixas c
+    LEFT JOIN totals t ON t.k = 'caixa' AND t.id = c.id
+   WHERE c.id = ANY (p_caixa_ids)
+  UNION ALL
+  SELECT 'entity'::text, en.id, coalesce(en.trade_name, en.name), NULL::text, en.kind, NULL::uuid,
+         NULL::bigint, NULL::bigint, mc.category_id, coalesce(cat.parent_id, cat.id),
+         t.r_in::bigint, t.r_out::bigint, t.f_in::bigint, t.f_out::bigint
+    FROM totals t
+    JOIN entities en ON en.id = t.id
+    LEFT JOIN main_cat mc ON mc.id = en.id
+    LEFT JOIN categories cat ON cat.id = mc.category_id
+   WHERE t.k = 'entity'
+   ORDER BY 1, 3, 2
+$$;
+
+
+--
+-- Name: FUNCTION flow_graph_nodes(p_caixa_ids uuid[], p_from date, p_to date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.flow_graph_nodes(p_caixa_ids uuid[], p_from date, p_to date) IS 'Nós do canvas (spec 014): todas as caixas de p_caixa_ids (node_kind caixa: balance_cents = soma dos saldos das contas no fim de p_to, só em general; card_used_cents = limite usado, só em cartão) e as entidades que aparecem nas arestas (node_kind entity: nome fantasia ou nome; main_category_id / main_group_category_id = categoria de maior volume, para agrupar folhas). Totais de entrada e saída, realizados e previstos, no período.';
+
+
+--
 -- Name: is_valid_boleto_barcode(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1274,6 +1484,386 @@ COMMENT ON FUNCTION public.is_valid_nfe_access_key(access_key text) IS 'Valida a
 
 
 --
+-- Name: message_destination_token(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.message_destination_token(p_message_id uuid) RETURNS text
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  st  text;
+  tok text;
+BEGIN
+  SELECT o.status, d.bot_token INTO st, tok
+    FROM public.message_outbox o
+    JOIN public.message_destinations d ON d.id = o.destination_id
+   WHERE o.id = p_message_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'message_destination_token: message % not found', p_message_id
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  IF st <> 'sending' THEN
+    RAISE EXCEPTION 'message_destination_token: message % is not being sent (status %)', p_message_id, st
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN tok;
+END
+$$;
+
+
+--
+-- Name: FUNCTION message_destination_token(p_message_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.message_destination_token(p_message_id uuid) IS 'Devolve o bot token do destino de uma mensagem RESERVADA pelo worker (status sending); erro 42501 em qualquer outro status e P0002 se a mensagem não existe. Única forma de a aplicação ler message_destinations.bot_token.';
+
+
+--
+-- Name: message_destinations_cancel_pending(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.message_destinations_cancel_pending() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE message_outbox o
+     SET status = 'canceled', last_error = 'destination_inactive'
+   WHERE o.destination_id = NEW.id AND o.status IN ('pending', 'failed');
+  RETURN NULL;
+END
+$$;
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: message_outbox; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.message_outbox (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    destination_id uuid NOT NULL,
+    subscription_id uuid,
+    event_kind text NOT NULL,
+    dedup_key text,
+    caixa_id uuid,
+    user_id uuid,
+    agent_run_id text,
+    payload jsonb NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    attempts smallint DEFAULT 0 NOT NULL,
+    max_attempts smallint DEFAULT 5 NOT NULL,
+    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
+    locked_at timestamp with time zone,
+    sent_at timestamp with time zone,
+    last_error text,
+    provider_message_id text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT message_outbox_attempts_check CHECK ((((max_attempts >= 1) AND (max_attempts <= 20)) AND ((attempts >= 0) AND (attempts <= max_attempts)))),
+    CONSTRAINT message_outbox_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
+    CONSTRAINT message_outbox_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'test'::text]))),
+    CONSTRAINT message_outbox_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
+    CONSTRAINT message_outbox_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'sending'::text, 'sent'::text, 'failed'::text, 'canceled'::text]))),
+    CONSTRAINT message_outbox_status_fields_check CHECK ((((status = 'sending'::text) = (locked_at IS NOT NULL)) AND ((status = 'sent'::text) = (sent_at IS NOT NULL)) AND ((status <> ALL (ARRAY['failed'::text, 'canceled'::text])) OR (last_error IS NOT NULL))))
+);
+
+
+--
+-- Name: TABLE message_outbox; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.message_outbox IS 'Fila de saída e histórico de mensagens (spec 013). O worker reserva com message_outbox_claim (FOR UPDATE SKIP LOCKED), envia fora da transação e fecha com message_outbox_mark_sent / message_outbox_mark_failed. Fora da auditoria (é fila operacional; o histórico é a própria tabela).';
+
+
+--
+-- Name: COLUMN message_outbox.event_kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_outbox.event_kind IS 'Evento que gerou a mensagem (os de message_subscriptions, mais test).';
+
+
+--
+-- Name: COLUMN message_outbox.dedup_key; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_outbox.dedup_key IS 'Chave do evento, única por destino (ex.: due_reminder:<title_id>:D-3:2026-10-12): enfileirar com ON CONFLICT (destination_id, dedup_key) DO NOTHING para nunca mandar o mesmo lembrete duas vezes. Nulo = sem dedup.';
+
+
+--
+-- Name: COLUMN message_outbox.payload; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_outbox.payload IS 'Mensagem já montada (ex.: {"text": "...", "parse_mode": "HTML"}). Nunca contém o bot token nem senhas. Imutável.';
+
+
+--
+-- Name: COLUMN message_outbox.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_outbox.status IS 'pending (aguarda next_attempt_at) → sending (reservada por um worker, locked_at) → sent | pending (retry) | failed (esgotou ou erro permanente). canceled: destino desativado ou cancelada pela aplicação. failed → pending = reenviar.';
+
+
+--
+-- Name: COLUMN message_outbox.attempts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_outbox.attempts IS 'Tentativas já iniciadas (o claim soma 1).';
+
+
+--
+-- Name: COLUMN message_outbox.locked_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_outbox.locked_at IS 'Quando o worker reservou (só em sending). Reserva velha é retomada pelo claim.';
+
+
+--
+-- Name: COLUMN message_outbox.provider_message_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_outbox.provider_message_id IS 'Id da mensagem no provedor (Telegram message_id), após o envio.';
+
+
+--
+-- Name: message_outbox_claim(integer, interval); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.message_outbox_claim(p_limit integer DEFAULT 10, p_stale_after interval DEFAULT '00:05:00'::interval) RETURNS SETOF public.message_outbox
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1000 OR p_stale_after IS NULL OR p_stale_after < interval '10 seconds' THEN
+    RAISE EXCEPTION 'message_outbox_claim: limit must be 1..1000 and stale_after >= 10 seconds'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Reserva abandonada (worker caiu) que já esgotou as tentativas: falha definitiva.
+  UPDATE message_outbox o
+     SET status = 'failed', locked_at = NULL,
+         last_error = coalesce(o.last_error || ' | ', '') || 'stale_lock: worker did not finish the attempt'
+   WHERE o.id IN (SELECT x.id FROM message_outbox x
+                   WHERE x.status = 'sending' AND x.locked_at < clock_timestamp() - p_stale_after
+                     AND x.attempts >= x.max_attempts
+                   FOR UPDATE SKIP LOCKED);
+
+  RETURN QUERY
+  UPDATE message_outbox o
+     SET status = 'sending', locked_at = clock_timestamp(), attempts = o.attempts + 1
+   WHERE o.id IN (SELECT x.id FROM message_outbox x
+                   WHERE (x.status = 'pending' AND x.next_attempt_at <= clock_timestamp())
+                      OR (x.status = 'sending' AND x.locked_at < clock_timestamp() - p_stale_after
+                          AND x.attempts < x.max_attempts)
+                   ORDER BY x.next_attempt_at, x.id
+                   LIMIT p_limit
+                   FOR UPDATE SKIP LOCKED)
+  RETURNING o.*;
+END
+$$;
+
+
+--
+-- Name: FUNCTION message_outbox_claim(p_limit integer, p_stale_after interval); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.message_outbox_claim(p_limit integer, p_stale_after interval) IS 'Reserva até p_limit mensagens prontas (pending com next_attempt_at <= agora, ou sending com reserva mais velha que p_stale_after) com FOR UPDATE SKIP LOCKED: status = sending, locked_at = agora, attempts + 1; devolve as linhas. Reserva velha sem tentativas restantes vira failed. Rode numa transação curta e faça COMMIT antes de enviar. Erro 22023: parâmetros inválidos.';
+
+
+--
+-- Name: message_outbox_mark_failed(uuid, text, interval, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.message_outbox_mark_failed(p_message_id uuid, p_error text, p_retry_after interval DEFAULT NULL::interval, p_permanent boolean DEFAULT false) RETURNS text
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  m message_outbox;
+  new_status text;
+BEGIN
+  SELECT * INTO m FROM message_outbox WHERE id = p_message_id FOR UPDATE;
+  IF NOT FOUND OR m.status <> 'sending' THEN
+    RAISE EXCEPTION 'message_outbox: message % is not being sent', p_message_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'message_outbox_transition_check';
+  END IF;
+
+  new_status := CASE WHEN p_permanent OR m.attempts >= m.max_attempts THEN 'failed' ELSE 'pending' END;
+  UPDATE message_outbox o
+     SET status = new_status,
+         locked_at = NULL,
+         last_error = left(coalesce(nullif(btrim(p_error), ''), 'unknown error'), 2000),
+         next_attempt_at = CASE WHEN new_status = 'pending'
+                                THEN clock_timestamp() + coalesce(p_retry_after,
+                                       least(interval '1 hour', interval '30 seconds' * power(2, m.attempts - 1)))
+                                ELSE o.next_attempt_at END
+   WHERE o.id = p_message_id;
+  RETURN new_status;
+END
+$$;
+
+
+--
+-- Name: FUNCTION message_outbox_mark_failed(p_message_id uuid, p_error text, p_retry_after interval, p_permanent boolean); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.message_outbox_mark_failed(p_message_id uuid, p_error text, p_retry_after interval, p_permanent boolean) IS 'Registra a falha de uma tentativa de uma mensagem em sending. Volta a pending com next_attempt_at = agora + p_retry_after (ex.: retry_after do Telegram 429) ou backoff 30 s × 2^(tentativa−1), máximo 1 h; vira failed se p_permanent (ex.: chat não existe, token inválido) ou se esgotou max_attempts. Devolve o novo status. Erro 23514 (message_outbox_transition_check) se ela não está em sending.';
+
+
+--
+-- Name: message_outbox_mark_sent(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.message_outbox_mark_sent(p_message_id uuid, p_provider_message_id text DEFAULT NULL::text) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE message_outbox o
+     SET status = 'sent', sent_at = clock_timestamp(), locked_at = NULL, provider_message_id = p_provider_message_id
+   WHERE o.id = p_message_id AND o.status = 'sending';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'message_outbox: message % is not being sent', p_message_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'message_outbox_transition_check';
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION message_outbox_mark_sent(p_message_id uuid, p_provider_message_id text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.message_outbox_mark_sent(p_message_id uuid, p_provider_message_id text) IS 'Fecha uma mensagem reservada como enviada (sent_at, id no provedor). Erro 23514 (message_outbox_transition_check) se ela não está em sending.';
+
+
+--
+-- Name: message_outbox_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.message_outbox_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.status <> 'pending' THEN
+      RAISE EXCEPTION 'message_outbox: new messages must be pending'
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'message_outbox_transition_check';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM message_destinations d
+                    WHERE d.id = NEW.destination_id AND d.is_active AND d.archived_at IS NULL) THEN
+      RAISE EXCEPTION 'message_outbox: destination % is not active', NEW.destination_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'message_outbox_destination_active_check';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.destination_id <> OLD.destination_id OR NEW.event_kind <> OLD.event_kind
+     OR NEW.dedup_key IS DISTINCT FROM OLD.dedup_key OR NEW.payload <> OLD.payload THEN
+    RAISE EXCEPTION 'message_outbox: destination, event, dedup key and payload of message % are immutable', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'message_outbox_immutable_check';
+  END IF;
+
+  IF NEW.status <> OLD.status AND NOT (
+       (OLD.status = 'pending' AND NEW.status IN ('sending', 'canceled'))
+    OR (OLD.status = 'sending' AND NEW.status IN ('sent', 'pending', 'failed', 'canceled'))
+    OR (OLD.status = 'failed' AND NEW.status IN ('pending', 'canceled'))
+  ) THEN
+    RAISE EXCEPTION 'message_outbox: invalid transition % -> % (message %)', OLD.status, NEW.status, OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'message_outbox_transition_check';
+  END IF;
+  IF OLD.status IN ('sent', 'canceled') AND (to_jsonb(NEW) - 'updated_at') <> (to_jsonb(OLD) - 'updated_at') THEN
+    RAISE EXCEPTION 'message_outbox: message % is % and cannot change', OLD.id, OLD.status
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'message_outbox_transition_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: message_subscription_params_valid(text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.message_subscription_params_valid(p_event_kind text, p_params jsonb) RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $_$
+DECLARE
+  allowed text[];
+  required text[];
+  hhmm constant text := '^([01][0-9]|2[0-3]):[0-5][0-9]$';
+  arr jsonb;
+BEGIN
+  IF p_params IS NULL OR jsonb_typeof(p_params) <> 'object' THEN
+    RETURN false;
+  END IF;
+
+  CASE p_event_kind
+    WHEN 'due_reminder' THEN allowed := '{days_before,send_at}'; required := '{days_before,send_at}';
+    WHEN 'overdue' THEN allowed := '{send_at,repeat_every_days}'; required := '{send_at}';
+    WHEN 'daily_summary' THEN allowed := '{send_at}'; required := '{send_at}';
+    WHEN 'weekly_summary' THEN allowed := '{send_at,weekday}'; required := '{send_at,weekday}';
+    WHEN 'card_limit' THEN allowed := '{thresholds_percent}'; required := '{thresholds_percent}';
+    WHEN 'reconciliation_divergence' THEN allowed := '{min_difference_cents}'; required := '{}';
+    WHEN 'invoice_closed', 'agent_completed', 'agent_message' THEN allowed := '{}'; required := '{}';
+    ELSE RETURN false;
+  END CASE;
+
+  IF EXISTS (SELECT 1 FROM jsonb_object_keys(p_params) k WHERE k <> ALL (allowed))
+     OR NOT (p_params ?& required) THEN
+    RETURN false;
+  END IF;
+
+  IF p_params ? 'send_at' AND (jsonb_typeof(p_params -> 'send_at') <> 'string' OR p_params ->> 'send_at' !~ hhmm) THEN
+    RETURN false;
+  END IF;
+  IF p_params ? 'weekday' AND (jsonb_typeof(p_params -> 'weekday') <> 'number'
+                               OR (p_params ->> 'weekday') !~ '^[1-7]$') THEN
+    RETURN false;
+  END IF;
+  IF p_params ? 'repeat_every_days' AND (jsonb_typeof(p_params -> 'repeat_every_days') <> 'number'
+                                         OR (p_params ->> 'repeat_every_days') !~ '^[0-9]{1,2}$'
+                                         OR (p_params ->> 'repeat_every_days')::int NOT BETWEEN 1 AND 30) THEN
+    RETURN false;
+  END IF;
+  IF p_params ? 'min_difference_cents' AND (jsonb_typeof(p_params -> 'min_difference_cents') <> 'number'
+                                            OR (p_params ->> 'min_difference_cents') !~ '^[0-9]{1,15}$') THEN
+    RETURN false;
+  END IF;
+
+  -- Listas de inteiros: 1–10 valores distintos dentro da faixa.
+  FOREACH arr IN ARRAY ARRAY[p_params -> 'days_before', p_params -> 'thresholds_percent'] LOOP
+    CONTINUE WHEN arr IS NULL;
+    IF jsonb_typeof(arr) <> 'array' OR jsonb_array_length(arr) NOT BETWEEN 1 AND 10
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements(arr) e
+                   WHERE jsonb_typeof(e) <> 'number' OR e::text !~ '^[0-9]{1,3}$')
+       OR (SELECT count(DISTINCT e::text) FROM jsonb_array_elements(arr) e) <> jsonb_array_length(arr) THEN
+      RETURN false;
+    END IF;
+  END LOOP;
+  IF p_params ? 'days_before'
+     AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_params -> 'days_before') e WHERE e::int > 60) THEN
+    RETURN false;
+  END IF;
+  IF p_params ? 'thresholds_percent'
+     AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_params -> 'thresholds_percent') e
+                  WHERE e::int NOT BETWEEN 1 AND 200) THEN
+    RETURN false;
+  END IF;
+
+  RETURN true;
+END
+$_$;
+
+
+--
+-- Name: FUNCTION message_subscription_params_valid(p_event_kind text, p_params jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.message_subscription_params_valid(p_event_kind text, p_params jsonb) IS 'true se params é válido para o evento (chaves permitidas e obrigatórias, HH:MM, dia ISO, listas de 1–10 inteiros distintos: days_before 0–60, thresholds_percent 1–200). Usada no CHECK de message_subscriptions.';
+
+
+--
 -- Name: movements_integrity_check(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1466,6 +2056,313 @@ BEGIN
   RETURN NEW;
 END
 $$;
+
+
+--
+-- Name: report_cash_projection(uuid[], date, integer[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.report_cash_projection(p_caixa_ids uuid[], p_today date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date, p_horizons integer[] DEFAULT '{30,60,90}'::integer[]) RETURNS TABLE(caixa_id uuid, financial_account_id uuid, horizon_days integer, until date, balance_today_cents bigint, scheduled_movements_cents bigint, overdue_receivable_cents bigint, overdue_payable_cents bigint, receivable_cents bigint, payable_cents bigint, projected_cents bigint)
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+  IF p_today IS NULL OR p_horizons IS NULL OR cardinality(p_horizons) = 0
+     OR EXISTS (SELECT 1 FROM unnest(p_horizons) h WHERE h IS NULL OR h < 1 OR h > 1100) THEN
+    RAISE EXCEPTION 'report_cash_projection: horizons must be 1..1100 days and today must be set'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  RETURN QUERY
+  WITH hz AS (
+    SELECT DISTINCT h AS days, p_today + h AS until FROM unnest(p_horizons) h
+  ),
+  accs AS (
+    SELECT a.id, a.caixa_id, a.opening_date, a.opening_balance_cents
+      FROM financial_accounts a
+      JOIN caixas c ON c.id = a.caixa_id AND c.kind = 'general'
+     WHERE a.caixa_id = ANY (p_caixa_ids)
+  ),
+  -- Por conta: saldo no fim de hoje e o que já está lançado com data futura (até o horizonte).
+  acc_rows AS (
+    SELECT accs.caixa_id, accs.id AS account_id, hz.days, hz.until,
+           (CASE WHEN accs.opening_date <= p_today THEN accs.opening_balance_cents ELSE 0 END
+            + coalesce((SELECT sum(m.amount_cents) FROM movements m
+                         WHERE m.financial_account_id = accs.id AND m.occurred_on <= p_today), 0))::bigint AS today_cents,
+           (CASE WHEN accs.opening_date > p_today AND accs.opening_date <= hz.until THEN accs.opening_balance_cents ELSE 0 END
+            + coalesce((SELECT sum(m.amount_cents) FROM movements m
+                         WHERE m.financial_account_id = accs.id
+                           AND m.occurred_on > p_today AND m.occurred_on <= hz.until), 0))::bigint AS future_cents
+      FROM accs CROSS JOIN hz
+  ),
+  -- Previsto da caixa: saldo aberto dos títulos (não arquivados) até o horizonte, vencidos à parte,
+  -- e as faturas abertas em que ela é pagadora (itens − antecipações), como no calendário.
+  open_items AS (
+    SELECT b.caixa_id, b.direction, b.due_date, b.open_cents
+      FROM title_balances b
+      JOIN titles t ON t.id = b.title_id
+      LEFT JOIN card_invoices v ON v.id = t.card_invoice_id
+     WHERE b.caixa_id = ANY (p_caixa_ids) AND b.open_cents > 0 AND b.archived_at IS NULL
+       AND (v.id IS NULL OR v.closed_at IS NOT NULL)
+    UNION ALL
+    SELECT x.payer_caixa_id, 'payable', x.due_date, (x.items_cents - x.settled_cents)::bigint
+      FROM card_invoice_payer_totals x
+      JOIN card_invoices v ON v.id = x.card_invoice_id AND v.closed_at IS NULL
+     WHERE x.payer_caixa_id = ANY (p_caixa_ids) AND x.items_cents - x.settled_cents > 0
+  ),
+  caixa_rows AS (
+    SELECT c.id AS caixa_id, hz.days, hz.until,
+           coalesce((SELECT sum(r.today_cents) FROM acc_rows r WHERE r.caixa_id = c.id AND r.days = hz.days), 0)::bigint AS today_cents,
+           coalesce((SELECT sum(r.future_cents) FROM acc_rows r WHERE r.caixa_id = c.id AND r.days = hz.days), 0)::bigint AS future_cents,
+           coalesce(sum(o.open_cents) FILTER (WHERE o.direction = 'receivable' AND o.due_date < p_today), 0)::bigint AS od_rec,
+           coalesce(sum(o.open_cents) FILTER (WHERE o.direction = 'payable' AND o.due_date < p_today), 0)::bigint AS od_pay,
+           coalesce(sum(o.open_cents) FILTER (WHERE o.direction = 'receivable' AND o.due_date <= hz.until), 0)::bigint AS rec,
+           coalesce(sum(o.open_cents) FILTER (WHERE o.direction = 'payable' AND o.due_date <= hz.until), 0)::bigint AS pay
+      FROM caixas c
+      CROSS JOIN hz
+      LEFT JOIN open_items o ON o.caixa_id = c.id
+     WHERE c.id = ANY (p_caixa_ids) AND c.kind = 'general'
+     GROUP BY c.id, hz.days, hz.until
+  )
+  SELECT r.caixa_id, NULL::uuid, r.days, r.until, r.today_cents, r.future_cents, r.od_rec, r.od_pay, r.rec, r.pay,
+         (r.today_cents + r.future_cents + r.rec - r.pay)::bigint
+    FROM caixa_rows r
+  UNION ALL
+  SELECT r.caixa_id, r.account_id, r.days, r.until, r.today_cents, r.future_cents, 0::bigint, 0::bigint, 0::bigint, 0::bigint,
+         (r.today_cents + r.future_cents)::bigint
+    FROM acc_rows r
+   ORDER BY 1, 2 NULLS FIRST, 3;
+END
+$$;
+
+
+--
+-- Name: FUNCTION report_cash_projection(p_caixa_ids uuid[], p_today date, p_horizons integer[]); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.report_cash_projection(p_caixa_ids uuid[], p_today date, p_horizons integer[]) IS 'Fluxo de caixa projetado (spec 014) das caixas general pedidas, por horizonte (padrão 30/60/90 dias a partir de p_today, padrão = hoje em America/Sao_Paulo). Linha da caixa (financial_account_id nulo): balance_today_cents = saldo das contas no fim de hoje; scheduled_movements_cents = movimentos já lançados com data em (hoje, until] (e saldo inicial de conta aberta nesse intervalo); receivable_cents/payable_cents = saldo aberto dos títulos não arquivados com vencimento até until, INCLUSIVE os vencidos (que também saem em overdue_*), e as faturas abertas em que a caixa é pagadora (itens − antecipações); projected_cents = saldo + lançados + a receber − a pagar. Linha da conta: só realizado (títulos não têm conta), previstos = 0. Caixas de cartão não entram. Erro 22023: horizonte fora de 1..1100 ou lista vazia.';
+
+
+--
+-- Name: report_category_totals(uuid[], date, date, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.report_category_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text DEFAULT 'competence'::text) RETURNS TABLE(month date, caixa_id uuid, card_caixa_id uuid, kind text, group_category_id uuid, category_id uuid, source text, is_internal boolean, amount_cents bigint, entries integer)
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+  PERFORM report_check_period('report_category_totals', p_from, p_to, p_basis);
+
+  IF p_basis = 'competence' THEN
+    RETURN QUERY
+    WITH lines AS (
+      SELECT date_trunc('month', t.competence_date)::date AS month,
+             t.caixa_id,
+             NULL::uuid AS card_caixa_id,
+             c.kind,
+             coalesce(c.parent_id, c.id) AS group_category_id,
+             c.id AS category_id,
+             'title'::text AS source,
+             coalesce(t.counterparty_caixa_id = ANY (p_caixa_ids), false) AS is_internal,
+             t.amount_cents
+        FROM titles t
+        JOIN categories c ON c.id = t.category_id
+       WHERE t.caixa_id = ANY (p_caixa_ids)
+         AND t.competence_date BETWEEN p_from AND p_to
+         AND t.status <> 'canceled'
+         AND t.origin <> 'card_invoice'
+      UNION ALL
+      SELECT date_trunc('month', p.purchased_on)::date,
+             p.payer_caixa_id,
+             p.card_caixa_id,
+             c.kind,
+             coalesce(c.parent_id, c.id),
+             c.id,
+             'card_purchase'::text,
+             false,
+             CASE p.kind WHEN 'refund' THEN -p.amount_cents ELSE p.amount_cents END
+        FROM card_purchases p
+        JOIN categories c ON c.id = p.category_id
+       WHERE (p.payer_caixa_id = ANY (p_caixa_ids) OR p.card_caixa_id = ANY (p_caixa_ids))
+         AND p.purchased_on BETWEEN p_from AND p_to
+    )
+    SELECT l.month, l.caixa_id, l.card_caixa_id, l.kind, l.group_category_id, l.category_id, l.source,
+           l.is_internal, sum(l.amount_cents)::bigint, count(*)::int
+      FROM lines l
+     GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+     ORDER BY 1, 2, 4, 5, 6, 7, 8, 3;
+  ELSE
+    RETURN QUERY
+    WITH lines AS (
+      SELECT date_trunc('month', m.occurred_on)::date AS month,
+             a.caixa_id,
+             CASE WHEN t.origin = 'card_invoice' THEN t.counterparty_caixa_id END AS card_caixa_id,
+             c.kind,
+             coalesce(c.parent_id, c.id) AS group_category_id,
+             c.id AS category_id,
+             CASE WHEN t.origin = 'card_invoice' THEN 'card_invoice_payment' ELSE 'settlement' END AS source,
+             (t.origin <> 'card_invoice' AND coalesce(t.counterparty_caixa_id = ANY (p_caixa_ids), false)) AS is_internal,
+             CASE c.kind WHEN 'expense' THEN -m.amount_cents ELSE m.amount_cents END AS amount_cents
+        FROM movements m
+        JOIN financial_accounts a ON a.id = m.financial_account_id
+        JOIN settlements s ON s.id = m.settlement_id
+        JOIN titles t ON t.id = s.title_id
+        JOIN categories c ON c.id = t.category_id
+       WHERE m.kind = 'settlement'
+         AND a.caixa_id = ANY (p_caixa_ids)
+         AND m.occurred_on BETWEEN p_from AND p_to
+      UNION ALL
+      SELECT date_trunc('month', m.occurred_on)::date,
+             a.caixa_id,
+             NULL::uuid,
+             x.kind,
+             coalesce(c.parent_id, c.id),
+             c.id,
+             'adjustment'::text,
+             false,
+             CASE x.kind WHEN 'expense' THEN -m.amount_cents ELSE m.amount_cents END
+        FROM movements m
+        JOIN financial_accounts a ON a.id = m.financial_account_id
+        LEFT JOIN categories c ON c.id = m.category_id
+        CROSS JOIN LATERAL (
+          SELECT coalesce(c.kind, CASE WHEN m.amount_cents > 0 THEN 'income' ELSE 'expense' END) AS kind
+        ) x
+       WHERE m.kind = 'adjustment'
+         AND a.caixa_id = ANY (p_caixa_ids)
+         AND m.occurred_on BETWEEN p_from AND p_to
+    )
+    SELECT l.month, l.caixa_id, l.card_caixa_id, l.kind, l.group_category_id, l.category_id, l.source,
+           l.is_internal, sum(l.amount_cents)::bigint, count(*)::int
+      FROM lines l
+     GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+     ORDER BY 1, 2, 4, 5, 6, 7, 8, 3;
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION report_category_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.report_category_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text) IS 'Despesa/receita por mês, caixa e categoria (spec 014). p_basis: competence (padrão) ou cash. Uma linha por (month, caixa_id, card_caixa_id, kind, group_category_id, category_id, source, is_internal) com amount_cents (positivo = despesa em expense, receita em income; estornos subtraem) e entries. competence: source title (títulos não cancelados pela competência, sem os card_invoice) e card_purchase (compras/encargos/estornos do cartão pela data da compra, caixa_id = pagadora, card_caixa_id = cartão; entram se a pagadora OU o cartão está em p_caixa_ids). cash: source settlement (movimentos de baixa pela data, categoria do título), card_invoice_payment (pagamento da fatura pela pagadora, categoria do título da fatura, card_caixa_id = cartão; não rateado pelas compras) e adjustment (ajustes; sem categoria = category_id nulo, kind pelo sinal). Transferências nunca contam. is_internal: espelho cuja outra caixa também está na lista. Erro 22023: período inválido (até 3660 dias) ou regime desconhecido.';
+
+
+--
+-- Name: report_check_period(text, date, date, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.report_check_period(p_fn text, p_from date, p_to date, p_basis text DEFAULT 'competence'::text) RETURNS void
+    LANGUAGE plpgsql IMMUTABLE
+    AS $$
+BEGIN
+  IF p_from IS NULL OR p_to IS NULL OR p_to < p_from OR p_to - p_from > 3660 THEN
+    RAISE EXCEPTION '%: invalid period % .. % (max 3660 days)', p_fn, p_from, p_to
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_basis IS NULL OR p_basis NOT IN ('competence', 'cash') THEN
+    RAISE EXCEPTION '%: basis must be competence or cash, got %', p_fn, p_basis
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION report_check_period(p_fn text, p_from date, p_to date, p_basis text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.report_check_period(p_fn text, p_from date, p_to date, p_basis text) IS 'Interna dos relatórios: erro 22023 se o período é inválido (até 3660 dias) ou o regime não é competence/cash.';
+
+
+--
+-- Name: report_entity_totals(uuid[], date, date, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.report_entity_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text DEFAULT 'competence'::text) RETURNS TABLE(entity_id uuid, caixa_id uuid, card_caixa_id uuid, source text, is_internal boolean, outflow_cents bigint, inflow_cents bigint, entries integer)
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+  PERFORM report_check_period('report_entity_totals', p_from, p_to, p_basis);
+
+  IF p_basis = 'competence' THEN
+    RETURN QUERY
+    WITH lines AS (
+      SELECT t.entity_id,
+             t.caixa_id,
+             NULL::uuid AS card_caixa_id,
+             'title'::text AS source,
+             coalesce(t.counterparty_caixa_id = ANY (p_caixa_ids), false) AS is_internal,
+             CASE t.direction WHEN 'payable' THEN t.amount_cents ELSE 0 END AS outflow,
+             CASE t.direction WHEN 'receivable' THEN t.amount_cents ELSE 0 END AS inflow
+        FROM titles t
+       WHERE t.caixa_id = ANY (p_caixa_ids)
+         AND t.competence_date BETWEEN p_from AND p_to
+         AND t.status <> 'canceled'
+         AND t.origin <> 'card_invoice'
+      UNION ALL
+      SELECT p.entity_id,
+             p.payer_caixa_id,
+             p.card_caixa_id,
+             'card_purchase'::text,
+             false,
+             CASE p.kind WHEN 'refund' THEN -p.amount_cents ELSE p.amount_cents END,
+             0
+        FROM card_purchases p
+       WHERE (p.payer_caixa_id = ANY (p_caixa_ids) OR p.card_caixa_id = ANY (p_caixa_ids))
+         AND p.purchased_on BETWEEN p_from AND p_to
+    )
+    SELECT l.entity_id, l.caixa_id, l.card_caixa_id, l.source, l.is_internal,
+           sum(l.outflow)::bigint, sum(l.inflow)::bigint, count(*)::int
+      FROM lines l
+     GROUP BY 1, 2, 3, 4, 5
+     ORDER BY 1, 2, 4, 5, 3;
+  ELSE
+    RETURN QUERY
+    WITH lines AS (
+      SELECT t.entity_id,
+             a.caixa_id,
+             CASE WHEN t.origin = 'card_invoice' THEN t.counterparty_caixa_id END AS card_caixa_id,
+             CASE WHEN t.origin = 'card_invoice' THEN 'card_invoice_payment' ELSE 'settlement' END AS source,
+             (t.origin <> 'card_invoice' AND coalesce(t.counterparty_caixa_id = ANY (p_caixa_ids), false)) AS is_internal,
+             CASE t.direction WHEN 'payable' THEN -m.amount_cents ELSE 0 END AS outflow,
+             CASE t.direction WHEN 'receivable' THEN m.amount_cents ELSE 0 END AS inflow
+        FROM movements m
+        JOIN financial_accounts a ON a.id = m.financial_account_id
+        JOIN settlements s ON s.id = m.settlement_id
+        JOIN titles t ON t.id = s.title_id
+       WHERE m.kind = 'settlement'
+         AND a.caixa_id = ANY (p_caixa_ids)
+         AND m.occurred_on BETWEEN p_from AND p_to
+      UNION ALL
+      SELECT m.entity_id,
+             a.caixa_id,
+             NULL::uuid,
+             'adjustment'::text,
+             false,
+             greatest(-m.amount_cents, 0),
+             greatest(m.amount_cents, 0)
+        FROM movements m
+        JOIN financial_accounts a ON a.id = m.financial_account_id
+       WHERE m.kind = 'adjustment'
+         AND m.entity_id IS NOT NULL
+         AND a.caixa_id = ANY (p_caixa_ids)
+         AND m.occurred_on BETWEEN p_from AND p_to
+    )
+    SELECT l.entity_id, l.caixa_id, l.card_caixa_id, l.source, l.is_internal,
+           sum(l.outflow)::bigint, sum(l.inflow)::bigint, count(*)::int
+      FROM lines l
+     GROUP BY 1, 2, 3, 4, 5
+     ORDER BY 1, 2, 4, 5, 3;
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION report_entity_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.report_entity_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text) IS 'Pago (outflow_cents) e recebido (inflow_cents) por entidade e caixa no período (spec 014). competence (padrão): títulos não cancelados pela competência, sem os card_invoice (source title), e compras do cartão pela data com o RECEBEDOR FINAL como entidade (source card_purchase; caixa_id = pagadora, card_caixa_id = cartão: rastreio pagadora → cartão → lojista; estorno subtrai). cash: movimentos de baixa pela data (source settlement; estorno subtrai), pagamento de fatura ao emissor (source card_invoice_payment, card_caixa_id = cartão; os lojistas ficam no regime de competência) e ajustes com entidade (source adjustment, pelo sinal). Transferências nunca contam. is_internal como em report_category_totals. Erro 22023: período ou regime inválido.';
 
 
 --
@@ -2208,10 +3105,6 @@ END
 $$;
 
 
-SET default_tablespace = '';
-
-SET default_table_access_method = heap;
-
 --
 -- Name: card_purchase_attachments; Type: TABLE; Schema: public; Owner: -
 --
@@ -2793,6 +3686,47 @@ COMMENT ON COLUMN public.caixas.card_last4 IS 'Cartão: 4 últimos dígitos.';
 
 
 --
+-- Name: canvas_node_positions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.canvas_node_positions (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    user_id uuid NOT NULL,
+    layout text DEFAULT 'default'::text NOT NULL,
+    node_kind text NOT NULL,
+    node_id uuid NOT NULL,
+    x double precision NOT NULL,
+    y double precision NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT canvas_node_positions_layout_check CHECK (((btrim(layout) <> ''::text) AND (length(layout) <= 60))),
+    CONSTRAINT canvas_node_positions_node_kind_check CHECK ((node_kind = ANY (ARRAY['caixa'::text, 'entity'::text, 'category_group'::text]))),
+    CONSTRAINT canvas_node_positions_xy_check CHECK ((((x >= ('-10000000'::numeric)::double precision) AND (x <= ('10000000'::numeric)::double precision)) AND ((y >= ('-10000000'::numeric)::double precision) AND (y <= ('10000000'::numeric)::double precision))))
+);
+
+
+--
+-- Name: TABLE canvas_node_positions; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.canvas_node_positions IS 'Posição de cada nó do canvas de fluxo por usuário e layout nomeado (spec 014). Estado de interface: sem FK para o nó (caixa, entidade ou grupo de categoria; posições de nós que sumiram são ignoradas) e fora da auditoria. Gravar com INSERT … ON CONFLICT (user_id, layout, node_kind, node_id) DO UPDATE.';
+
+
+--
+-- Name: COLUMN canvas_node_positions.layout; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.canvas_node_positions.layout IS 'Nome do layout ("default" = o do canvas; outros = visões salvas).';
+
+
+--
+-- Name: COLUMN canvas_node_positions.node_kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.canvas_node_positions.node_kind IS 'caixa, entity ou category_group (folhas agrupadas pela categoria; node_id = id do grupo).';
+
+
+--
 -- Name: card_invoice_items; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3342,15 +4276,17 @@ CREATE VIEW public.card_invoice_summaries WITH (security_invoker='true') AS
     (COALESCE(s.carried_out_cents, (0)::numeric))::bigint AS carried_out_cents,
         CASE
             WHEN (v.closed_at IS NULL) THEN 'open'::text
-            WHEN ((COALESCE(s.open_cents, (0)::numeric) = (0)::numeric) AND (COALESCE(s.carried_out_cents, (0)::numeric) <= (0)::numeric)) THEN 'paid'::text
-            ELSE 'closed'::text
+            WHEN (COALESCE(s.open_cents, (0)::numeric) > (0)::numeric) THEN 'closed'::text
+            WHEN COALESCE(s.carried_debt, false) THEN 'carried_over'::text
+            ELSE 'paid'::text
         END AS status
    FROM (public.card_invoices v
      LEFT JOIN LATERAL ( SELECT sum(x.items_cents) AS items_cents,
             sum(x.billed_cents) AS billed_cents,
             sum(x.settled_cents) AS settled_cents,
             sum(x.open_cents) AS open_cents,
-            sum(x.carried_out_cents) AS carried_out_cents
+            sum(x.carried_out_cents) AS carried_out_cents,
+            bool_or((x.carried_out_cents > 0)) AS carried_debt
            FROM public.card_invoice_payer_totals x
           WHERE (x.card_invoice_id = v.id)) s ON (true));
 
@@ -3359,7 +4295,7 @@ CREATE VIEW public.card_invoice_summaries WITH (security_invoker='true') AS
 -- Name: VIEW card_invoice_summaries; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.card_invoice_summaries IS 'Fatura com totais e status: open (aberta), closed (fechada com saldo aberto ou rolado) ou paid (fechada e quitada).';
+COMMENT ON VIEW public.card_invoice_summaries IS 'Fatura com totais e status: open (aberta), closed (fechada com saldo aberto a pagar), carried_over (fechada, nada mais a pagar nela, mas com saldo devedor rolado para a fatura seguinte) ou paid (fechada e quitada, sem saldo devedor rolado de nenhuma pagadora; crédito rolado conta como quitada).';
 
 
 --
@@ -3951,6 +4887,149 @@ COMMENT ON VIEW public.financial_account_balances IS 'Saldo de cada conta: openi
 
 
 --
+-- Name: message_destinations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.message_destinations (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    channel text DEFAULT 'telegram'::text NOT NULL,
+    name text NOT NULL,
+    owner_user_id uuid,
+    owner_caixa_id uuid,
+    bot_token text,
+    bot_id text GENERATED ALWAYS AS (split_part(bot_token, ':'::text, 1)) STORED,
+    chat_id text,
+    is_active boolean DEFAULT true NOT NULL,
+    created_by_user_id uuid,
+    notes text,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT message_destinations_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
+    CONSTRAINT message_destinations_bot_token_check CHECK ((bot_token ~ '^[0-9]{3,20}:[A-Za-z0-9_-]{20,100}$'::text)),
+    CONSTRAINT message_destinations_channel_check CHECK ((channel = 'telegram'::text)),
+    CONSTRAINT message_destinations_chat_id_check CHECK (((chat_id ~ '^-?[0-9]{1,20}$'::text) OR (chat_id ~ '^@[A-Za-z][A-Za-z0-9_]{3,31}$'::text))),
+    CONSTRAINT message_destinations_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
+    CONSTRAINT message_destinations_owner_check CHECK ((num_nonnulls(owner_user_id, owner_caixa_id) <= 1)),
+    CONSTRAINT message_destinations_telegram_check CHECK (((channel <> 'telegram'::text) OR ((bot_token IS NOT NULL) AND (chat_id IS NOT NULL))))
+);
+
+
+--
+-- Name: TABLE message_destinations; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.message_destinations IS 'Cadastro central de destinos de mensagens (spec 013). Dono: um usuário (pessoal), uma caixa (ex.: grupo da casa) ou nenhum (global, gerido pelo admin). O canal é abstrato; por ora só telegram (bot_token + chat_id).';
+
+
+--
+-- Name: COLUMN message_destinations.channel; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.channel IS 'Canal: telegram (email/whatsapp no futuro, com as próprias colunas).';
+
+
+--
+-- Name: COLUMN message_destinations.owner_user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.owner_user_id IS 'Destino pessoal deste usuário. Nulo junto com owner_caixa_id = global (admin).';
+
+
+--
+-- Name: COLUMN message_destinations.owner_caixa_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.owner_caixa_id IS 'Destino da caixa (ex.: grupo da casa).';
+
+
+--
+-- Name: COLUMN message_destinations.bot_token; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.bot_token IS 'SEGREDO: token do bot do Telegram (<id>:<chave>). moneyflow_app grava mas NÃO lê esta coluna; o worker lê pela função message_destination_token(message_id). Nunca vai para o audit_log, respostas da API, logs ou tools de agente.';
+
+
+--
+-- Name: COLUMN message_destinations.bot_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.bot_id IS 'Parte pública do token (id numérico do bot), gerada pelo banco: identifica o bot na tela sem expor o segredo.';
+
+
+--
+-- Name: COLUMN message_destinations.chat_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.chat_id IS 'chat_id do Telegram (pessoa ou grupo, numérico, grupos negativos) ou @canal.';
+
+
+--
+-- Name: COLUMN message_destinations.is_active; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.is_active IS 'false = não recebe mensagens novas; as pendentes são canceladas na hora.';
+
+
+--
+-- Name: message_subscription_caixas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.message_subscription_caixas (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    subscription_id uuid NOT NULL,
+    caixa_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE message_subscription_caixas; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.message_subscription_caixas IS 'Filtro opcional de caixas de uma assinatura (nenhuma linha = sem filtro).';
+
+
+--
+-- Name: message_subscriptions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.message_subscriptions (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    destination_id uuid NOT NULL,
+    event_kind text NOT NULL,
+    params jsonb DEFAULT '{}'::jsonb NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT message_subscriptions_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text]))),
+    CONSTRAINT message_subscriptions_params_check CHECK (public.message_subscription_params_valid(event_kind, params))
+);
+
+
+--
+-- Name: TABLE message_subscriptions; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.message_subscriptions IS 'Eventos que um destino recebe (spec 013), um por tipo de evento, com parâmetros validados por message_subscription_params_valid. Filtro opcional por caixas em message_subscription_caixas (sem linhas = todas as caixas que o dono do destino vê).';
+
+
+--
+-- Name: COLUMN message_subscriptions.event_kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_subscriptions.event_kind IS 'due_reminder (D-N), overdue (atrasados), daily_summary, weekly_summary, invoice_closed (fatura fechada, valor por pagadora), card_limit (limite acima de X%), reconciliation_divergence, agent_completed, agent_message.';
+
+
+--
+-- Name: COLUMN message_subscriptions.params; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_subscriptions.params IS 'Parâmetros do evento (ver message_subscription_params_valid).';
+
+
+--
 -- Name: nfe_items; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3996,6 +5075,73 @@ COMMENT ON COLUMN public.nfe_items.unit_price_cents IS 'Valor unitário (vUnCom)
 --
 
 COMMENT ON COLUMN public.nfe_items.total_cents IS 'Valor do item (vProd), em centavos.';
+
+
+--
+-- Name: notifications; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.notifications (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    user_id uuid NOT NULL,
+    kind text NOT NULL,
+    title text NOT NULL,
+    body text,
+    link text,
+    caixa_id uuid,
+    data jsonb DEFAULT '{}'::jsonb NOT NULL,
+    dedup_key text,
+    read_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT notifications_data_check CHECK ((jsonb_typeof(data) = 'object'::text)),
+    CONSTRAINT notifications_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
+    CONSTRAINT notifications_kind_check CHECK ((kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text]))),
+    CONSTRAINT notifications_link_check CHECK (((link ~ '^/[^/]'::text) OR (link = '/'::text))),
+    CONSTRAINT notifications_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 200)))
+);
+
+
+--
+-- Name: TABLE notifications; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.notifications IS 'Notificações do sino, por usuário. Estado de interface: fora da auditoria. Contador de não lidas: count(*) WHERE read_at IS NULL (índice parcial). Criar com ON CONFLICT (user_id, dedup_key) DO NOTHING quando o evento puder repetir.';
+
+
+--
+-- Name: COLUMN notifications.kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notifications.kind IS 'agent_completed, agent_message, mirror_pending, mirror_disputed, invoice_closed, due_reminder, overdue, card_limit, reconciliation_divergence, message_failed ou system.';
+
+
+--
+-- Name: COLUMN notifications.link; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notifications.link IS 'Caminho relativo do console (começa com "/"), ex.: /titles/<id>. Nunca URL externa.';
+
+
+--
+-- Name: COLUMN notifications.data; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notifications.data IS 'Dados extras para a tela (ids, valores). Nunca senha nem token.';
+
+
+--
+-- Name: COLUMN notifications.dedup_key; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notifications.dedup_key IS 'Chave do evento, única por usuário (nulo = sem dedup).';
+
+
+--
+-- Name: COLUMN notifications.read_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notifications.read_at IS 'Quando foi lida (nulo = não lida).';
 
 
 --
@@ -4546,6 +5692,22 @@ ALTER TABLE ONLY public.caixas
 
 
 --
+-- Name: canvas_node_positions canvas_node_positions_node_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.canvas_node_positions
+    ADD CONSTRAINT canvas_node_positions_node_key UNIQUE (user_id, layout, node_kind, node_id);
+
+
+--
+-- Name: canvas_node_positions canvas_node_positions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.canvas_node_positions
+    ADD CONSTRAINT canvas_node_positions_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: card_invoice_items card_invoice_items_carryover_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4730,6 +5892,54 @@ ALTER TABLE ONLY public.financial_accounts
 
 
 --
+-- Name: message_destinations message_destinations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_destinations
+    ADD CONSTRAINT message_destinations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: message_outbox message_outbox_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_outbox
+    ADD CONSTRAINT message_outbox_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: message_subscription_caixas message_subscription_caixas_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_subscription_caixas
+    ADD CONSTRAINT message_subscription_caixas_key UNIQUE (subscription_id, caixa_id);
+
+
+--
+-- Name: message_subscription_caixas message_subscription_caixas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_subscription_caixas
+    ADD CONSTRAINT message_subscription_caixas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: message_subscriptions message_subscriptions_destination_event_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_subscriptions
+    ADD CONSTRAINT message_subscriptions_destination_event_key UNIQUE (destination_id, event_kind);
+
+
+--
+-- Name: message_subscriptions message_subscriptions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_subscriptions
+    ADD CONSTRAINT message_subscriptions_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: movement_attachments movement_attachments_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4783,6 +5993,14 @@ ALTER TABLE ONLY public.nfe_items
 
 ALTER TABLE ONLY public.nfe_items
     ADD CONSTRAINT nfe_items_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: notifications notifications_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_pkey PRIMARY KEY (id);
 
 
 --
@@ -5226,6 +6444,97 @@ CREATE INDEX financial_accounts_caixa_id_idx ON public.financial_accounts USING 
 
 
 --
+-- Name: message_destinations_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_destinations_created_by_user_id_idx ON public.message_destinations USING btree (created_by_user_id);
+
+
+--
+-- Name: message_destinations_name_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX message_destinations_name_key ON public.message_destinations USING btree (owner_user_id, owner_caixa_id, lower(name)) NULLS NOT DISTINCT;
+
+
+--
+-- Name: message_destinations_owner_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_destinations_owner_caixa_id_idx ON public.message_destinations USING btree (owner_caixa_id);
+
+
+--
+-- Name: message_destinations_owner_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_destinations_owner_user_id_idx ON public.message_destinations USING btree (owner_user_id);
+
+
+--
+-- Name: message_outbox_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_outbox_caixa_id_idx ON public.message_outbox USING btree (caixa_id);
+
+
+--
+-- Name: message_outbox_dedup_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX message_outbox_dedup_key ON public.message_outbox USING btree (destination_id, dedup_key);
+
+
+--
+-- Name: message_outbox_destination_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_outbox_destination_id_idx ON public.message_outbox USING btree (destination_id, created_at);
+
+
+--
+-- Name: message_outbox_ready_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_outbox_ready_idx ON public.message_outbox USING btree (next_attempt_at) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: message_outbox_sending_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_outbox_sending_idx ON public.message_outbox USING btree (locked_at) WHERE (status = 'sending'::text);
+
+
+--
+-- Name: message_outbox_subscription_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_outbox_subscription_id_idx ON public.message_outbox USING btree (subscription_id);
+
+
+--
+-- Name: message_outbox_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_outbox_user_id_idx ON public.message_outbox USING btree (user_id);
+
+
+--
+-- Name: message_subscription_caixas_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_subscription_caixas_caixa_id_idx ON public.message_subscription_caixas USING btree (caixa_id);
+
+
+--
+-- Name: message_subscriptions_event_kind_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_subscriptions_event_kind_idx ON public.message_subscriptions USING btree (event_kind) WHERE is_active;
+
+
+--
 -- Name: movement_attachments_attachment_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -5286,6 +6595,34 @@ CREATE INDEX nfe_documents_recipient_entity_id_idx ON public.nfe_documents USING
 --
 
 CREATE INDEX nfe_documents_xml_attachment_id_idx ON public.nfe_documents USING btree (xml_attachment_id);
+
+
+--
+-- Name: notifications_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX notifications_caixa_id_idx ON public.notifications USING btree (caixa_id);
+
+
+--
+-- Name: notifications_dedup_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX notifications_dedup_key ON public.notifications USING btree (user_id, dedup_key);
+
+
+--
+-- Name: notifications_unread_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX notifications_unread_idx ON public.notifications USING btree (user_id, created_at DESC) WHERE (read_at IS NULL);
+
+
+--
+-- Name: notifications_user_id_created_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX notifications_user_id_created_at_idx ON public.notifications USING btree (user_id, created_at DESC);
 
 
 --
@@ -5681,6 +7018,13 @@ CREATE TRIGGER caixas_validate BEFORE INSERT OR UPDATE ON public.caixas FOR EACH
 
 
 --
+-- Name: canvas_node_positions canvas_node_positions_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER canvas_node_positions_set_updated_at BEFORE UPDATE ON public.canvas_node_positions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
 -- Name: card_invoice_items card_invoice_items_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -5961,6 +7305,69 @@ CREATE TRIGGER financial_accounts_validate_history BEFORE UPDATE OF caixa_id, op
 
 
 --
+-- Name: message_destinations message_destinations_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER message_destinations_audit AFTER INSERT OR DELETE OR UPDATE ON public.message_destinations FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: message_destinations message_destinations_cancel_pending; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER message_destinations_cancel_pending AFTER UPDATE OF is_active, archived_at ON public.message_destinations FOR EACH ROW WHEN (((NOT new.is_active) OR (new.archived_at IS NOT NULL))) EXECUTE FUNCTION public.message_destinations_cancel_pending();
+
+
+--
+-- Name: message_destinations message_destinations_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER message_destinations_set_updated_at BEFORE UPDATE ON public.message_destinations FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: message_outbox message_outbox_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER message_outbox_set_updated_at BEFORE UPDATE ON public.message_outbox FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: message_outbox message_outbox_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER message_outbox_validate BEFORE INSERT OR UPDATE ON public.message_outbox FOR EACH ROW EXECUTE FUNCTION public.message_outbox_validate();
+
+
+--
+-- Name: message_subscription_caixas message_subscription_caixas_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER message_subscription_caixas_audit AFTER INSERT OR DELETE OR UPDATE ON public.message_subscription_caixas FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: message_subscription_caixas message_subscription_caixas_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER message_subscription_caixas_set_updated_at BEFORE UPDATE ON public.message_subscription_caixas FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: message_subscriptions message_subscriptions_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER message_subscriptions_audit AFTER INSERT OR DELETE OR UPDATE ON public.message_subscriptions FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: message_subscriptions message_subscriptions_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER message_subscriptions_set_updated_at BEFORE UPDATE ON public.message_subscriptions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
 -- Name: movement_attachments movement_attachments_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -6042,6 +7449,13 @@ CREATE TRIGGER nfe_items_audit AFTER INSERT OR DELETE OR UPDATE ON public.nfe_it
 --
 
 CREATE TRIGGER nfe_items_set_updated_at BEFORE UPDATE ON public.nfe_items FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: notifications notifications_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER notifications_set_updated_at BEFORE UPDATE ON public.notifications FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -6381,6 +7795,14 @@ ALTER TABLE ONLY public.caixas
 
 
 --
+-- Name: canvas_node_positions canvas_node_positions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.canvas_node_positions
+    ADD CONSTRAINT canvas_node_positions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: card_invoice_items card_invoice_items_card_invoice_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6597,6 +8019,86 @@ ALTER TABLE ONLY public.financial_accounts
 
 
 --
+-- Name: message_destinations message_destinations_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_destinations
+    ADD CONSTRAINT message_destinations_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: message_destinations message_destinations_owner_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_destinations
+    ADD CONSTRAINT message_destinations_owner_caixa_id_fkey FOREIGN KEY (owner_caixa_id) REFERENCES public.caixas(id) ON DELETE CASCADE;
+
+
+--
+-- Name: message_destinations message_destinations_owner_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_destinations
+    ADD CONSTRAINT message_destinations_owner_user_id_fkey FOREIGN KEY (owner_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: message_outbox message_outbox_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_outbox
+    ADD CONSTRAINT message_outbox_caixa_id_fkey FOREIGN KEY (caixa_id) REFERENCES public.caixas(id) ON DELETE SET NULL;
+
+
+--
+-- Name: message_outbox message_outbox_destination_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_outbox
+    ADD CONSTRAINT message_outbox_destination_id_fkey FOREIGN KEY (destination_id) REFERENCES public.message_destinations(id);
+
+
+--
+-- Name: message_outbox message_outbox_subscription_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_outbox
+    ADD CONSTRAINT message_outbox_subscription_id_fkey FOREIGN KEY (subscription_id) REFERENCES public.message_subscriptions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: message_outbox message_outbox_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_outbox
+    ADD CONSTRAINT message_outbox_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: message_subscription_caixas message_subscription_caixas_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_subscription_caixas
+    ADD CONSTRAINT message_subscription_caixas_caixa_id_fkey FOREIGN KEY (caixa_id) REFERENCES public.caixas(id) ON DELETE CASCADE;
+
+
+--
+-- Name: message_subscription_caixas message_subscription_caixas_subscription_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_subscription_caixas
+    ADD CONSTRAINT message_subscription_caixas_subscription_id_fkey FOREIGN KEY (subscription_id) REFERENCES public.message_subscriptions(id) ON DELETE CASCADE;
+
+
+--
+-- Name: message_subscriptions message_subscriptions_destination_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_subscriptions
+    ADD CONSTRAINT message_subscriptions_destination_id_fkey FOREIGN KEY (destination_id) REFERENCES public.message_destinations(id) ON DELETE CASCADE;
+
+
+--
 -- Name: movement_attachments movement_attachments_attachment_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6682,6 +8184,22 @@ ALTER TABLE ONLY public.nfe_documents
 
 ALTER TABLE ONLY public.nfe_items
     ADD CONSTRAINT nfe_items_nfe_document_id_fkey FOREIGN KEY (nfe_document_id) REFERENCES public.nfe_documents(id) ON DELETE CASCADE;
+
+
+--
+-- Name: notifications notifications_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_caixa_id_fkey FOREIGN KEY (caixa_id) REFERENCES public.caixas(id) ON DELETE SET NULL;
+
+
+--
+-- Name: notifications notifications_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
