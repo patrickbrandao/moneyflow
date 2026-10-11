@@ -1,0 +1,71 @@
+# Pilha completa do MoneyFlow: Postgres (de database/), migrations (one-shot),
+# API (que serve o SPA) e worker, todos da imagem única tmsoftbrasil/moneyflow.
+#   docker compose up --build -d     → http://localhost:${APP_PORT:-3000}
+# O banco desta pilha tem volume próprio e sai em STACK_DB_PORT (5433), separado
+# do banco de desenvolvimento de database/ (5432).
+name: moneyflow
+
+include:
+  - path:
+      - database/docker-compose.yml
+      - docker/database.override.yml
+
+x-app: &app
+  image: ${MONEYFLOW_IMAGE:-tmsoftbrasil/moneyflow:dev}
+  restart: unless-stopped
+  environment: &app-env
+    DATABASE_URL: postgres://moneyflow_app:${APP_DB_PASSWORD:-moneyflow_app}@postgres:5432/${POSTGRES_DB:-moneyflow}
+    LOG_LEVEL: ${LOG_LEVEL:-info}
+    TZ: America/Sao_Paulo
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+
+services:
+  # Aplica as migrations (dbmate, como dono do banco) antes da API e do worker.
+  migrate:
+    image: ghcr.io/amacneil/dbmate:2
+    command: ["--wait", "--wait-timeout", "60s", "up"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-moneyflow}:${POSTGRES_PASSWORD:-moneyflow}@postgres:5432/${POSTGRES_DB:-moneyflow}?sslmode=disable
+      DBMATE_MIGRATIONS_DIR: /db/migrations
+      DBMATE_NO_DUMP_SCHEMA: "true"
+      DBMATE_STRICT: "true"
+    volumes:
+      - ./database/migrations:/db/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      <<: *app-env
+      MODE: api
+      PORT: 3000
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      SESSION_DAYS: ${SESSION_DAYS:-30}
+      LOOKUP_TIMEOUT_MS: ${LOOKUP_TIMEOUT_MS:-5000}
+      LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-10}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+
+  worker:
+    <<: *app
+    command: ["worker"]
+    environment:
+      <<: *app-env
+      MODE: worker
+      WORKER_INTERVAL_MS: ${WORKER_INTERVAL_MS:-3600000}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_started

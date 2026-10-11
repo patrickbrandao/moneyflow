@@ -80,7 +80,7 @@ export async function buildApp({
     request.ctx = { db, config, access: await loadAccess(db, session.actor) };
   });
 
-  app.get('/api/health', async () => {
+  app.get('/api/health', { logLevel: 'warn' }, async () => {
     await db.execute(sql`SELECT 1`);
     return { ok: true };
   });

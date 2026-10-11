@@ -1,0 +1,7 @@
+# Ajuste do Postgres de database/docker-compose.yml quando ele sobe pelo compose
+# da raiz (pilha completa): publica em STACK_DB_PORT (padrão 5433) para não
+# disputar a 5432 com o banco de desenvolvimento (`make -C database up`).
+services:
+  postgres:
+    ports: !override
+      - "${STACK_DB_PORT:-5433}:5432"

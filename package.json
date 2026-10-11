@@ -14,7 +14,7 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "biome check .",
     "format": "biome check --write .",
-    "test": "pnpm -r test",
+    "test": "pnpm -r --filter '!@moneyflow/e2e' test",
     "test:unit": "pnpm --filter @moneyflow/shared test",
     "test:integration": "pnpm --filter @moneyflow/server test",
     "e2e": "pnpm --filter @moneyflow/e2e test",

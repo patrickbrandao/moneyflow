@@ -18,3 +18,7 @@ coverage/
 
 # Claude Code (configurações locais)
 .claude/settings.local.json
+
+# Playwright
+test-results/
+playwright-report/
