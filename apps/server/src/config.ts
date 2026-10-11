@@ -9,6 +9,10 @@ export type Config = {
   admin: { username: string; email: string; password: string } | null;
   workerIntervalMs: number;
   lookupTimeoutMs: number;
+  /** Consulta de CNPJ no CNPJ Aberto (spec 003), ligada por CNPJ_ABERTO_ENABLED; null = só BrasilAPI. A chave nunca vai a logs. */
+  cnpjAberto: { base: string; apiKey: string } | null;
+  /** URL base da BrasilAPI (consulta de CNPJ padrão e fallback do CNPJ Aberto; troque por um mock nos testes). */
+  brasilApiBase: string;
   logLevel: string;
   /** Tentativas de login por minuto por IP. */
   loginRateLimit: number;
@@ -42,6 +46,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     env.ADMIN_USERNAME && env.ADMIN_EMAIL && env.ADMIN_PASSWORD
       ? { username: env.ADMIN_USERNAME, email: env.ADMIN_EMAIL, password: env.ADMIN_PASSWORD }
       : null;
+  const cnpjAbertoKey = env.CNPJ_ABERTO_API_KEY?.trim();
+  if (env.CNPJ_ABERTO_ENABLED === 'true' && !cnpjAbertoKey)
+    throw new Error('CNPJ_ABERTO_ENABLED=true exige CNPJ_ABERTO_API_KEY (veja .env.example).');
   return {
     databaseUrl,
     host: env.HOST ?? '0.0.0.0',
@@ -52,6 +59,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     admin,
     workerIntervalMs: Number(env.WORKER_INTERVAL_MS ?? 60 * 60 * 1000),
     lookupTimeoutMs: Number(env.LOOKUP_TIMEOUT_MS ?? 5000),
+    cnpjAberto:
+      env.CNPJ_ABERTO_ENABLED === 'true' && cnpjAbertoKey
+        ? { base: (env.CNPJ_ABERTO_BASE || 'https://cnpjaberto.com.br').replace(/\/+$/, ''), apiKey: cnpjAbertoKey }
+        : null,
+    brasilApiBase: (env.BRASILAPI_BASE || 'https://brasilapi.com.br').replace(/\/+$/, ''),
     logLevel: env.LOG_LEVEL ?? 'info',
     loginRateLimit: Number(env.LOGIN_RATE_LIMIT ?? 10),
     cardAutoClose: env.CARD_AUTO_CLOSE === 'true',

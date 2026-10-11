@@ -106,6 +106,10 @@ export type CnpjLookup = {
   tradeName: string | null;
   email: string | null;
   phone: string | null;
+  /** Situação cadastral na Receita ("Ativa", "Inapta", "Baixada"…), se o provedor informar. */
+  registrationStatus: string | null;
+  /** Provedor que respondeu: CNPJ Aberto (com CNPJ_ABERTO_ENABLED) ou BrasilAPI. */
+  source: 'cnpjaberto' | 'brasilapi';
   address: Omit<EntityAddress, 'id' | 'label'> | null;
 };
 

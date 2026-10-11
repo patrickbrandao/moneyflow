@@ -29,7 +29,7 @@ Stack: monorepo pnpm, Node/TypeScript (Fastify, Drizzle), React 19 com Vite, Pos
 |---|---|
 | [001-stack-e-entrega.md](001-stack-e-entrega.md) | Frontend (template da skill do console), backend, banco, estrutura do monorepo, testes, imagem Docker, Compose, CI/CD, locale e moeda. |
 | [002-usuarios-e-permissoes.md](002-usuarios-e-permissoes.md) | Campos do usuário, senha em texto puro e suas restrições de exposição, login e sessão, admin inicial, papéis globais e por caixa. |
-| [003-entidades.md](003-entidades.md) | Pessoas e empresas, validação de CPF e CNPJ (inclusive alfanumérico), autopreenchimento, contatos, dados bancários, chaves PIX e vínculos. |
+| [003-entidades.md](003-entidades.md) | Pessoas e empresas, validação de CPF e CNPJ (inclusive alfanumérico), autopreenchimento (consulta de CNPJ no CNPJ Aberto, ligada por `CNPJ_ABERTO_ENABLED`, com fallback na BrasilAPI; CEP no ViaCEP), contatos, dados bancários, chaves PIX e vínculos. |
 | [004-caixas-e-contas.md](004-caixas-e-contas.md) | A caixa como livro do titular, caixa principal, tipos de caixa e tipos de conta financeira. |
 | [005-titulos-baixas-e-movimentos.md](005-titulos-baixas-e-movimentos.md) | Títulos, baixas parciais, movimentos, recorrência e parcelamento, transferências, e o pagamento de uma caixa por conta de outra. |
 | [006-espelhamento-entre-caixas.md](006-espelhamento-entre-caixas.md) | Título espelho, caixa da contraparte, aceite pendente quando falta permissão, e a baixa única com duas pernas. |

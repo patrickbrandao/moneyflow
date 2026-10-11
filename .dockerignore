@@ -6,6 +6,7 @@
 .git
 .github
 .claude
+.local
 database
 docs
 **/test-results

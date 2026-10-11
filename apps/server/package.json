@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch --env-file-if-exists=../../.env src/main.ts api",
-    "dev:worker": "tsx watch --env-file-if-exists=../../.env src/main.ts worker",
+    "dev": "tsx watch --env-file-if-exists=../../.env --env-file-if-exists=../../.local/cnpjaberto.env src/main.ts api",
+    "dev:worker": "tsx watch --env-file-if-exists=../../.env --env-file-if-exists=../../.local/cnpjaberto.env src/main.ts worker",
     "build": "node build.mjs",
     "start": "node dist/main.mjs api",
     "typecheck": "tsc -p tsconfig.json",

@@ -53,6 +53,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Consulta de CNPJ no CNPJ Aberto (spec 003): CNPJ_ABERTO_ENABLED e CNPJ_ABERTO_API_KEY vêm deste
+    # arquivo local, fora do git (sem ele, a consulta usa só a BrasilAPI).
+    env_file:
+      - path: .local/cnpjaberto.env
+        required: false
     environment:
       <<: *app-env
       MODE: api

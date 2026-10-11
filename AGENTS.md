@@ -75,6 +75,7 @@ O banco tem comandos próprios (`make -C database test`, pgTAP) em [database/AGE
 - `message_destinations`: NUNCA `SELECT *` nem `RETURNING` sem colunas (o papel da aplicação não lê `bot_token`; 42501). O token é write-only como a senha: nunca devolvido pela API, nem em logs, auditoria, exportações ou tools de agente.
 - Segredos da IA (`ai_providers.api_key`, `mcp_servers.secret_headers`, `user_api_tokens.token_hash`): NUNCA `SELECT *` nessas tabelas (42501); liste colunas. Grave e nunca devolva; leia só pelas funções do banco (`ai_run_provider_credentials`, `ai_run_mcp_headers`, `ai_embedding_credentials`, `admin_*`, `api_token_authenticate`). Fora de logs, auditoria, eventos de SSE e resultados de tools.
 - Agentes: tools novas entram em `AGENT_TOOLS` (shared) e no `TOOL_HANDLERS` (server), sempre sobre os serviços (com `Access`), com `preview` nas escritas. O loop grava em transações curtas e nunca segura transação durante a chamada ao modelo. Em `ai_messages`, nunca selecione `search_tsv` (use `MESSAGE_COLUMNS`).
+- Chave do CNPJ Aberto (`CNPJ_ABERTO_API_KEY`, spec 003): segredo local em `.local/cnpjaberto.env` (fora do git e da imagem; o compose da raiz e o `pnpm dev` o carregam). Nunca a versione, devolva pela API nem a registre em logs.
 - Enfileirar mensagem sempre com `dedup_key` e `ON CONFLICT (destination_id, dedup_key) DO NOTHING`; notificação com `ON CONFLICT (user_id, dedup_key) DO NOTHING`.
 
 ## Configuração

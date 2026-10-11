@@ -14,7 +14,7 @@ import { useAction } from '../../lib/hooks';
 import { FormError, ModalActions } from '../forms';
 import { Button, Field, Modal } from '../ui';
 
-/** Nova entidade (pessoa/empresa) ou edição; CNPJ preenche pela BrasilAPI (falha graciosa). */
+/** Nova entidade (pessoa/empresa) ou edição; CNPJ preenche pelo CNPJ Aberto ou pela BrasilAPI (falha graciosa). */
 export function EntityFormModal({
   entity,
   onClose,
@@ -49,7 +49,7 @@ export function EntityFormModal({
       setLookup(data);
       if (data.name) setName(data.name);
       if (data.tradeName) setTradeName(data.tradeName);
-      setNotice('Dados preenchidos pela consulta do CNPJ.');
+      setNotice(t.entity.lookupFilled(t.entity.lookupSources[data.source] ?? data.source));
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -164,6 +164,9 @@ export function EntityFormModal({
             )}
           </div>
           {notice && !error && <p className="notice ok mt-3">{notice}</p>}
+          {lookup?.registrationStatus && lookup.registrationStatus !== 'Ativa' && !error && (
+            <p className="notice warn mt-3">{t.entity.registrationStatus(lookup.registrationStatus)}</p>
+          )}
           <FormError>{error}</FormError>
         </div>
         <ModalActions>

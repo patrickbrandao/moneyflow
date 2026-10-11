@@ -47,6 +47,6 @@ export async function entityRoutes(app: FastifyInstance) {
   app.post('/api/entities/:id/links', (r: Req) => entities.addLink(r.ctx, id(r), parse(linkInput, r.body)));
   app.delete('/api/entities/:id/links/:childId', (r: Req) => entities.deleteLink(r.ctx, id(r), child(r)));
 
-  app.get('/api/lookup/cnpj/:value', (r: Req) => lookupCnpj(r.params.value ?? '', app.config.lookupTimeoutMs));
+  app.get('/api/lookup/cnpj/:value', (r: Req) => lookupCnpj(r.params.value ?? '', app.config, r.log));
   app.get('/api/lookup/cep/:value', (r: Req) => lookupCep(r.params.value ?? '', app.config.lookupTimeoutMs));
 }
