@@ -12,6 +12,10 @@ As especificações em `docs/nnn-titulo.md` são a fonte da verdade do produto. 
 
 Tudo o que é banco (PostgreSQL 18 + pgvector) fica em `database/` e é responsabilidade exclusiva do subagente **dba** (`.claude/agents/dba.md`, regras em [database/AGENTS.md](database/AGENTS.md)). Não edite `database/`: descreva a necessidade e delegue ao dba. Detalhes em [docs/016-banco-de-dados.md](docs/016-banco-de-dados.md).
 
+## Tarefas entre agentes (`tasks/`)
+
+Achados do usuário e pedidos de revisão/correção entre agentes viram arquivos `tasks/nnn-titulo.md` com status no cabeçalho, listados em [tasks/INDEX.md](tasks/INDEX.md). Toda tarefa tem um agente designado: o subagente **triage** analisa, reproduz e designa o executor — **dba** para `database/`, **app** para o resto —, que corrige com testes e fecha a tarefa. Se você encontrar algo fora do seu escopo, abra uma tarefa em vez de contornar. Detalhes em [docs/017-tarefas-entre-agentes.md](docs/017-tarefas-entre-agentes.md). Versões e publicação: [docs/018-versoes-e-publicacao.md](docs/018-versoes-e-publicacao.md).
+
 ## Comandos
 
 Node 22.12+ e pnpm 9 (`corepack enable`). Copie `.env.example` para `.env` na raiz.
