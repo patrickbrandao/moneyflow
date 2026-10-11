@@ -139,6 +139,39 @@ COMMENT ON FUNCTION public.admin_ai_provider_api_key(p_provider_id uuid, p_actor
 
 
 --
+-- Name: admin_api_token_hash(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_api_token_hash(p_token_id uuid, p_actor_user_id uuid) RETURNS text
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  h text;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.users a
+                  WHERE a.id = p_actor_user_id AND a.role = 'admin' AND a.is_active) THEN
+    RAISE EXCEPTION 'admin_api_token_hash: actor % is not an active admin', p_actor_user_id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  SELECT t.token_hash INTO h FROM public.user_api_tokens t WHERE t.id = p_token_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'admin_api_token_hash: token % not found', p_token_id
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  RETURN h;
+END
+$$;
+
+
+--
+-- Name: FUNCTION admin_api_token_hash(p_token_id uuid, p_actor_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.admin_api_token_hash(p_token_id uuid, p_actor_user_id uuid) IS 'SHA-256 (hex) do token pessoal para o export de backup do admin (restaurado, o token continua válido). Erro 42501 se o ator não é admin ativo (ator = sessão autenticada) e P0002 se o token não existe.';
+
+
+--
 -- Name: admin_mcp_server_headers(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -168,6 +201,39 @@ $$;
 --
 
 COMMENT ON FUNCTION public.admin_mcp_server_headers(p_server_id uuid, p_actor_user_id uuid) IS 'Cabeçalhos do servidor para uso INTERNO da API em ações do admin (testar, atualizar a lista de tools); nunca devolva ao cliente. Erro 42501 se o ator não é admin ativo e P0002 se o servidor não existe.';
+
+
+--
+-- Name: admin_message_destination_token(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_message_destination_token(p_destination_id uuid, p_actor_user_id uuid) RETURNS text
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  k text;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.users a
+                  WHERE a.id = p_actor_user_id AND a.role = 'admin' AND a.is_active) THEN
+    RAISE EXCEPTION 'admin_message_destination_token: actor % is not an active admin', p_actor_user_id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  SELECT d.bot_token INTO k FROM public.message_destinations d WHERE d.id = p_destination_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'admin_message_destination_token: destination % not found', p_destination_id
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  RETURN k;
+END
+$$;
+
+
+--
+-- Name: FUNCTION admin_message_destination_token(p_destination_id uuid, p_actor_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.admin_message_destination_token(p_destination_id uuid, p_actor_user_id uuid) IS 'Bot token do destino para o export de backup do admin (única saída do token para fora do banco além do worker). Erro 42501 se o ator não é admin ativo (ator = sessão autenticada) e P0002 se o destino não existe.';
 
 
 --
@@ -1429,6 +1495,34 @@ $$;
 --
 
 COMMENT ON FUNCTION public.api_token_authenticate(p_token_hash text, p_ip inet) IS 'Autentica um token pessoal pelo SHA-256 (hex) do token apresentado: devolve (user_id, token_id) se o token existe, não está revogado nem expirado e o dono está ativo; senão nenhuma linha. Atualiza last_used_at/ip (no máximo uma vez por minuto, ou quando o IP muda).';
+
+
+--
+-- Name: app_schema_version(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.app_schema_version() RETURNS text
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  v text;
+BEGIN
+  -- Bancos migrados sem dbmate (testes de integração da API) não têm a tabela: devolve NULL.
+  IF to_regclass('public.schema_migrations') IS NULL THEN
+    RETURN NULL;
+  END IF;
+  EXECUTE 'SELECT max(version)::text FROM public.schema_migrations' INTO v;
+  RETURN v;
+END
+$$;
+
+
+--
+-- Name: FUNCTION app_schema_version(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.app_schema_version() IS 'Versão do schema = última migration aplicada pelo dbmate (max(version) de public.schema_migrations, ex.: 0031); NULL se a tabela não existe (banco migrado sem dbmate) ou está vazia. Registrada no arquivo de backup.';
 
 
 --

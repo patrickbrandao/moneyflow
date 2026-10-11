@@ -14,7 +14,7 @@
 ### Destinos e permissões
 - Tela `/messages`: destinos, eventos de cada um (gaveta) e o histórico de envios.
 - Dono: **pessoal** (só o usuário o vê e gerencia), **de uma caixa** (vê quem lê a caixa, gerencia quem escreve nela) ou **global** (só o admin). O admin vê e gerencia todos.
-- O **bot token é write-only**, como a senha: a API nunca o devolve (só `bot_id`, a parte pública), não entra em logs, auditoria, exportações nem tools de agente; na edição o campo vem vazio e vazio mantém o atual. O worker lê o token só da mensagem que reservou (`message_destination_token`).
+- O **bot token é write-only**, como a senha: a API nunca o devolve (só `bot_id`, a parte pública), não entra em logs, auditoria, exportações nem tools de agente (exceto o JSON completo do backup do admin, [019](019-backup-e-restauracao.md)); na edição o campo vem vazio e vazio mantém o atual. O worker lê o token só da mensagem que reservou (`message_destination_token`).
 - Destino com histórico não é excluído: é **arquivado** (e desativado). Desativar cancela as mensagens pendentes. "Restaurar" volta o destino desativado.
 - **Enviar teste** enfileira uma mensagem `test` e já tenta entregá-la na hora, mostrando o resultado; falha temporária fica para o worker.
 

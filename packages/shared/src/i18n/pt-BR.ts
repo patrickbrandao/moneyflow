@@ -2,6 +2,7 @@ import { agentsStrings } from './areas/agents';
 import { agentsUiStrings } from './areas/agents-ui';
 import { attachmentsStrings } from './areas/attachments';
 import { auditStrings } from './areas/audit';
+import { backupStrings } from './areas/backup';
 import { calendarStrings } from './areas/calendar';
 import { cardStrings } from './areas/card';
 import { closingStrings } from './areas/closing';
@@ -415,6 +416,8 @@ export const ptBR = {
   // Fase 4.
   agents: agentsStrings,
   agentsUi: agentsUiStrings,
+  // Backup e restauração (spec 019).
+  backup: backupStrings,
 } as const;
 
 export type Strings = typeof ptBR;

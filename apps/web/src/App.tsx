@@ -12,6 +12,7 @@ import { CommandProvider, useRegisterCommands } from './lib/commands';
 import { toggleTheme } from './lib/theme';
 import { AccountPage } from './pages/AccountPage';
 import { AdminAiPage } from './pages/AdminAiPage';
+import { AdminBackupPage } from './pages/AdminBackupPage';
 import { AuditPage } from './pages/AuditPage';
 import { CaixaPage } from './pages/CaixaPage';
 import { CaixasPage } from './pages/CaixasPage';
@@ -78,6 +79,8 @@ function Console() {
             <Route path="account" element={<AccountPage />} />
             <Route path="admin/ai" element={<AdminAiPage />} />
             <Route path="admin/ai/:tab" element={<AdminAiPage />} />
+            <Route path="admin/backup" element={<AdminBackupPage />} />
+            <Route path="admin/backup/:tab" element={<AdminBackupPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Route>
           <Route element={<Layout stage />}>
