@@ -36,7 +36,7 @@ const PDF_LINE: [number, number, number] = [214, 212, 222];
 export async function downloadPdf(table: ExportTable) {
   const [{ jsPDF }, { autoTable }] = await Promise.all([import('jspdf'), import('jspdf-autotable')]);
   const landscape = table.columns.length > 6;
-  const doc = new jsPDF({ orientation: landscape ? 'landscape' : 'portrait', unit: 'pt', format: 'a4' });
+  const doc = new jsPDF({ orientation: landscape ? 'landscape' : 'portrait', unit: 'pt', format: 'a4', compress: true });
   const margin = 36;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(14);

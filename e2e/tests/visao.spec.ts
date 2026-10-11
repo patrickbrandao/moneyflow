@@ -65,9 +65,9 @@ test('canvas de fluxo: nós, gaveta com o lançamento e link para o título', as
 
   await page.goto(`/flow?from=${year}-01-01&to=${year}-12-31&caixas=${s.caixa.id}&mode=realized`);
   await expect(page.getByRole('heading', { name: 'Fluxo de dinheiro' })).toBeVisible();
-  const caixaNode = page.locator('.react-flow__node', { hasText: s.caixa.name });
-  await expect(caixaNode).toBeVisible();
-  const supplierNode = page.locator('.react-flow__node', { hasText: s.supplier.name });
+  const caixaNode = page.getByTestId(`rf__node-caixa:${s.caixa.id}`);
+  await expect(caixaNode).toContainText(s.caixa.name);
+  const supplierNode = page.getByTestId(`rf__node-entity:${s.supplier.id}`);
   await expect(supplierNode).toContainText('R$ 456,00');
 
   await supplierNode.click();
@@ -148,7 +148,10 @@ test.describe('mensagens', () => {
     await expect(page.getByText('Evento salvo.')).toBeVisible();
 
     await drawer.getByRole('button', { name: 'Enviar teste' }).click();
-    await expect(page.getByText('Mensagem de teste enviada.'), 'a pilha precisa de TELEGRAM_API_BASE apontando para a Bot API falsa').toBeVisible();
+    await expect(
+      page.getByText('Mensagem de teste enviada.'),
+      'a pilha precisa de TELEGRAM_API_BASE apontando para a Bot API falsa',
+    ).toBeVisible();
     const call = calls.find((c) => c.body.chat_id === chatId);
     expect(call?.path).toBe(`/bot${token}/sendMessage`);
     expect(call?.body.parse_mode).toBe('HTML');

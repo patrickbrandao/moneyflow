@@ -16,7 +16,9 @@
 - **Pagamento parcial**: a baixa cobre o valor pago, o par de títulos é reduzido a esse valor (ou cancelado, se nada foi pago), o restante rola como "saldo anterior" na fatura seguinte e os encargos (juros, IOF, multa) entram nela como lançamentos do emissor.
 - **Pagamento antecipado** (fatura aberta): par de títulos já quitado, com as duas pernas da baixa e o movimento na conta da pagadora.
 - **Reabrir**: só sem pagamento ativo; os títulos não pagos são excluídos (ou cancelados, se já tiveram baixa estornada) e o crédito rolado é desfeito.
-- **Relatórios por competência** (F3, [014](014-visualizacao-e-relatorios.md)) usam as **compras** do cartão (recebedor final, categoria, data da compra) e **excluem** os títulos `card_invoice`, para não contar a despesa duas vezes. No regime de caixa vale o pagamento da fatura.
+- **Relatórios por competência** (F3, [014](014-visualizacao-e-relatorios.md)) usam as **compras** do cartão (recebedor final, categoria, data da compra) e **excluem** os títulos `card_invoice`, para não contar a despesa duas vezes. No **regime de caixa** o pagamento da fatura conta como o pagamento do título da pagadora, com a **categoria desse título** (origem `card_invoice_payment`), **sem ratear pelas compras**; os lojistas (recebedores finais) aparecem no regime de competência.
+- **Status da fatura** (F3): aberta, fechada (com saldo a pagar), **rolada** (`carried_over`: fechada, nada mais a pagar nela, mas com saldo devedor rolado para a seguinte) e paga.
+- O **canvas de fluxo** ([014](014-visualizacao-e-relatorios.md)) mostra o caminho pagadora → cartão (fatura) → lojista (compras); o relatório por entidade traz o mesmo rastreio.
 
 ```
 Caixa "Nubank PJ" (cartão)
