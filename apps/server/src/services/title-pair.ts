@@ -18,9 +18,15 @@ export type TitleFields = {
   dueDate: string;
   amountCents: number;
   notes: string | null;
-  origin: 'manual' | 'recurrence';
+  origin: 'manual' | 'recurrence' | 'card_invoice';
   recurrenceRuleId: string | null;
   occurrence: number | null;
+  /** Entrada do título (spec 010): só no lado original, menos a NF-e, que vale para o par. */
+  boletoBarcode?: string | null;
+  pixPayload?: string | null;
+  nfeDocumentId?: string | null;
+  /** origin = card_invoice: a fatura, nos dois lados (spec 007). */
+  cardInvoiceId?: string | null;
 };
 
 export type MirrorPlan = {
@@ -66,6 +72,8 @@ export async function insertTitlePair(
       origin: fields.origin,
       recurrenceRuleId: fields.recurrenceRuleId,
       occurrence: fields.occurrence,
+      nfeDocumentId: fields.nfeDocumentId ?? null,
+      cardInvoiceId: fields.cardInvoiceId ?? null,
       counterpartyCaixaId: fields.caixaId,
       mirrorTitleId: id!,
       mirrorStatus: mirror.status,

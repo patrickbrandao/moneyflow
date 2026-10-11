@@ -8,6 +8,7 @@ import {
   type CaixaDetail,
   type CaixaRole,
   type CaixaSummary,
+  type CardSettings,
   type caixaCreateInput,
   type caixaUpdateInput,
   type DeleteResult,
@@ -23,7 +24,10 @@ import type { z } from 'zod';
 import type { Access } from '../authz/access';
 import type { ServiceContext } from '../context';
 import { notFound, unprocessable } from '../errors';
-import { camel, deleteOrArchive } from './util';
+import { type Card, ensureHorizon, invoiceDates } from './card-core';
+import { assertNotReconciled, clearStatementSuggestions } from './reconciliation-guards';
+import { deleteOrArchive, withTx } from './tx';
+import { camel } from './util';
 
 /* Caixas, membros e contas financeiras (specs 002 e 004). */
 
@@ -70,7 +74,17 @@ export async function getCaixa(ctx: ServiceContext, id: string): Promise<CaixaDe
     ...toSummary(ctx.access, row),
     accounts: await listAccounts(ctx, { caixaId: id, archived: true }),
     canWrite: ctx.access.canWrite(id),
+    card: await cardSettings(ctx.db, id),
   };
+}
+
+export async function cardSettings(db: Executor, caixaId: string): Promise<CardSettings | null> {
+  const result = await db.execute(sql`
+    SELECT c.default_payer_caixa_id, p.name AS default_payer_name, c.credit_limit_cents, c.closing_day, c.due_day, c.card_last4
+      FROM caixas c JOIN caixas p ON p.id = c.default_payer_caixa_id
+     WHERE c.id = ${caixaId} AND c.kind = 'credit_card'`);
+  const row = result.rows[0];
+  return row ? camel<CardSettings>(row) : null;
 }
 
 async function assertHolder(db: Executor, entityId: string) {
@@ -81,32 +95,52 @@ async function assertHolder(db: Executor, entityId: string) {
 
 export async function createCaixa(ctx: ServiceContext, input: z.output<typeof caixaCreateInput>): Promise<CaixaDetail> {
   ctx.access.assertRegistryWrite();
-  const id = await ctx.db.transaction(async (tx) => {
+  const isCard = input.kind === 'credit_card';
+  if (isCard) ctx.access.assertRead(input.defaultPayerCaixaId!);
+  const id = await withTx(ctx, async (tx) => {
     await assertHolder(tx, input.holderEntityId);
-    if (input.isPrimary) {
+    if (isCard) await assertGeneralPayer(tx, input.defaultPayerCaixaId!);
+    if (input.isPrimary && !isCard) {
       await tx.update(caixas).set({ isPrimary: false }).where(eq(caixas.holderEntityId, input.holderEntityId));
     }
     const [row] = await tx
       .insert(caixas)
       .values({
         name: input.name,
-        kind: 'general',
+        kind: input.kind,
         holderEntityId: input.holderEntityId,
-        isPrimary: input.isPrimary,
+        // A caixa principal do titular é a geral (o espelho cai nela, spec 006).
+        isPrimary: isCard ? false : input.isPrimary,
         description: input.description,
+        ...(isCard
+          ? {
+              defaultPayerCaixaId: input.defaultPayerCaixaId,
+              creditLimitCents: input.creditLimitCents,
+              closingDay: input.closingDay,
+              dueDay: input.dueDay,
+              cardLast4: input.cardLast4,
+            }
+          : {}),
       })
-      .returning({ id: caixas.id });
+      .returning();
     // Quem cria (sem ser admin) vira editor da caixa nova.
     if (!ctx.access.isAdmin) await tx.insert(caixaMembers).values({ userId: ctx.access.actor.id, caixaId: row!.id, role: 'editor' });
+    if (isCard) await ensureHorizon(tx, row as Card);
     return row!.id;
   });
   if (!ctx.access.isAdmin) ctx.access.grant(id, 'editor');
   return getCaixa(ctx, id);
 }
 
+async function assertGeneralPayer(db: Executor, caixaId: string) {
+  const [payer] = await db.select({ kind: caixas.kind }).from(caixas).where(eq(caixas.id, caixaId));
+  if (!payer) throw notFound();
+  if (payer.kind !== 'general') throw unprocessable(t.errors.cardPayerNotGeneral);
+}
+
 export async function updateCaixa(ctx: ServiceContext, id: string, input: z.output<typeof caixaUpdateInput>): Promise<CaixaDetail> {
   ctx.access.assertWrite(id);
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     const [current] = await tx.select().from(caixas).where(eq(caixas.id, id)).for('update');
     if (!current) throw notFound();
     const holder = input.holderEntityId ?? current.holderEntityId;
@@ -126,8 +160,30 @@ export async function updateCaixa(ctx: ServiceContext, id: string, input: z.outp
     if (input.name !== undefined) patch.name = input.name;
     if (input.description !== undefined) patch.description = input.description;
     if (input.holderEntityId !== undefined) patch.holderEntityId = input.holderEntityId;
-    if (input.isPrimary !== undefined) patch.isPrimary = input.isPrimary;
+    if (input.isPrimary !== undefined) patch.isPrimary = current.kind === 'credit_card' ? false : input.isPrimary;
+    const cardKeys = ['defaultPayerCaixaId', 'creditLimitCents', 'closingDay', 'dueDay', 'cardLast4'] as const;
+    if (current.kind !== 'credit_card' && cardKeys.some((key) => input[key] !== undefined)) {
+      throw unprocessable(t.errors.cardFieldsGeneral);
+    }
+    if (input.defaultPayerCaixaId !== undefined) {
+      ctx.access.assertRead(input.defaultPayerCaixaId);
+      await assertGeneralPayer(tx, input.defaultPayerCaixaId);
+    }
+    for (const key of cardKeys) if (input[key] !== undefined) (patch as Record<string, unknown>)[key] = input[key];
     if (Object.keys(patch).length > 0) await tx.update(caixas).set(patch).where(eq(caixas.id, id));
+    // Novo dia de fechamento/vencimento: as faturas ainda abertas seguem as novas datas.
+    if (current.kind === 'credit_card' && (input.closingDay !== undefined || input.dueDay !== undefined)) {
+      const card = { closingDay: input.closingDay ?? current.closingDay!, dueDay: input.dueDay ?? current.dueDay! };
+      const open = await tx.execute<{ id: string; reference_month: string }>(
+        sql`SELECT id, reference_month FROM card_invoices WHERE card_caixa_id = ${id} AND closed_at IS NULL`,
+      );
+      for (const inv of open.rows) {
+        const dates = invoiceDates(card, inv.reference_month);
+        await tx.execute(
+          sql`UPDATE card_invoices SET closing_date = ${dates.closingDate}, due_date = ${dates.dueDate} WHERE id = ${inv.id}`,
+        );
+      }
+    }
   });
   return getCaixa(ctx, id);
 }
@@ -136,16 +192,20 @@ export async function deleteCaixa(ctx: ServiceContext, id: string): Promise<Dele
   ctx.access.assertAdmin();
   const [current] = await ctx.db.select({ id: caixas.id }).from(caixas).where(eq(caixas.id, id));
   if (!current) throw notFound();
-  return deleteOrArchive(
-    async () => (await ctx.db.delete(caixas).where(eq(caixas.id, id))).rowCount ?? 0,
-    // A principal não pode ficar arquivada: deixa de ser principal.
-    () => ctx.db.update(caixas).set({ archivedAt: sql`now()`, isPrimary: false }).where(eq(caixas.id, id)),
+  // Com fechamentos de mês, títulos ou contas (FK), a caixa é arquivada em vez de excluída.
+  return withTx(ctx, (tx) =>
+    deleteOrArchive(
+      tx,
+      async (sp) => (await sp.delete(caixas).where(eq(caixas.id, id))).rowCount ?? 0,
+      // A principal não pode ficar arquivada: deixa de ser principal.
+      (t) => t.update(caixas).set({ archivedAt: sql`now()`, isPrimary: false }).where(eq(caixas.id, id)),
+    ),
   );
 }
 
 export async function restoreCaixa(ctx: ServiceContext, id: string) {
   ctx.access.assertAdmin();
-  await ctx.db.update(caixas).set({ archivedAt: null }).where(eq(caixas.id, id));
+  await withTx(ctx, (tx) => tx.update(caixas).set({ archivedAt: null }).where(eq(caixas.id, id)));
   return getCaixa(ctx, id);
 }
 
@@ -171,23 +231,25 @@ export async function listMembers(ctx: ServiceContext, caixaId: string): Promise
 
 export async function addMember(ctx: ServiceContext, caixaId: string, input: z.output<typeof memberInput>) {
   ctx.access.assertAdmin();
-  await ctx.db.insert(caixaMembers).values({ caixaId, userId: input.userId, role: input.role });
+  await withTx(ctx, (tx) => tx.insert(caixaMembers).values({ caixaId, userId: input.userId, role: input.role }));
   return listMembers(ctx, caixaId);
 }
 
 export async function updateMember(ctx: ServiceContext, caixaId: string, memberId: string, input: z.output<typeof memberUpdateInput>) {
   ctx.access.assertAdmin();
-  const result = await ctx.db
-    .update(caixaMembers)
-    .set({ role: input.role })
-    .where(and(eq(caixaMembers.id, memberId), eq(caixaMembers.caixaId, caixaId)));
+  const result = await withTx(ctx, (tx) =>
+    tx
+      .update(caixaMembers)
+      .set({ role: input.role })
+      .where(and(eq(caixaMembers.id, memberId), eq(caixaMembers.caixaId, caixaId))),
+  );
   if (!result.rowCount) throw notFound();
   return listMembers(ctx, caixaId);
 }
 
 export async function removeMember(ctx: ServiceContext, caixaId: string, memberId: string) {
   ctx.access.assertAdmin();
-  await ctx.db.delete(caixaMembers).where(and(eq(caixaMembers.id, memberId), eq(caixaMembers.caixaId, caixaId)));
+  await withTx(ctx, (tx) => tx.delete(caixaMembers).where(and(eq(caixaMembers.id, memberId), eq(caixaMembers.caixaId, caixaId))));
   return listMembers(ctx, caixaId);
 }
 
@@ -231,10 +293,12 @@ export async function getAccount(ctx: ServiceContext, id: string, db: Executor =
 export async function createAccount(ctx: ServiceContext, caixaId: string, input: z.output<typeof accountCreateInput>) {
   ctx.access.assertWrite(caixaId);
   const bank = input.kind === 'cash' ? { bankCode: null, ispb: null, branch: null, accountNumber: null } : {};
-  const [row] = await ctx.db
-    .insert(financialAccounts)
-    .values({ caixaId, ...input, ...bank })
-    .returning({ id: financialAccounts.id });
+  const [row] = await withTx(ctx, (tx) =>
+    tx
+      .insert(financialAccounts)
+      .values({ caixaId, ...input, ...bank })
+      .returning({ id: financialAccounts.id }),
+  );
   return (await listAccounts(ctx, { caixaId, archived: true })).find((a) => a.id === row!.id)!;
 }
 
@@ -245,42 +309,47 @@ export async function updateAccount(ctx: ServiceContext, id: string, input: z.ou
   for (const key of ['name', 'bankCode', 'ispb', 'branch', 'accountNumber', 'openingBalanceCents', 'openingDate'] as const) {
     if (input[key] !== undefined) (patch as Record<string, unknown>)[key] = input[key];
   }
-  if (Object.keys(patch).length > 0) await ctx.db.update(financialAccounts).set(patch).where(eq(financialAccounts.id, id));
+  if (Object.keys(patch).length > 0) await withTx(ctx, (tx) => tx.update(financialAccounts).set(patch).where(eq(financialAccounts.id, id)));
   return (await listAccounts(ctx, { caixaId: account.caixaId, archived: true })).find((a) => a.id === id)!;
 }
 
 export async function deleteAccount(ctx: ServiceContext, id: string): Promise<DeleteResult> {
   const account = await getAccount(ctx, id);
   ctx.access.assertWrite(account.caixaId);
-  return deleteOrArchive(
-    async () => (await ctx.db.delete(financialAccounts).where(eq(financialAccounts.id, id))).rowCount ?? 0,
-    () => ctx.db.update(financialAccounts).set({ archivedAt: sql`now()` }).where(eq(financialAccounts.id, id)),
+  return withTx(ctx, (tx) =>
+    deleteOrArchive(
+      tx,
+      async (sp) => (await sp.delete(financialAccounts).where(eq(financialAccounts.id, id))).rowCount ?? 0,
+      (t) => t.update(financialAccounts).set({ archivedAt: sql`now()` }).where(eq(financialAccounts.id, id)),
+    ),
   );
 }
 
 export async function restoreAccount(ctx: ServiceContext, id: string) {
   const account = await getAccount(ctx, id);
   ctx.access.assertWrite(account.caixaId);
-  await ctx.db.update(financialAccounts).set({ archivedAt: null }).where(eq(financialAccounts.id, id));
+  await withTx(ctx, (tx) => tx.update(financialAccounts).set({ archivedAt: null }).where(eq(financialAccounts.id, id)));
 }
 
 /** Lançamento avulso (ajuste de contagem, rendimento, tarifa). */
 export async function addAdjustment(ctx: ServiceContext, accountId: string, input: z.output<typeof adjustmentInput>) {
   const account = await getAccount(ctx, accountId);
   ctx.access.assertWrite(account.caixaId);
-  const [row] = await ctx.db
-    .insert(movements)
-    .values({
-      financialAccountId: accountId,
-      occurredOn: input.occurredOn,
-      amountCents: input.amountCents,
-      kind: 'adjustment',
-      description: input.description,
-      categoryId: input.categoryId,
-      entityId: input.entityId,
-      notes: input.notes,
-    })
-    .returning({ id: movements.id });
+  const [row] = await withTx(ctx, (tx) =>
+    tx
+      .insert(movements)
+      .values({
+        financialAccountId: accountId,
+        occurredOn: input.occurredOn,
+        amountCents: input.amountCents,
+        kind: 'adjustment',
+        description: input.description,
+        categoryId: input.categoryId,
+        entityId: input.entityId,
+        notes: input.notes,
+      })
+      .returning({ id: movements.id }),
+  );
   return { id: row!.id };
 }
 
@@ -289,7 +358,12 @@ export async function deleteAdjustment(ctx: ServiceContext, movementId: string) 
   if (movement?.kind !== 'adjustment') throw notFound();
   const account = await getAccount(ctx, movement.financialAccountId);
   ctx.access.assertWrite(account.caixaId);
-  await ctx.db.delete(movements).where(eq(movements.id, movementId));
+  await withTx(ctx, async (tx) => {
+    // Movimento conciliado não sai (desfaça a conciliação); sugestão de extrato é removida antes.
+    await assertNotReconciled(tx, [movementId]);
+    await clearStatementSuggestions(tx, { movementIds: [movementId] });
+    await tx.delete(movements).where(eq(movements.id, movementId));
+  });
 }
 
 /* ---- categorias ocultas ---- */
@@ -305,7 +379,7 @@ export async function getHiddenCategories(ctx: ServiceContext, caixaId: string):
 
 export async function setHiddenCategories(ctx: ServiceContext, caixaId: string, input: z.output<typeof hiddenCategoriesInput>) {
   ctx.access.assertWrite(caixaId);
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     await tx.delete(caixaHiddenCategories).where(eq(caixaHiddenCategories.caixaId, caixaId));
     const ids = [...new Set(input.categoryIds)];
     if (ids.length > 0) await tx.insert(caixaHiddenCategories).values(ids.map((categoryId) => ({ caixaId, categoryId })));

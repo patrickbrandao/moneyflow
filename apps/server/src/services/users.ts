@@ -15,6 +15,7 @@ import { and, asc, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { AppError, notFound, unprocessable } from '../errors';
+import { withTx } from './tx';
 
 /*
  * Usuários (spec 002). A senha é texto puro por decisão do produto, mas a
@@ -89,7 +90,7 @@ export async function getUser(ctx: ServiceContext, id: string): Promise<UserRow>
 
 export async function createUser(ctx: ServiceContext, input: z.output<typeof userCreateInput>): Promise<UserRow> {
   ctx.access.assertAdmin();
-  const id = await insertUser(ctx.db, input);
+  const id = await withTx(ctx, (tx) => insertUser(tx, input));
   return getUser(ctx, id);
 }
 
@@ -105,7 +106,7 @@ export async function updateUser(ctx: ServiceContext, id: string, input: z.outpu
   ctx.access.assertAdmin();
   const self = id === ctx.access.actor.id;
   if (self && input.isActive === false) throw unprocessable(t.errors.selfDeactivate);
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     const [current] = await tx.select(userColumns).from(users).where(eq(users.id, id)).for('update');
     if (!current) throw notFound();
     const losesAdmin = current.role === 'admin' && current.isActive && (input.role === 'user' || input.isActive === false);
@@ -126,7 +127,7 @@ export async function updateUser(ctx: ServiceContext, id: string, input: z.outpu
 export async function deleteUser(ctx: ServiceContext, id: string) {
   ctx.access.assertAdmin();
   if (id === ctx.access.actor.id) throw unprocessable(t.errors.selfDelete);
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     const [current] = await tx.select(userColumns).from(users).where(eq(users.id, id)).for('update');
     if (!current) throw notFound();
     if (current.role === 'admin' && current.isActive && (await activeAdminCount(tx, id)) === 0) throw unprocessable(t.errors.lastAdmin);
@@ -146,7 +147,7 @@ export async function revealPassword(ctx: ServiceContext, id: string): Promise<s
 
 export async function setMemberships(ctx: ServiceContext, userId: string, input: z.output<typeof membershipsSetInput>) {
   ctx.access.assertAdmin();
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     const [user] = await tx.select({ id: users.id }).from(users).where(eq(users.id, userId));
     if (!user) throw notFound();
     await tx.delete(caixaMembers).where(eq(caixaMembers.userId, userId));
@@ -163,7 +164,7 @@ export async function changeOwnPassword(ctx: ServiceContext, input: z.output<typ
   const { actor } = ctx.access;
   const check = await ctx.db.execute<{ id: string | null }>(sql`SELECT auth_login(${actor.username}, ${input.currentPassword}) AS id`);
   if (check.rows[0]?.id !== actor.id) throw new AppError(422, 'current_password', t.errors.currentPasswordWrong);
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     await tx.update(users).set({ password: input.newPassword }).where(eq(users.id, actor.id));
     await tx.delete(sessions).where(and(eq(sessions.userId, actor.id), ne(sessions.id, currentSessionId)));
   });

@@ -8,13 +8,15 @@ import {
   type TitleDetail,
   todayIso,
 } from '@moneyflow/shared';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { forbidden, notFound, unprocessable } from '../errors';
 import { getAccount } from './caixas';
+import { assertNotReconciled, clearStatementSuggestions, transferMovementIds } from './reconciliation-guards';
 import { newIds } from './title-pair';
 import { getTitle } from './titles';
+import { withTx } from './tx';
 
 /*
  * Baixas (specs 005 e 006). Tudo numa transação, na ordem que as checagens
@@ -66,104 +68,116 @@ export async function createSettlement(
   titleId: string,
   input: z.output<typeof settlementCreateInput>,
 ): Promise<TitleDetail> {
-  await ctx.db.transaction(async (tx) => {
-    const title = await lockTitle(tx, titleId);
-    ctx.access.assertWrite(title.caixaId);
-    const cash = cashOf(input);
+  await withTx(ctx, (tx) => settleInTx(ctx, tx, titleId, input));
+  return getTitle(ctx, titleId);
+}
 
-    const accountId = input.financialAccountId;
-    if (accountId) await accountInCaixa(ctx, tx, accountId, title.caixaId);
+/**
+ * A baixa dentro de uma transação já aberta (usada também pelo pagamento de
+ * fatura e pela conciliação). Devolve o id da baixa e o do movimento gerado na
+ * conta da baixa (se houver).
+ */
+export async function settleInTx(
+  ctx: ServiceContext,
+  tx: Tx,
+  titleId: string,
+  input: z.output<typeof settlementCreateInput>,
+): Promise<{ settlementId: string; movementId: string | null }> {
+  const title = await lockTitle(tx, titleId);
+  ctx.access.assertWrite(title.caixaId);
+  const cash = cashOf(input);
 
-    // Pagar o título da caixa B com uma conta da caixa A: transferência A → B (ou B → A ao receber).
-    let transfer: { from: string; to: string } | null = null;
-    if (input.sourceAccountId) {
-      const source = await getAccount(ctx, input.sourceAccountId, tx);
-      ctx.access.assertWrite(source.caixaId);
-      if (source.caixaId === title.caixaId) throw unprocessable(strings.errors.sameCaixaSource);
-      if (!accountId) throw unprocessable(strings.errors.accountRequiredForTransfer);
-      if (cash <= 0) throw unprocessable(strings.errors.zeroCashTransfer);
-      transfer = (title.direction as Direction) === 'payable' ? { from: source.id, to: accountId } : { from: accountId, to: source.id };
-    }
+  const accountId = input.financialAccountId;
+  if (accountId) await accountInCaixa(ctx, tx, accountId, title.caixaId);
 
-    const mirror = title.mirrorTitleId ? await lockTitle(tx, title.mirrorTitleId) : null;
-    let mirrorAccountId: string | null = null;
-    if (mirror && input.mirrorAccountId) {
-      if (!ctx.access.canWrite(mirror.caixaId)) throw forbidden();
-      await accountInCaixa(ctx, tx, input.mirrorAccountId, mirror.caixaId);
-      mirrorAccountId = input.mirrorAccountId;
-    }
+  // Pagar o título da caixa B com uma conta da caixa A: transferência A → B (ou B → A ao receber).
+  let transfer: { from: string; to: string } | null = null;
+  if (input.sourceAccountId) {
+    const source = await getAccount(ctx, input.sourceAccountId, tx);
+    ctx.access.assertWrite(source.caixaId);
+    if (source.caixaId === title.caixaId) throw unprocessable(strings.errors.sameCaixaSource);
+    if (!accountId) throw unprocessable(strings.errors.accountRequiredForTransfer);
+    if (cash <= 0) throw unprocessable(strings.errors.zeroCashTransfer);
+    transfer = (title.direction as Direction) === 'payable' ? { from: source.id, to: accountId } : { from: accountId, to: source.id };
+  }
 
-    const [ownId, mirrorLegId] = await newIds(tx, mirror ? 2 : 1);
-    const amounts = {
-      settledOn: input.settledOn,
-      amountCents: input.amountCents,
-      interestCents: input.interestCents,
-      fineCents: input.fineCents,
-      discountCents: input.discountCents,
-    };
+  const mirror = title.mirrorTitleId ? await lockTitle(tx, title.mirrorTitleId) : null;
+  let mirrorAccountId: string | null = null;
+  if (mirror && input.mirrorAccountId) {
+    if (!ctx.access.canWrite(mirror.caixaId)) throw forbidden();
+    await accountInCaixa(ctx, tx, input.mirrorAccountId, mirror.caixaId);
+    mirrorAccountId = input.mirrorAccountId;
+  }
+
+  const [ownId, mirrorLegId] = await newIds(tx, mirror ? 2 : 1);
+  const amounts = {
+    settledOn: input.settledOn,
+    amountCents: input.amountCents,
+    interestCents: input.interestCents,
+    fineCents: input.fineCents,
+    discountCents: input.discountCents,
+  };
+  await tx.insert(settlements).values({
+    id: ownId!,
+    titleId,
+    ...amounts,
+    financialAccountId: accountId,
+    mirrorSettlementId: mirror ? mirrorLegId! : null,
+    notes: input.notes,
+  });
+  if (mirror) {
+    // Baixa única, duas pernas (spec 006): sem acesso ao outro lado, ele fica "baixado, conta a definir".
     await tx.insert(settlements).values({
-      id: ownId!,
-      titleId,
+      id: mirrorLegId!,
+      titleId: mirror.id,
       ...amounts,
-      financialAccountId: accountId,
-      mirrorSettlementId: mirror ? mirrorLegId! : null,
+      financialAccountId: mirrorAccountId,
+      mirrorSettlementId: ownId!,
       notes: input.notes,
     });
-    if (mirror) {
-      // Baixa única, duas pernas (spec 006): sem acesso ao outro lado, ele fica "baixado, conta a definir".
-      await tx.insert(settlements).values({
-        id: mirrorLegId!,
-        titleId: mirror.id,
-        ...amounts,
-        financialAccountId: mirrorAccountId,
-        mirrorSettlementId: ownId!,
-        notes: input.notes,
-      });
-    }
+  }
 
-    await insertSettlementMovement(tx, { id: ownId!, financialAccountId: accountId, settledOn: input.settledOn }, title, cash);
-    if (mirror) {
-      await insertSettlementMovement(
-        tx,
-        { id: mirrorLegId!, financialAccountId: mirrorAccountId, settledOn: input.settledOn },
-        mirror,
-        cash,
-      );
-    }
+  await insertSettlementMovement(tx, { id: ownId!, financialAccountId: accountId, settledOn: input.settledOn }, title, cash);
+  if (mirror) {
+    await insertSettlementMovement(tx, { id: mirrorLegId!, financialAccountId: mirrorAccountId, settledOn: input.settledOn }, mirror, cash);
+  }
 
-    if (transfer) {
-      const [row] = await tx
-        .insert(transfers)
-        .values({
-          fromAccountId: transfer.from,
-          toAccountId: transfer.to,
-          amountCents: cash,
-          transferredOn: input.settledOn,
-          description: title.description,
-          settlementId: ownId!,
-        })
-        .returning({ id: transfers.id });
-      await tx.insert(movements).values([
-        {
-          financialAccountId: transfer.from,
-          occurredOn: input.settledOn,
-          amountCents: -cash,
-          kind: 'transfer',
-          transferId: row!.id,
-          description: title.description,
-        },
-        {
-          financialAccountId: transfer.to,
-          occurredOn: input.settledOn,
-          amountCents: cash,
-          kind: 'transfer',
-          transferId: row!.id,
-          description: title.description,
-        },
-      ]);
-    }
-  });
-  return getTitle(ctx, titleId);
+  if (transfer) {
+    const [row] = await tx
+      .insert(transfers)
+      .values({
+        fromAccountId: transfer.from,
+        toAccountId: transfer.to,
+        amountCents: cash,
+        transferredOn: input.settledOn,
+        description: title.description,
+        settlementId: ownId!,
+      })
+      .returning({ id: transfers.id });
+    await tx.insert(movements).values([
+      {
+        financialAccountId: transfer.from,
+        occurredOn: input.settledOn,
+        amountCents: -cash,
+        kind: 'transfer',
+        transferId: row!.id,
+        description: title.description,
+      },
+      {
+        financialAccountId: transfer.to,
+        occurredOn: input.settledOn,
+        amountCents: cash,
+        kind: 'transfer',
+        transferId: row!.id,
+        description: title.description,
+      },
+    ]);
+  }
+  const [movement] = await tx
+    .select({ id: movements.id })
+    .from(movements)
+    .where(and(eq(movements.settlementId, ownId!), eq(movements.kind, 'settlement')));
+  return { settlementId: ownId!, movementId: movement?.id ?? null };
 }
 
 async function loadLeg(tx: Executor, id: string) {
@@ -178,7 +192,7 @@ export async function setSettlementAccount(
   settlementId: string,
   input: z.output<typeof settlementAccountInput>,
 ): Promise<TitleDetail> {
-  const titleId = await ctx.db.transaction(async (tx) => {
+  const titleId = await withTx(ctx, async (tx) => {
     const leg = await loadLeg(tx, settlementId);
     const [title] = await tx.select().from(titles).where(eq(titles.id, leg.titleId));
     if (!title) throw notFound();
@@ -203,7 +217,7 @@ export async function reverseSettlement(
   settlementId: string,
   input: z.output<typeof settlementReverseInput>,
 ): Promise<TitleDetail> {
-  const titleId = await ctx.db.transaction(async (tx) => {
+  const titleId = await withTx(ctx, async (tx) => {
     const leg = await loadLeg(tx, settlementId);
     const [title] = await tx.select().from(titles).where(eq(titles.id, leg.titleId));
     if (!title) throw notFound();
@@ -220,12 +234,29 @@ export async function reverseSettlement(
       await insertSettlementMovement(tx, current, owner!, cashOf(current), reversedOn, true);
     }
     if (input.undoTransfer) {
-      await tx.delete(transfers).where(
-        inArray(
-          transfers.settlementId,
-          legs.map((l) => l.id),
-        ),
+      const doomed = await tx
+        .select({ id: transfers.id })
+        .from(transfers)
+        .where(
+          inArray(
+            transfers.settlementId,
+            legs.map((l) => l.id),
+          ),
+        );
+      const movementIds = await transferMovementIds(
+        tx,
+        doomed.map((d) => d.id),
       );
+      // Movimento da transferência conciliado com o extrato não some; sugestões saem antes.
+      await assertNotReconciled(tx, movementIds);
+      await clearStatementSuggestions(tx, { movementIds });
+      if (doomed.length > 0)
+        await tx.delete(transfers).where(
+          inArray(
+            transfers.id,
+            doomed.map((d) => d.id),
+          ),
+        );
     }
     return title.id;
   });

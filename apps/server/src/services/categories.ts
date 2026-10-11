@@ -4,7 +4,7 @@ import { asc, eq, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { notFound } from '../errors';
-import { deleteOrArchive } from './util';
+import { deleteOrArchive, withTx } from './tx';
 
 /*
  * Plano global de categorias (spec 008): receita/despesa, grupo → subcategoria.
@@ -52,7 +52,7 @@ export async function categoryTree(
 
 export async function createCategory(ctx: ServiceContext, input: z.output<typeof categoryCreateInput>) {
   ctx.access.assertAdmin();
-  const [row] = await ctx.db.insert(categories).values(input).returning();
+  const [row] = await withTx(ctx, (tx) => tx.insert(categories).values(input).returning());
   return row!;
 }
 
@@ -63,7 +63,7 @@ export async function updateCategory(ctx: ServiceContext, id: string, input: z.o
   if (input.parentId !== undefined) patch.parentId = input.parentId;
   if (input.colorSlot !== undefined) patch.colorSlot = input.colorSlot;
   if (input.icon !== undefined) patch.icon = input.icon;
-  const [row] = await ctx.db.update(categories).set(patch).where(eq(categories.id, id)).returning();
+  const [row] = await withTx(ctx, (tx) => tx.update(categories).set(patch).where(eq(categories.id, id)).returning());
   if (!row) throw notFound();
   return row;
 }
@@ -72,18 +72,21 @@ export async function deleteCategory(ctx: ServiceContext, id: string): Promise<D
   ctx.access.assertAdmin();
   const [row] = await ctx.db.select({ id: categories.id }).from(categories).where(eq(categories.id, id));
   if (!row) throw notFound();
-  return deleteOrArchive(
-    async () => (await ctx.db.delete(categories).where(eq(categories.id, id))).rowCount ?? 0,
-    // Arquivar o grupo arquiva as subcategorias.
-    () =>
-      ctx.db
-        .update(categories)
-        .set({ archivedAt: sql`now()` })
-        .where(or(eq(categories.id, id), eq(categories.parentId, id))),
+  return withTx(ctx, (tx) =>
+    deleteOrArchive(
+      tx,
+      async (sp) => (await sp.delete(categories).where(eq(categories.id, id))).rowCount ?? 0,
+      // Arquivar o grupo arquiva as subcategorias.
+      (t) =>
+        t
+          .update(categories)
+          .set({ archivedAt: sql`now()` })
+          .where(or(eq(categories.id, id), eq(categories.parentId, id))),
+    ),
   );
 }
 
 export async function restoreCategory(ctx: ServiceContext, id: string) {
   ctx.access.assertAdmin();
-  await ctx.db.update(categories).set({ archivedAt: null }).where(eq(categories.id, id));
+  await withTx(ctx, (tx) => tx.update(categories).set({ archivedAt: null }).where(eq(categories.id, id)));
 }

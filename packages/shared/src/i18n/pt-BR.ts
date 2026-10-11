@@ -1,3 +1,11 @@
+import { attachmentsStrings } from './areas/attachments';
+import { auditStrings } from './areas/audit';
+import { calendarStrings } from './areas/calendar';
+import { cardStrings } from './areas/card';
+import { closingStrings } from './areas/closing';
+import { entryStrings } from './areas/entry';
+import { statementsStrings } from './areas/statements';
+
 /*
  * Textos da interface (pt-BR), centralizados. Componentes e API usam estas
  * chaves em vez de escrever o texto solto (i18n-ready).
@@ -58,6 +66,8 @@ export const ptBR = {
     categories: 'Categorias',
     transfers: 'Transferências',
     users: 'Usuários',
+    calendar: 'Calendário',
+    audit: 'Auditoria',
     account: 'Minha conta',
     admin: 'Administração',
   },
@@ -144,6 +154,52 @@ export const ptBR = {
     caixaKindF1: 'Caixas de cartão chegam na fase 2.',
     holderArchived: 'O titular está arquivado.',
     inactiveUser: 'Usuário desativado.',
+    invalidMonth: 'Mês inválido.',
+    cardFieldsRequired: 'Cartão precisa de pagadora padrão, limite, dias de fechamento e vencimento e os 4 últimos dígitos.',
+    notCard: 'Esta caixa não é um cartão de crédito.',
+    cardFieldsGeneral: 'Campos de cartão só valem para caixa de cartão.',
+    cardPayerNotGeneral: 'A pagadora precisa ser uma caixa geral.',
+    invoiceClosed: 'A fatura já está fechada.',
+    invoiceNotClosed: 'A fatura ainda está aberta: feche-a antes de pagar (ou use o pagamento antecipado).',
+    invoiceNoOpenBalance: 'Não há saldo em aberto desta pagadora nesta fatura.',
+    invoicePaymentTooHigh: 'O pagamento passa do saldo em aberto da fatura.',
+    invoiceHasPayments: 'A fatura tem pagamento: estorne-o antes de reabrir.',
+    invoiceCarriedClosed: 'O saldo desta fatura já está numa fatura fechada: reabra a seguinte antes.',
+    noOpenInvoice: 'Não há fatura aberta que feche nessa data ou depois.',
+    purchaseClosedInvoice: 'A compra tem parcela em fatura fechada: reabra a fatura para mudar.',
+    purchaseHasRefunds: 'A compra tem estornos: exclua os estornos antes.',
+    refundOfRefund: 'Não se estorna um estorno.',
+    refundTooHigh: 'O estorno passa do valor ainda não estornado da compra.',
+    cardInvoiceTitleLocked: 'Título de fatura muda pela fatura do cartão (fechar, reabrir, pagar).',
+    cardHasNoAccounts: 'Cartão não tem contas: o pagamento sai da conta da pagadora.',
+    movementReconciled: 'O movimento está conciliado com o extrato: desfaça a conciliação antes.',
+    csvAmountColumn: 'Mapeie a coluna de valor ou as de débito e crédito.',
+    statementTarget: 'Informe a conta ou o cartão do extrato.',
+    statementFormat: 'Formato de arquivo não reconhecido: envie OFX ou CSV.',
+    statementEmpty: 'Nenhuma transação encontrada no arquivo.',
+    statementAllDuplicated: 'Todas as linhas do arquivo já tinham sido importadas.',
+    csvMappingRequired: 'Escolha ou crie o mapeamento de colunas do CSV.',
+    ruleTarget: 'A regra precisa de entidade ou categoria.',
+    ruleDirection: 'Regra com categoria precisa da direção (entrada ou saída).',
+    lineNotPending: 'Esta linha já foi conciliada ou ignorada.',
+    lineNotSuggested: 'Esta linha não tem sugestão a confirmar.',
+    lineNotMatched: 'Esta linha não está conciliada.',
+    lineAmountMismatch: 'O valor não bate com o da linha do extrato.',
+    lineDirectionMismatch: 'A direção do título não bate com a da linha (entrada × saída).',
+    lineNeedsClassification: 'Informe a entidade e a categoria.',
+    lineCardOnly: 'Só linhas de fatura de cartão viram compra.',
+    lineCreditOnCard: 'Crédito na fatura: concilie com um estorno lançado ou ignore a linha.',
+    lineAccountOnly: 'Linha de fatura de cartão vira compra, não movimento.',
+    attachmentEmpty: 'Arquivo vazio.',
+    attachmentTooLarge: 'O arquivo passa de 20 MB.',
+    closingUnreconciled: (n: number) =>
+      `Há ${n} linha(s) de extrato do mês sem conciliar nas contas desta caixa. Concilie antes ou feche assim mesmo.`,
+    reopenAdminOnly: 'Só um administrador reabre um mês fechado.',
+    pixInvalid: 'PIX copia-e-cola inválido.',
+    boletoInvalid: 'Linha digitável ou código de barras de boleto inválido.',
+    nfeInvalid: 'O arquivo não é uma NF-e válida.',
+    documentReaderUnavailable: 'A leitura de PDF/imagem por IA chega na fase 4; preencha à mão por enquanto.',
+    uploadRequired: 'Envie o arquivo no corpo da requisição.',
   },
 
   entity: {
@@ -197,6 +253,8 @@ export const ptBR = {
     members: 'Membros',
     accounts: 'Contas',
     statement: 'Extrato',
+    reconciliation: 'Conciliação',
+    closing: 'Fechamento',
     payables: 'A pagar',
     receivables: 'A receber',
     balance: 'Saldo das contas',
@@ -317,6 +375,14 @@ export const ptBR = {
     newPassword: 'Nova senha',
     passwordChanged: 'Senha alterada. As outras sessões foram encerradas.',
   },
+  // Fase 2: cada área tem o próprio arquivo em ./areas.
+  card: cardStrings,
+  statements: statementsStrings,
+  calendar: calendarStrings,
+  audit: auditStrings,
+  attachments: attachmentsStrings,
+  entry: entryStrings,
+  closing: closingStrings,
 } as const;
 
 export type Strings = typeof ptBR;

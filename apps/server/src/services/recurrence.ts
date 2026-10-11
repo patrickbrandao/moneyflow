@@ -89,24 +89,30 @@ export async function materializeRule(tx: Executor, ruleId: string, horizon = ma
 export async function materializeAll(
   db: Database,
   horizon = materializeHorizon(),
-): Promise<{ rules: number; created: number; skipped: number }> {
+): Promise<{ rules: number; created: number; skipped: number; failed: number }> {
   const rules = await db.execute<{ id: string }>(sql`
     SELECT r.id FROM recurrence_rules r
      WHERE EXISTS (SELECT 1 FROM titles t WHERE t.recurrence_rule_id = r.id)
      ORDER BY r.id`);
   let created = 0;
   let skipped = 0;
+  let failed = 0;
   for (const { id } of rules.rows) {
-    await db.transaction(async (tx) => {
-      const lock = await tx.execute<{ ok: boolean }>(sql`SELECT pg_try_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${id})) AS ok`);
-      if (!lock.rows[0]?.ok) {
-        skipped += 1;
-        return;
-      }
-      created += await materializeRule(tx, id, horizon);
-    });
+    // Uma série com erro (ex.: competência num mês fechado) não impede as outras.
+    try {
+      await db.transaction(async (tx) => {
+        const lock = await tx.execute<{ ok: boolean }>(sql`SELECT pg_try_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${id})) AS ok`);
+        if (!lock.rows[0]?.ok) {
+          skipped += 1;
+          return;
+        }
+        created += await materializeRule(tx, id, horizon);
+      });
+    } catch {
+      failed += 1;
+    }
   }
-  return { rules: rules.rows.length, created, skipped };
+  return { rules: rules.rows.length, created, skipped, failed };
 }
 
 /** Primeira chave do advisory lock das séries (constante arbitrária do MoneyFlow). */

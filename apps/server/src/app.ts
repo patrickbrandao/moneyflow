@@ -11,9 +11,13 @@ import { resolveSession, SESSION_COOKIE } from './auth/session';
 import { loadAccess } from './authz/access';
 import type { Config } from './config';
 import { AppError, translateDbError } from './errors';
+import { attachmentRoutes, UPLOAD_BODY_LIMIT } from './routes/attachments';
 import { authRoutes } from './routes/auth';
 import { caixaRoutes } from './routes/caixas';
+import { cardRoutes } from './routes/cards';
 import { entityRoutes } from './routes/entities';
+import { operationRoutes } from './routes/operation';
+import { statementRoutes } from './routes/statements';
 import { titleRoutes } from './routes/titles';
 import { userRoutes } from './routes/users';
 
@@ -46,6 +50,10 @@ export async function buildApp({
   app.decorateRequest('actor', null);
   app.decorateRequest('sessionId', null);
   app.decorateRequest('ctx', null as never);
+
+  // Uploads (anexos, extratos, NF-e): o arquivo vai cru no corpo, com o próprio Content-Type.
+  // JSON continua no parser padrão; o limite de cada rota de upload é UPLOAD_BODY_LIMIT.
+  app.addContentTypeParser('*', { parseAs: 'buffer', bodyLimit: UPLOAD_BODY_LIMIT }, (_request, body, done) => done(null, body));
 
   await app.register(cookie);
   await app.register(rateLimit, { global: false });
@@ -90,6 +98,10 @@ export async function buildApp({
   await app.register(entityRoutes);
   await app.register(caixaRoutes);
   await app.register(titleRoutes);
+  await app.register(cardRoutes);
+  await app.register(attachmentRoutes);
+  await app.register(statementRoutes);
+  await app.register(operationRoutes);
 
   // Em produção a API serve o SPA compilado (imagem única).
   const webDist = config.webDist ? resolve(config.webDist) : null;

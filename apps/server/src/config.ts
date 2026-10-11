@@ -12,6 +12,8 @@ export type Config = {
   logLevel: string;
   /** Tentativas de login por minuto por IP. */
   loginRateLimit: number;
+  /** Worker fecha sozinho as faturas de cartão na data de fechamento (padrão: só sugere; fechamento manual). */
+  cardAutoClose: boolean;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -33,5 +35,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     lookupTimeoutMs: Number(env.LOOKUP_TIMEOUT_MS ?? 5000),
     logLevel: env.LOG_LEVEL ?? 'info',
     loginRateLimit: Number(env.LOGIN_RATE_LIMIT ?? 10),
+    cardAutoClose: env.CARD_AUTO_CLOSE === 'true',
   };
 }

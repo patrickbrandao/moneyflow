@@ -7,6 +7,7 @@ import { FREQUENCIES } from '../recurrence';
 import { cents, id, isoDate, nonNegativeCents, optionalText, positiveCents, queryBool, requiredText } from './common';
 
 export * from './common';
+export * from './operation';
 
 const E = ptBR.errors;
 
@@ -170,18 +171,50 @@ export const linkInput = z.object({
 
 /* ---------------- caixas e contas ---------------- */
 
-export const caixaCreateInput = z.object({
-  name: requiredText(120),
-  holderEntityId: id,
-  isPrimary: z.boolean().default(false),
-  description: optionalText(),
-});
+export const CAIXA_KINDS = ['general', 'credit_card'] as const;
+
+/** Campos do cartão (caixa credit_card, spec 007). */
+const cardFields = {
+  defaultPayerCaixaId: id,
+  creditLimitCents: nonNegativeCents,
+  closingDay: z.number().int().min(1).max(31),
+  dueDay: z.number().int().min(1).max(31),
+  cardLast4: z
+    .string()
+    .trim()
+    .regex(/^[0-9]{4}$/, E.validation),
+};
+
+export const caixaCreateInput = z
+  .object({
+    name: requiredText(120),
+    kind: z.enum(CAIXA_KINDS).default('general'),
+    holderEntityId: id,
+    isPrimary: z.boolean().default(false),
+    description: optionalText(),
+    defaultPayerCaixaId: cardFields.defaultPayerCaixaId.nullish(),
+    creditLimitCents: cardFields.creditLimitCents.nullish(),
+    closingDay: cardFields.closingDay.nullish(),
+    dueDay: cardFields.dueDay.nullish(),
+    cardLast4: cardFields.cardLast4.nullish(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.kind !== 'credit_card') return;
+    for (const key of ['defaultPayerCaixaId', 'creditLimitCents', 'closingDay', 'dueDay', 'cardLast4'] as const) {
+      if (value[key] === null || value[key] === undefined) ctx.addIssue({ code: 'custom', path: [key], message: E.cardFieldsRequired });
+    }
+  });
 
 export const caixaUpdateInput = z.object({
   name: requiredText(120).optional(),
   holderEntityId: id.optional(),
   isPrimary: z.boolean().optional(),
   description: optionalText().optional(),
+  defaultPayerCaixaId: cardFields.defaultPayerCaixaId.optional(),
+  creditLimitCents: cardFields.creditLimitCents.optional(),
+  closingDay: cardFields.closingDay.optional(),
+  dueDay: cardFields.dueDay.optional(),
+  cardLast4: cardFields.cardLast4.optional(),
 });
 
 export const ACCOUNT_KINDS = ['checking', 'cash', 'savings'] as const;
@@ -285,6 +318,21 @@ export const titleCreateInput = z.object({
   /** Categoria do lado espelho (tipo oposto). Omitida: escolhida automaticamente. */
   mirrorCategoryId: id.nullish(),
   series: seriesInput.nullish(),
+  /** Boleto: linha digitável (47/48) ou código de barras (44); gravado como o código de 44 dígitos. */
+  boletoBarcode: z
+    .string()
+    .trim()
+    .nullish()
+    .transform((v) => (v ? v : null)),
+  /** PIX copia-e-cola (BR Code) completo. */
+  pixPayload: z
+    .string()
+    .trim()
+    .max(512)
+    .nullish()
+    .transform((v) => (v ? v : null)),
+  /** NF-e importada (title-entry/nfe). */
+  nfeDocumentId: id.nullish().transform((v) => v ?? null),
 });
 
 export const SCOPES = ['this', 'following'] as const;
@@ -297,6 +345,19 @@ export const titleUpdateInput = z.object({
   dueDate: isoDate.optional(),
   amountCents: positiveCents.optional(),
   notes: optionalText().optional(),
+  boletoBarcode: z
+    .string()
+    .trim()
+    .nullish()
+    .transform((v) => (v ? v : null))
+    .optional(),
+  pixPayload: z
+    .string()
+    .trim()
+    .max(512)
+    .nullish()
+    .transform((v) => (v ? v : null))
+    .optional(),
   scope: z.enum(SCOPES).default('this'),
 });
 

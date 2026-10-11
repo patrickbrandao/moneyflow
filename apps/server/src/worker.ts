@@ -2,11 +2,14 @@ import type { Database } from '@moneyflow/db';
 import type { FastifyBaseLogger } from 'fastify';
 import { purgeExpiredSessions } from './auth/session';
 import type { Config } from './config';
+import { cardMaintenance } from './services/cards';
 import { materializeAll } from './services/recurrence';
 
 /**
  * Modo worker: materializa as séries (recorrências e parcelas) até 12 meses à
- * frente e limpa sessões vencidas. Roda ao subir e a cada WORKER_INTERVAL_MS.
+ * frente, mantém criadas as faturas futuras dos cartões (e, com
+ * CARD_AUTO_CLOSE=true, fecha as que passaram da data de fechamento; sem isso
+ * a tela só sugere o fechamento) e limpa sessões vencidas. Roda ao subir e a cada WORKER_INTERVAL_MS.
  * Vários workers podem rodar juntos: cada série usa advisory lock.
  */
 export function startWorker(db: Database, config: Config, log: FastifyBaseLogger) {
@@ -16,8 +19,10 @@ export function startWorker(db: Database, config: Config, log: FastifyBaseLogger
     running = true;
     try {
       const result = await materializeAll(db);
-      await purgeExpiredSessions(db);
       log.info(result, 'worker: séries materializadas');
+      const cards = await cardMaintenance(db, { autoClose: config.cardAutoClose });
+      log.info(cards, 'worker: faturas de cartão');
+      await purgeExpiredSessions(db);
     } catch (error) {
       log.error(error, 'worker: falha na passada');
     } finally {

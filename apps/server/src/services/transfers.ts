@@ -5,6 +5,8 @@ import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { notFound, unprocessable } from '../errors';
 import { getAccount, readableFilter } from './caixas';
+import { assertNotReconciled, clearStatementSuggestions, transferMovementIds } from './reconciliation-guards';
+import { withTx } from './tx';
 import { camel } from './util';
 
 /* Transferências (spec 005): par de movimentos que soma zero; não é receita nem despesa. */
@@ -47,7 +49,7 @@ export async function getTransfer(ctx: ServiceContext, id: string): Promise<Tran
 
 /** Exige escrita nas duas caixas (o dinheiro sai de uma e entra na outra). */
 export async function createTransfer(ctx: ServiceContext, input: z.output<typeof transferCreateInput>): Promise<TransferRow> {
-  const id = await ctx.db.transaction(async (tx) => {
+  const id = await withTx(ctx, async (tx) => {
     const from = await getAccount(ctx, input.fromAccountId, tx);
     const to = await getAccount(ctx, input.toAccountId, tx);
     ctx.access.assertWrite(from.caixaId);
@@ -92,5 +94,10 @@ export async function deleteTransfer(ctx: ServiceContext, id: string) {
   ctx.access.assertWrite(transfer.fromCaixaId);
   ctx.access.assertWrite(transfer.toCaixaId);
   if (transfer.settlementId) throw unprocessable(strings.errors.transferFromSettlement);
-  await ctx.db.delete(transfers).where(eq(transfers.id, id));
+  await withTx(ctx, async (tx) => {
+    const movementIds = await transferMovementIds(tx, [id]);
+    await assertNotReconciled(tx, movementIds);
+    await clearStatementSuggestions(tx, { movementIds });
+    await tx.delete(transfers).where(eq(transfers.id, id));
+  });
 }

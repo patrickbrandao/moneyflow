@@ -7,6 +7,7 @@ import {
   type MirrorStatus,
   type mirrorAcceptInput,
   type mirrorDisputeInput,
+  parseBoleto,
   type RecurrenceRuleDto,
   type SettlementRow,
   t as strings,
@@ -23,9 +24,11 @@ import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { notFound, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
+import { clearStatementSuggestions } from './reconciliation-guards';
 import { materializeRule } from './recurrence';
 import { insertTitlePair, type MirrorPlan, opposite } from './title-pair';
-import { camel, deleteOrArchive } from './util';
+import { deleteOrArchive, withTx } from './tx';
+import { camel } from './util';
 
 /* Títulos a pagar e a receber (spec 005) com espelhamento (spec 006). */
 
@@ -43,9 +46,12 @@ const rowSelect = (today: string) => sql`
   coalesce(t.mirror_status, m.mirror_status) AS pair_mirror_status,
   t.notes, t.archived_at,
   (tb.open_cents > 0 AND t.due_date < ${today}::date) AS overdue,
+  CASE WHEN c.kind = 'credit_card' THEN 0 ELSE
   (SELECT count(*)::int FROM settlements s
     WHERE s.title_id = t.id AND s.reversed_at IS NULL AND s.financial_account_id IS NULL
-      AND s.amount_cents + s.interest_cents + s.fine_cents - s.discount_cents <> 0) AS pending_account_count`;
+      AND s.amount_cents + s.interest_cents + s.fine_cents - s.discount_cents <> 0) END AS pending_account_count,
+  t.card_invoice_id, t.boleto_barcode, t.pix_payload, t.nfe_document_id,
+  (SELECT count(*)::int FROM title_attachments ta WHERE ta.title_id = t.id) AS attachment_count`;
 
 const fromSql = sql`
   FROM titles t
@@ -106,7 +112,8 @@ export async function listTitles(
       where.push(sql`t.mirror_status = 'pending'`);
       break;
     case 'pending_account':
-      where.push(sql`EXISTS (SELECT 1 FROM settlements s WHERE s.title_id = t.id AND s.reversed_at IS NULL AND s.financial_account_id IS NULL
+      // O lado do cartão de uma fatura é baixado sempre sem conta (cartão não tem contas).
+      where.push(sql`c.kind <> 'credit_card' AND EXISTS (SELECT 1 FROM settlements s WHERE s.title_id = t.id AND s.reversed_at IS NULL AND s.financial_account_id IS NULL
         AND s.amount_cents + s.interest_cents + s.fine_cents - s.discount_cents <> 0)`);
       break;
   }
@@ -201,7 +208,7 @@ export async function getTitle(ctx: ServiceContext, id: string): Promise<TitleDe
  * recentemente nessa caixa com a direção do espelho; senão uma "Outras…" do
  * tipo certo; senão qualquer uma do tipo. (O editor de lá pode trocá-la ao aceitar.)
  */
-async function defaultMirrorCategory(tx: Executor, caixaId: string, direction: Direction): Promise<string> {
+export async function defaultMirrorCategory(tx: Executor, caixaId: string, direction: Direction): Promise<string> {
   const kind = categoryKindFor(direction);
   const [recent] = await tx
     .select({ id: titles.categoryId })
@@ -257,9 +264,17 @@ async function resolveMirror(
 
 /* ---------------- escrita ---------------- */
 
+/** Linha digitável (47/48) ou código de barras (44) → código de barras de 44 dígitos (spec 010). */
+export function normalizeBoleto(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const parsed = parseBoleto(value);
+  if (!parsed.ok) throw unprocessable(strings.errors.boletoInvalid, 'boleto_invalid');
+  return parsed.barcode;
+}
+
 export async function createTitle(ctx: ServiceContext, input: z.output<typeof titleCreateInput>): Promise<TitleDetail> {
   ctx.access.assertWrite(input.caixaId);
-  const id = await ctx.db.transaction(async (tx) => {
+  const id = await withTx(ctx, async (tx) => {
     const [caixa] = await tx.select().from(caixas).where(eq(caixas.id, input.caixaId));
     if (!caixa) throw notFound();
     const mirror = await resolveMirror(ctx, tx, input, caixa.holderEntityId);
@@ -296,6 +311,9 @@ export async function createTitle(ctx: ServiceContext, input: z.output<typeof ti
         origin: ruleId ? 'recurrence' : 'manual',
         recurrenceRuleId: ruleId,
         occurrence: ruleId ? 1 : null,
+        boletoBarcode: normalizeBoleto(input.boletoBarcode),
+        pixPayload: input.pixPayload,
+        nfeDocumentId: input.nfeDocumentId,
       },
       mirror,
     );
@@ -308,7 +326,7 @@ export async function createTitle(ctx: ServiceContext, input: z.output<typeof ti
 type Patch = Partial<typeof titles.$inferInsert>;
 
 export async function updateTitle(ctx: ServiceContext, id: string, input: z.output<typeof titleUpdateInput>): Promise<TitleDetail> {
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     const title = await loadTitle(tx, id, true);
     ctx.access.assertWrite(title.caixaId);
     const mirror = title.mirrorTitleId ? await loadTitle(tx, title.mirrorTitleId, true) : null;
@@ -328,6 +346,8 @@ export async function updateTitle(ctx: ServiceContext, id: string, input: z.outp
     if (input.dueDate !== undefined) patch.dueDate = input.dueDate;
     if (input.amountCents !== undefined) patch.amountCents = input.amountCents;
     if (input.notes !== undefined) patch.notes = input.notes;
+    if (input.boletoBarcode !== undefined) patch.boletoBarcode = normalizeBoleto(input.boletoBarcode);
+    if (input.pixPayload !== undefined) patch.pixPayload = input.pixPayload;
     if (Object.keys(patch).length > 0) await tx.update(titles).set(patch).where(eq(titles.id, id));
 
     // "Esta e as próximas": reescreve as ocorrências futuras ainda em aberto (datas seguem a regra).
@@ -386,7 +406,7 @@ async function syncMirror(
 
 /** Cancela o título e o espelho (um débito cancelado vale para os dois lados). */
 export async function cancelTitle(ctx: ServiceContext, id: string): Promise<TitleDetail> {
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     const title = await loadTitle(tx, id, true);
     ctx.access.assertWrite(title.caixaId);
     const ids = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
@@ -396,7 +416,7 @@ export async function cancelTitle(ctx: ServiceContext, id: string): Promise<Titl
 }
 
 export async function reopenTitle(ctx: ServiceContext, id: string): Promise<TitleDetail> {
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     const title = await loadTitle(tx, id, true);
     ctx.access.assertWrite(title.caixaId);
     if (title.status !== 'canceled') return;
@@ -418,28 +438,34 @@ export async function reopenTitle(ctx: ServiceContext, id: string): Promise<Titl
 export async function deleteTitle(ctx: ServiceContext, id: string, scope: 'this' | 'following'): Promise<DeleteResult> {
   const title = await loadTitle(ctx.db, id);
   ctx.access.assertWrite(title.caixaId);
+  if (title.cardInvoiceId) throw unprocessable(strings.errors.cardInvoiceTitleLocked);
   const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
 
   if (title.recurrenceRuleId && title.occurrence) {
     if (scope === 'following') {
-      await ctx.db.transaction((tx) => endSeriesFrom(tx, title.recurrenceRuleId!, title.occurrence!, title.dueDate));
+      await withTx(ctx, (tx) => endSeriesFrom(tx, title.recurrenceRuleId!, title.occurrence!, title.dueDate));
       return { deleted: true, archived: false };
     }
-    await ctx.db.update(titles).set({ archivedAt: sql`now()` }).where(inArray(titles.id, pair));
+    await withTx(ctx, (tx) => tx.update(titles).set({ archivedAt: sql`now()` }).where(inArray(titles.id, pair)));
     return { deleted: false, archived: true };
   }
 
-  return deleteOrArchive(
-    async () => (await ctx.db.delete(titles).where(inArray(titles.id, pair))).rowCount ?? 0,
-    () => ctx.db.update(titles).set({ archivedAt: sql`now()` }).where(inArray(titles.id, pair)),
-  );
+  return withTx(ctx, async (tx) => {
+    // Sugestão de extrato apontando para o título sai antes (spec 009).
+    await clearStatementSuggestions(tx, { titleIds: pair });
+    return deleteOrArchive(
+      tx,
+      async (sp) => (await sp.delete(titles).where(inArray(titles.id, pair))).rowCount ?? 0,
+      (t) => t.update(titles).set({ archivedAt: sql`now()` }).where(inArray(titles.id, pair)),
+    );
+  });
 }
 
 export async function restoreTitle(ctx: ServiceContext, id: string): Promise<TitleDetail> {
   const title = await loadTitle(ctx.db, id);
   ctx.access.assertWrite(title.caixaId);
   const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
-  await ctx.db.update(titles).set({ archivedAt: null }).where(inArray(titles.id, pair));
+  await withTx(ctx, (tx) => tx.update(titles).set({ archivedAt: null }).where(inArray(titles.id, pair)));
   return getTitle(ctx, id);
 }
 
@@ -454,6 +480,7 @@ async function endSeriesFrom(tx: Tx, ruleId: string, occurrence: number, dueDate
   if (doomedIds.length > 0) {
     const [settled] = await tx.select({ id: settlements.id }).from(settlements).where(inArray(settlements.titleId, doomedIds)).limit(1);
     if (settled) throw unprocessable(strings.errors.seriesHasSettlements);
+    await clearStatementSuggestions(tx, { titleIds: doomedIds });
     await tx.delete(titles).where(inArray(titles.id, doomedIds));
   }
   const remaining = occurrence - 1;
@@ -484,10 +511,12 @@ export async function acceptMirror(ctx: ServiceContext, id: string, input: z.out
   const title = await loadTitle(ctx.db, id);
   ctx.access.assertWrite(title.caixaId);
   if (title.mirrorStatus !== 'pending' && title.mirrorStatus !== 'disputed') throw unprocessable(strings.errors.mirrorNotPending);
-  await ctx.db
-    .update(titles)
-    .set({ mirrorStatus: 'accepted', ...(input.categoryId ? { categoryId: input.categoryId } : {}) })
-    .where(eq(titles.id, id));
+  await withTx(ctx, (tx) =>
+    tx
+      .update(titles)
+      .set({ mirrorStatus: 'accepted', ...(input.categoryId ? { categoryId: input.categoryId } : {}) })
+      .where(eq(titles.id, id)),
+  );
   return getTitle(ctx, id);
 }
 
@@ -498,7 +527,7 @@ export async function disputeMirror(ctx: ServiceContext, id: string, input: z.ou
   const notes = input.reason
     ? [title.notes, `${strings.title.mirrorStatuses.disputed}: ${input.reason}`].filter(Boolean).join('\n')
     : title.notes;
-  await ctx.db.update(titles).set({ mirrorStatus: 'disputed', notes }).where(eq(titles.id, id));
+  await withTx(ctx, (tx) => tx.update(titles).set({ mirrorStatus: 'disputed', notes }).where(eq(titles.id, id)));
   return getTitle(ctx, id);
 }
 

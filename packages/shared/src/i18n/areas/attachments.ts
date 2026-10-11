@@ -1,0 +1,21 @@
+/* Textos dos anexos. */
+export const attachmentsStrings = {
+  title: 'Anexos',
+  attach: 'Anexar arquivo',
+  attachShort: 'Anexar',
+  dropHere: 'Solte os arquivos aqui para anexar',
+  dropHint: 'Arraste arquivos para cá ou use o botão. Até 20 MB cada.',
+  empty: 'Nenhum anexo.',
+  uploading: 'Enviando…',
+  uploaded: (n: number) => (n === 1 ? 'Arquivo anexado.' : `${n} arquivos anexados.`),
+  tooLarge: (name: string) => `${name} passa de 20 MB e não foi enviado.`,
+  open: 'Abrir',
+  download: 'Baixar',
+  remove: 'Remover anexo',
+  removeConfirm: (name: string) => `Remover ${name}?`,
+  removeHint: 'O arquivo deixa de estar ligado a este registro.',
+  removed: 'Anexo removido.',
+  by: (who: string) => `por ${who}`,
+  movementTitle: 'Anexos do movimento',
+  count: (n: number) => `${n} anexo${n === 1 ? '' : 's'}`,
+};

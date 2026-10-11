@@ -149,7 +149,17 @@ export type AccountRow = {
 
 export type MemberRow = { id: string; userId: string; username: string; email: string; isActive: boolean; role: CaixaRole };
 
-export type CaixaDetail = CaixaSummary & { accounts: AccountRow[]; canWrite: boolean };
+/** Atributos da caixa de cartão (spec 007). */
+export type CardSettings = {
+  defaultPayerCaixaId: string;
+  defaultPayerName: string;
+  creditLimitCents: number;
+  closingDay: number;
+  dueDay: number;
+  cardLast4: string;
+};
+
+export type CaixaDetail = CaixaSummary & { accounts: AccountRow[]; canWrite: boolean; card: CardSettings | null };
 
 export type CategoryNode = {
   id: string;
@@ -198,6 +208,12 @@ export type TitleRow = {
   archivedAt: string | null;
   overdue: boolean;
   pendingAccountCount: number;
+  /** origin = card_invoice: a fatura (a pagadora navega para as compras). */
+  cardInvoiceId: string | null;
+  boletoBarcode: string | null;
+  pixPayload: string | null;
+  nfeDocumentId: string | null;
+  attachmentCount: number;
 };
 
 export type SettlementRow = {
@@ -304,3 +320,386 @@ export type SearchHit = { kind: 'entity' | 'caixa' | 'title'; id: string; label:
 
 /** DELETE que arquiva quando há vínculos (spec 008). */
 export type DeleteResult = { deleted: boolean; archived: boolean };
+
+/* ---------------- fase 2: cartão (spec 007) ---------------- */
+
+export type InvoiceStatus = 'open' | 'closed' | 'paid';
+
+export type InvoiceSummary = {
+  id: string;
+  cardCaixaId: string;
+  referenceMonth: string;
+  closingDate: string;
+  dueDate: string;
+  closedAt: string | null;
+  totalCents: number;
+  billedCents: number;
+  settledCents: number;
+  openCents: number;
+  carriedOutCents: number;
+  status: InvoiceStatus;
+  /** Aberta com a data de fechamento já passada: sugerir o fechamento. */
+  closeSuggested: boolean;
+};
+
+export type InvoicePayerTotal = {
+  payerCaixaId: string;
+  payerCaixaName: string;
+  itemsCents: number;
+  billedCents: number;
+  settledCents: number;
+  openCents: number;
+  carriedOutCents: number;
+  /** Título "a pagar" da pagadora nesta fatura (se houver e for legível). */
+  payerTitleId: string | null;
+  canReadPayer: boolean;
+  canWritePayer: boolean;
+};
+
+export type InvoiceLine = {
+  itemId: string;
+  itemKind: 'installment' | 'carryover';
+  payerCaixaId: string;
+  payerCaixaName: string;
+  amountCents: number;
+  installmentNumber: number | null;
+  installmentsTotal: number | null;
+  purchaseId: string | null;
+  purchaseKind: 'purchase' | 'refund' | 'charge' | null;
+  chargeKind: string | null;
+  refundedPurchaseId: string | null;
+  entityId: string | null;
+  entityName: string | null;
+  categoryId: string | null;
+  categoryName: string | null;
+  categoryColorSlot: number | null;
+  purchasedOn: string | null;
+  description: string;
+  carriedFromInvoiceId: string | null;
+  carriedFromMonth: string | null;
+  reconciled: boolean;
+};
+
+export type InvoiceDetail = InvoiceSummary & {
+  cardName: string;
+  issuerName: string;
+  canWrite: boolean;
+  payers: InvoicePayerTotal[];
+  lines: InvoiceLine[];
+  /** Pagadora filtrada (quem só lê a pagadora vê só as compras dela). */
+  payerCaixaId: string | null;
+  titles: TitleRow[];
+};
+
+export type CardOverview = {
+  caixaId: string;
+  name: string;
+  settings: CardSettings;
+  issuerEntityId: string;
+  issuerName: string;
+  creditLimitCents: number;
+  usedCents: number;
+  availableCents: number;
+  canWrite: boolean;
+  openInvoice: InvoiceSummary | null;
+  invoices: InvoiceSummary[];
+  /** Comprometido por fatura futura (parcelas lançadas), para o gráfico do limite. */
+  committed: { referenceMonth: string; amountCents: number }[];
+};
+
+export type CardPurchaseRow = {
+  id: string;
+  cardCaixaId: string;
+  kind: 'purchase' | 'refund' | 'charge';
+  chargeKind: string | null;
+  payerCaixaId: string;
+  payerCaixaName: string;
+  entityId: string;
+  entityName: string;
+  categoryId: string;
+  categoryName: string;
+  categoryColorSlot: number | null;
+  purchasedOn: string;
+  description: string;
+  amountCents: number;
+  installmentsTotal: number;
+  firstInstallment: number;
+  refundedPurchaseId: string | null;
+  refundedCents: number;
+  notes: string | null;
+  attachmentCount: number;
+  /** Todas as parcelas em faturas abertas (pode editar/excluir). */
+  editable: boolean;
+};
+
+export type CardPurchaseDetail = CardPurchaseRow & {
+  items: {
+    id: string;
+    invoiceId: string;
+    referenceMonth: string;
+    installmentNumber: number;
+    amountCents: number;
+    invoiceClosed: boolean;
+  }[];
+  refunds: CardPurchaseRow[];
+  canWrite: boolean;
+};
+
+/* ---------------- extratos e conciliação (spec 009) ---------------- */
+
+export type LineStatus = 'matched' | 'suggested' | 'new' | 'ignored';
+
+export type StatementImportSummary = {
+  id: string;
+  financialAccountId: string | null;
+  accountName: string | null;
+  cardCaixaId: string | null;
+  cardInvoiceId: string | null;
+  caixaId: string;
+  format: 'ofx' | 'csv';
+  fileName: string;
+  attachmentId: string;
+  periodStart: string;
+  periodEnd: string;
+  bankBalanceOn: string | null;
+  bankBalanceCents: number | null;
+  appBalanceCents: number | null;
+  differenceCents: number | null;
+  lineCount: number;
+  matchedLines: number;
+  suggestedLines: number;
+  newLines: number;
+  ignoredLines: number;
+  importedBy: string | null;
+  createdAt: string;
+};
+
+export type StatementLineRow = {
+  id: string;
+  lineNumber: number;
+  postedOn: string;
+  amountCents: number;
+  description: string;
+  fitid: string | null;
+  status: LineStatus;
+  movementId: string | null;
+  titleId: string | null;
+  cardInvoiceItemId: string | null;
+  /** Resumo do par (conciliado ou sugerido). */
+  target: {
+    kind: 'movement' | 'title' | 'card_item';
+    date: string;
+    description: string;
+    amountCents: number;
+    entityName: string | null;
+  } | null;
+  entityId: string | null;
+  entityName: string | null;
+  categoryId: string | null;
+  categoryName: string | null;
+  categoryColorSlot: number | null;
+  classificationSource: 'rule' | 'agent' | 'user' | null;
+  classificationRuleId: string | null;
+};
+
+export type StatementImportDetail = StatementImportSummary & {
+  canWrite: boolean;
+  lines: StatementLineRow[];
+  /** Quantas linhas do arquivo já existiam (dedup) no momento do import. */
+  skippedDuplicates?: number;
+};
+
+export type StatementInspect = {
+  format: 'ofx' | 'csv';
+  encoding: string;
+  ofx: {
+    kind: 'bank' | 'creditcard';
+    bankId: string | null;
+    accountId: string | null;
+    periodStart: string | null;
+    periodEnd: string | null;
+    ledgerBalance: { amountCents: number; date: string } | null;
+    count: number;
+    sample: { postedOn: string; amountCents: number; description: string; fitid: string | null }[];
+  } | null;
+  csv: { delimiter: string; rows: string[][] } | null;
+};
+
+export type MatchCandidateRow = {
+  kind: 'movement' | 'title' | 'card_item';
+  id: string;
+  date: string;
+  amountCents: number;
+  description: string;
+  entityName: string | null;
+  score: number | null;
+};
+
+export type CsvMappingRow = {
+  id: string;
+  financialAccountId: string | null;
+  cardCaixaId: string | null;
+  name: string;
+  delimiter: string;
+  encoding: string;
+  hasHeader: boolean;
+  skipRows: number;
+  dateFormat: string;
+  decimalSeparator: string;
+  columns: Record<string, string | number>;
+  isDefault: boolean;
+};
+
+export type ClassificationRuleRow = {
+  id: string;
+  caixaId: string | null;
+  caixaName: string | null;
+  matchKind: 'contains' | 'starts_with' | 'exact' | 'regex';
+  pattern: string;
+  direction: 'in' | 'out' | null;
+  entityId: string | null;
+  entityName: string | null;
+  categoryId: string | null;
+  categoryName: string | null;
+  priority: number;
+  origin: 'manual' | 'correction' | 'agent';
+  usageCount: number;
+  lastUsedAt: string | null;
+  archivedAt: string | null;
+  canWrite: boolean;
+};
+
+/* ---------------- anexos ---------------- */
+
+export type AttachmentTarget = 'title' | 'settlement' | 'movement' | 'card_purchase' | 'entity';
+
+export type AttachmentRow = {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  uploadedBy: string | null;
+  createdAt: string;
+};
+
+/* ---------------- auditoria e fechamento (spec 008) ---------------- */
+
+export type AuditEntry = {
+  id: string;
+  tableName: string;
+  recordId: string;
+  action: 'insert' | 'update' | 'delete';
+  oldData: Record<string, unknown> | null;
+  newData: Record<string, unknown> | null;
+  changedColumns: string[] | null;
+  userId: string | null;
+  username: string | null;
+  actorKind: 'human' | 'agent' | 'system';
+  agentRunId: string | null;
+  transactionId: number;
+  createdAt: string;
+};
+
+export type PeriodClosingRow = {
+  id: string;
+  caixaId: string;
+  month: string;
+  closedByUserId: string | null;
+  closedBy: string | null;
+  notes: string | null;
+  createdAt: string;
+};
+
+export type ClosingsOverview = {
+  closings: PeriodClosingRow[];
+  /** Linhas de extrato não conciliadas (new/suggested) por mês, nas contas da caixa. */
+  unreconciled: { month: string; lines: number }[];
+  canWrite: boolean;
+  canReopen: boolean;
+};
+
+/* ---------------- entrada de títulos (spec 010) ---------------- */
+
+export type PixEntryResult = {
+  payload: string;
+  pixKey: string | null;
+  pixKeyType: string | null;
+  merchantName: string | null;
+  merchantCity: string | null;
+  amountCents: number | null;
+  txid: string | null;
+  description: string | null;
+  entity: { id: string; name: string; document: string | null } | null;
+  createdEntity: boolean;
+};
+
+export type NfeEntryResult = {
+  nfeDocumentId: string;
+  accessKey: string;
+  number: number;
+  series: number;
+  issuedAt: string;
+  totalCents: number;
+  issuer: { entityId: string; name: string; document: string; created: boolean };
+  recipient: { entityId: string | null; name: string | null; document: string | null } | null;
+  duplicates: { number: string | null; dueDate: string | null; amountCents: number }[];
+  itemCount: number;
+  attachmentId: string | null;
+  alreadyImported: boolean;
+};
+
+export type NfeDetail = {
+  id: string;
+  accessKey: string;
+  number: number;
+  series: number;
+  issuedAt: string;
+  totalCents: number;
+  issuerEntityId: string;
+  issuerName: string;
+  recipientEntityId: string | null;
+  recipientName: string | null;
+  xmlAttachmentId: string | null;
+  items: {
+    itemNumber: number;
+    productCode: string | null;
+    description: string;
+    ncm: string | null;
+    cfop: string | null;
+    unit: string | null;
+    quantity: number;
+    unitPriceCents: number;
+    totalCents: number;
+  }[];
+};
+
+/* ---------------- calendário (spec 012) ---------------- */
+
+export type CalendarStatus = 'paid' | 'overdue' | 'payable' | 'receivable';
+
+export type CalendarItem = {
+  key: string;
+  itemKind: 'title' | 'card_invoice';
+  titleId: string | null;
+  cardInvoiceId: string | null;
+  caixaId: string;
+  caixaName: string;
+  counterpartyCaixaId: string | null;
+  direction: 'payable' | 'receivable';
+  dueDate: string;
+  referenceMonth: string | null;
+  description: string;
+  entityId: string | null;
+  entityName: string | null;
+  categoryId: string | null;
+  categoryName: string | null;
+  categoryColorSlot: number | null;
+  amountCents: number;
+  openCents: number;
+  status: string;
+  calendarStatus: CalendarStatus;
+  canWrite: boolean;
+};
+
+export type DailyBalance = { day: string; realizedCents: number | null; scheduledCents: number; projectedCents: number | null };

@@ -30,7 +30,8 @@ import { and, asc, desc, eq, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { AppError, notFound } from '../errors';
-import { camel, deleteOrArchive } from './util';
+import { deleteOrArchive, withTx } from './tx';
+import { camel } from './util';
 
 /* Entidades (spec 003): cadastro global, visível a todos; escrita para admin ou editores. */
 
@@ -144,17 +145,19 @@ export async function getEntity(ctx: ServiceContext, id: string): Promise<Entity
 
 export async function createEntity(ctx: ServiceContext, input: z.output<typeof entityCreateInput>): Promise<EntityDetail> {
   ctx.access.assertRegistryWrite();
-  const [row] = await ctx.db
-    .insert(entities)
-    .values({
-      kind: input.kind,
-      name: input.name,
-      tradeName: input.kind === 'company' ? input.tradeName : null,
-      document: input.document,
-      birthDate: input.kind === 'person' ? input.birthDate : null,
-      notes: input.notes,
-    })
-    .returning({ id: entities.id });
+  const [row] = await withTx(ctx, (tx) =>
+    tx
+      .insert(entities)
+      .values({
+        kind: input.kind,
+        name: input.name,
+        tradeName: input.kind === 'company' ? input.tradeName : null,
+        document: input.document,
+        birthDate: input.kind === 'person' ? input.birthDate : null,
+        notes: input.notes,
+      })
+      .returning({ id: entities.id }),
+  );
   return getEntity(ctx, row!.id);
 }
 
@@ -176,22 +179,25 @@ export async function updateEntity(ctx: ServiceContext, id: string, input: z.out
   if (input.document !== undefined) patch.document = input.document;
   if (input.birthDate !== undefined) patch.birthDate = kind === 'person' ? input.birthDate : null;
   if (input.notes !== undefined) patch.notes = input.notes;
-  if (Object.keys(patch).length > 0) await ctx.db.update(entities).set(patch).where(eq(entities.id, id));
+  if (Object.keys(patch).length > 0) await withTx(ctx, (tx) => tx.update(entities).set(patch).where(eq(entities.id, id)));
   return getEntity(ctx, id);
 }
 
 export async function deleteEntity(ctx: ServiceContext, id: string): Promise<DeleteResult> {
   ctx.access.assertRegistryWrite();
   await entityKind(ctx.db, id);
-  return deleteOrArchive(
-    async () => (await ctx.db.delete(entities).where(eq(entities.id, id))).rowCount ?? 0,
-    () => ctx.db.update(entities).set({ archivedAt: sql`now()` }).where(eq(entities.id, id)),
+  return withTx(ctx, (tx) =>
+    deleteOrArchive(
+      tx,
+      async (sp) => (await sp.delete(entities).where(eq(entities.id, id))).rowCount ?? 0,
+      (t) => t.update(entities).set({ archivedAt: sql`now()` }).where(eq(entities.id, id)),
+    ),
   );
 }
 
 export async function restoreEntity(ctx: ServiceContext, id: string): Promise<EntityDetail> {
   ctx.access.assertRegistryWrite();
-  await ctx.db.update(entities).set({ archivedAt: null }).where(eq(entities.id, id));
+  await withTx(ctx, (tx) => tx.update(entities).set({ archivedAt: null }).where(eq(entities.id, id)));
   return getEntity(ctx, id);
 }
 
@@ -205,7 +211,7 @@ async function guardChild(ctx: ServiceContext, entityId: string) {
 export async function addContact(ctx: ServiceContext, entityId: string, input: z.output<typeof contactInput>) {
   await guardChild(ctx, entityId);
   const value = input.kind === 'email' ? input.value.toLowerCase() : input.value;
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     if (input.isPrimary) {
       await tx
         .update(entityContacts)
@@ -220,7 +226,7 @@ export async function addContact(ctx: ServiceContext, entityId: string, input: z
 export async function updateContact(ctx: ServiceContext, entityId: string, contactId: string, input: z.output<typeof contactInput>) {
   await guardChild(ctx, entityId);
   const value = input.kind === 'email' ? input.value.toLowerCase() : input.value;
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     if (input.isPrimary) {
       await tx
         .update(entityContacts)
@@ -238,35 +244,39 @@ export async function updateContact(ctx: ServiceContext, entityId: string, conta
 
 export async function deleteContact(ctx: ServiceContext, entityId: string, contactId: string) {
   await guardChild(ctx, entityId);
-  await ctx.db.delete(entityContacts).where(and(eq(entityContacts.id, contactId), eq(entityContacts.entityId, entityId)));
+  await withTx(ctx, (tx) => tx.delete(entityContacts).where(and(eq(entityContacts.id, contactId), eq(entityContacts.entityId, entityId))));
   return getEntity(ctx, entityId);
 }
 
 export async function addAddress(ctx: ServiceContext, entityId: string, input: z.output<typeof addressInput>) {
   await guardChild(ctx, entityId);
-  await ctx.db.insert(entityAddresses).values({ entityId, ...input });
+  await withTx(ctx, (tx) => tx.insert(entityAddresses).values({ entityId, ...input }));
   return getEntity(ctx, entityId);
 }
 
 export async function updateAddress(ctx: ServiceContext, entityId: string, addressId: string, input: z.output<typeof addressInput>) {
   await guardChild(ctx, entityId);
-  const result = await ctx.db
-    .update(entityAddresses)
-    .set(input)
-    .where(and(eq(entityAddresses.id, addressId), eq(entityAddresses.entityId, entityId)));
+  const result = await withTx(ctx, (tx) =>
+    tx
+      .update(entityAddresses)
+      .set(input)
+      .where(and(eq(entityAddresses.id, addressId), eq(entityAddresses.entityId, entityId))),
+  );
   if (!result.rowCount) throw notFound();
   return getEntity(ctx, entityId);
 }
 
 export async function deleteAddress(ctx: ServiceContext, entityId: string, addressId: string) {
   await guardChild(ctx, entityId);
-  await ctx.db.delete(entityAddresses).where(and(eq(entityAddresses.id, addressId), eq(entityAddresses.entityId, entityId)));
+  await withTx(ctx, (tx) =>
+    tx.delete(entityAddresses).where(and(eq(entityAddresses.id, addressId), eq(entityAddresses.entityId, entityId))),
+  );
   return getEntity(ctx, entityId);
 }
 
 export async function addBankAccount(ctx: ServiceContext, entityId: string, input: z.output<typeof bankAccountInput>) {
   await guardChild(ctx, entityId);
-  await ctx.db.insert(entityBankAccounts).values({ entityId, ...input });
+  await withTx(ctx, (tx) => tx.insert(entityBankAccounts).values({ entityId, ...input }));
   return getEntity(ctx, entityId);
 }
 
@@ -277,23 +287,27 @@ export async function updateBankAccount(
   input: z.output<typeof bankAccountInput>,
 ) {
   await guardChild(ctx, entityId);
-  const result = await ctx.db
-    .update(entityBankAccounts)
-    .set(input)
-    .where(and(eq(entityBankAccounts.id, accountId), eq(entityBankAccounts.entityId, entityId)));
+  const result = await withTx(ctx, (tx) =>
+    tx
+      .update(entityBankAccounts)
+      .set(input)
+      .where(and(eq(entityBankAccounts.id, accountId), eq(entityBankAccounts.entityId, entityId))),
+  );
   if (!result.rowCount) throw notFound();
   return getEntity(ctx, entityId);
 }
 
 export async function deleteBankAccount(ctx: ServiceContext, entityId: string, accountId: string) {
   await guardChild(ctx, entityId);
-  await ctx.db.delete(entityBankAccounts).where(and(eq(entityBankAccounts.id, accountId), eq(entityBankAccounts.entityId, entityId)));
+  await withTx(ctx, (tx) =>
+    tx.delete(entityBankAccounts).where(and(eq(entityBankAccounts.id, accountId), eq(entityBankAccounts.entityId, entityId))),
+  );
   return getEntity(ctx, entityId);
 }
 
 export async function addPixKey(ctx: ServiceContext, entityId: string, input: z.output<typeof pixKeyInput>) {
   await guardChild(ctx, entityId);
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     const [existing] = await tx.select({ n: sql<number>`count(*)::int` }).from(entityPixKeys).where(eq(entityPixKeys.entityId, entityId));
     // A primeira chave já nasce principal.
     const isPrimary = input.isPrimary || (existing?.n ?? 0) === 0;
@@ -305,7 +319,7 @@ export async function addPixKey(ctx: ServiceContext, entityId: string, input: z.
 
 export async function updatePixKey(ctx: ServiceContext, entityId: string, keyId: string, input: z.output<typeof pixKeyInput>) {
   await guardChild(ctx, entityId);
-  await ctx.db.transaction(async (tx) => {
+  await withTx(ctx, async (tx) => {
     if (input.isPrimary) await tx.update(entityPixKeys).set({ isPrimary: false }).where(eq(entityPixKeys.entityId, entityId));
     const result = await tx
       .update(entityPixKeys)
@@ -318,21 +332,23 @@ export async function updatePixKey(ctx: ServiceContext, entityId: string, keyId:
 
 export async function deletePixKey(ctx: ServiceContext, entityId: string, keyId: string) {
   await guardChild(ctx, entityId);
-  await ctx.db.delete(entityPixKeys).where(and(eq(entityPixKeys.id, keyId), eq(entityPixKeys.entityId, entityId)));
+  await withTx(ctx, (tx) => tx.delete(entityPixKeys).where(and(eq(entityPixKeys.id, keyId), eq(entityPixKeys.entityId, entityId))));
   return getEntity(ctx, entityId);
 }
 
 export async function addLink(ctx: ServiceContext, entityId: string, input: z.output<typeof linkInput>) {
   await guardChild(ctx, entityId);
   await entityKind(ctx.db, input.relatedEntityId);
-  await ctx.db.insert(entityLinks).values({ entityId, ...input });
+  await withTx(ctx, (tx) => tx.insert(entityLinks).values({ entityId, ...input }));
   return getEntity(ctx, entityId);
 }
 
 export async function deleteLink(ctx: ServiceContext, entityId: string, linkId: string) {
   await guardChild(ctx, entityId);
-  await ctx.db
-    .delete(entityLinks)
-    .where(and(eq(entityLinks.id, linkId), or(eq(entityLinks.entityId, entityId), eq(entityLinks.relatedEntityId, entityId))));
+  await withTx(ctx, (tx) =>
+    tx
+      .delete(entityLinks)
+      .where(and(eq(entityLinks.id, linkId), or(eq(entityLinks.entityId, entityId), eq(entityLinks.relatedEntityId, entityId)))),
+  );
   return getEntity(ctx, entityId);
 }
