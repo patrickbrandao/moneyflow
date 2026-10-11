@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<?OFX OFXHEADER="200" VERSION="211" SECURITY="NONE" OLDFILEUID="NONE" NEWFILEUID="NONE"?>
+<OFX>
+  <SIGNONMSGSRSV1>
+    <SONRS>
+      <STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS>
+      <DTSERVER>20261031120000</DTSERVER>
+      <LANGUAGE>POR</LANGUAGE>
+    </SONRS>
+  </SIGNONMSGSRSV1>
+  <BANKMSGSRSV1>
+    <STMTTRNRS>
+      <TRNUID>2001</TRNUID>
+      <STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS>
+      <STMTRS>
+        <CURDEF>BRL</CURDEF>
+        <BANKACCTFROM>
+          <BANKID>077</BANKID>
+          <BRANCHID>0001</BRANCHID>
+          <ACCTID>12345-6</ACCTID>
+          <ACCTTYPE>CHECKING</ACCTTYPE>
+        </BANKACCTFROM>
+        <BANKTRANLIST>
+          <DTSTART>20261001</DTSTART>
+          <DTEND>20261031</DTEND>
+        <STMTTRN>
+          <TRNTYPE>DEBIT</TRNTYPE>
+          <DTPOSTED>20261003100000.000[-3:BRT]</DTPOSTED>
+          <TRNAMT>-59.90</TRNAMT>
+          <FITID>OFX2-0001</FITID>
+          <NAME>ASSINATURA STREAMING</NAME>
+          <MEMO>Assinatura mensal</MEMO>
+        </STMTTRN>
+        <STMTTRN>
+          <TRNTYPE>CREDIT</TRNTYPE>
+          <DTPOSTED>20261004100000.000[-3:BRT]</DTPOSTED>
+          <TRNAMT>1500.00</TRNAMT>
+          <FITID>OFX2-0002</FITID>
+          <NAME>PIX RECEBIDO</NAME>
+          <MEMO>Cliente Ômega</MEMO>
+        </STMTTRN>
+        <STMTTRN>
+          <TRNTYPE>DEBIT</TRNTYPE>
+          <DTPOSTED>20261008100000.000[-3:BRT]</DTPOSTED>
+          <TRNAMT>-230.15</TRNAMT>
+          <FITID>OFX2-0003</FITID>
+          <NAME>SUPERMERCADO</NAME>
+          <MEMO>Supermercado Bom Preço</MEMO>
+        </STMTTRN>
+        <STMTTRN>
+          <TRNTYPE>DEBIT</TRNTYPE>
+          <DTPOSTED>20261012100000.000[-3:BRT]</DTPOSTED>
+          <TRNAMT>-99.00</TRNAMT>
+          <FITID>OFX2-0004</FITID>
+          <NAME>INTERNET</NAME>
+          <MEMO>Provedor Fibra</MEMO>
+        </STMTTRN>
+        <STMTTRN>
+          <TRNTYPE>INT</TRNTYPE>
+          <DTPOSTED>20261018100000.000[-3:BRT]</DTPOSTED>
+          <TRNAMT>75.25</TRNAMT>
+          <FITID>OFX2-0005</FITID>
+          <NAME>RENDIMENTO</NAME>
+          <MEMO>Rendimento poupança</MEMO>
+        </STMTTRN>
+        <STMTTRN>
+          <TRNTYPE>DEBIT</TRNTYPE>
+          <DTPOSTED>20261022100000.000[-3:BRT]</DTPOSTED>
+          <TRNAMT>-400.00</TRNAMT>
+          <FITID>OFX2-0006</FITID>
+          <NAME>PIX ENVIADO</NAME>
+          <MEMO>José &amp; Filhos</MEMO>
+        </STMTTRN>
+        </BANKTRANLIST>
+        <LEDGERBAL>
+          <BALAMT>2786.20</BALAMT>
+          <DTASOF>20261031</DTASOF>
+        </LEDGERBAL>
+      </STMTRS>
+    </STMTTRNRS>
+  </BANKMSGSRSV1>
+</OFX>

@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- NF-e fictícia para testes: CNPJ, CPF e chave gerados, sem valor fiscal. -->
+<nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
+  <NFe xmlns="http://www.portalfiscal.inf.br/nfe">
+    <infNFe Id="NFe35261012345678000195550010000123451876543219" versao="4.00">
+      <ide>
+        <cUF>35</cUF>
+        <cNF>87654321</cNF>
+        <natOp>Venda de mercadoria</natOp>
+        <mod>55</mod>
+        <serie>1</serie>
+        <nNF>12345</nNF>
+        <dhEmi>2026-10-05T14:30:00-03:00</dhEmi>
+        <tpNF>1</tpNF>
+        <tpEmis>1</tpEmis>
+        <cDV>9</cDV>
+      </ide>
+      <emit>
+        <CNPJ>12345678000195</CNPJ>
+        <xNome>Móveis Exemplo &amp; Cia Ltda</xNome>
+        <xFant>Móveis Exemplo</xFant>
+        <enderEmit>
+          <xLgr>Rua das Flores</xLgr>
+          <nro>100</nro>
+          <xCpl>Sala 2</xCpl>
+          <xBairro>Centro</xBairro>
+          <cMun>3550308</cMun>
+          <xMun>São Paulo</xMun>
+          <UF>SP</UF>
+          <CEP>01001000</CEP>
+        </enderEmit>
+        <IE>123456789110</IE>
+        <CRT>3</CRT>
+      </emit>
+      <dest>
+        <CPF>12345678909</CPF>
+        <xNome>Fulano de Tal</xNome>
+      </dest>
+      <det nItem="1">
+        <prod>
+          <cProd>P001</cProd>
+          <xProd>Cadeira de escritório</xProd>
+          <NCM>94013000</NCM>
+          <CFOP>5102</CFOP>
+          <uCom>UN</uCom>
+          <qCom>2.0000</qCom>
+          <vUnCom>150.0000000000</vUnCom>
+          <vProd>300.00</vProd>
+        </prod>
+      </det>
+      <det nItem="2">
+        <prod>
+          <cProd>P002</cProd>
+          <xProd>Mesa dobrável</xProd>
+          <NCM>94036000</NCM>
+          <CFOP>5102</CFOP>
+          <uCom>UN</uCom>
+          <qCom>1.0000</qCom>
+          <vUnCom>89.9000000000</vUnCom>
+          <vProd>89.90</vProd>
+        </prod>
+      </det>
+      <det nItem="3">
+        <prod>
+          <cProd>P003</cProd>
+          <xProd><![CDATA[Cabo de rede <Cat6> (metro)]]></xProd>
+          <NCM>85444900</NCM>
+          <CFOP>5102</CFOP>
+          <uCom>M</uCom>
+          <qCom>3.5000</qCom>
+          <vUnCom>12.3400000000</vUnCom>
+          <vProd>43.19</vProd>
+        </prod>
+      </det>
+      <total>
+        <ICMSTot>
+          <vProd>433.09</vProd>
+          <vFrete>0.00</vFrete>
+          <vDesc>0.00</vDesc>
+          <vNF>433.09</vNF>
+        </ICMSTot>
+      </total>
+      <cobr>
+        <fat>
+          <nFat>12345</nFat>
+          <vOrig>433.09</vOrig>
+          <vLiq>433.09</vLiq>
+        </fat>
+        <dup>
+          <nDup>001</nDup>
+          <dVenc>2026-11-10</dVenc>
+          <vDup>216.55</vDup>
+        </dup>
+        <dup>
+          <nDup>002</nDup>
+          <dVenc>2026-12-10</dVenc>
+          <vDup>216.54</vDup>
+        </dup>
+      </cobr>
+    </infNFe>
+  </NFe>
+  <protNFe versao="4.00">
+    <infProt>
+      <tpAmb>2</tpAmb>
+      <chNFe>35261012345678000195550010000123451876543219</chNFe>
+      <dhRecbto>2026-10-05T14:31:10-03:00</dhRecbto>
+      <nProt>135260000012345</nProt>
+      <cStat>100</cStat>
+      <xMotivo>Autorizado o uso da NF-e</xMotivo>
+    </infProt>
+  </protNFe>
+</nfeProc>

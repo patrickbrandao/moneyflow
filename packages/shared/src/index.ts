@@ -1,10 +1,14 @@
 export * from './address';
+export * from './boleto';
+export * from './brcode';
 export * from './dates';
 export * from './documents';
 export { DB_CODE_MESSAGES, DB_CONSTRAINT_MESSAGES } from './i18n/errors';
 export { ptBR, ptBR as t, type Strings } from './i18n/pt-BR';
 export * from './money';
+export * from './parsers';
 export * from './pix';
+export * from './reconcile';
 export * from './recurrence';
 export * from './schemas';
 export type * from './types';
