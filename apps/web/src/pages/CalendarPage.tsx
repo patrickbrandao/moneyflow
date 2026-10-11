@@ -24,6 +24,7 @@ import {
 import { type ReactNode, useCallback, useMemo, useState } from 'react';
 import '../styles/calendar.css';
 import { useSearchParams } from 'react-router-dom';
+import { useAgentScreenContext } from '../agents/AgentsProvider';
 import { AuditHistory } from '../components/audit/AuditHistory';
 import { AgendaView } from '../components/calendar/AgendaView';
 import { CalendarGrid } from '../components/calendar/CalendarGrid';
@@ -60,6 +61,10 @@ export function CalendarPage() {
   const { from, to } = viewRange(view, anchor);
 
   const caixas = useApi<CaixaSummary[]>('/api/caixas');
+  useAgentScreenContext({
+    title: t.nav.calendar,
+    filters: { view, date: anchor, from, to, caixas: selected.join(',') || null, balance: balanceParam },
+  });
   const accounts = useApi<AccountRow[]>('/api/accounts');
   const itemsPath = `/api/calendar?from=${from}&to=${to}${selected.length ? `&caixaIds=${selected.join(',')}` : ''}`;
   const items = useApi<CalendarItem[]>(itemsPath);

@@ -1,4 +1,5 @@
 import {
+  type DocumentReadingDto,
   formatBRL,
   formatDate,
   formatDocument,
@@ -8,10 +9,10 @@ import {
   parseBrCode,
   t,
 } from '@moneyflow/shared';
-import { Barcode, FileCode2, ScanText, UserPlus, X } from 'lucide-react';
+import { Barcode, FileCode2, FileScan, Loader2, ScanText, Sparkles, UserPlus, X } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import '../../styles/attachments.css';
-import { api } from '../../lib/api';
+import { ApiError, api } from '../../lib/api';
 import { useAction } from '../../lib/hooks';
 import { upload } from '../../lib/upload';
 import { MAX_ATTACHMENT_BYTES } from '../attachments/AttachmentsPanel';
@@ -31,12 +32,14 @@ export type EntryPatch = {
   installments?: { count: number; amountCents: number };
 };
 
-type Source = 'boleto' | 'pix' | 'nfe';
+type Source = 'boleto' | 'pix' | 'nfe' | 'ai';
+
+const u = t.agentsUi.flows;
 
 /**
  * "Preencher a partir de" (spec 010): boleto (linha digitável, lida no
  * navegador), PIX copia-e-cola (pré-visualização local + busca da entidade na
- * API) e NF-e (upload do XML). A leitura por IA fica para a fase 4.
+ * API), NF-e (upload do XML) e documento lido por IA (PDF/imagem, fase 4).
  */
 export function EntrySources({
   direction,
@@ -50,8 +53,8 @@ export function EntrySources({
   onApply: (patch: EntryPatch) => void;
 }) {
   const [source, setSource] = useState<Source | null>(initial?.boletoBarcode ? 'boleto' : initial?.pixPayload ? 'pix' : null);
-  const sources: Source[] = allowNfe ? ['boleto', 'pix', 'nfe'] : ['boleto', 'pix'];
-  const icons: Record<Source, ReactNode> = { boleto: <Barcode />, pix: <ScanText />, nfe: <FileCode2 /> };
+  const sources: Source[] = allowNfe ? ['boleto', 'pix', 'nfe', 'ai'] : ['boleto', 'pix', 'ai'];
+  const icons: Record<Source, ReactNode> = { boleto: <Barcode />, pix: <ScanText />, nfe: <FileCode2 />, ai: <Sparkles /> };
 
   return (
     <div className="entry-box span-all">
@@ -66,19 +69,17 @@ export function EntrySources({
               aria-pressed={source === key}
               onClick={() => setSource(source === key ? null : key)}
             >
-              {icons[key]} {t.entry.sources[key]}
+              {icons[key]} {key === 'ai' ? u.documentSource : t.entry.sources[key]}
             </button>
           ))}
         </div>
-        <Button size="sm" variant="quiet" disabled title={t.entry.aiReaderHint}>
-          {t.entry.aiReader}
-        </Button>
       </div>
       {source && (
         <div className="entry-body">
           {source === 'boleto' && <BoletoSource initial={initial?.boletoBarcode ?? ''} onApply={onApply} />}
           {source === 'pix' && <PixSource initial={initial?.pixPayload ?? ''} onApply={onApply} />}
           {source === 'nfe' && <NfeSource direction={direction} onApply={onApply} />}
+          {source === 'ai' && <DocumentSource onApply={onApply} />}
         </div>
       )}
     </div>
@@ -396,6 +397,104 @@ function NfeSource({ direction, onApply }: { direction: 'payable' | 'receivable'
               )}
             </div>
           )}
+        </>
+      )}
+    </>
+  );
+}
+
+/** PDF/imagem lido por IA (POST /api/title-entry/document): pode levar até ~90 s; 501 = sem agente configurado. */
+function DocumentSource({ onApply }: { onApply: (patch: EntryPatch) => void }) {
+  const input = useRef<HTMLInputElement>(null);
+  const [reading, setReading] = useState<string | null>(null);
+  const [result, setResult] = useState<DocumentReadingDto | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function read(file: File) {
+    if (file.size > MAX_ATTACHMENT_BYTES) return setError(t.agentsUi.chat.attachmentTooLarge);
+    setReading(file.name);
+    setError(null);
+    setResult(null);
+    try {
+      const doc = await upload<DocumentReadingDto>('/api/title-entry/document', file);
+      setResult(doc);
+      const boleto = doc.boletoLine ? parseBoleto(doc.boletoLine) : null;
+      onApply({
+        ...(doc.entityId ? { entity: { id: doc.entityId, name: doc.entityName ?? '', document: doc.document ?? null } } : {}),
+        ...(doc.amountCents ? { amountCents: doc.amountCents } : {}),
+        ...(doc.dueDate ? { dueDate: doc.dueDate } : {}),
+        ...(doc.description ? { description: doc.description } : {}),
+        ...(boleto?.ok ? { boletoBarcode: boleto.barcode } : {}),
+        ...(doc.pixPayload ? { pixPayload: doc.pixPayload } : {}),
+      });
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 501 || err.code === 'document_reader_unavailable')) setError(u.documentUnavailable);
+      else setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReading(null);
+    }
+  }
+
+  return (
+    <>
+      <input
+        ref={input}
+        type="file"
+        accept="application/pdf,image/*"
+        hidden
+        aria-label={u.documentPick}
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) void read(file);
+          event.target.value = '';
+        }}
+      />
+      <p className="mb-2 text-[12px] text-muted">{u.documentHint}</p>
+      <Button size="sm" variant="ghost" disabled={reading !== null} onClick={() => input.current?.click()}>
+        {reading ? <Loader2 className="spin" /> : <FileScan />} {reading ?? u.documentPick}
+      </Button>
+      {reading && <p className="notice info mt-2">{u.documentReading}</p>}
+      {error && <p className="notice danger mt-2">{error}</p>}
+      {result && (
+        <>
+          <dl className="entry-preview">
+            <dt>{t.common.kind}</dt>
+            <dd>{u.documentKinds[result.kind] ?? result.kind}</dd>
+            {result.entityName && (
+              <>
+                <dt>{t.title.entity}</dt>
+                <dd>
+                  {result.entityName}
+                  {result.document && <span className="mono text-faint"> {formatDocument(result.document)}</span>}
+                </dd>
+              </>
+            )}
+            <dt>{t.title.amount}</dt>
+            <dd className="mono">{result.amountCents ? formatBRL(result.amountCents) : '—'}</dd>
+            <dt>{t.title.due}</dt>
+            <dd className="mono">{result.dueDate ? formatDate(result.dueDate) : '—'}</dd>
+            {result.description && (
+              <>
+                <dt>{t.common.description}</dt>
+                <dd>{result.description}</dd>
+              </>
+            )}
+            {result.boletoLine && (
+              <>
+                <dt>{t.entry.line}</dt>
+                <dd className="code-line">{result.boletoLine}</dd>
+              </>
+            )}
+          </dl>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px]">
+            <span className="text-muted">{u.documentRead}</span>
+            {result.entityName &&
+              (result.entityId ? (
+                <Badge tone="ok">{u.entityFound(result.entityName)}</Badge>
+              ) : (
+                <span className="text-muted">{u.entityNotFound(result.entityName)}</span>
+              ))}
+          </div>
         </>
       )}
     </>

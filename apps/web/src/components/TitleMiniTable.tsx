@@ -1,5 +1,6 @@
 import { formatDate, type TitleRow } from '@moneyflow/shared';
 import { Link } from 'react-router-dom';
+import { recordDragProps } from '../agents/records';
 import { titleLink } from '../lib/links';
 import { MirrorBadge, Money, SkelRows, TitleStatusBadge } from './domain';
 import { EmptyRow } from './ui';
@@ -23,7 +24,7 @@ export function TitleMiniTable({ rows, empty, showCaixa = true }: { rows: TitleR
           {!rows && <SkelRows cols={cols} rows={3} />}
           {rows && rows.length === 0 && <EmptyRow colSpan={cols}>{empty}</EmptyRow>}
           {rows?.map((title) => (
-            <tr key={title.id}>
+            <tr key={title.id} {...recordDragProps({ kind: 'title', id: title.id, label: title.description })}>
               <td className="mono text-xs">{formatDate(title.dueDate)}</td>
               <td>
                 <Link to={titleLink(title)} className="row-title hover:text-[var(--accent-soft)]">

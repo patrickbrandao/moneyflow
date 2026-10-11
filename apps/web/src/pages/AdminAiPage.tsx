@@ -1,0 +1,47 @@
+import { t } from '@moneyflow/shared';
+import { BarChart3, Bot, CircleDollarSign, Plug, Server } from 'lucide-react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { AgentsTab } from '../components/admin-ai/AgentsTab';
+import { McpTab } from '../components/admin-ai/McpTab';
+import { PricesTab } from '../components/admin-ai/PricesTab';
+import { ProvidersTab } from '../components/admin-ai/ProvidersTab';
+import { UsageTab } from '../components/admin-ai/UsageTab';
+import { PageHead } from '../components/domain';
+import { Tabs } from '../components/ui';
+import { useUser } from '../lib/auth';
+import { NotFoundPage } from './NotFoundPage';
+
+const a = t.agentsUi.admin;
+const TABS = ['providers', 'prices', 'agents', 'mcp', 'usage'] as const;
+type Tab = (typeof TABS)[number];
+
+/** Administração da IA (spec 011, só admin): provedores, preços, agentes, servidores MCP e uso. */
+export function AdminAiPage() {
+  const user = useUser();
+  const { tab: raw } = useParams();
+  const navigate = useNavigate();
+  const tab: Tab = (TABS as readonly string[]).includes(raw ?? '') ? (raw as Tab) : 'providers';
+  if (user.role !== 'admin') return <NotFoundPage />;
+
+  return (
+    <div className="page wide">
+      <PageHead title={a.title} sub={a.sub} />
+      <Tabs
+        value={tab}
+        onChange={(key) => navigate(key === 'providers' ? '/admin/ai' : `/admin/ai/${key}`)}
+        items={[
+          { key: 'providers', label: a.tabs.providers, icon: <Server /> },
+          { key: 'prices', label: a.tabs.prices, icon: <CircleDollarSign /> },
+          { key: 'agents', label: a.tabs.agents, icon: <Bot /> },
+          { key: 'mcp', label: a.tabs.mcp, icon: <Plug /> },
+          { key: 'usage', label: a.tabs.usage, icon: <BarChart3 /> },
+        ]}
+      />
+      {tab === 'providers' && <ProvidersTab />}
+      {tab === 'prices' && <PricesTab />}
+      {tab === 'agents' && <AgentsTab />}
+      {tab === 'mcp' && <McpTab />}
+      {tab === 'usage' && <UsageTab />}
+    </div>
+  );
+}

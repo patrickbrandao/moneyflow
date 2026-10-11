@@ -1,6 +1,9 @@
 import { ChevronRight, Moon, PanelLeftOpen, Search, Sun } from 'lucide-react';
-import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from 'react';
+import { type CSSProperties, createContext, type ReactNode, useContext, useEffect, useMemo, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { AgentSidePanel, usePanelColumn } from '../../agents/AgentSidePanel';
+import { AgentsMenu } from '../../agents/AgentsMenu';
+import { AgentWindowsLayer } from '../../agents/AgentWindows';
 import { chordShortcuts, matchLink, navigationFor } from '../../config/navigation';
 import { useUser } from '../../lib/auth';
 import { armChord, isChordKey, isTypingTarget, usePalette } from '../../lib/commands';
@@ -44,6 +47,8 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
   const [extra, setExtra] = useState<Crumb[]>([]);
   const { open: openPalette } = usePalette();
   const [theme, toggleTheme] = useTheme();
+  // Agente ancorado à direita: uma terceira coluna do grid (o palco encolhe).
+  const panelColumn = usePanelColumn();
 
   const sections = useMemo(() => navigationFor(user.role), [user.role]);
   const hit = matchLink(location.pathname, sections);
@@ -75,7 +80,10 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
 
   return (
     <CrumbContext.Provider value={setExtra}>
-      <div className={`shell${collapsed ? ' sidebar-collapsed' : ''}`}>
+      <div
+        className={`shell${collapsed ? ' sidebar-collapsed' : ''}${panelColumn ? ' has-agent-panel' : ''}`}
+        style={panelColumn ? ({ '--agent-panel-w': panelColumn } as CSSProperties) : undefined}
+      >
         <Sidebar open={menuOpen} onClose={() => setMenuOpen(false)} onCollapse={() => setCollapsed(true)} />
         {menuOpen && <div className="overlay" style={{ zIndex: 45 }} onClick={() => setMenuOpen(false)} />}
 
@@ -117,13 +125,16 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
           >
             {theme === 'dark' ? <Sun /> : <Moon />}
           </button>
+          <AgentsMenu />
           <Notifications />
         </header>
 
         <main className="main">
           <div className={`main-panel${stage ? ' stage' : ''}`}>{children ?? <Outlet />}</div>
         </main>
+        <AgentSidePanel />
       </div>
+      <AgentWindowsLayer />
       <CommandPalette />
     </CrumbContext.Provider>
   );

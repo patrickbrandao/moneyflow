@@ -1,5 +1,6 @@
 import {
   type CardOverview,
+  type ClassificationSuggestResult,
   formatDate,
   formatSignedBRL,
   type LineStatus,
@@ -7,18 +8,20 @@ import {
   type StatementLineRow,
   t,
 } from '@moneyflow/shared';
-import { ArrowLeft, Ban, Check, CheckCheck, Download, Link2, Plus, RefreshCw, RotateCcw, Tag, Undo2 } from 'lucide-react';
-import { type ReactNode, useState } from 'react';
+import { ArrowLeft, Ban, Check, CheckCheck, Download, Link2, Plus, RefreshCw, RotateCcw, Sparkles, Tag, Undo2, X } from 'lucide-react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction, useApi } from '../../lib/hooks';
 import { useParamState } from '../../lib/params';
 import { attachmentUrl } from '../../lib/upload';
 import { CategoryLabel, LoadError, Money, SkelRows } from '../domain';
+import { useToast } from '../Toast';
 import { Badge, Button, cx, EmptyRow, Skel, Tabs, type Tone } from '../ui';
 import { CreateModal, MatchModal } from './LineModals';
 
 const s = t.statements;
+const ai = t.agentsUi.flows;
 
 const STATUS_TONE: Record<LineStatus, Tone> = { matched: 'ok', suggested: 'accent', new: 'warn', ignored: 'outline' };
 
@@ -79,6 +82,15 @@ export function ImportDetail({
   const isCard = Boolean(data?.cardCaixaId);
   const canWrite = Boolean(data?.canWrite);
   const suggested = data?.lines.filter((l) => l.status === 'suggested') ?? [];
+  // Sugestões do agente (classificationSource 'agent'): aprovar vira classificação do usuário; descartar limpa.
+  const agentLines = data?.lines.filter((l) => l.classificationSource === 'agent') ?? [];
+  const suggestedIds = new Set(suggested.map((l) => l.id));
+  const agentIds = new Set(agentLines.map((l) => l.id));
+  const selectedSuggested = [...selected].filter((id) => suggestedIds.has(id));
+  const selectedAgent = [...selected].filter((id) => agentIds.has(id));
+  const toast = useToast();
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  useEffect(() => () => timers.current.forEach(clearTimeout), []);
 
   const changed = () => {
     void detail.reload();
@@ -98,7 +110,28 @@ export function ImportDetail({
     changed();
   }
 
-  const confirmAll = () => void confirmLines(selected.size ? [...selected] : suggested.map((l) => l.id));
+  const confirmAll = () => void confirmLines(selectedSuggested.length ? selectedSuggested : suggested.map((l) => l.id));
+
+  async function decideSuggestions(decision: 'approve' | 'reject') {
+    const ids = selectedAgent.length ? selectedAgent : [...agentIds];
+    if (ids.length === 0) return;
+    const result = await run(
+      () => api.post<{ updated: number }>('/api/statement-lines/suggestions', { lineIds: ids, decision }),
+      (r) => (decision === 'approve' ? ai.approved(r.updated) : ai.discarded(r.updated)),
+    );
+    if (!result) return;
+    setSelected((current) => new Set([...current].filter((id) => !ids.includes(id))));
+    changed();
+  }
+
+  async function aiSuggest() {
+    const result = await run(() => api.post<ClassificationSuggestResult>(`/api/statement-imports/${importId}/ai-suggest`));
+    if (!result) return;
+    if (!result.queued || result.lines === 0) return toast.success(ai.aiSuggestNothing);
+    toast.success(ai.aiSuggestQueued(result.lines));
+    // As sugestões chegam pelo worker: recarrega algumas vezes.
+    for (const ms of [5000, 12000, 25000]) timers.current.push(setTimeout(() => changed(), ms));
+  }
 
   useRegisterCommands(
     canWrite && suggested.length > 0
@@ -121,7 +154,7 @@ export function ImportDetail({
   for (const line of data?.lines ?? []) counts[line.status] = (counts[line.status] ?? 0) + 1;
   const status = filter ?? 'all';
   const lines = (data?.lines ?? []).filter((l) => status === 'all' || l.status === status);
-  const visibleSuggested = lines.filter((l) => l.status === 'suggested');
+  const visibleSuggested = lines.filter((l) => l.status === 'suggested' || l.classificationSource === 'agent');
   const allChecked = visibleSuggested.length > 0 && visibleSuggested.every((l) => selected.has(l.id));
   const failedById = new Map(failures.map((f) => [f.lineId, f.message]));
 
@@ -145,9 +178,15 @@ export function ImportDetail({
             <RefreshCw /> {s.rematch}
           </Button>
         )}
+        {canWrite && (
+          <Button variant="ghost" size="sm" onClick={() => void aiSuggest()} disabled={busy}>
+            <Sparkles /> {ai.aiSuggest}
+          </Button>
+        )}
         {canWrite && suggested.length > 0 && (
           <Button size="sm" onClick={confirmAll} disabled={busy}>
-            <CheckCheck /> {selected.size ? s.confirmSelected(selected.size) : `${s.confirmSuggested} (${suggested.length})`}
+            <CheckCheck />{' '}
+            {selectedSuggested.length ? s.confirmSelected(selectedSuggested.length) : `${s.confirmSuggested} (${suggested.length})`}
           </Button>
         )}
       </div>
@@ -202,6 +241,21 @@ export function ImportDetail({
         </div>
       )}
 
+      {canWrite && agentLines.length > 0 && (
+        <div className="notice info mb-3 flex flex-wrap items-center gap-2">
+          <Sparkles className="size-4 flex-none" />
+          <span className="min-w-0 flex-1">
+            <strong>{ai.agentSuggestions(agentLines.length)}</strong> · {ai.agentSuggestionsHint}
+          </span>
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void decideSuggestions('reject')}>
+            <X /> {ai.discardSuggestions(selectedAgent.length || agentLines.length)}
+          </Button>
+          <Button size="sm" disabled={busy} onClick={() => void decideSuggestions('approve')}>
+            <Check /> {ai.approveSuggestions(selectedAgent.length || agentLines.length)}
+          </Button>
+        </div>
+      )}
+
       <Tabs
         value={status}
         onChange={(key) => setFilter(key === 'all' ? null : key)}
@@ -244,7 +298,7 @@ export function ImportDetail({
               <tr key={line.id} className={cx(line.status === 'ignored' && 'is-off', selected.has(line.id) && 'is-selected')}>
                 {canWrite && (
                   <td>
-                    {line.status === 'suggested' && (
+                    {(line.status === 'suggested' || line.classificationSource === 'agent') && (
                       <input
                         type="checkbox"
                         aria-label={s.selectLine(line.description)}
@@ -284,7 +338,13 @@ export function ImportDetail({
                     <span className="rec-pair">
                       {line.entityName && <span className="text-[13px]">{line.entityName}</span>}
                       {line.categoryName && <CategoryLabel name={line.categoryName} slot={line.categoryColorSlot} />}
-                      {line.classificationSource && <span className="row-sub">{s.bySource[line.classificationSource]}</span>}
+                      {line.classificationSource === 'agent' ? (
+                        <span className="ai-tag">
+                          <Sparkles /> {s.bySource.agent}
+                        </span>
+                      ) : (
+                        line.classificationSource && <span className="row-sub">{s.bySource[line.classificationSource]}</span>
+                      )}
                     </span>
                   ) : (
                     <span className="text-faint text-xs">—</span>

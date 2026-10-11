@@ -2,6 +2,7 @@ import { ENTITY_KINDS, type EntitySummary, formatDocument, formatPixKey, type Pi
 import { Building2, Plus, Search, UserRound } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { recordDragProps } from '../agents/records';
 import { LoadError, PageHead, SkelRows } from '../components/domain';
 import { ExportMenu } from '../components/ExportMenu';
 import { EntityFormModal } from '../components/entity/EntityFormModal';
@@ -97,6 +98,7 @@ export function EntitiesPage() {
                   key={entity.id}
                   className={`cursor-pointer${entity.archivedAt ? ' is-off' : ''}`}
                   onClick={() => navigate(`/entities/${entity.id}`)}
+                  {...recordDragProps({ kind: 'entity', id: entity.id, label: entity.name })}
                 >
                   <td>
                     <span className="flex items-center gap-2">

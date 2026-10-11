@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useAgentScreenContext } from '../agents/AgentsProvider';
 import { CaixaFormModal } from '../components/CaixaFormModal';
 import { AccountsTab } from '../components/caixa/AccountsTab';
 import { MembersTab } from '../components/caixa/MembersTab';
@@ -45,6 +46,7 @@ export function CaixaPage() {
   const confirm = useConfirm();
   const { run } = useAction();
   useCrumbs(caixa ? [{ label: caixa.name }] : []);
+  useAgentScreenContext(caixa ? { caixaId: caixa.id, caixaName: caixa.name, title: caixa.name, filters: { tab } } : null);
 
   useRegisterCommands(
     caixa

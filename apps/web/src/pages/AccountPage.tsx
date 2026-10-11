@@ -2,6 +2,7 @@ import { t } from '@moneyflow/shared';
 import { KeyRound, UserRound, Wallet } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ApiTokensPanel } from '../components/account/ApiTokensPanel';
 import { RoleBadge } from '../components/domain';
 import { FormError } from '../components/forms';
 import { Avatar, Button, Field, Panel } from '../components/ui';
@@ -118,6 +119,7 @@ export function AccountPage() {
             </div>
           </form>
         </Panel>
+        <ApiTokensPanel />
       </div>
     </div>
   );

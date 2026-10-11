@@ -2,6 +2,7 @@ import { t } from '@moneyflow/shared';
 import { ArrowLeftRight, Building2, LogOut, Moon, UserRound, Wallet } from 'lucide-react';
 import { useEffect } from 'react';
 import { Route, Routes, useNavigate } from 'react-router-dom';
+import { AgentsProvider } from './agents/AgentsProvider';
 import { Layout } from './components/shell/Layout';
 import { ToastProvider } from './components/Toast';
 import { ConfirmProvider } from './components/ui';
@@ -10,6 +11,7 @@ import { useAuth } from './lib/auth';
 import { CommandProvider, useRegisterCommands } from './lib/commands';
 import { toggleTheme } from './lib/theme';
 import { AccountPage } from './pages/AccountPage';
+import { AdminAiPage } from './pages/AdminAiPage';
 import { AuditPage } from './pages/AuditPage';
 import { CaixaPage } from './pages/CaixaPage';
 import { CaixasPage } from './pages/CaixasPage';
@@ -54,30 +56,35 @@ function Console() {
   return (
     <CommandProvider>
       <GlobalCommands />
-      <Routes>
-        <Route element={<Layout />}>
-          <Route index element={<OverviewPage />} />
-          <Route path="caixas" element={<CaixasPage />} />
-          <Route path="caixas/:id" element={<CaixaPage />} />
-          <Route path="caixas/:id/:tab" element={<CaixaPage />} />
-          <Route path="entities" element={<EntitiesPage />} />
-          <Route path="entities/:id" element={<EntityPage />} />
-          <Route path="transfers" element={<TransfersPage />} />
-          <Route path="calendar" element={<CalendarPage />} />
-          <Route path="card-invoices/:id" element={<InvoicePage />} />
-          <Route path="reports" element={<ReportsPage />} />
-          <Route path="reports/:tab" element={<ReportsPage />} />
-          <Route path="messages" element={<MessagesPage />} />
-          <Route path="audit" element={<AuditPage />} />
-          <Route path="categories" element={<CategoriesPage />} />
-          <Route path="users" element={<UsersPage />} />
-          <Route path="account" element={<AccountPage />} />
-          <Route path="*" element={<NotFoundPage />} />
-        </Route>
-        <Route element={<Layout stage />}>
-          <Route path="flow" element={<FlowPage />} />
-        </Route>
-      </Routes>
+      {/* Janelas dos agentes: acima das rotas, para sobreviver à navegação. */}
+      <AgentsProvider>
+        <Routes>
+          <Route element={<Layout />}>
+            <Route index element={<OverviewPage />} />
+            <Route path="caixas" element={<CaixasPage />} />
+            <Route path="caixas/:id" element={<CaixaPage />} />
+            <Route path="caixas/:id/:tab" element={<CaixaPage />} />
+            <Route path="entities" element={<EntitiesPage />} />
+            <Route path="entities/:id" element={<EntityPage />} />
+            <Route path="transfers" element={<TransfersPage />} />
+            <Route path="calendar" element={<CalendarPage />} />
+            <Route path="card-invoices/:id" element={<InvoicePage />} />
+            <Route path="reports" element={<ReportsPage />} />
+            <Route path="reports/:tab" element={<ReportsPage />} />
+            <Route path="messages" element={<MessagesPage />} />
+            <Route path="audit" element={<AuditPage />} />
+            <Route path="categories" element={<CategoriesPage />} />
+            <Route path="users" element={<UsersPage />} />
+            <Route path="account" element={<AccountPage />} />
+            <Route path="admin/ai" element={<AdminAiPage />} />
+            <Route path="admin/ai/:tab" element={<AdminAiPage />} />
+            <Route path="*" element={<NotFoundPage />} />
+          </Route>
+          <Route element={<Layout stage />}>
+            <Route path="flow" element={<FlowPage />} />
+          </Route>
+        </Routes>
+      </AgentsProvider>
     </CommandProvider>
   );
 }

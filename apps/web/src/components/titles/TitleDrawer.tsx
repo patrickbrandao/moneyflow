@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { useAgentScreenContext } from '../../agents/AgentsProvider';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction, useApi } from '../../lib/hooks';
@@ -51,6 +52,15 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
   const navigate = useNavigate();
   const confirm = useConfirm();
   const { run } = useAction();
+  useAgentScreenContext(
+    title
+      ? {
+          caixaId: title.caixaId,
+          caixaName: title.caixaName,
+          record: { kind: 'title', id: title.id, label: title.description },
+        }
+      : null,
+  );
 
   useEffect(() => {
     const down = (event: KeyboardEvent) => {

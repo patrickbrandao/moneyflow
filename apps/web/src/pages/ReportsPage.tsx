@@ -12,6 +12,7 @@ import {
 import { Building2, ChartColumn, TrendingUp } from 'lucide-react';
 import { useMemo } from 'react';
 import { useLocation, useParams, useSearchParams } from 'react-router-dom';
+import { useAgentScreenContext } from '../agents/AgentsProvider';
 import { CaixaFilter } from '../components/CaixaFilter';
 import { LoadError, PageHead } from '../components/domain';
 import { ExportMenu } from '../components/ExportMenu';
@@ -52,6 +53,11 @@ export function ReportsPage() {
   const kind = params.get('kind') === 'income' ? 'income' : 'expense';
   const caixaIds = useMemo(() => (params.get('caixas') ?? '').split(',').filter(Boolean), [params]);
   const scope = params.get('scope'); // null = consolidado
+
+  useAgentScreenContext({
+    title: t.nav.reports,
+    filters: { report: tab, from, to, basis, kind, caixas: caixaIds.join(',') || null, scope },
+  });
 
   const qs = new URLSearchParams({ from, to, basis });
   if (caixaIds.length) qs.set('caixaIds', caixaIds.join(','));

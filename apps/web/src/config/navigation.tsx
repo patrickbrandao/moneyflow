@@ -1,12 +1,14 @@
 import { t } from '@moneyflow/shared';
 import {
   ArrowLeftRight,
+  Bot,
   Building2,
   CalendarDays,
   ChartColumn,
   History,
   LayoutGrid,
   Send,
+  ShieldCheck,
   Tags,
   UserRound,
   Users,
@@ -72,6 +74,14 @@ export const NAVIGATION: NavEntry[][] = [
     { kind: 'link', to: '/categories', label: t.nav.categories, icon: <Tags /> },
     { kind: 'link', to: '/users', label: t.nav.users, icon: <Users />, roles: ['admin'], shortcut: 'g u' },
     { kind: 'link', to: '/audit', label: t.nav.audit, icon: <History />, roles: ['admin'] },
+    {
+      kind: 'group',
+      id: 'admin',
+      label: t.nav.admin,
+      icon: <ShieldCheck />,
+      roles: ['admin'],
+      children: [{ kind: 'link', to: '/admin/ai', label: t.agentsUi.admin.nav, icon: <Bot />, roles: ['admin'] }],
+    },
     { kind: 'link', to: '/account', label: t.nav.account, icon: <UserRound /> },
   ],
 ];

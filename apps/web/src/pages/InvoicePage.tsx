@@ -16,6 +16,7 @@ import { useAction, useApi } from '../lib/hooks';
 import { caixaTab, invoiceLink } from '../lib/links';
 import { useParamState } from '../lib/params';
 import '../styles/card.css';
+import { useAgentScreenContext } from '../agents/AgentsProvider';
 
 /** Detalhe da fatura do cartão (spec 007): totais por pagadora, linhas até o recebedor final e as ações. */
 export function InvoicePage() {
@@ -42,6 +43,18 @@ export function InvoicePage() {
           { label: `${t.card.invoice} ${month}` },
         ]
       : [],
+  );
+
+  useAgentScreenContext(
+    invoice
+      ? {
+          title: `${invoice.cardName} · ${t.card.invoice} ${month}`,
+          caixaId: invoice.cardCaixaId,
+          caixaName: invoice.cardName,
+          record: { kind: 'invoice', id: invoice.id, label: `${t.card.invoice} ${month}` },
+          filters: payer ? { payerCaixaId: payer } : undefined,
+        }
+      : null,
   );
 
   const canClose = Boolean(invoice?.canWrite && invoice.status === 'open');

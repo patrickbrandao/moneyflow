@@ -1,6 +1,7 @@
 import { type CaixaSummary, t } from '@moneyflow/shared';
 import { CreditCard, Plus, Star, Wallet } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { recordDragProps } from '../agents/records';
 import { CaixaFormModal } from '../components/CaixaFormModal';
 import { LoadError, Money, PageHead, RoleBadge, SkelRows } from '../components/domain';
 import { Badge, Button, EmptyRow, Tabs } from '../components/ui';
@@ -70,7 +71,12 @@ export function CaixasPage() {
                 </EmptyRow>
               )}
               {data?.map((caixa) => (
-                <tr key={caixa.id} className="cursor-pointer" onClick={() => navigate(`/caixas/${caixa.id}`)}>
+                <tr
+                  key={caixa.id}
+                  className="cursor-pointer"
+                  onClick={() => navigate(`/caixas/${caixa.id}`)}
+                  {...recordDragProps({ kind: 'caixa', id: caixa.id, label: caixa.name })}
+                >
                   <td>
                     <span className="flex items-center gap-2">
                       {caixa.kind === 'credit_card' ? (

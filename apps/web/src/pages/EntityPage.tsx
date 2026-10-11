@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useAgentScreenContext } from '../agents/AgentsProvider';
 import { AttachmentsPanel } from '../components/attachments/AttachmentsPanel';
 import { AuditHistory } from '../components/audit/AuditHistory';
 import { CaixaFormModal } from '../components/CaixaFormModal';
@@ -53,6 +54,7 @@ export function EntityPage() {
   const { run } = useAction();
   const canEdit = user.canEditRegistry;
   useCrumbs(entity ? [{ label: entity.name }] : []);
+  useAgentScreenContext(entity ? { title: entity.name, record: { kind: 'entity', id: entity.id, label: entity.name } } : null);
 
   useRegisterCommands(
     entity && canEdit

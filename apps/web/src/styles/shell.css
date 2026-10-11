@@ -10,7 +10,8 @@
 
 .shell {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
+  /* 3ª coluna: o agente ancorado à direita (agents.css); 0 sem painel. */
+  grid-template-columns: 220px minmax(0, 1fr) var(--agent-panel-w, 0px);
   grid-template-rows: 56px minmax(0, 1fr);
   height: 100dvh;
   background: var(--bg-chrome);
@@ -238,7 +239,7 @@ img.avatar {
 
 /* ---- barra superior ---- */
 .topbar {
-  grid-column: 2;
+  grid-column: 2 / -1;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -1287,7 +1288,7 @@ img.avatar {
    `visibility` sai só no fim da animação, e tira a navegação do Tab. */
 @media (min-width: 901px) {
   .shell.sidebar-collapsed {
-    grid-template-columns: 0 minmax(0, 1fr);
+    grid-template-columns: 0 minmax(0, 1fr) var(--agent-panel-w, 0px);
   }
   .shell .sidebar {
     transition: visibility 0s;

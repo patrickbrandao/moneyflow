@@ -2,6 +2,7 @@ import { type CaixaDetail, formatDate, type TitleRow, t } from '@moneyflow/share
 import { CircleDollarSign, Paperclip, Plus, Search } from 'lucide-react';
 import { useState } from 'react';
 import '../../styles/attachments.css';
+import { recordDragProps } from '../../agents/records';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { titlesTable } from '../../lib/export-tables';
@@ -156,6 +157,7 @@ export function TitlesTab({
                     (row.status === 'canceled' || row.archivedAt) && 'is-off',
                   )}
                   onClick={() => setTitleId(row.id)}
+                  {...recordDragProps({ kind: 'title', id: row.id, label: row.description })}
                 >
                   <td className={cx('mono text-xs', row.overdue && 'text-danger')}>{formatDate(row.dueDate)}</td>
                   <td>
