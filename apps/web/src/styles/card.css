@@ -1,0 +1,99 @@
+/* ============================================================
+   Cartão de crédito (spec 007). Só tokens, sem sombra.
+   ============================================================ */
+
+.card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: -8px 0 14px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* saldo rolado e encargos destacados nas linhas da fatura */
+table.data tr.card-line.is-highlight td {
+  background: var(--warn-tint);
+}
+
+/* barra do limite usado */
+.card-meter {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--surface-3);
+  overflow: hidden;
+}
+.card-meter > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+/* comprometido por fatura futura */
+.card-bars {
+  display: grid;
+  gap: 8px;
+}
+.card-bars li {
+  display: grid;
+  grid-template-columns: 64px 1fr 110px;
+  align-items: center;
+  gap: 10px;
+}
+.card-bars li > :last-child {
+  text-align: right;
+}
+.card-bars .bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.card-bars .bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent-soft);
+  border-radius: 999px;
+}
+
+/* listas curtas da gaveta da compra */
+.card-mini-list {
+  display: grid;
+  gap: 6px;
+}
+.card-mini-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+/* encargos no pagamento da fatura */
+.card-charge-row {
+  display: grid;
+  grid-template-columns: auto 120px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+@media (max-width: 640px) {
+  .card-charge-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* resumo do cabeçalho da fatura */
+.invoice-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.invoice-facts b {
+  color: var(--text);
+  font-weight: 500;
+}

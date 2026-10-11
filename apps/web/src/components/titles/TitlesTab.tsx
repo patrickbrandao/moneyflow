@@ -1,6 +1,7 @@
 import { type CaixaDetail, formatDate, type TitleRow, t } from '@moneyflow/shared';
-import { CircleDollarSign, Plus, Search } from 'lucide-react';
+import { CircleDollarSign, Paperclip, Plus, Search } from 'lucide-react';
 import { useState } from 'react';
+import '../../styles/attachments.css';
 import { useRegisterCommands } from '../../lib/commands';
 import { useApi } from '../../lib/hooks';
 import { useParamState, useSetParams } from '../../lib/params';
@@ -147,6 +148,12 @@ export function TitlesTab({
                         <Badge mono className="ml-2">
                           {t.title.occurrenceOf(row.occurrence, row.installmentsTotal)}
                         </Badge>
+                      )}
+                      {row.attachmentCount > 0 && (
+                        <span className="clip-count" title={t.attachments.count(row.attachmentCount)}>
+                          <Paperclip aria-hidden />
+                          {row.attachmentCount}
+                        </span>
                       )}
                     </span>
                     <span className="row-sub">

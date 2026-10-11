@@ -49,6 +49,8 @@ export const entryStrings = {
   copyPix: 'Copiar PIX',
   nfeNumber: 'Número',
   nfeKey: 'Chave de acesso',
+  nfeRecipient: 'Destinatário',
+  nfeNumberSeries: (n: number, series: number) => `${n} / série ${series}`,
   nfeItems: 'Itens',
   nfeXml: 'Baixar XML',
   qty: 'Qtd.',

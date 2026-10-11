@@ -1,12 +1,30 @@
 import { formatBRL, formatDate, formatDateTime, type TitleDetail, t } from '@moneyflow/shared';
-import { Ban, Check, CircleDollarSign, Pencil, RotateCcw, ThumbsDown, Trash2, Undo2, Wallet, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import {
+  Ban,
+  CalendarDays,
+  Check,
+  CircleDollarSign,
+  CreditCard,
+  History,
+  Paperclip,
+  Pencil,
+  RotateCcw,
+  ThumbsDown,
+  Trash2,
+  Undo2,
+  Wallet,
+  X,
+} from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction, useApi } from '../../lib/hooks';
-import { titleLink } from '../../lib/links';
+import { invoiceLink, titleLink } from '../../lib/links';
+import { AttachmentsPanel } from '../attachments/AttachmentsPanel';
+import { AuditHistory } from '../audit/AuditHistory';
 import { CategoryLabel, LoadError, MirrorBadge, Money, TitleStatusBadge } from '../domain';
+import { TitleEntryInfo } from '../entry/TitleEntryInfo';
 import { CategorySelect, ModalActions } from '../forms';
 import { Badge, Button, Field, Modal, Skel, useConfirm } from '../ui';
 import { ReverseModal, SetAccountModal, SettlementModal } from './SettlementModal';
@@ -26,7 +44,11 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
     | { kind: 'dispute' }
     | { kind: 'reverse'; id: string; hasTransfer: boolean }
     | { kind: 'account'; id: string }
+    | { kind: 'history'; table: 'titles' | 'settlements'; id: string }
   >(null);
+  const [attachmentCount, setAttachmentCount] = useState<number | null>(null);
+  const pickFile = useRef<(() => void) | null>(null);
+  const navigate = useNavigate();
   const confirm = useConfirm();
   const { run } = useAction();
 
@@ -46,6 +68,8 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
 
   const canSettle = Boolean(title?.canWrite && title.status !== 'canceled' && title.openCents > 0 && !title.archivedAt);
   const awaiting = title?.mirrorStatus === 'pending' || title?.mirrorStatus === 'disputed';
+  /** Título de fatura de cartão: valor, vencimento, cancelamento e exclusão mudam pela fatura. */
+  const isInvoice = Boolean(title?.cardInvoiceId);
 
   async function cancel() {
     if (!title) return;
@@ -113,6 +137,32 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                 },
               ]
             : []),
+          {
+            id: 't-history',
+            label: t.audit.titleHistory,
+            group: 'Recurso' as const,
+            icon: <History />,
+            run: () => setModal({ kind: 'history', table: 'titles', id: title.id }),
+          },
+          ...(title.canWrite
+            ? [
+                {
+                  id: 't-attach',
+                  label: `${t.attachments.attach}: ${title.description}`,
+                  group: 'Recurso' as const,
+                  icon: <Paperclip />,
+                  run: () => pickFile.current?.(),
+                },
+              ]
+            : []),
+          {
+            id: 't-calendar',
+            label: t.calendar.openCalendarAt,
+            group: 'Ir para' as const,
+            icon: <CalendarDays />,
+            keywords: [t.calendar.openCalendar],
+            run: () => navigate(`/calendar?date=${title.dueDate}&caixas=${title.caixaId}`),
+          },
           ...(title.canWrite && awaiting
             ? [
                 {
@@ -126,7 +176,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
             : []),
         ]
       : [],
-    [title, canSettle, awaiting],
+    [title, canSettle, awaiting, navigate],
   );
 
   return (
@@ -172,7 +222,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                 <Button size="sm" variant="ghost" onClick={() => setModal({ kind: 'edit' })}>
                   <Pencil /> {t.common.edit}
                 </Button>
-                {title.status === 'canceled' ? (
+                {isInvoice ? null : title.status === 'canceled' ? (
                   <Button size="sm" variant="ghost" onClick={() => void reopen()}>
                     <RotateCcw /> Reabrir
                   </Button>
@@ -185,6 +235,17 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                 )}
               </div>
             )}
+
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Button size="sm" variant="quiet" onClick={() => setModal({ kind: 'history', table: 'titles', id: title.id })}>
+                <History /> {t.audit.history}
+              </Button>
+              {title.cardInvoiceId && (
+                <Link className="btn btn-quiet btn-sm" to={invoiceLink(title.cardInvoiceId, title.caixaId)}>
+                  <CreditCard /> {t.entry.cardInvoice}
+                </Link>
+              )}
+            </div>
 
             {awaiting && title.canWrite && (
               <div className="sec">
@@ -279,6 +340,8 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
               </div>
             )}
 
+            <TitleEntryInfo title={title} />
+
             <div className="sec">
               <p className="eyebrow">{t.settlement.history}</p>
               {title.settlements.length === 0 && <p className="text-[13px] text-faint">Nenhuma baixa.</p>}
@@ -306,19 +369,29 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                           {formatDateTime(s.reversedAt)} · {s.reversalReason}
                         </div>
                       )}
+                      <AttachmentsPanel target="settlement" targetId={s.id} canWrite={title.canWrite} compact />
                     </div>
-                    {title.canWrite && !s.reversedAt && (
-                      <span className="row-actions">
-                        {!s.financialAccountId && s.cashCents !== 0 && (
-                          <button
-                            type="button"
-                            className="row-action"
-                            title={t.settlement.setAccount}
-                            onClick={() => setModal({ kind: 'account', id: s.id })}
-                          >
-                            <Wallet />
-                          </button>
-                        )}
+                    <span className="row-actions">
+                      {title.canWrite && !s.reversedAt && !s.financialAccountId && s.cashCents !== 0 && (
+                        <button
+                          type="button"
+                          className="row-action"
+                          title={t.settlement.setAccount}
+                          onClick={() => setModal({ kind: 'account', id: s.id })}
+                        >
+                          <Wallet />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="row-action"
+                        title={t.audit.settlementHistory}
+                        aria-label={t.audit.settlementHistory}
+                        onClick={() => setModal({ kind: 'history', table: 'settlements', id: s.id })}
+                      >
+                        <History />
+                      </button>
+                      {title.canWrite && !s.reversedAt && (
                         <button
                           type="button"
                           className="row-action danger"
@@ -327,14 +400,32 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                         >
                           <Undo2 />
                         </button>
-                      </span>
-                    )}
+                      )}
+                    </span>
                   </div>
                 ))}
               </div>
             </div>
 
-            {title.canWrite && !title.archivedAt && (
+            <div className="sec">
+              <p className="eyebrow">
+                {t.attachments.title}
+                {attachmentCount ? ` · ${attachmentCount}` : ''}
+              </p>
+              <AttachmentsPanel
+                target="title"
+                targetId={title.id}
+                canWrite={title.canWrite}
+                onCountChange={(count) => {
+                  // Mudou com a gaveta aberta: a lista atualiza o clipe.
+                  if (attachmentCount !== null && attachmentCount !== count) onChanged();
+                  setAttachmentCount(count);
+                }}
+                pickerRef={pickFile}
+              />
+            </div>
+
+            {title.canWrite && !title.archivedAt && !isInvoice && (
               <div className="sec flex flex-wrap gap-2">
                 <Button size="sm" variant="danger" onClick={() => void remove('this')}>
                   <Trash2 /> {title.recurrenceRuleId ? t.title.scopeThis : t.common.delete}
@@ -359,6 +450,14 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
       )}
       {title && modal?.kind === 'account' && (
         <SetAccountModal settlementId={modal.id} caixaId={title.caixaId} onClose={() => setModal(null)} onSaved={saved} />
+      )}
+      {modal?.kind === 'history' && (
+        <AuditHistory
+          table={modal.table}
+          recordId={modal.id}
+          title={modal.table === 'titles' ? t.audit.titleHistory : t.audit.settlementHistory}
+          onClose={() => setModal(null)}
+        />
       )}
       {title && (modal?.kind === 'accept' || modal?.kind === 'dispute') && (
         <MirrorDecisionModal title={title} mode={modal.kind} onClose={() => setModal(null)} onSaved={saved} />

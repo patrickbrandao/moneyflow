@@ -1,5 +1,5 @@
 import { type CaixaSummary, t } from '@moneyflow/shared';
-import { Plus, Star, Wallet } from 'lucide-react';
+import { CreditCard, Plus, Star, Wallet } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { CaixaFormModal } from '../components/CaixaFormModal';
 import { LoadError, Money, PageHead, RoleBadge, SkelRows } from '../components/domain';
@@ -73,8 +73,13 @@ export function CaixasPage() {
                 <tr key={caixa.id} className="cursor-pointer" onClick={() => navigate(`/caixas/${caixa.id}`)}>
                   <td>
                     <span className="flex items-center gap-2">
-                      <Wallet className="size-4 text-muted" />
+                      {caixa.kind === 'credit_card' ? (
+                        <CreditCard className="size-4 text-muted" aria-label={t.caixa.kinds.credit_card} />
+                      ) : (
+                        <Wallet className="size-4 text-muted" />
+                      )}
                       <span className="row-title">{caixa.name}</span>
+                      {caixa.kind === 'credit_card' && <CardEnding last4={caixa.cardLast4} />}
                       {caixa.isPrimary && (
                         <Badge tone="outline" title={t.caixa.isPrimary}>
                           <Star /> {t.common.primary}
@@ -113,5 +118,14 @@ export function CaixasPage() {
         />
       )}
     </div>
+  );
+}
+
+/** Final do cartão (vem no resumo da caixa). */
+function CardEnding({ last4 }: { last4: string | null }) {
+  return (
+    <Badge tone="outline" mono title={t.caixa.kinds.credit_card}>
+      {last4 ? t.card.endingIn(last4) : t.caixa.kinds.credit_card}
+    </Badge>
   );
 }

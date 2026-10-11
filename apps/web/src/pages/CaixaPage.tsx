@@ -1,12 +1,27 @@
 import { type CaixaDetail, t } from '@moneyflow/shared';
-import { Archive, ArchiveRestore, ArrowDownLeft, ArrowUpRight, FileText, Landmark, Pencil, Star, Users } from 'lucide-react';
+import {
+  Archive,
+  ArchiveRestore,
+  ArrowDownLeft,
+  ArrowUpRight,
+  CalendarCheck,
+  FileText,
+  Landmark,
+  ListChecks,
+  Pencil,
+  Star,
+  Users,
+} from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { CaixaFormModal } from '../components/CaixaFormModal';
 import { AccountsTab } from '../components/caixa/AccountsTab';
 import { MembersTab } from '../components/caixa/MembersTab';
 import { StatementTab } from '../components/caixa/StatementTab';
+import { CardCaixaView } from '../components/card/CardCaixaView';
+import { ClosingTab } from '../components/closing/ClosingTab';
 import { LoadError, Money, PageHead, RoleBadge } from '../components/domain';
+import { ReconciliationTab } from '../components/reconciliation/ReconciliationTab';
 import { useCrumbs } from '../components/shell/Layout';
 import { TitlesTab } from '../components/titles/TitlesTab';
 import { Badge, Button, Skel, Tabs, useConfirm } from '../components/ui';
@@ -16,7 +31,7 @@ import { useRegisterCommands } from '../lib/commands';
 import { useAction, useApi } from '../lib/hooks';
 import { caixaTab } from '../lib/links';
 
-const TABS = ['payables', 'receivables', 'accounts', 'statement', 'members'] as const;
+const TABS = ['payables', 'receivables', 'accounts', 'statement', 'reconciliation', 'closing', 'members'] as const;
 type Tab = (typeof TABS)[number];
 
 /** Detalhe da caixa: títulos a pagar e a receber, contas, extrato e membros. */
@@ -155,59 +170,74 @@ export function CaixaPage() {
         </div>
       </PageHead>
 
-      <div className="stat-tiles">
-        <Link to={caixaTab(caixa.id, 'accounts')} className="stat-tile">
-          <div className="v">
-            <Money cents={caixa.balanceCents} />
+      {caixa.kind === 'credit_card' ? (
+        <CardCaixaView caixa={caixa} tab={rawTab} onChanged={refresh} />
+      ) : (
+        <>
+          <div className="stat-tiles">
+            <Link to={caixaTab(caixa.id, 'accounts')} className="stat-tile">
+              <div className="v">
+                <Money cents={caixa.balanceCents} />
+              </div>
+              <div className="k">
+                <Landmark /> {t.caixa.balance.toLowerCase()}
+              </div>
+            </Link>
+            <Link to={caixaTab(caixa.id, 'receivables')} className="stat-tile">
+              <div className="v">
+                <Money cents={caixa.receivableOpenCents} />
+              </div>
+              <div className="k">
+                <ArrowDownLeft /> {t.caixa.receivableOpen.toLowerCase()}
+              </div>
+            </Link>
+            <Link to={caixaTab(caixa.id, 'payables')} className="stat-tile">
+              <div className="v">
+                <Money cents={caixa.payableOpenCents} />
+              </div>
+              <div className="k">
+                <ArrowUpRight /> {t.caixa.payableOpen.toLowerCase()}
+              </div>
+            </Link>
+            <Link to={`${caixaTab(caixa.id, 'payables')}?status=overdue`} className="stat-tile">
+              <div className="v">{caixa.overdueCount}</div>
+              <div className="k">vencidos · {<Money cents={caixa.overdueCents} />}</div>
+            </Link>
           </div>
-          <div className="k">
-            <Landmark /> {t.caixa.balance.toLowerCase()}
-          </div>
-        </Link>
-        <Link to={caixaTab(caixa.id, 'receivables')} className="stat-tile">
-          <div className="v">
-            <Money cents={caixa.receivableOpenCents} />
-          </div>
-          <div className="k">
-            <ArrowDownLeft /> {t.caixa.receivableOpen.toLowerCase()}
-          </div>
-        </Link>
-        <Link to={caixaTab(caixa.id, 'payables')} className="stat-tile">
-          <div className="v">
-            <Money cents={caixa.payableOpenCents} />
-          </div>
-          <div className="k">
-            <ArrowUpRight /> {t.caixa.payableOpen.toLowerCase()}
-          </div>
-        </Link>
-        <Link to={`${caixaTab(caixa.id, 'payables')}?status=overdue`} className="stat-tile">
-          <div className="v">{caixa.overdueCount}</div>
-          <div className="k">vencidos · {<Money cents={caixa.overdueCents} />}</div>
-        </Link>
-      </div>
 
-      <Tabs
-        value={tab}
-        items={[
-          { key: 'payables', label: t.caixa.payables, icon: <ArrowUpRight />, to: caixaTab(caixa.id, 'payables') },
-          { key: 'receivables', label: t.caixa.receivables, icon: <ArrowDownLeft />, to: caixaTab(caixa.id, 'receivables') },
-          {
-            key: 'accounts',
-            label: t.caixa.accounts,
-            icon: <Landmark />,
-            count: caixa.accounts.filter((a) => !a.archivedAt).length,
-            to: caixaTab(caixa.id, 'accounts'),
-          },
-          { key: 'statement', label: t.caixa.statement, icon: <FileText />, to: caixaTab(caixa.id, 'statement') },
-          { key: 'members', label: t.caixa.members, icon: <Users />, to: caixaTab(caixa.id, 'members') },
-        ]}
-      />
+          <Tabs
+            value={tab}
+            items={[
+              { key: 'payables', label: t.caixa.payables, icon: <ArrowUpRight />, to: caixaTab(caixa.id, 'payables') },
+              { key: 'receivables', label: t.caixa.receivables, icon: <ArrowDownLeft />, to: caixaTab(caixa.id, 'receivables') },
+              {
+                key: 'accounts',
+                label: t.caixa.accounts,
+                icon: <Landmark />,
+                count: caixa.accounts.filter((a) => !a.archivedAt).length,
+                to: caixaTab(caixa.id, 'accounts'),
+              },
+              { key: 'statement', label: t.caixa.statement, icon: <FileText />, to: caixaTab(caixa.id, 'statement') },
+              {
+                key: 'reconciliation',
+                label: t.caixa.reconciliation,
+                icon: <ListChecks />,
+                to: caixaTab(caixa.id, 'reconciliation'),
+              },
+              { key: 'closing', label: t.caixa.closing, icon: <CalendarCheck />, to: caixaTab(caixa.id, 'closing') },
+              { key: 'members', label: t.caixa.members, icon: <Users />, to: caixaTab(caixa.id, 'members') },
+            ]}
+          />
 
-      {tab === 'payables' && <TitlesTab key="p" caixa={caixa} direction="payable" onChanged={refresh} />}
-      {tab === 'receivables' && <TitlesTab key="r" caixa={caixa} direction="receivable" onChanged={refresh} />}
-      {tab === 'accounts' && <AccountsTab caixa={caixa} onChanged={refresh} />}
-      {tab === 'statement' && <StatementTab caixa={caixa} onChanged={refresh} />}
-      {tab === 'members' && <MembersTab caixa={caixa} />}
+          {tab === 'payables' && <TitlesTab key="p" caixa={caixa} direction="payable" onChanged={refresh} />}
+          {tab === 'receivables' && <TitlesTab key="r" caixa={caixa} direction="receivable" onChanged={refresh} />}
+          {tab === 'accounts' && <AccountsTab caixa={caixa} onChanged={refresh} />}
+          {tab === 'statement' && <StatementTab caixa={caixa} onChanged={refresh} />}
+          {tab === 'reconciliation' && <ReconciliationTab caixa={caixa} onChanged={refresh} />}
+          {tab === 'closing' && <ClosingTab caixa={caixa} />}
+          {tab === 'members' && <MembersTab caixa={caixa} />}
+        </>
+      )}
 
       {editing && (
         <CaixaFormModal

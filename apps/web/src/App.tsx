@@ -10,11 +10,14 @@ import { useAuth } from './lib/auth';
 import { CommandProvider, useRegisterCommands } from './lib/commands';
 import { toggleTheme } from './lib/theme';
 import { AccountPage } from './pages/AccountPage';
+import { AuditPage } from './pages/AuditPage';
 import { CaixaPage } from './pages/CaixaPage';
 import { CaixasPage } from './pages/CaixasPage';
+import { CalendarPage } from './pages/CalendarPage';
 import { CategoriesPage } from './pages/CategoriesPage';
 import { EntitiesPage } from './pages/EntitiesPage';
 import { EntityPage } from './pages/EntityPage';
+import { InvoicePage } from './pages/InvoicePage';
 import { LoginPage } from './pages/LoginPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { OverviewPage } from './pages/OverviewPage';
@@ -57,6 +60,9 @@ function Console() {
           <Route path="entities" element={<EntitiesPage />} />
           <Route path="entities/:id" element={<EntityPage />} />
           <Route path="transfers" element={<TransfersPage />} />
+          <Route path="calendar" element={<CalendarPage />} />
+          <Route path="card-invoices/:id" element={<InvoicePage />} />
+          <Route path="audit" element={<AuditPage />} />
           <Route path="categories" element={<CategoriesPage />} />
           <Route path="users" element={<UsersPage />} />
           <Route path="account" element={<AccountPage />} />

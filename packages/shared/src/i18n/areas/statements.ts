@@ -45,6 +45,7 @@ export const statementsStrings = {
   invoice: 'Fatura',
   invoiceAuto: 'Pela data de cada lançamento',
   invoiceHint: 'Opcional: amarra todas as linhas a esta fatura.',
+  invoiceStatuses: { open: 'aberta', closed: 'fechada', paid: 'paga' } as Record<string, string>,
   doImport: 'Importar',
   imported: (lines: number, skipped: number) =>
     `${lines} linha(s) importada(s)${skipped ? `; ${skipped} já existia(m) e ficou(aram) de fora` : ''}.`,
@@ -58,6 +59,8 @@ export const statementsStrings = {
   newMapping: 'Novo mapeamento',
   mappingName: 'Nome do mapeamento',
   mappingNamePlaceholder: 'Ex.: CSV do banco',
+  defaultMappingName: 'CSV do banco',
+  defaultTag: 'padrão',
   isDefault: 'Padrão desta conta',
   isDefaultCard: 'Padrão deste cartão',
   delimiter: 'Separador',

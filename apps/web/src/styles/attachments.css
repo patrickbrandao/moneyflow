@@ -1,0 +1,207 @@
+/* Anexos, histórico (auditoria) e entrada de títulos. Só tokens. */
+
+.att-panel {
+  position: relative;
+  border-radius: var(--radius-surface);
+}
+.att-panel.dragging {
+  outline: 1px dashed var(--accent-soft);
+  outline-offset: 4px;
+  background: var(--accent-tint);
+}
+.att-drop {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--accent-soft);
+  pointer-events: none;
+}
+.att-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.att-row svg.att-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--text-muted);
+}
+.att-row .att-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text);
+}
+.att-row .att-meta {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.att-compact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+.att-compact a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  color: var(--text-dim);
+}
+.att-compact a span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.att-compact svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+.att-compact .att-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.att-compact .att-add:hover,
+.att-compact a:hover {
+  color: var(--accent-soft);
+}
+.clip-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+.clip-count svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* ---- auditoria ---- */
+.audit-list {
+  display: grid;
+  gap: 10px;
+}
+.audit-entry {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-surface);
+  background: var(--bg-sunken);
+  padding: 10px 12px;
+}
+.audit-entry .head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.audit-diff {
+  width: 100%;
+  margin-top: 8px;
+  border-collapse: collapse;
+  font-size: 12px;
+  table-layout: fixed;
+}
+.audit-diff th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-faint);
+  padding: 2px 8px 4px 0;
+}
+.audit-diff td {
+  padding: 3px 8px 3px 0;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+}
+.audit-diff td.col {
+  color: var(--text-muted);
+  width: 30%;
+}
+.audit-diff td.old {
+  color: var(--text-faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--border-strong);
+}
+.audit-diff td.new {
+  color: var(--text);
+}
+.audit-row-detail td {
+  background: var(--bg-sunken);
+}
+
+/* ---- entrada de títulos ---- */
+.entry-box {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-surface);
+  background: var(--bg-sunken);
+  padding: 10px 12px;
+}
+.entry-box .entry-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.entry-box .entry-body {
+  margin-top: 10px;
+}
+.entry-preview {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.entry-preview dt {
+  color: var(--text-faint);
+}
+.entry-preview dd {
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.nfe-items {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.nfe-items th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-faint);
+  padding: 2px 6px 4px 0;
+}
+.nfe-items td {
+  padding: 3px 6px 3px 0;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  vertical-align: top;
+}
+.nfe-items .num {
+  text-align: right;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+.code-line {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}

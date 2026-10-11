@@ -4,9 +4,11 @@ import {
   ArchiveRestore,
   Building2,
   Contact,
+  History,
   Landmark,
   Link2,
   MapPin,
+  Paperclip,
   Pencil,
   Plus,
   QrCode,
@@ -17,6 +19,8 @@ import {
 } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { AttachmentsPanel } from '../components/attachments/AttachmentsPanel';
+import { AuditHistory } from '../components/audit/AuditHistory';
 import { CaixaFormModal } from '../components/CaixaFormModal';
 import { LoadError, PageHead } from '../components/domain';
 import { AddressModal, BankAccountModal, ContactModal, LinkModal, PixKeyModal } from '../components/entity/ChildModals';
@@ -35,7 +39,8 @@ type Editing =
   | { kind: 'address'; item?: EntityDetail['addresses'][number] }
   | { kind: 'bank'; item?: EntityDetail['bankAccounts'][number] }
   | { kind: 'link' }
-  | { kind: 'caixa' };
+  | { kind: 'caixa' }
+  | { kind: 'history' };
 
 /** Detalhe da entidade: PIX (com copiar), contatos, endereços, dados bancários, vínculos e caixas. */
 export function EntityPage() {
@@ -157,22 +162,27 @@ export function EntityPage() {
           </>
         }
         actions={
-          canEdit && (
-            <>
-              <Button variant="ghost" onClick={() => setEditing({ kind: 'entity' })}>
-                <Pencil /> {t.common.edit}
-              </Button>
-              {entity.archivedAt ? (
-                <Button variant="ghost" onClick={() => void restore()}>
-                  <ArchiveRestore /> {t.common.restore}
+          <>
+            <Button variant="quiet" onClick={() => setEditing({ kind: 'history' })}>
+              <History /> {t.audit.history}
+            </Button>
+            {canEdit && (
+              <>
+                <Button variant="ghost" onClick={() => setEditing({ kind: 'entity' })}>
+                  <Pencil /> {t.common.edit}
                 </Button>
-              ) : (
-                <Button variant="ghost" onClick={() => void archive()}>
-                  <Archive /> {t.common.delete}
-                </Button>
-              )}
-            </>
-          )
+                {entity.archivedAt ? (
+                  <Button variant="ghost" onClick={() => void restore()}>
+                    <ArchiveRestore /> {t.common.restore}
+                  </Button>
+                ) : (
+                  <Button variant="ghost" onClick={() => void archive()}>
+                    <Archive /> {t.common.delete}
+                  </Button>
+                )}
+              </>
+            )}
+          </>
         }
       >
         <div className="mt-2 flex flex-wrap gap-2">
@@ -320,6 +330,10 @@ export function EntityPage() {
             ))}
           </Items>
         </Panel>
+
+        <Panel title={t.attachments.title} icon={<Paperclip />}>
+          <AttachmentsPanel target="entity" targetId={entity.id} canWrite={canEdit} />
+        </Panel>
       </div>
 
       {editing?.kind === 'entity' && <EntityFormModal entity={entity} onClose={() => setEditing(null)} onSaved={saved} />}
@@ -327,6 +341,9 @@ export function EntityPage() {
       {editing?.kind === 'contact' && <ContactModal entityId={id} item={editing.item} onClose={() => setEditing(null)} onSaved={saved} />}
       {editing?.kind === 'address' && <AddressModal entityId={id} item={editing.item} onClose={() => setEditing(null)} onSaved={saved} />}
       {editing?.kind === 'bank' && <BankAccountModal entityId={id} item={editing.item} onClose={() => setEditing(null)} onSaved={saved} />}
+      {editing?.kind === 'history' && (
+        <AuditHistory table="entities" recordId={entity.id} title={t.audit.entityHistory} onClose={() => setEditing(null)} />
+      )}
       {editing?.kind === 'link' && <LinkModal entityId={id} onClose={() => setEditing(null)} onSaved={saved} />}
       {editing?.kind === 'caixa' && (
         <CaixaFormModal

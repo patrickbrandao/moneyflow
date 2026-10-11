@@ -1,6 +1,7 @@
 import {
   type EntityDetail,
   FREQUENCIES,
+  formatCents,
   type SeriesInput,
   type TitleCreateInput,
   type TitleDetail,
@@ -8,11 +9,12 @@ import {
   t,
   todayIso,
 } from '@moneyflow/shared';
-import { type FormEvent, useEffect, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { canWriteCaixa } from '../../lib/access';
 import { api } from '../../lib/api';
 import { useUser } from '../../lib/auth';
 import { useAction } from '../../lib/hooks';
+import { type EntryPatch, EntrySources } from '../entry/EntrySources';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
 import { Button, Field, Modal } from '../ui';
 
@@ -51,6 +53,8 @@ export function TitleFormModal({
   const [dueDate, setDueDate] = useState(title?.dueDate ?? today);
   const [competenceDate, setCompetenceDate] = useState(title?.competenceDate ?? today);
   const [competenceTouched, setCompetenceTouched] = useState(editing);
+  const competenceTouchedRef = useRef(competenceTouched);
+  competenceTouchedRef.current = competenceTouched;
   const [notes, setNotes] = useState(title?.notes ?? '');
   const [scope, setScope] = useState<'this' | 'following'>('this');
 
@@ -66,6 +70,44 @@ export function TitleFormModal({
   const [mirrorCategoryId, setMirrorCategoryId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { run, busy } = useAction();
+
+  // Entrada (spec 010): boleto, PIX e NF-e vinculados ao título.
+  const [boletoBarcode, setBoletoBarcode] = useState<string | null>(title?.boletoBarcode ?? null);
+  const [pixPayload, setPixPayload] = useState<string | null>(title?.pixPayload ?? null);
+  const [nfeDocumentId, setNfeDocumentId] = useState<string | null>(null);
+  /** Título de fatura de cartão: valor e vencimento mudam pela fatura. */
+  const invoiceLocked = Boolean(title?.cardInvoiceId);
+  const entityLocked = Boolean(title?.mirrorTitleId);
+
+  const applyEntry = useCallback(
+    (patch: EntryPatch) => {
+      if (patch.boletoBarcode !== undefined) setBoletoBarcode(patch.boletoBarcode);
+      if (patch.pixPayload !== undefined) setPixPayload(patch.pixPayload);
+      if (patch.nfeDocumentId !== undefined) setNfeDocumentId(patch.nfeDocumentId);
+      if (patch.entity && !entityLocked) setEntity(patch.entity);
+      if (patch.amountCents) setAmount(patch.amountCents);
+      if (patch.description) {
+        const text = patch.description;
+        setDescription((current) => (current.trim() ? current : text));
+      }
+      if (patch.dueDate) {
+        setDueDate(patch.dueDate);
+        if (!competenceTouchedRef.current) setCompetenceDate(patch.dueDate);
+      }
+      if (patch.competenceDate) {
+        setCompetenceDate(patch.competenceDate);
+        setCompetenceTouched(true);
+      }
+      if (patch.installments) {
+        setSeriesKind('installments');
+        setCount(patch.installments.count);
+        setFrequency('monthly');
+        setIntervalCount(1);
+        setAmount(patch.installments.amountCents);
+      }
+    },
+    [entityLocked],
+  );
 
   useEffect(() => {
     if (editing || !entity) {
@@ -103,8 +145,7 @@ export function TitleFormModal({
       const body: TitleUpdateInput = {
         description,
         categoryId,
-        amountCents: amount,
-        dueDate,
+        ...(invoiceLocked ? {} : { amountCents: amount, dueDate, boletoBarcode, pixPayload }),
         competenceDate,
         notes,
         scope,
@@ -131,6 +172,9 @@ export function TitleFormModal({
       mirrorCaixaId: held && held.length > 0 ? mirrorCaixaId : null,
       mirrorCategoryId: mirrorCaixaId && mirrorWritable ? mirrorCategoryId : null,
       series,
+      boletoBarcode,
+      pixPayload,
+      nfeDocumentId,
     };
     const saved = await run(() => api.post<TitleDetail>('/api/titles', body), 'Título criado.');
     if (saved) onSaved(saved);
@@ -144,6 +188,16 @@ export function TitleFormModal({
       <form onSubmit={submit}>
         <div className="modal-body">
           <div className="form-grid cols-2">
+            {invoiceLocked ? (
+              <p className="notice info span-all">{t.entry.cardInvoiceHint}</p>
+            ) : (
+              <EntrySources
+                direction={direction}
+                allowNfe={!editing}
+                initial={{ boletoBarcode: title?.boletoBarcode, pixPayload: title?.pixPayload }}
+                onApply={applyEntry}
+              />
+            )}
             <Field label={label} className="span-all">
               {title?.mirrorTitleId ? (
                 <input className="field" value={entity?.name ?? ''} readOnly title={t.errors.mirrorEntityLocked} />
@@ -164,7 +218,11 @@ export function TitleFormModal({
               />
             </Field>
             <Field label={seriesKind === 'installments' ? t.title.installmentAmount : t.title.amount}>
-              <MoneyInput value={amount} onChange={setAmount} ariaLabel={t.title.amount} />
+              {invoiceLocked ? (
+                <input className="field field-mono" value={formatCents(amount ?? 0)} readOnly aria-label={t.title.amount} />
+              ) : (
+                <MoneyInput value={amount} onChange={setAmount} ariaLabel={t.title.amount} />
+              )}
             </Field>
             <Field label={t.title.due}>
               <input
@@ -172,6 +230,8 @@ export function TitleFormModal({
                 className="field"
                 value={dueDate}
                 required
+                readOnly={invoiceLocked}
+                aria-label={t.title.due}
                 onChange={(e) => {
                   setDueDate(e.target.value);
                   if (!competenceTouched) setCompetenceDate(e.target.value);

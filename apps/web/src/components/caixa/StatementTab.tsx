@@ -1,11 +1,12 @@
 import { addDays, type CaixaDetail, formatDate, type Statement, t, todayIso } from '@moneyflow/shared';
-import { FileText, Trash2 } from 'lucide-react';
+import { FileText, Paperclip, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
 import { titleLink } from '../../lib/links';
 import { useParamState } from '../../lib/params';
+import { AttachmentsModal } from '../attachments/AttachmentsPanel';
 import { LoadError, Money, SkelRows } from '../domain';
 import { Badge, EmptyRow, EmptyState, useConfirm } from '../ui';
 
@@ -21,6 +22,7 @@ export function StatementTab({ caixa, onChanged }: { caixa: CaixaDetail; onChang
   if (to) qs.set('to', to);
   const { data, error, reload } = useApi<Statement>(accountId ? `/api/accounts/${accountId}/statement?${qs}` : null);
   const confirm = useConfirm();
+  const [attachFor, setAttachFor] = useState<{ id: string; label: string } | null>(null);
   const { run } = useAction();
 
   if (!accountId) {
@@ -149,22 +151,44 @@ export function StatementTab({ caixa, onChanged }: { caixa: CaixaDetail; onChang
                     <Money cents={row.balanceCents} />
                   </td>
                   <td className="text-right">
-                    {row.kind === 'adjustment' && caixa.canWrite && (
+                    <span className="row-actions">
                       <button
                         type="button"
-                        className="row-action danger"
-                        title={t.common.delete}
-                        onClick={() => void removeAdjustment(row.id)}
+                        className="row-action"
+                        title={t.attachments.movementTitle}
+                        aria-label={t.attachments.movementTitle}
+                        onClick={() =>
+                          setAttachFor({ id: row.id, label: row.titleDescription ?? row.description ?? formatDate(row.occurredOn) })
+                        }
                       >
-                        <Trash2 />
+                        <Paperclip />
                       </button>
-                    )}
+                      {row.kind === 'adjustment' && caixa.canWrite && (
+                        <button
+                          type="button"
+                          className="row-action danger"
+                          title={t.common.delete}
+                          onClick={() => void removeAdjustment(row.id)}
+                        >
+                          <Trash2 />
+                        </button>
+                      )}
+                    </span>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+      )}
+      {attachFor && (
+        <AttachmentsModal
+          target="movement"
+          targetId={attachFor.id}
+          canWrite={caixa.canWrite}
+          title={`${t.attachments.movementTitle}: ${attachFor.label}`}
+          onClose={() => setAttachFor(null)}
+        />
       )}
     </>
   );
