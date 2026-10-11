@@ -6,7 +6,7 @@ autor: usuario
 responsavel: app
 prioridade: media
 criada: 2026-10-11
-commit:
+commit: 555ec24
 ---
 
 # Trocar as cores de tom roxo para tom azul em todo o frontend
