@@ -1,4 +1,5 @@
 export * from './address';
+export * from './agents';
 export * from './boleto';
 export * from './brcode';
 export * from './dates';

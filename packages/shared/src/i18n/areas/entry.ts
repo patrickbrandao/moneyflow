@@ -2,8 +2,6 @@
 export const entryStrings = {
   fillFrom: 'Preencher a partir de',
   sources: { boleto: 'Boleto', pix: 'PIX copia-e-cola', nfe: 'NF-e (XML)' } as Record<string, string>,
-  aiReader: 'Ler PDF/imagem (IA, fase 4)',
-  aiReaderHint: 'A leitura de PDF/imagem por IA chega na fase 4; preencha à mão por enquanto.',
   boletoInput: 'Linha digitável ou código de barras',
   boletoPlaceholder: 'Cole ou digite os números do boleto',
   boletoKinds: { bank: 'Boleto bancário', utility: 'Convênio/arrecadação' } as Record<string, string>,

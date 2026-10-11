@@ -1,3 +1,5 @@
+import { agentsStrings } from './areas/agents';
+import { agentsUiStrings } from './areas/agents-ui';
 import { attachmentsStrings } from './areas/attachments';
 import { auditStrings } from './areas/audit';
 import { calendarStrings } from './areas/calendar';
@@ -206,7 +208,7 @@ export const ptBR = {
     pixInvalid: 'PIX copia-e-cola inválido.',
     boletoInvalid: 'Linha digitável ou código de barras de boleto inválido.',
     nfeInvalid: 'O arquivo não é uma NF-e válida.',
-    documentReaderUnavailable: 'A leitura de PDF/imagem por IA chega na fase 4; preencha à mão por enquanto.',
+    documentReaderUnavailable: 'Nenhum agente de IA está configurado para ler documentos; preencha à mão.',
     uploadRequired: 'Envie o arquivo no corpo da requisição.',
     invalidPeriod: 'Período inválido: o fim vem antes do início.',
     invalidTime: 'Horário inválido: use HH:MM.',
@@ -407,6 +409,9 @@ export const ptBR = {
   flow: flowStrings,
   messages: messagesStrings,
   notifications: notificationsStrings,
+  // Fase 4.
+  agents: agentsStrings,
+  agentsUi: agentsUiStrings,
 } as const;
 
 export type Strings = typeof ptBR;
