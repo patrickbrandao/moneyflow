@@ -13,7 +13,7 @@ import { Badge, cx, EmptyRow } from '../ui';
 export const monthLabel = (referenceMonth: string) => `${referenceMonth.slice(5, 7)}/${referenceMonth.slice(0, 4)}`;
 
 export function InvoiceStatusBadge({ status }: { status: InvoiceStatus }) {
-  const tone = status === 'paid' ? 'ok' : status === 'closed' ? 'info' : 'neutral';
+  const tone = status === 'paid' ? 'ok' : status === 'closed' ? 'info' : status === 'carried_over' ? 'warn' : 'neutral';
   return <Badge tone={tone}>{t.card.invoiceStatuses[status]}</Badge>;
 }
 

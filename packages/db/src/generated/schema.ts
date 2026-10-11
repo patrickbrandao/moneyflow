@@ -18,6 +18,7 @@ import {
   integer,
   numeric,
   jsonb,
+  doublePrecision,
   pgView,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
@@ -1560,6 +1561,274 @@ export const periodClosings = pgTable(
     check('period_closings_month_check', sql`month = (date_trunc('month'::text, (month)::timestamp with time zone))::date`),
   ],
 );
+
+export const canvasNodePositions = pgTable(
+  'canvas_node_positions',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    userId: uuid('user_id').notNull(),
+    layout: text().default('default').notNull(),
+    nodeKind: text('node_kind').notNull(),
+    nodeId: uuid('node_id').notNull(),
+    x: doublePrecision().notNull(),
+    y: doublePrecision().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'canvas_node_positions_user_id_fkey',
+    }).onDelete('cascade'),
+    unique('canvas_node_positions_node_key').on(table.layout, table.nodeId, table.nodeKind, table.userId),
+    check('canvas_node_positions_layout_check', sql`(btrim(layout) <> ''::text) AND (length(layout) <= 60)`),
+    check('canvas_node_positions_node_kind_check', sql`node_kind = ANY (ARRAY['caixa'::text, 'entity'::text, 'category_group'::text])`),
+    check(
+      'canvas_node_positions_xy_check',
+      sql`((x >= ('-10000000'::numeric)::double precision) AND (x <= ('10000000'::numeric)::double precision)) AND ((y >= ('-10000000'::numeric)::double precision) AND (y <= ('10000000'::numeric)::double precision))`,
+    ),
+  ],
+);
+
+export const messageDestinations = pgTable(
+  'message_destinations',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    channel: text().default('telegram').notNull(),
+    name: text().notNull(),
+    ownerUserId: uuid('owner_user_id'),
+    ownerCaixaId: uuid('owner_caixa_id'),
+    botToken: text('bot_token'),
+    botId: text('bot_id').generatedAlwaysAs(sql`split_part(bot_token, ':'::text, 1)`),
+    chatId: text('chat_id'),
+    isActive: boolean('is_active').default(true).notNull(),
+    createdByUserId: uuid('created_by_user_id'),
+    notes: text(),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('message_destinations_created_by_user_id_idx').using('btree', table.createdByUserId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('message_destinations_name_key').using('btree', sql`owner_user_id`, sql`owner_caixa_id`, sql`lower(name)`),
+    index('message_destinations_owner_caixa_id_idx').using('btree', table.ownerCaixaId.asc().nullsLast().op('uuid_ops')),
+    index('message_destinations_owner_user_id_idx').using('btree', table.ownerUserId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.createdByUserId],
+      foreignColumns: [users.id],
+      name: 'message_destinations_created_by_user_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.ownerCaixaId],
+      foreignColumns: [caixas.id],
+      name: 'message_destinations_owner_caixa_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.ownerUserId],
+      foreignColumns: [users.id],
+      name: 'message_destinations_owner_user_id_fkey',
+    }).onDelete('cascade'),
+    check('message_destinations_active_check', sql`NOT (is_active AND (archived_at IS NOT NULL))`),
+    check('message_destinations_bot_token_check', sql`bot_token ~ '^[0-9]{3,20}:[A-Za-z0-9_-]{20,100}$'::text`),
+    check('message_destinations_channel_check', sql`channel = 'telegram'::text`),
+    check(
+      'message_destinations_chat_id_check',
+      sql`(chat_id ~ '^-?[0-9]{1,20}$'::text) OR (chat_id ~ '^@[A-Za-z][A-Za-z0-9_]{3,31}$'::text)`,
+    ),
+    check('message_destinations_name_check', sql`(btrim(name) <> ''::text) AND (length(name) <= 120)`),
+    check('message_destinations_owner_check', sql`num_nonnulls(owner_user_id, owner_caixa_id) <= 1`),
+    check('message_destinations_telegram_check', sql`(channel <> 'telegram'::text) OR ((bot_token IS NOT NULL) AND (chat_id IS NOT NULL))`),
+  ],
+);
+
+export const messageSubscriptions = pgTable(
+  'message_subscriptions',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    destinationId: uuid('destination_id').notNull(),
+    eventKind: text('event_kind').notNull(),
+    params: jsonb().default({}).notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('message_subscriptions_event_kind_idx').using('btree', table.eventKind.asc().nullsLast().op('text_ops')).where(sql`is_active`),
+    foreignKey({
+      columns: [table.destinationId],
+      foreignColumns: [messageDestinations.id],
+      name: 'message_subscriptions_destination_id_fkey',
+    }).onDelete('cascade'),
+    unique('message_subscriptions_destination_event_key').on(table.destinationId, table.eventKind),
+    check(
+      'message_subscriptions_event_kind_check',
+      sql`event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text])`,
+    ),
+    check('message_subscriptions_params_check', sql`CHECK (message_subscription_params_valid(event_kind, params`),
+  ],
+);
+
+export const messageSubscriptionCaixas = pgTable(
+  'message_subscription_caixas',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    subscriptionId: uuid('subscription_id').notNull(),
+    caixaId: uuid('caixa_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('message_subscription_caixas_caixa_id_idx').using('btree', table.caixaId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.caixaId],
+      foreignColumns: [caixas.id],
+      name: 'message_subscription_caixas_caixa_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.subscriptionId],
+      foreignColumns: [messageSubscriptions.id],
+      name: 'message_subscription_caixas_subscription_id_fkey',
+    }).onDelete('cascade'),
+    unique('message_subscription_caixas_key').on(table.caixaId, table.subscriptionId),
+  ],
+);
+
+export const messageOutbox = pgTable(
+  'message_outbox',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    destinationId: uuid('destination_id').notNull(),
+    subscriptionId: uuid('subscription_id'),
+    eventKind: text('event_kind').notNull(),
+    dedupKey: text('dedup_key'),
+    caixaId: uuid('caixa_id'),
+    userId: uuid('user_id'),
+    agentRunId: text('agent_run_id'),
+    payload: jsonb().notNull(),
+    status: text().default('pending').notNull(),
+    attempts: smallint().default(0).notNull(),
+    maxAttempts: smallint('max_attempts').default(5).notNull(),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    lockedAt: timestamp('locked_at', { withTimezone: true, mode: 'string' }),
+    sentAt: timestamp('sent_at', { withTimezone: true, mode: 'string' }),
+    lastError: text('last_error'),
+    providerMessageId: text('provider_message_id'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('message_outbox_caixa_id_idx').using('btree', table.caixaId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('message_outbox_dedup_key').using(
+      'btree',
+      table.destinationId.asc().nullsLast().op('text_ops'),
+      table.dedupKey.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('message_outbox_destination_id_idx').using(
+      'btree',
+      table.destinationId.asc().nullsLast().op('timestamptz_ops'),
+      table.createdAt.asc().nullsLast().op('timestamptz_ops'),
+    ),
+    index('message_outbox_ready_idx')
+      .using('btree', table.nextAttemptAt.asc().nullsLast().op('timestamptz_ops'))
+      .where(sql`(status = 'pending'::text)`),
+    index('message_outbox_sending_idx')
+      .using('btree', table.lockedAt.asc().nullsLast().op('timestamptz_ops'))
+      .where(sql`(status = 'sending'::text)`),
+    index('message_outbox_subscription_id_idx').using('btree', table.subscriptionId.asc().nullsLast().op('uuid_ops')),
+    index('message_outbox_user_id_idx').using('btree', table.userId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.caixaId],
+      foreignColumns: [caixas.id],
+      name: 'message_outbox_caixa_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.destinationId],
+      foreignColumns: [messageDestinations.id],
+      name: 'message_outbox_destination_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.subscriptionId],
+      foreignColumns: [messageSubscriptions.id],
+      name: 'message_outbox_subscription_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'message_outbox_user_id_fkey',
+    }).onDelete('set null'),
+    check(
+      'message_outbox_attempts_check',
+      sql`((max_attempts >= 1) AND (max_attempts <= 20)) AND ((attempts >= 0) AND (attempts <= max_attempts))`,
+    ),
+    check('message_outbox_dedup_key_check', sql`(btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300)`),
+    check(
+      'message_outbox_event_kind_check',
+      sql`event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'test'::text])`,
+    ),
+    check('message_outbox_payload_check', sql`jsonb_typeof(payload) = 'object'::text`),
+    check(
+      'message_outbox_status_check',
+      sql`status = ANY (ARRAY['pending'::text, 'sending'::text, 'sent'::text, 'failed'::text, 'canceled'::text])`,
+    ),
+    check(
+      'message_outbox_status_fields_check',
+      sql`((status = 'sending'::text) = (locked_at IS NOT NULL)) AND ((status = 'sent'::text) = (sent_at IS NOT NULL)) AND ((status <> ALL (ARRAY['failed'::text, 'canceled'::text])) OR (last_error IS NOT NULL))`,
+    ),
+  ],
+);
+
+export const notifications = pgTable(
+  'notifications',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    userId: uuid('user_id').notNull(),
+    kind: text().notNull(),
+    title: text().notNull(),
+    body: text(),
+    link: text(),
+    caixaId: uuid('caixa_id'),
+    data: jsonb().default({}).notNull(),
+    dedupKey: text('dedup_key'),
+    readAt: timestamp('read_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('notifications_caixa_id_idx').using('btree', table.caixaId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('notifications_dedup_key').using(
+      'btree',
+      table.userId.asc().nullsLast().op('uuid_ops'),
+      table.dedupKey.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('notifications_unread_idx')
+      .using('btree', table.userId.asc().nullsLast().op('uuid_ops'), table.createdAt.desc().nullsFirst().op('timestamptz_ops'))
+      .where(sql`(read_at IS NULL)`),
+    index('notifications_user_id_created_at_idx').using(
+      'btree',
+      table.userId.asc().nullsLast().op('timestamptz_ops'),
+      table.createdAt.desc().nullsFirst().op('uuid_ops'),
+    ),
+    foreignKey({
+      columns: [table.caixaId],
+      foreignColumns: [caixas.id],
+      name: 'notifications_caixa_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'notifications_user_id_fkey',
+    }).onDelete('cascade'),
+    check('notifications_data_check', sql`jsonb_typeof(data) = 'object'::text`),
+    check('notifications_dedup_key_check', sql`(btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300)`),
+    check(
+      'notifications_kind_check',
+      sql`kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text])`,
+    ),
+    check('notifications_link_check', sql`(link ~ '^/[^/]'::text) OR (link = '/'::text)`),
+    check('notifications_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
+  ],
+);
 export const titleBalances = pgView('title_balances', {
   titleId: uuid('title_id'),
   caixaId: uuid('caixa_id'),
@@ -1600,28 +1869,6 @@ export const financialAccountBalances = pgView('financial_account_balances', {
     sql`SELECT a.id AS financial_account_id, a.caixa_id, a.opening_date, a.opening_balance_cents, COALESCE(m.movements_cents, 0::numeric)::bigint AS movements_cents, (a.opening_balance_cents::numeric + COALESCE(m.movements_cents, 0::numeric))::bigint AS balance_cents, a.archived_at FROM financial_accounts a LEFT JOIN LATERAL ( SELECT sum(x.amount_cents) AS movements_cents FROM movements x WHERE x.financial_account_id = a.id) m ON true`,
   );
 
-export const cardInvoicePayerTotals = pgView('card_invoice_payer_totals', {
-  cardInvoiceId: uuid('card_invoice_id'),
-  cardCaixaId: uuid('card_caixa_id'),
-  referenceMonth: date('reference_month'),
-  dueDate: date('due_date'),
-  payerCaixaId: uuid('payer_caixa_id'),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  itemsCents: bigint('items_cents', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  billedCents: bigint('billed_cents', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  settledCents: bigint('settled_cents', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  openCents: bigint('open_cents', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  carriedOutCents: bigint('carried_out_cents', { mode: 'number' }),
-})
-  .with({ securityInvoker: true })
-  .as(
-    sql`SELECT v.id AS card_invoice_id, v.card_caixa_id, v.reference_month, v.due_date, p.payer_caixa_id, COALESCE(it.items_cents, 0::numeric)::bigint AS items_cents, COALESCE(tt.billed_cents, 0::numeric)::bigint AS billed_cents, COALESCE(tt.settled_cents, 0::numeric)::bigint AS settled_cents, COALESCE(tt.open_cents, 0::numeric)::bigint AS open_cents, COALESCE(co.carried_out_cents, 0::numeric)::bigint AS carried_out_cents FROM card_invoices v JOIN LATERAL ( SELECT i.payer_caixa_id FROM card_invoice_items i WHERE i.card_invoice_id = v.id UNION SELECT t.counterparty_caixa_id FROM titles t WHERE t.card_invoice_id = v.id AND t.caixa_id = v.card_caixa_id) p ON true LEFT JOIN LATERAL ( SELECT sum(i.amount_cents) AS items_cents FROM card_invoice_items i WHERE i.card_invoice_id = v.id AND i.payer_caixa_id = p.payer_caixa_id) it ON true LEFT JOIN LATERAL ( SELECT sum(b.amount_cents) FILTER (WHERE b.status <> 'canceled'::text) AS billed_cents, sum(b.settled_cents) AS settled_cents, sum(b.open_cents) AS open_cents FROM title_balances b JOIN titles t ON t.id = b.title_id WHERE t.card_invoice_id = v.id AND t.caixa_id = v.card_caixa_id AND t.counterparty_caixa_id = p.payer_caixa_id) tt ON true LEFT JOIN LATERAL ( SELECT sum(i.amount_cents) AS carried_out_cents FROM card_invoice_items i WHERE i.carried_from_invoice_id = v.id AND i.payer_caixa_id = p.payer_caixa_id) co ON true`,
-  );
-
 export const cardInvoiceSummaries = pgView('card_invoice_summaries', {
   cardInvoiceId: uuid('card_invoice_id'),
   cardCaixaId: uuid('card_caixa_id'),
@@ -1643,7 +1890,29 @@ export const cardInvoiceSummaries = pgView('card_invoice_summaries', {
 })
   .with({ securityInvoker: true })
   .as(
-    sql`SELECT v.id AS card_invoice_id, v.card_caixa_id, v.reference_month, v.closing_date, v.due_date, v.closed_at, COALESCE(s.items_cents, 0::numeric)::bigint AS total_cents, COALESCE(s.billed_cents, 0::numeric)::bigint AS billed_cents, COALESCE(s.settled_cents, 0::numeric)::bigint AS settled_cents, COALESCE(s.open_cents, 0::numeric)::bigint AS open_cents, COALESCE(s.carried_out_cents, 0::numeric)::bigint AS carried_out_cents, CASE WHEN v.closed_at IS NULL THEN 'open'::text WHEN COALESCE(s.open_cents, 0::numeric) = 0::numeric AND COALESCE(s.carried_out_cents, 0::numeric) <= 0::numeric THEN 'paid'::text ELSE 'closed'::text END AS status FROM card_invoices v LEFT JOIN LATERAL ( SELECT sum(x.items_cents) AS items_cents, sum(x.billed_cents) AS billed_cents, sum(x.settled_cents) AS settled_cents, sum(x.open_cents) AS open_cents, sum(x.carried_out_cents) AS carried_out_cents FROM card_invoice_payer_totals x WHERE x.card_invoice_id = v.id) s ON true`,
+    sql`SELECT v.id AS card_invoice_id, v.card_caixa_id, v.reference_month, v.closing_date, v.due_date, v.closed_at, COALESCE(s.items_cents, 0::numeric)::bigint AS total_cents, COALESCE(s.billed_cents, 0::numeric)::bigint AS billed_cents, COALESCE(s.settled_cents, 0::numeric)::bigint AS settled_cents, COALESCE(s.open_cents, 0::numeric)::bigint AS open_cents, COALESCE(s.carried_out_cents, 0::numeric)::bigint AS carried_out_cents, CASE WHEN v.closed_at IS NULL THEN 'open'::text WHEN COALESCE(s.open_cents, 0::numeric) > 0::numeric THEN 'closed'::text WHEN COALESCE(s.carried_debt, false) THEN 'carried_over'::text ELSE 'paid'::text END AS status FROM card_invoices v LEFT JOIN LATERAL ( SELECT sum(x.items_cents) AS items_cents, sum(x.billed_cents) AS billed_cents, sum(x.settled_cents) AS settled_cents, sum(x.open_cents) AS open_cents, sum(x.carried_out_cents) AS carried_out_cents, bool_or(x.carried_out_cents > 0) AS carried_debt FROM card_invoice_payer_totals x WHERE x.card_invoice_id = v.id) s ON true`,
+  );
+
+export const cardInvoicePayerTotals = pgView('card_invoice_payer_totals', {
+  cardInvoiceId: uuid('card_invoice_id'),
+  cardCaixaId: uuid('card_caixa_id'),
+  referenceMonth: date('reference_month'),
+  dueDate: date('due_date'),
+  payerCaixaId: uuid('payer_caixa_id'),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  itemsCents: bigint('items_cents', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  billedCents: bigint('billed_cents', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  settledCents: bigint('settled_cents', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  openCents: bigint('open_cents', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  carriedOutCents: bigint('carried_out_cents', { mode: 'number' }),
+})
+  .with({ securityInvoker: true })
+  .as(
+    sql`SELECT v.id AS card_invoice_id, v.card_caixa_id, v.reference_month, v.due_date, p.payer_caixa_id, COALESCE(it.items_cents, 0::numeric)::bigint AS items_cents, COALESCE(tt.billed_cents, 0::numeric)::bigint AS billed_cents, COALESCE(tt.settled_cents, 0::numeric)::bigint AS settled_cents, COALESCE(tt.open_cents, 0::numeric)::bigint AS open_cents, COALESCE(co.carried_out_cents, 0::numeric)::bigint AS carried_out_cents FROM card_invoices v JOIN LATERAL ( SELECT i.payer_caixa_id FROM card_invoice_items i WHERE i.card_invoice_id = v.id UNION SELECT t.counterparty_caixa_id FROM titles t WHERE t.card_invoice_id = v.id AND t.caixa_id = v.card_caixa_id) p ON true LEFT JOIN LATERAL ( SELECT sum(i.amount_cents) AS items_cents FROM card_invoice_items i WHERE i.card_invoice_id = v.id AND i.payer_caixa_id = p.payer_caixa_id) it ON true LEFT JOIN LATERAL ( SELECT sum(b.amount_cents) FILTER (WHERE b.status <> 'canceled'::text) AS billed_cents, sum(b.settled_cents) AS settled_cents, sum(b.open_cents) AS open_cents FROM title_balances b JOIN titles t ON t.id = b.title_id WHERE t.card_invoice_id = v.id AND t.caixa_id = v.card_caixa_id AND t.counterparty_caixa_id = p.payer_caixa_id) tt ON true LEFT JOIN LATERAL ( SELECT sum(i.amount_cents) AS carried_out_cents FROM card_invoice_items i WHERE i.carried_from_invoice_id = v.id AND i.payer_caixa_id = p.payer_caixa_id) co ON true`,
   );
 
 export const cardInvoiceLines = pgView('card_invoice_lines', {

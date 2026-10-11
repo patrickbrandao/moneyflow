@@ -4,6 +4,10 @@ import { calendarStrings } from './areas/calendar';
 import { cardStrings } from './areas/card';
 import { closingStrings } from './areas/closing';
 import { entryStrings } from './areas/entry';
+import { flowStrings } from './areas/flow';
+import { messagesStrings } from './areas/messages';
+import { notificationsStrings } from './areas/notifications';
+import { reportsStrings } from './areas/reports';
 import { statementsStrings } from './areas/statements';
 
 /*
@@ -70,6 +74,9 @@ export const ptBR = {
     audit: 'Auditoria',
     account: 'Minha conta',
     admin: 'Administração',
+    flow: 'Fluxo',
+    reports: 'Relatórios',
+    messages: 'Mensagens',
   },
 
   palette: {
@@ -200,6 +207,17 @@ export const ptBR = {
     nfeInvalid: 'O arquivo não é uma NF-e válida.',
     documentReaderUnavailable: 'A leitura de PDF/imagem por IA chega na fase 4; preencha à mão por enquanto.',
     uploadRequired: 'Envie o arquivo no corpo da requisição.',
+    invalidPeriod: 'Período inválido: o fim vem antes do início.',
+    invalidTime: 'Horário inválido: use HH:MM.',
+    duplicateValues: 'Há valores repetidos na lista.',
+    invalidBotToken: 'Token do bot inválido: use o formato 123456789:ABC… que o BotFather fornece.',
+    invalidChatId: 'chat_id inválido: use o número do chat (grupos começam com -) ou @canal.',
+    destinationOwner: 'Escolha a caixa dona do destino.',
+    destinationGlobalAdmin: 'Só um administrador cria ou gerencia destinos globais.',
+    destinationArchived: 'O destino está arquivado: restaure-o antes.',
+    destinationInactive: 'O destino está desativado: ative-o para enviar.',
+    outboxNotFailed: 'Só mensagens com falha podem ser reenviadas.',
+    outboxNotPending: 'Só mensagens pendentes ou com falha podem ser canceladas.',
   },
 
   entity: {
@@ -383,6 +401,11 @@ export const ptBR = {
   attachments: attachmentsStrings,
   entry: entryStrings,
   closing: closingStrings,
+  // Fase 3.
+  reports: reportsStrings,
+  flow: flowStrings,
+  messages: messagesStrings,
+  notifications: notificationsStrings,
 } as const;
 
 export type Strings = typeof ptBR;

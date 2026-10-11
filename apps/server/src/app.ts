@@ -20,6 +20,7 @@ import { operationRoutes } from './routes/operation';
 import { statementRoutes } from './routes/statements';
 import { titleRoutes } from './routes/titles';
 import { userRoutes } from './routes/users';
+import { visionRoutes } from './routes/vision';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -116,6 +117,7 @@ export async function buildApp({
   await app.register(attachmentRoutes);
   await app.register(statementRoutes);
   await app.register(operationRoutes);
+  await app.register(visionRoutes);
 
   // Em produção a API serve o SPA compilado (imagem única).
   const webDist = config.webDist ? resolve(config.webDist) : null;

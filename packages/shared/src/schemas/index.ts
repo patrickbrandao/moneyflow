@@ -8,6 +8,7 @@ import { cents, id, isoDate, nonNegativeCents, optionalText, positiveCents, quer
 
 export * from './common';
 export * from './operation';
+export * from './vision';
 
 const E = ptBR.errors;
 

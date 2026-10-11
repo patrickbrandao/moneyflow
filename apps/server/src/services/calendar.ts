@@ -23,8 +23,9 @@ export async function calendarItems(ctx: ServiceContext, query: { from: string; 
     SELECT ci.item_kind, ci.title_id, ci.card_invoice_id, ci.caixa_id, c.name AS caixa_name, ci.counterparty_caixa_id,
            ci.direction, ci.due_date, ci.reference_month, ci.description, ci.entity_id, e.name AS entity_name,
            ci.category_id, cat.name AS category_name, coalesce(cat.color_slot, pc.color_slot) AS category_color_slot,
-           ci.amount_cents, ci.open_cents, ci.status, ci.calendar_status,
-           (t.mirror_status IS NOT NULL) AS is_mirror_side, t.card_invoice_id IS NOT NULL AS is_invoice_title
+           ci.amount_cents, ci.open_cents, ci.status, ci.calendar_status, ci.mirror_side, ci.mirror_status,
+           (ci.item_kind = 'title' AND ci.mirror_status IS NOT NULL) AS is_mirror_side,
+           (ci.item_kind = 'title' AND ci.card_invoice_id IS NOT NULL) AS is_invoice_title
       FROM calendar_items(ARRAY[${sql.join(
         ids.map((id) => sql`${id}::uuid`),
         sql`, `,
@@ -32,8 +33,7 @@ export async function calendarItems(ctx: ServiceContext, query: { from: string; 
       JOIN caixas c ON c.id = ci.caixa_id
       LEFT JOIN entities e ON e.id = ci.entity_id
       LEFT JOIN categories cat ON cat.id = ci.category_id
-      LEFT JOIN categories pc ON pc.id = cat.parent_id
-      LEFT JOIN titles t ON t.id = ci.title_id`);
+      LEFT JOIN categories pc ON pc.id = cat.parent_id`);
   return result.rows.map((row) => {
     const r = camel<Omit<CalendarItem, 'key' | 'canWrite' | 'canReschedule'> & { isMirrorSide: boolean }>(row);
     const canWrite = ctx.access.canWrite(r.caixaId);

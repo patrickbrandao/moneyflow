@@ -3,20 +3,21 @@ import { createDb, createPool, type Database } from '@moneyflow/db';
 import type { FastifyInstance } from 'fastify';
 import { inject } from 'vitest';
 import { buildApp } from '../src/app';
-import { loadConfig } from '../src/config';
+import { type Config, loadConfig } from '../src/config';
 import { insertUser } from '../src/services/users';
 
-export type Harness = { app: FastifyInstance; db: Database; close: () => Promise<void> };
+export type Harness = { app: FastifyInstance; db: Database; config: Config; close: () => Promise<void> };
 
-export async function startApp(): Promise<Harness> {
+export async function startApp(env: Record<string, string> = {}): Promise<Harness> {
   const pool = createPool(inject('databaseUrl'), 5);
   const db = createDb(pool);
-  const config = loadConfig({ DATABASE_URL: inject('databaseUrl'), LOOKUP_TIMEOUT_MS: '1500', LOGIN_RATE_LIMIT: '10000' });
+  const config = loadConfig({ DATABASE_URL: inject('databaseUrl'), LOOKUP_TIMEOUT_MS: '1500', LOGIN_RATE_LIMIT: '10000', ...env });
   const app = await buildApp({ db, config, logger: false });
   await app.ready();
   return {
     app,
     db,
+    config,
     close: async () => {
       await app.close();
       await pool.end();

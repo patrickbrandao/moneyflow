@@ -2,7 +2,7 @@
 export const cardStrings = {
   chargeKinds: { interest: 'Juros', iof: 'IOF', fine: 'Multa', fee: 'Tarifa', other: 'Outro encargo' } as Record<string, string>,
   purchaseKinds: { purchase: 'Compra', refund: 'Estorno', charge: 'Encargo' } as Record<string, string>,
-  invoiceStatuses: { open: 'Aberta', closed: 'Fechada', paid: 'Paga' } as Record<string, string>,
+  invoiceStatuses: { open: 'Aberta', closed: 'Fechada', carried_over: 'Rolada', paid: 'Paga' } as Record<string, string>,
 
   // abas da caixa de cartão
   tabs: {

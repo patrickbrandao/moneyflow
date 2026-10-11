@@ -34,6 +34,12 @@ import {
   classificationRules,
   statementLines,
   periodClosings,
+  canvasNodePositions,
+  messageDestinations,
+  messageSubscriptions,
+  messageSubscriptionCaixas,
+  messageOutbox,
+  notifications,
 } from './schema';
 
 export const sessionsRelations = relations(sessions, ({ one }) => ({
@@ -50,6 +56,15 @@ export const usersRelations = relations(users, ({ many }) => ({
   statementImports: many(statementImports),
   classificationRules: many(classificationRules),
   periodClosings: many(periodClosings),
+  canvasNodePositions: many(canvasNodePositions),
+  messageDestinations_createdByUserId: many(messageDestinations, {
+    relationName: 'messageDestinations_createdByUserId_users_id',
+  }),
+  messageDestinations_ownerUserId: many(messageDestinations, {
+    relationName: 'messageDestinations_ownerUserId_users_id',
+  }),
+  messageOutboxes: many(messageOutbox),
+  notifications: many(notifications),
 }));
 
 export const entityContactsRelations = relations(entityContacts, ({ one }) => ({
@@ -154,6 +169,10 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
   classificationRules: many(classificationRules),
   statementLines: many(statementLines),
   periodClosings: many(periodClosings),
+  messageDestinations: many(messageDestinations),
+  messageSubscriptionCaixas: many(messageSubscriptionCaixas),
+  messageOutboxes: many(messageOutbox),
+  notifications: many(notifications),
 }));
 
 export const caixaMembersRelations = relations(caixaMembers, ({ one }) => ({
@@ -606,6 +625,82 @@ export const periodClosingsRelations = relations(periodClosings, ({ one }) => ({
   }),
   user: one(users, {
     fields: [periodClosings.closedByUserId],
+    references: [users.id],
+  }),
+}));
+
+export const canvasNodePositionsRelations = relations(canvasNodePositions, ({ one }) => ({
+  user: one(users, {
+    fields: [canvasNodePositions.userId],
+    references: [users.id],
+  }),
+}));
+
+export const messageDestinationsRelations = relations(messageDestinations, ({ one, many }) => ({
+  user_createdByUserId: one(users, {
+    fields: [messageDestinations.createdByUserId],
+    references: [users.id],
+    relationName: 'messageDestinations_createdByUserId_users_id',
+  }),
+  caixa: one(caixas, {
+    fields: [messageDestinations.ownerCaixaId],
+    references: [caixas.id],
+  }),
+  user_ownerUserId: one(users, {
+    fields: [messageDestinations.ownerUserId],
+    references: [users.id],
+    relationName: 'messageDestinations_ownerUserId_users_id',
+  }),
+  messageSubscriptions: many(messageSubscriptions),
+  messageOutboxes: many(messageOutbox),
+}));
+
+export const messageSubscriptionsRelations = relations(messageSubscriptions, ({ one, many }) => ({
+  messageDestination: one(messageDestinations, {
+    fields: [messageSubscriptions.destinationId],
+    references: [messageDestinations.id],
+  }),
+  messageSubscriptionCaixas: many(messageSubscriptionCaixas),
+  messageOutboxes: many(messageOutbox),
+}));
+
+export const messageSubscriptionCaixasRelations = relations(messageSubscriptionCaixas, ({ one }) => ({
+  caixa: one(caixas, {
+    fields: [messageSubscriptionCaixas.caixaId],
+    references: [caixas.id],
+  }),
+  messageSubscription: one(messageSubscriptions, {
+    fields: [messageSubscriptionCaixas.subscriptionId],
+    references: [messageSubscriptions.id],
+  }),
+}));
+
+export const messageOutboxRelations = relations(messageOutbox, ({ one }) => ({
+  caixa: one(caixas, {
+    fields: [messageOutbox.caixaId],
+    references: [caixas.id],
+  }),
+  messageDestination: one(messageDestinations, {
+    fields: [messageOutbox.destinationId],
+    references: [messageDestinations.id],
+  }),
+  messageSubscription: one(messageSubscriptions, {
+    fields: [messageOutbox.subscriptionId],
+    references: [messageSubscriptions.id],
+  }),
+  user: one(users, {
+    fields: [messageOutbox.userId],
+    references: [users.id],
+  }),
+}));
+
+export const notificationsRelations = relations(notifications, ({ one }) => ({
+  caixa: one(caixas, {
+    fields: [notifications.caixaId],
+    references: [caixas.id],
+  }),
+  user: one(users, {
+    fields: [notifications.userId],
     references: [users.id],
   }),
 }));

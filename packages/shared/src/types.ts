@@ -325,7 +325,8 @@ export type DeleteResult = { deleted: boolean; archived: boolean };
 
 /* ---------------- fase 2: cartão (spec 007) ---------------- */
 
-export type InvoiceStatus = 'open' | 'closed' | 'paid';
+/** carried_over: fechada sem nada a pagar nela, mas com saldo devedor rolado para a fatura seguinte. */
+export type InvoiceStatus = 'open' | 'closed' | 'carried_over' | 'paid';
 
 export type InvoiceSummary = {
   id: string;
@@ -706,6 +707,9 @@ export type CalendarItem = {
   /** Pode arrastar para outro dia (título, com escrita; no lado espelho, também na caixa do original). */
   canReschedule: boolean;
   isMirrorSide: boolean;
+  /** Lado do espelho (original/mirror) e o status do aceite, de calendar_items. */
+  mirrorSide: 'original' | 'mirror' | null;
+  mirrorStatus: string | null;
 };
 
 /**
@@ -714,3 +718,250 @@ export type CalendarItem = {
  * hoje; antes de hoje é 0); projected = realized + scheduled.
  */
 export type DailyBalance = { day: string; realizedCents: number | null; scheduledCents: number; projectedCents: number | null };
+
+/* ======================================================================
+ * Fase 3: relatórios, canvas de fluxo, mensagens e notificações.
+ * ====================================================================== */
+
+/** Regime dos relatórios (spec 008): competência (padrão) ou caixa. */
+export type ReportBasis = 'competence' | 'cash';
+
+/** Caixa citada num relatório (nome e tipo para a interface). */
+export type ReportCaixa = { id: string; name: string; kind: 'general' | 'credit_card' };
+
+/** Uma linha de report_category_totals com os nomes resolvidos. */
+export type CategoryTotalLine = {
+  month: string;
+  caixaId: string;
+  cardCaixaId: string | null;
+  kind: 'income' | 'expense';
+  groupCategoryId: string | null;
+  groupName: string | null;
+  groupColorSlot: number | null;
+  categoryId: string | null;
+  categoryName: string | null;
+  colorSlot: number | null;
+  source: 'title' | 'card_purchase' | 'settlement' | 'card_invoice_payment' | 'adjustment';
+  isInternal: boolean;
+  amountCents: number;
+  entries: number;
+};
+
+export type CategoryReportData = {
+  basis: ReportBasis;
+  from: string;
+  to: string;
+  /** Meses do período ('YYYY-MM-01'), em ordem. */
+  months: string[];
+  caixas: ReportCaixa[];
+  lines: CategoryTotalLine[];
+};
+
+/** Uma linha de report_entity_totals com os nomes resolvidos. */
+export type EntityTotalLine = {
+  entityId: string;
+  entityName: string;
+  caixaId: string;
+  caixaName: string;
+  cardCaixaId: string | null;
+  cardName: string | null;
+  source: 'title' | 'card_purchase' | 'settlement' | 'card_invoice_payment' | 'adjustment';
+  isInternal: boolean;
+  outflowCents: number;
+  inflowCents: number;
+  entries: number;
+};
+
+export type EntityReportData = {
+  basis: ReportBasis;
+  from: string;
+  to: string;
+  caixas: ReportCaixa[];
+  lines: EntityTotalLine[];
+};
+
+/** Uma linha de report_cash_projection (caixa, ou conta quando financialAccountId não é nulo). */
+export type ProjectionLine = {
+  caixaId: string;
+  caixaName: string;
+  financialAccountId: string | null;
+  accountName: string | null;
+  horizonDays: number;
+  until: string;
+  balanceTodayCents: number;
+  scheduledMovementsCents: number;
+  overdueReceivableCents: number;
+  overduePayableCents: number;
+  receivableCents: number;
+  payableCents: number;
+  projectedCents: number;
+};
+
+export type ProjectionReportData = { today: string; horizons: number[]; lines: ProjectionLine[] };
+
+/* ---------------- canvas de fluxo (spec 014) ---------------- */
+
+export type FlowNodeKind = 'caixa' | 'entity';
+export type FlowEdgeKind = 'payment' | 'receipt' | 'transfer' | 'card_invoice' | 'card_purchase';
+
+export type FlowNodeDto = {
+  kind: FlowNodeKind;
+  id: string;
+  name: string;
+  caixaKind: 'general' | 'credit_card' | null;
+  entityKind: 'person' | 'company' | null;
+  holderEntityId: string | null;
+  balanceCents: number | null;
+  cardUsedCents: number | null;
+  cardLimitCents: number | null;
+  mainCategoryId: string | null;
+  mainGroupCategoryId: string | null;
+  mainGroupName: string | null;
+  mainGroupColorSlot: number | null;
+  realizedInCents: number;
+  realizedOutCents: number;
+  forecastInCents: number;
+  forecastOutCents: number;
+};
+
+export type FlowEdgeDto = {
+  sourceKind: FlowNodeKind;
+  sourceId: string;
+  targetKind: FlowNodeKind;
+  targetId: string;
+  edgeKind: FlowEdgeKind;
+  payerCaixaId: string | null;
+  realizedCents: number;
+  forecastCents: number;
+  lines: number;
+};
+
+export type CanvasNodeKind = 'caixa' | 'entity' | 'category_group';
+export type CanvasPosition = { nodeKind: CanvasNodeKind; nodeId: string; x: number; y: number };
+
+export type FlowGraphData = {
+  from: string;
+  to: string;
+  caixaIds: string[];
+  nodes: FlowNodeDto[];
+  edges: FlowEdgeDto[];
+  positions: CanvasPosition[];
+};
+
+/** Uma linha da gaveta (flow_graph_lines), com rótulo e link para o registro. */
+export type FlowLineDto = {
+  sourceKind: FlowNodeKind;
+  sourceId: string;
+  sourceName: string;
+  targetKind: FlowNodeKind;
+  targetId: string;
+  targetName: string;
+  edgeKind: FlowEdgeKind;
+  payerCaixaId: string | null;
+  categoryId: string | null;
+  categoryName: string | null;
+  colorSlot: number | null;
+  refKind: 'settlement' | 'title' | 'card_invoice' | 'card_purchase' | 'transfer' | 'movement';
+  refId: string;
+  description: string;
+  occurredOn: string;
+  realizedCents: number;
+  forecastCents: number;
+  /** Caminho relativo do console para abrir o registro (nulo se o usuário não lê a caixa dele). */
+  link: string | null;
+};
+
+/* ---------------- mensagens (spec 013) ---------------- */
+
+export type MessageEventKind =
+  | 'due_reminder'
+  | 'overdue'
+  | 'daily_summary'
+  | 'weekly_summary'
+  | 'invoice_closed'
+  | 'card_limit'
+  | 'reconciliation_divergence'
+  | 'agent_completed'
+  | 'agent_message';
+
+export type DestinationOwnerKind = 'user' | 'caixa' | 'global';
+
+/** Destino de mensagens. O bot token NUNCA vem na resposta: só botId (a parte pública). */
+export type MessageDestinationDto = {
+  id: string;
+  channel: 'telegram';
+  name: string;
+  ownerKind: DestinationOwnerKind;
+  ownerUserId: string | null;
+  ownerUsername: string | null;
+  ownerCaixaId: string | null;
+  ownerCaixaName: string | null;
+  botId: string | null;
+  chatId: string | null;
+  isActive: boolean;
+  notes: string | null;
+  archivedAt: string | null;
+  createdAt: string;
+  canManage: boolean;
+  subscriptions: number;
+  lastSentAt: string | null;
+  failedCount: number;
+};
+
+export type MessageSubscriptionDto = {
+  id: string;
+  destinationId: string;
+  eventKind: MessageEventKind;
+  params: Record<string, unknown>;
+  isActive: boolean;
+  caixaIds: string[];
+};
+
+export type OutboxStatus = 'pending' | 'sending' | 'sent' | 'failed' | 'canceled';
+
+export type OutboxMessageDto = {
+  id: string;
+  destinationId: string;
+  destinationName: string;
+  eventKind: MessageEventKind | 'test';
+  status: OutboxStatus;
+  attempts: number;
+  maxAttempts: number;
+  nextAttemptAt: string;
+  sentAt: string | null;
+  lastError: string | null;
+  text: string;
+  caixaId: string | null;
+  createdAt: string;
+  canManage: boolean;
+};
+
+export type TestSendResult = { messageId: string; status: OutboxStatus; error: string | null };
+
+/* ---------------- notificações (sino) ---------------- */
+
+export type NotificationKind =
+  | 'agent_completed'
+  | 'agent_message'
+  | 'mirror_pending'
+  | 'mirror_disputed'
+  | 'invoice_closed'
+  | 'due_reminder'
+  | 'overdue'
+  | 'card_limit'
+  | 'reconciliation_divergence'
+  | 'message_failed'
+  | 'system';
+
+export type NotificationDto = {
+  id: string;
+  kind: NotificationKind;
+  title: string;
+  body: string | null;
+  link: string | null;
+  caixaId: string | null;
+  readAt: string | null;
+  createdAt: string;
+};
+
+export type NotificationList = { unread: number; items: NotificationDto[] };
