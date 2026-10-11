@@ -22,3 +22,6 @@ coverage/
 # Playwright
 test-results/
 playwright-report/
+
+# Credenciais e anotações locais (nunca versionar)
+.local/
