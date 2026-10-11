@@ -5,7 +5,18 @@
 - Parcelado: a compra-mãe gera N parcelas nas faturas futuras (limite comprometido). Estorno: crédito vinculado à compra original, na fatura aberta.
 - No **fechamento**, gera-se uma fatura-título por caixa pagadora (soma das compras dela): "a receber" na caixa do cartão, espelhada como "a pagar" na pagadora ([006](006-espelhamento-entre-caixas.md)). A pagadora navega da fatura para o detalhe das compras.
 - Pagamento parcial ou antecipado abate a fatura; o restante rola para a próxima, com juros/IOF/multa lançados como encargos do emissor. A fatura pode ser reaberta enquanto não houver pagamento.
-- Import de fatura OFX/CSV ([009](009-extratos-e-conciliacao.md)).
+- Import de fatura OFX/CSV ([009](009-extratos-e-conciliacao.md)): as linhas casam com as parcelas lançadas (valor oposto, data da compra ±3 dias) ou viram compras.
+
+## Regras de operação (F2)
+
+- **Competência da fatura** = mês do vencimento. Ela vence no dia de vencimento desse mês e fecha no dia de fechamento do mesmo mês, se ele vem antes do vencimento, ou do mês anterior (meses curtos usam o último dia). Uma compra entra na primeira fatura **aberta** que fecha no dia da compra ou depois; as parcelas seguem nas faturas dos meses seguintes. O resto da divisão em centavos fica na primeira parcela.
+- O worker mantém criadas as faturas até 3 meses à frente. O fechamento é **manual** por padrão: a tela sugere fechar quando a data passa. Com `CARD_AUTO_CLOSE=true` o worker fecha sozinho.
+- **Fechamento**: por pagadora, título = soma dos itens − antecipações já pagas. Saldo negativo (estornos/antecipações acima das compras) vira item "saldo anterior" negativo na fatura seguinte.
+- **Lados do título da fatura**: "a receber" na caixa do cartão (o original) e "a pagar" na pagadora (o espelho). O `mirror_status` fica **no lado da pagadora**: aceito, ou aguardando aceite se quem fechou não tem permissão de escrita na pagadora. O lado do cartão é baixado sempre sem conta e não conta como "conta a definir".
+- **Pagamento parcial**: a baixa cobre o valor pago, o par de títulos é reduzido a esse valor (ou cancelado, se nada foi pago), o restante rola como "saldo anterior" na fatura seguinte e os encargos (juros, IOF, multa) entram nela como lançamentos do emissor.
+- **Pagamento antecipado** (fatura aberta): par de títulos já quitado, com as duas pernas da baixa e o movimento na conta da pagadora.
+- **Reabrir**: só sem pagamento ativo; os títulos não pagos são excluídos (ou cancelados, se já tiveram baixa estornada) e o crédito rolado é desfeito.
+- **Relatórios por competência** (F3, [014](014-visualizacao-e-relatorios.md)) usam as **compras** do cartão (recebedor final, categoria, data da compra) e **excluem** os títulos `card_invoice`, para não contar a despesa duas vezes. No regime de caixa vale o pagamento da fatura.
 
 ```
 Caixa "Nubank PJ" (cartão)

@@ -64,6 +64,7 @@ services:
       <<: *app-env
       MODE: worker
       WORKER_INTERVAL_MS: ${WORKER_INTERVAL_MS:-3600000}
+      CARD_AUTO_CLOSE: ${CARD_AUTO_CLOSE:-false}
     depends_on:
       migrate:
         condition: service_completed_successfully

@@ -33,8 +33,8 @@ Stack: monorepo pnpm, Node/TypeScript (Fastify, Drizzle), React 19 com Vite, Pos
 | [004-caixas-e-contas.md](004-caixas-e-contas.md) | A caixa como livro do titular, caixa principal, tipos de caixa e tipos de conta financeira. |
 | [005-titulos-baixas-e-movimentos.md](005-titulos-baixas-e-movimentos.md) | Títulos, baixas parciais, movimentos, recorrência e parcelamento, transferências, e o pagamento de uma caixa por conta de outra. |
 | [006-espelhamento-entre-caixas.md](006-espelhamento-entre-caixas.md) | Título espelho, caixa da contraparte, aceite pendente quando falta permissão, e a baixa única com duas pernas. |
-| [007-cartao-de-credito.md](007-cartao-de-credito.md) | A caixa do tipo cartão, compras com recebedor final, parcelas, estornos, fechamento por pagadora, pagamento parcial e encargos. |
-| [008-categorias-auditoria-e-exclusao.md](008-categorias-auditoria-e-exclusao.md) | Plano global de categorias, regime de competência e de caixa, arquivamento em vez de exclusão, auditoria e fechamento de mês. |
+| [007-cartao-de-credito.md](007-cartao-de-credito.md) | A caixa do tipo cartão, compras com recebedor final, parcelas, estornos, datas da fatura, fechamento por pagadora (espelho aceito no lado da pagadora), pagamento parcial e antecipado, encargos, e relatórios por competência pelas compras (sem os títulos de fatura). |
+| [008-categorias-auditoria-e-exclusao.md](008-categorias-auditoria-e-exclusao.md) | Plano global de categorias, regime de competência e de caixa, arquivamento em vez de exclusão, auditoria (sem retenção por enquanto) e fechamento de mês após a conciliação. |
 | [009-extratos-e-conciliacao.md](009-extratos-e-conciliacao.md) | Import OFX/CSV, deduplicação, casamento assistido, divergência de saldo e regras de classificação. |
 | [010-entrada-de-titulos.md](010-entrada-de-titulos.md) | Boleto (linha digitável), PIX copia-e-cola, leitura de PDF/imagem por IA e import de NF-e. |
 | [011-agentes-de-ia.md](011-agentes-de-ia.md) | Provedores, agentes, tools e confirmação de escrita, visibilidade de MCP, servidor MCP próprio, execução, histórico, custo e UX das janelas e do painel lateral. |
