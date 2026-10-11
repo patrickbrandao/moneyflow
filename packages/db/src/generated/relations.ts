@@ -5,11 +5,14 @@ import {
   entities,
   entityContacts,
   entityAddresses,
+  aiProviders,
   entityBankAccounts,
   entityPixKeys,
   entityLinks,
+  aiModelPrices,
   caixas,
   caixaMembers,
+  aiAgents,
   financialAccounts,
   caixaHiddenCategories,
   categories,
@@ -20,26 +23,37 @@ import {
   titleAttachments,
   movements,
   settlementAttachments,
+  mcpServers,
   movementAttachments,
   entityAttachments,
   nfeDocuments,
   nfeItems,
   cardInvoices,
+  agentMcpServers,
   cardPurchases,
   cardInvoiceItems,
   recurrenceRules,
   cardPurchaseAttachments,
   statementCsvMappings,
   statementImports,
+  aiConversations,
+  aiMessages,
   classificationRules,
   statementLines,
   periodClosings,
   canvasNodePositions,
   messageDestinations,
+  aiRuns,
   messageSubscriptions,
   messageSubscriptionCaixas,
   messageOutbox,
   notifications,
+  aiMessageAttachments,
+  aiRunEvents,
+  aiToolConfirmations,
+  aiUsage,
+  userApiTokens,
+  aiEmbeddings,
 } from './schema';
 
 export const sessionsRelations = relations(sessions, ({ one }) => ({
@@ -51,9 +65,13 @@ export const sessionsRelations = relations(sessions, ({ one }) => ({
 
 export const usersRelations = relations(users, ({ many }) => ({
   sessions: many(sessions),
+  aiProviders: many(aiProviders),
   caixaMembers: many(caixaMembers),
+  aiAgents: many(aiAgents),
   attachments: many(attachments),
+  mcpServers: many(mcpServers),
   statementImports: many(statementImports),
+  aiConversations: many(aiConversations),
   classificationRules: many(classificationRules),
   periodClosings: many(periodClosings),
   canvasNodePositions: many(canvasNodePositions),
@@ -63,8 +81,12 @@ export const usersRelations = relations(users, ({ many }) => ({
   messageDestinations_ownerUserId: many(messageDestinations, {
     relationName: 'messageDestinations_ownerUserId_users_id',
   }),
+  aiRuns: many(aiRuns),
   messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
+  aiToolConfirmations: many(aiToolConfirmations),
+  aiUsages: many(aiUsage),
+  userApiTokens: many(userApiTokens),
 }));
 
 export const entityContactsRelations = relations(entityContacts, ({ one }) => ({
@@ -107,6 +129,17 @@ export const entityAddressesRelations = relations(entityAddresses, ({ one }) => 
   }),
 }));
 
+export const aiProvidersRelations = relations(aiProviders, ({ one, many }) => ({
+  user: one(users, {
+    fields: [aiProviders.createdByUserId],
+    references: [users.id],
+  }),
+  aiModelPrices: many(aiModelPrices),
+  aiAgents: many(aiAgents),
+  aiRuns: many(aiRuns),
+  aiUsages: many(aiUsage),
+}));
+
 export const entityBankAccountsRelations = relations(entityBankAccounts, ({ one }) => ({
   entity: one(entities, {
     fields: [entityBankAccounts.entityId],
@@ -132,6 +165,14 @@ export const entityLinksRelations = relations(entityLinks, ({ one }) => ({
     references: [entities.id],
     relationName: 'entityLinks_relatedEntityId_entities_id',
   }),
+}));
+
+export const aiModelPricesRelations = relations(aiModelPrices, ({ one, many }) => ({
+  aiProvider: one(aiProviders, {
+    fields: [aiModelPrices.providerId],
+    references: [aiProviders.id],
+  }),
+  aiUsages: many(aiUsage),
 }));
 
 export const caixasRelations = relations(caixas, ({ one, many }) => ({
@@ -173,6 +214,7 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
   messageSubscriptionCaixas: many(messageSubscriptionCaixas),
   messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
+  aiEmbeddings: many(aiEmbeddings),
 }));
 
 export const caixaMembersRelations = relations(caixaMembers, ({ one }) => ({
@@ -184,6 +226,21 @@ export const caixaMembersRelations = relations(caixaMembers, ({ one }) => ({
     fields: [caixaMembers.userId],
     references: [users.id],
   }),
+}));
+
+export const aiAgentsRelations = relations(aiAgents, ({ one, many }) => ({
+  user: one(users, {
+    fields: [aiAgents.createdByUserId],
+    references: [users.id],
+  }),
+  aiProvider: one(aiProviders, {
+    fields: [aiAgents.providerId],
+    references: [aiProviders.id],
+  }),
+  agentMcpServers: many(agentMcpServers),
+  aiConversations: many(aiConversations),
+  aiRuns: many(aiRuns),
+  aiUsages: many(aiUsage),
 }));
 
 export const financialAccountsRelations = relations(financialAccounts, ({ one, many }) => ({
@@ -339,6 +396,7 @@ export const attachmentsRelations = relations(attachments, ({ one, many }) => ({
   nfeDocuments: many(nfeDocuments),
   cardPurchaseAttachments: many(cardPurchaseAttachments),
   statementImports: many(statementImports),
+  aiMessageAttachments: many(aiMessageAttachments),
 }));
 
 export const movementsRelations = relations(movements, ({ one, many }) => ({
@@ -375,6 +433,14 @@ export const settlementAttachmentsRelations = relations(settlementAttachments, (
     fields: [settlementAttachments.settlementId],
     references: [settlements.id],
   }),
+}));
+
+export const mcpServersRelations = relations(mcpServers, ({ one, many }) => ({
+  user: one(users, {
+    fields: [mcpServers.createdByUserId],
+    references: [users.id],
+  }),
+  agentMcpServers: many(agentMcpServers),
 }));
 
 export const movementAttachmentsRelations = relations(movementAttachments, ({ one }) => ({
@@ -438,6 +504,17 @@ export const cardInvoicesRelations = relations(cardInvoices, ({ one, many }) => 
   }),
   titles: many(titles),
   statementImports: many(statementImports),
+}));
+
+export const agentMcpServersRelations = relations(agentMcpServers, ({ one }) => ({
+  aiAgent: one(aiAgents, {
+    fields: [agentMcpServers.agentId],
+    references: [aiAgents.id],
+  }),
+  mcpServer: one(mcpServers, {
+    fields: [agentMcpServers.mcpServerId],
+    references: [mcpServers.id],
+  }),
 }));
 
 export const cardPurchasesRelations = relations(cardPurchases, ({ one, many }) => ({
@@ -548,6 +625,48 @@ export const statementImportsRelations = relations(statementImports, ({ one, man
   statementLines: many(statementLines),
 }));
 
+export const aiConversationsRelations = relations(aiConversations, ({ one, many }) => ({
+  aiAgent: one(aiAgents, {
+    fields: [aiConversations.agentId],
+    references: [aiAgents.id],
+  }),
+  aiMessage: one(aiMessages, {
+    fields: [aiConversations.forkedFromConversationId],
+    references: [aiMessages.id],
+    relationName: 'aiConversations_forkedFromConversationId_aiMessages_id',
+  }),
+  user: one(users, {
+    fields: [aiConversations.userId],
+    references: [users.id],
+  }),
+  aiRuns: many(aiRuns),
+  aiMessages: many(aiMessages, {
+    relationName: 'aiMessages_conversationId_aiConversations_id',
+  }),
+  aiUsages: many(aiUsage),
+}));
+
+export const aiMessagesRelations = relations(aiMessages, ({ one, many }) => ({
+  aiConversations: many(aiConversations, {
+    relationName: 'aiConversations_forkedFromConversationId_aiMessages_id',
+  }),
+  aiRuns: many(aiRuns, {
+    relationName: 'aiRuns_conversationId_aiMessages_id',
+  }),
+  aiConversation: one(aiConversations, {
+    fields: [aiMessages.conversationId],
+    references: [aiConversations.id],
+    relationName: 'aiMessages_conversationId_aiConversations_id',
+  }),
+  aiRun: one(aiRuns, {
+    fields: [aiMessages.conversationId],
+    references: [aiRuns.id],
+    relationName: 'aiMessages_conversationId_aiRuns_id',
+  }),
+  aiMessageAttachments: many(aiMessageAttachments),
+  aiUsages: many(aiUsage),
+}));
+
 export const classificationRulesRelations = relations(classificationRules, ({ one, many }) => ({
   caixa: one(caixas, {
     fields: [classificationRules.caixaId],
@@ -655,6 +774,36 @@ export const messageDestinationsRelations = relations(messageDestinations, ({ on
   messageOutboxes: many(messageOutbox),
 }));
 
+export const aiRunsRelations = relations(aiRuns, ({ one, many }) => ({
+  aiAgent: one(aiAgents, {
+    fields: [aiRuns.agentId],
+    references: [aiAgents.id],
+  }),
+  aiConversation: one(aiConversations, {
+    fields: [aiRuns.conversationId],
+    references: [aiConversations.id],
+  }),
+  aiProvider: one(aiProviders, {
+    fields: [aiRuns.providerId],
+    references: [aiProviders.id],
+  }),
+  aiMessage: one(aiMessages, {
+    fields: [aiRuns.conversationId],
+    references: [aiMessages.id],
+    relationName: 'aiRuns_conversationId_aiMessages_id',
+  }),
+  user: one(users, {
+    fields: [aiRuns.userId],
+    references: [users.id],
+  }),
+  aiMessages: many(aiMessages, {
+    relationName: 'aiMessages_conversationId_aiRuns_id',
+  }),
+  aiRunEvents: many(aiRunEvents),
+  aiToolConfirmations: many(aiToolConfirmations),
+  aiUsages: many(aiUsage),
+}));
+
 export const messageSubscriptionsRelations = relations(messageSubscriptions, ({ one, many }) => ({
   messageDestination: one(messageDestinations, {
     fields: [messageSubscriptions.destinationId],
@@ -702,5 +851,79 @@ export const notificationsRelations = relations(notifications, ({ one }) => ({
   user: one(users, {
     fields: [notifications.userId],
     references: [users.id],
+  }),
+}));
+
+export const aiMessageAttachmentsRelations = relations(aiMessageAttachments, ({ one }) => ({
+  attachment: one(attachments, {
+    fields: [aiMessageAttachments.attachmentId],
+    references: [attachments.id],
+  }),
+  aiMessage: one(aiMessages, {
+    fields: [aiMessageAttachments.messageId],
+    references: [aiMessages.id],
+  }),
+}));
+
+export const aiRunEventsRelations = relations(aiRunEvents, ({ one }) => ({
+  aiRun: one(aiRuns, {
+    fields: [aiRunEvents.runId],
+    references: [aiRuns.id],
+  }),
+}));
+
+export const aiToolConfirmationsRelations = relations(aiToolConfirmations, ({ one }) => ({
+  user: one(users, {
+    fields: [aiToolConfirmations.decidedByUserId],
+    references: [users.id],
+  }),
+  aiRun: one(aiRuns, {
+    fields: [aiToolConfirmations.runId],
+    references: [aiRuns.id],
+  }),
+}));
+
+export const aiUsageRelations = relations(aiUsage, ({ one }) => ({
+  aiAgent: one(aiAgents, {
+    fields: [aiUsage.agentId],
+    references: [aiAgents.id],
+  }),
+  aiConversation: one(aiConversations, {
+    fields: [aiUsage.conversationId],
+    references: [aiConversations.id],
+  }),
+  aiMessage: one(aiMessages, {
+    fields: [aiUsage.messageId],
+    references: [aiMessages.id],
+  }),
+  aiModelPrice: one(aiModelPrices, {
+    fields: [aiUsage.priceId],
+    references: [aiModelPrices.id],
+  }),
+  aiProvider: one(aiProviders, {
+    fields: [aiUsage.providerId],
+    references: [aiProviders.id],
+  }),
+  aiRun: one(aiRuns, {
+    fields: [aiUsage.runId],
+    references: [aiRuns.id],
+  }),
+  user: one(users, {
+    fields: [aiUsage.userId],
+    references: [users.id],
+  }),
+}));
+
+export const userApiTokensRelations = relations(userApiTokens, ({ one }) => ({
+  user: one(users, {
+    fields: [userApiTokens.userId],
+    references: [users.id],
+  }),
+}));
+
+export const aiEmbeddingsRelations = relations(aiEmbeddings, ({ one }) => ({
+  caixa: one(caixas, {
+    fields: [aiEmbeddings.caixaId],
+    references: [caixas.id],
   }),
 }));

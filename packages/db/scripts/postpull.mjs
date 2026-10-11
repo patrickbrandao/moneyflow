@@ -1,7 +1,7 @@
 // Pós-processamento determinístico do `drizzle-kit pull` (parte da geração,
 // não é edição manual): o drizzle-kit não conhece `citext` nem `bytea` e emite
-// `unknown("col")`; trocamos pelos tipos customizados de src/citext.ts e
-// src/bytea.ts (o comentário TODO que precede a coluna diz o tipo). Também
+// `unknown("col")`; trocamos pelos tipos customizados de src/citext.ts,
+// src/bytea.ts e src/tsvector.ts (o comentário TODO que precede a coluna diz o tipo). Também
 // apaga a "migration" e o snapshot que o pull grava (as migrations são do
 // dbmate, em database/).
 import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -11,14 +11,16 @@ const dir = new URL('../src/generated/', import.meta.url).pathname;
 const file = join(dir, 'schema.ts');
 let src = readFileSync(file, 'utf8');
 // Colunas com TODO explícito: o tipo vem no comentário.
-src = src.replace(/^\s*\/\/ TODO: failed to parse database type '(bytea|citext)'\n(\s*\w+: )unknown\(/gm, '$2$1(');
+src = src.replace(/^\s*\/\/ TODO: failed to parse database type '(bytea|citext|tsvector)'\n(\s*\w+: )unknown\(/gm, '$2$1(');
 // citext às vezes sai sem o comentário.
 src = src.replace(/\bunknown\(/g, 'citext(');
-for (const type of ['citext', 'bytea']) {
+for (const type of ['citext', 'bytea', 'tsvector']) {
   if (new RegExp(`\\b${type}\\(`).test(src) && !src.includes(`from '../${type}'`)) {
     src = `import { ${type} } from '../${type}';\n${src}`;
   }
 }
+// Default de texto vazio sai como `.default(')` (bug do drizzle-kit com `DEFAULT ''`).
+src = src.replace(/\.default\('\)/g, ".default('')");
 // FK em ciclo com uma tabela declarada mais adiante (ex.: classification_rules ⇄
 // statement_lines) faz o TypeScript desistir da inferência (TS7022). As FKs do
 // schema Drizzle não são usadas em runtime (o banco as garante e as migrations são

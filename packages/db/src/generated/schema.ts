@@ -1,3 +1,4 @@
+import { tsvector } from '../tsvector';
 import { bytea } from '../bytea';
 import { citext } from '../citext';
 import {
@@ -13,12 +14,13 @@ import {
   boolean,
   date,
   uniqueIndex,
+  numeric,
   bigint,
   smallint,
-  integer,
-  numeric,
   jsonb,
+  integer,
   doublePrecision,
+  vector,
   pgView,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
@@ -61,8 +63,8 @@ export const users = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
   },
   (table) => [
-    unique('users_email_key').on(table.email),
     unique('users_username_key').on(table.username),
+    unique('users_email_key').on(table.email),
     check(
       'users_email_format_check',
       sql`(email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'::citext) AND (length((email)::text) <= 254)`,
@@ -161,6 +163,49 @@ export const entityAddresses = pgTable(
       'entity_addresses_state_check',
       sql`state = ANY (ARRAY['AC'::text, 'AL'::text, 'AP'::text, 'AM'::text, 'BA'::text, 'CE'::text, 'DF'::text, 'ES'::text, 'GO'::text, 'MA'::text, 'MT'::text, 'MS'::text, 'MG'::text, 'PA'::text, 'PB'::text, 'PR'::text, 'PE'::text, 'PI'::text, 'RJ'::text, 'RN'::text, 'RS'::text, 'RO'::text, 'RR'::text, 'SC'::text, 'SP'::text, 'SE'::text, 'TO'::text])`,
     ),
+  ],
+);
+
+export const aiProviders = pgTable(
+  'ai_providers',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    name: text().notNull(),
+    kind: text().notNull(),
+    baseUrl: text('base_url'),
+    apiKey: text('api_key'),
+    apiKeyHint: text('api_key_hint').generatedAlwaysAs(sql`
+CASE
+    WHEN (api_key IS NOT NULL) THEN ('…'::text || "right"(api_key, 4))
+    ELSE NULL::text
+END`),
+    embeddingModel: text('embedding_model'),
+    isActive: boolean('is_active').default(true).notNull(),
+    createdByUserId: uuid('created_by_user_id'),
+    notes: text(),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_providers_created_by_user_id_idx').using('btree', table.createdByUserId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('ai_providers_embedding_key').using('btree', sql`(true)`).where(sql`((embedding_model IS NOT NULL) AND is_active)`),
+    uniqueIndex('ai_providers_name_key').using('btree', sql`lower(name)`),
+    foreignKey({
+      columns: [table.createdByUserId],
+      foreignColumns: [users.id],
+      name: 'ai_providers_created_by_user_id_fkey',
+    }).onDelete('set null'),
+    check('ai_providers_active_check', sql`NOT (is_active AND (archived_at IS NOT NULL))`),
+    check('ai_providers_api_key_check', sql`(api_key ~ '^[[:graph:]]+$'::text) AND ((length(api_key) >= 8) AND (length(api_key) <= 1000))`),
+    check('ai_providers_base_url_check', sql`(base_url ~ '^https?://[^[:space:]]+$'::text) AND (length(base_url) <= 500)`),
+    check('ai_providers_credentials_check', sql`(api_key IS NOT NULL) OR (base_url IS NOT NULL)`),
+    check(
+      'ai_providers_embedding_model_check',
+      sql`(embedding_model IS NULL) OR ((embedding_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text) AND (kind = 'openai'::text))`,
+    ),
+    check('ai_providers_kind_check', sql`kind = ANY (ARRAY['anthropic'::text, 'openai'::text])`),
+    check('ai_providers_name_check', sql`(btrim(name) <> ''::text) AND (length(name) <= 120)`),
   ],
 );
 
@@ -277,6 +322,37 @@ export const entityLinks = pgTable(
   ],
 );
 
+export const aiModelPrices = pgTable(
+  'ai_model_prices',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    providerId: uuid('provider_id').notNull(),
+    model: text().notNull(),
+    currency: text().default('USD').notNull(),
+    inputPricePerMillion: numeric('input_price_per_million', { precision: 14, scale: 6 }).notNull(),
+    outputPricePerMillion: numeric('output_price_per_million', { precision: 14, scale: 6 }).notNull(),
+    cacheWritePricePerMillion: numeric('cache_write_price_per_million', { precision: 14, scale: 6 }),
+    cacheReadPricePerMillion: numeric('cache_read_price_per_million', { precision: 14, scale: 6 }),
+    validFrom: timestamp('valid_from', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.providerId],
+      foreignColumns: [aiProviders.id],
+      name: 'ai_model_prices_provider_id_fkey',
+    }).onDelete('cascade'),
+    unique('ai_model_prices_valid_from_key').on(table.model, table.providerId, table.validFrom),
+    check('ai_model_prices_currency_check', sql`currency = ANY (ARRAY['USD'::text, 'BRL'::text])`),
+    check('ai_model_prices_model_check', sql`model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text`),
+    check(
+      'ai_model_prices_values_check',
+      sql`(input_price_per_million >= (0)::numeric) AND (output_price_per_million >= (0)::numeric) AND (cache_write_price_per_million >= (0)::numeric) AND (cache_read_price_per_million >= (0)::numeric)`,
+    ),
+  ],
+);
+
 export const caixas = pgTable(
   'caixas',
   {
@@ -354,6 +430,53 @@ export const caixaMembers = pgTable(
     }).onDelete('cascade'),
     unique('caixa_members_user_caixa_key').on(table.caixaId, table.userId),
     check('caixa_members_role_check', sql`role = ANY (ARRAY['editor'::text, 'viewer'::text])`),
+  ],
+);
+
+export const aiAgents = pgTable(
+  'ai_agents',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    name: text().notNull(),
+    description: text(),
+    systemPrompt: text('system_prompt').default('').notNull(),
+    providerId: uuid('provider_id'),
+    model: text(),
+    params: jsonb().default({}).notNull(),
+    enabledTools: text('enabled_tools').array(),
+    requireWriteConfirmation: boolean('require_write_confirmation').default(true).notNull(),
+    colorSlot: smallint('color_slot').default(1).notNull(),
+    icon: text(),
+    isActive: boolean('is_active').default(true).notNull(),
+    createdByUserId: uuid('created_by_user_id'),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_agents_created_by_user_id_idx').using('btree', table.createdByUserId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('ai_agents_name_key').using('btree', sql`lower(name)`),
+    index('ai_agents_provider_id_idx').using('btree', table.providerId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.createdByUserId],
+      foreignColumns: [users.id],
+      name: 'ai_agents_created_by_user_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.providerId],
+      foreignColumns: [aiProviders.id],
+      name: 'ai_agents_provider_id_fkey',
+    }),
+    check('ai_agents_active_check', sql`NOT (is_active AND (archived_at IS NOT NULL))`),
+    check('ai_agents_color_slot_check', sql`(color_slot >= 1) AND (color_slot <= 12)`),
+    check('ai_agents_description_check', sql`length(description) <= 2000`),
+    check('ai_agents_enabled_tools_check', sql`CHECK (ai_tool_list_valid(enabled_tools`),
+    check('ai_agents_icon_check', sql`icon ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text`),
+    check('ai_agents_model_check', sql`model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text`),
+    check('ai_agents_name_check', sql`(btrim(name) <> ''::text) AND (length(name) <= 120)`),
+    check('ai_agents_params_check', sql`CHECK (ai_agent_params_valid(params`),
+    check('ai_agents_ready_check', sql`(NOT is_active) OR ((provider_id IS NOT NULL) AND (model IS NOT NULL))`),
+    check('ai_agents_system_prompt_check', sql`length(system_prompt) <= 200000`),
   ],
 );
 
@@ -720,6 +843,46 @@ export const settlementAttachments = pgTable(
   ],
 );
 
+export const mcpServers = pgTable(
+  'mcp_servers',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    name: text().notNull(),
+    url: text().notNull(),
+    secretHeaders: jsonb('secret_headers').default({}).notNull(),
+    secretHeaderNames: text('secret_header_names').array().notNull().generatedAlwaysAs(sql`mcp_header_names(secret_headers)`),
+    visibility: text().default('public').notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
+    toolsCache: jsonb('tools_cache'),
+    toolsCachedAt: timestamp('tools_cached_at', { withTimezone: true, mode: 'string' }),
+    toolsError: text('tools_error'),
+    createdByUserId: uuid('created_by_user_id'),
+    notes: text(),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('mcp_servers_created_by_user_id_idx').using('btree', table.createdByUserId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('mcp_servers_name_key').using('btree', sql`lower(name)`),
+    foreignKey({
+      columns: [table.createdByUserId],
+      foreignColumns: [users.id],
+      name: 'mcp_servers_created_by_user_id_fkey',
+    }).onDelete('set null'),
+    check('mcp_servers_active_check', sql`NOT (is_active AND (archived_at IS NOT NULL))`),
+    check('mcp_servers_name_check', sql`(btrim(name) <> ''::text) AND (length(name) <= 120)`),
+    check('mcp_servers_secret_headers_check', sql`CHECK (mcp_headers_valid(secret_headers`),
+    check(
+      'mcp_servers_tools_cache_check',
+      sql`(tools_cache IS NULL) OR ((jsonb_typeof(tools_cache) = 'array'::text) AND (tools_cached_at IS NOT NULL))`,
+    ),
+    check('mcp_servers_tools_error_check', sql`length(tools_error) <= 2000`),
+    check('mcp_servers_url_check', sql`(url ~ '^https?://[^[:space:]]+$'::text) AND (length(url) <= 2000)`),
+    check('mcp_servers_visibility_check', sql`visibility = ANY (ARRAY['global'::text, 'public'::text, 'private'::text])`),
+  ],
+);
+
 export const movementAttachments = pgTable(
   'movement_attachments',
   {
@@ -877,6 +1040,33 @@ export const cardInvoices = pgTable(
   ],
 );
 
+export const agentMcpServers = pgTable(
+  'agent_mcp_servers',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    agentId: uuid('agent_id').notNull(),
+    mcpServerId: uuid('mcp_server_id').notNull(),
+    enabledTools: text('enabled_tools').array(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('agent_mcp_servers_mcp_server_id_idx').using('btree', table.mcpServerId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.agentId],
+      foreignColumns: [aiAgents.id],
+      name: 'agent_mcp_servers_agent_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.mcpServerId],
+      foreignColumns: [mcpServers.id],
+      name: 'agent_mcp_servers_mcp_server_id_fkey',
+    }).onDelete('cascade'),
+    unique('agent_mcp_servers_key').on(table.agentId, table.mcpServerId),
+    check('agent_mcp_servers_enabled_tools_check', sql`CHECK (ai_tool_list_valid(enabled_tools`),
+  ],
+);
+
 export const cardPurchases = pgTable(
   'card_purchases',
   {
@@ -996,8 +1186,8 @@ export const cardInvoiceItems = pgTable(
       foreignColumns: [caixas.id],
       name: 'card_invoice_items_payer_caixa_id_fkey',
     }),
-    unique('card_invoice_items_carryover_key').on(table.carriedFromInvoiceId, table.payerCaixaId),
     unique('card_invoice_items_purchase_installment_key').on(table.cardPurchaseId, table.installmentNumber),
+    unique('card_invoice_items_carryover_key').on(table.carriedFromInvoiceId, table.payerCaixaId),
     check('card_invoice_items_amount_cents_check', sql`amount_cents <> 0`),
     check('card_invoice_items_carried_self_check', sql`carried_from_invoice_id <> card_invoice_id`),
     check('card_invoice_items_installment_number_check', sql`(installment_number >= 1) AND (installment_number <= 99)`),
@@ -1290,6 +1480,53 @@ export const statementImports = pgTable(
       'statement_imports_target_check',
       sql`(num_nonnulls(financial_account_id, card_caixa_id) = 1) AND ((card_invoice_id IS NULL) OR (card_caixa_id IS NOT NULL))`,
     ),
+  ],
+);
+
+export const aiConversations = pgTable(
+  'ai_conversations',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    userId: uuid('user_id').notNull(),
+    agentId: uuid('agent_id').notNull(),
+    title: text(),
+    titleSource: text('title_source').default('auto').notNull(),
+    pinnedAt: timestamp('pinned_at', { withTimezone: true, mode: 'string' }),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    forkedFromConversationId: uuid('forked_from_conversation_id'),
+    forkedFromMessageId: uuid('forked_from_message_id'),
+    screenContext: jsonb('screen_context'),
+    lastMessageAt: timestamp('last_message_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_conversations_agent_id_idx').using('btree', table.agentId.asc().nullsLast().op('uuid_ops')),
+    index('ai_conversations_forked_from_idx').using(
+      'btree',
+      table.forkedFromConversationId.asc().nullsLast().op('uuid_ops'),
+      table.forkedFromMessageId.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('ai_conversations_title_trgm_idx').using('gin', table.title.asc().nullsLast().op('gin_trgm_ops')),
+    index('ai_conversations_user_id_idx').using(
+      'btree',
+      table.userId.asc().nullsLast().op('uuid_ops'),
+      table.lastMessageAt.desc().nullsLast().op('uuid_ops'),
+    ),
+    foreignKey({
+      columns: [table.agentId],
+      foreignColumns: [aiAgents.id],
+      name: 'ai_conversations_agent_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'ai_conversations_user_id_fkey',
+    }).onDelete('cascade'),
+    check('ai_conversations_fork_check', sql`forked_from_conversation_id <> id`),
+    check('ai_conversations_screen_context_check', sql`jsonb_typeof(screen_context) = 'object'::text`),
+    check('ai_conversations_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
+    check('ai_conversations_title_source_check', sql`title_source = ANY (ARRAY['auto'::text, 'user'::text])`),
   ],
 );
 
@@ -1642,6 +1879,107 @@ export const messageDestinations = pgTable(
   ],
 );
 
+export const aiRuns = pgTable(
+  'ai_runs',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    conversationId: uuid('conversation_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    agentId: uuid('agent_id').notNull(),
+    providerId: uuid('provider_id').notNull(),
+    model: text().notNull(),
+    triggerMessageId: uuid('trigger_message_id'),
+    status: text().default('queued').notNull(),
+    error: text(),
+    cancelRequestedAt: timestamp('cancel_requested_at', { withTimezone: true, mode: 'string' }),
+    lockedAt: timestamp('locked_at', { withTimezone: true, mode: 'string' }),
+    lockToken: uuid('lock_token'),
+    attempts: smallint().default(0).notNull(),
+    maxAttempts: smallint('max_attempts').default(3).notNull(),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' }),
+    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'string' }),
+    lastEventSeq: integer('last_event_seq').default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    inputTokens: bigint('input_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    outputTokens: bigint('output_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    costMicros: bigint('cost_micros', { mode: 'number' }).default(0).notNull(),
+    costCurrency: text('cost_currency'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_runs_agent_id_idx').using('btree', table.agentId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('ai_runs_conversation_active_key')
+      .using('btree', table.conversationId.asc().nullsLast().op('uuid_ops'))
+      .where(sql`(status = ANY (ARRAY['queued'::text, 'running'::text, 'awaiting_confirmation'::text]))`),
+    index('ai_runs_finished_at_idx')
+      .using('btree', table.finishedAt.asc().nullsLast().op('timestamptz_ops'))
+      .where(sql`(finished_at IS NOT NULL)`),
+    index('ai_runs_provider_id_idx').using('btree', table.providerId.asc().nullsLast().op('uuid_ops')),
+    index('ai_runs_queued_idx')
+      .using('btree', table.createdAt.asc().nullsLast().op('timestamptz_ops'))
+      .where(sql`(status = 'queued'::text)`),
+    index('ai_runs_running_idx')
+      .using('btree', table.lockedAt.asc().nullsLast().op('timestamptz_ops'))
+      .where(sql`(status = 'running'::text)`),
+    index('ai_runs_trigger_message_idx').using(
+      'btree',
+      table.conversationId.asc().nullsLast().op('uuid_ops'),
+      table.triggerMessageId.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('ai_runs_user_id_idx').using(
+      'btree',
+      table.userId.asc().nullsLast().op('uuid_ops'),
+      table.createdAt.asc().nullsLast().op('uuid_ops'),
+    ),
+    foreignKey({
+      columns: [table.agentId],
+      foreignColumns: [aiAgents.id],
+      name: 'ai_runs_agent_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.conversationId],
+      foreignColumns: [aiConversations.id],
+      name: 'ai_runs_conversation_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.providerId],
+      foreignColumns: [aiProviders.id],
+      name: 'ai_runs_provider_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'ai_runs_user_id_fkey',
+    }).onDelete('cascade'),
+    unique('ai_runs_conversation_id_key').on(table.conversationId, table.id),
+    check(
+      'ai_runs_attempts_check',
+      sql`((max_attempts >= 1) AND (max_attempts <= 20)) AND ((attempts >= 0) AND (attempts <= max_attempts))`,
+    ),
+    check('ai_runs_cost_currency_check', sql`cost_currency = ANY (ARRAY['USD'::text, 'BRL'::text])`),
+    check('ai_runs_error_check', sql`length(error) <= 4000`),
+    check(
+      'ai_runs_status_check',
+      sql`status = ANY (ARRAY['queued'::text, 'running'::text, 'awaiting_confirmation'::text, 'completed'::text, 'failed'::text, 'canceled'::text])`,
+    ),
+    check(
+      'ai_runs_status_fields_check',
+      sql`((status = 'running'::text) = (locked_at IS NOT NULL)) AND ((status = 'running'::text) = (lock_token IS NOT NULL)) AND ((status = ANY (ARRAY['completed'::text, 'failed'::text, 'canceled'::text])) = (finished_at IS NOT NULL)) AND ((status <> 'failed'::text) OR (error IS NOT NULL)) AND ((status <> ALL (ARRAY['running'::text, 'awaiting_confirmation'::text, 'completed'::text])) OR (started_at IS NOT NULL))`,
+    ),
+    check(
+      'ai_runs_usage_check',
+      sql`(last_event_seq >= 0) AND (input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0) AND (cost_micros >= 0)`,
+    ),
+  ],
+);
+
 export const messageSubscriptions = pgTable(
   'message_subscriptions',
   {
@@ -1829,6 +2167,318 @@ export const notifications = pgTable(
     check('notifications_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
   ],
 );
+
+export const aiMessages = pgTable(
+  'ai_messages',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    conversationId: uuid('conversation_id').notNull(),
+    seq: integer().notNull(),
+    role: text().notNull(),
+    content: jsonb().notNull(),
+    runId: uuid('run_id'),
+    searchTsv: tsvector('search_tsv').notNull().generatedAlwaysAs(sql`to_tsvector('portuguese'::regconfig, ai_message_text(content))`),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_messages_run_id_idx').using('btree', table.runId.asc().nullsLast().op('uuid_ops')),
+    index('ai_messages_run_idx').using(
+      'btree',
+      table.conversationId.asc().nullsLast().op('uuid_ops'),
+      table.runId.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('ai_messages_search_tsv_idx').using('gin', table.searchTsv.asc().nullsLast().op('tsvector_ops')),
+    foreignKey({
+      columns: [table.conversationId],
+      foreignColumns: [aiConversations.id],
+      name: 'ai_messages_conversation_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.conversationId, table.runId],
+      foreignColumns: [aiRuns.id, aiRuns.conversationId],
+      name: 'ai_messages_run_fkey',
+    }).onDelete('set null'),
+    unique('ai_messages_conversation_id_key').on(table.conversationId, table.id),
+    unique('ai_messages_seq_key').on(table.conversationId, table.seq),
+    check('ai_messages_content_check', sql`CHECK (ai_message_content_valid(role, content`),
+    check('ai_messages_role_check', sql`role = ANY (ARRAY['user'::text, 'assistant'::text, 'tool'::text])`),
+    check('ai_messages_seq_check', sql`seq >= 1`),
+  ],
+);
+
+export const aiMessageAttachments = pgTable(
+  'ai_message_attachments',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    messageId: uuid('message_id').notNull(),
+    attachmentId: uuid('attachment_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_message_attachments_attachment_id_idx').using('btree', table.attachmentId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.attachmentId],
+      foreignColumns: [attachments.id],
+      name: 'ai_message_attachments_attachment_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.messageId],
+      foreignColumns: [aiMessages.id],
+      name: 'ai_message_attachments_message_id_fkey',
+    }).onDelete('cascade'),
+    unique('ai_message_attachments_key').on(table.attachmentId, table.messageId),
+  ],
+);
+
+export const aiRunEvents = pgTable(
+  'ai_run_events',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    runId: uuid('run_id').notNull(),
+    seq: integer().notNull(),
+    eventType: text('event_type').notNull(),
+    payload: jsonb().default({}).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.runId],
+      foreignColumns: [aiRuns.id],
+      name: 'ai_run_events_run_id_fkey',
+    }).onDelete('cascade'),
+    unique('ai_run_events_seq_key').on(table.runId, table.seq),
+    check('ai_run_events_event_type_check', sql`event_type ~ '^[a-z][a-z0-9_.]{0,63}$'::text`),
+    check('ai_run_events_payload_check', sql`jsonb_typeof(payload) = 'object'::text`),
+    check('ai_run_events_seq_check', sql`seq >= 1`),
+  ],
+);
+
+export const aiToolConfirmations = pgTable(
+  'ai_tool_confirmations',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    runId: uuid('run_id').notNull(),
+    toolUseId: text('tool_use_id').notNull(),
+    toolName: text('tool_name').notNull(),
+    input: jsonb().notNull(),
+    preview: jsonb(),
+    status: text().default('pending').notNull(),
+    decidedByUserId: uuid('decided_by_user_id'),
+    decidedAt: timestamp('decided_at', { withTimezone: true, mode: 'string' }),
+    reason: text(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_tool_confirmations_decided_by_user_id_idx').using('btree', table.decidedByUserId.asc().nullsLast().op('uuid_ops')),
+    index('ai_tool_confirmations_pending_idx')
+      .using('btree', table.runId.asc().nullsLast().op('uuid_ops'))
+      .where(sql`(status = 'pending'::text)`),
+    foreignKey({
+      columns: [table.decidedByUserId],
+      foreignColumns: [users.id],
+      name: 'ai_tool_confirmations_decided_by_user_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.runId],
+      foreignColumns: [aiRuns.id],
+      name: 'ai_tool_confirmations_run_id_fkey',
+    }).onDelete('cascade'),
+    unique('ai_tool_confirmations_tool_use_key').on(table.runId, table.toolUseId),
+    check(
+      'ai_tool_confirmations_decision_check',
+      sql`((status = 'pending'::text) = (decided_at IS NULL)) AND ((status = ANY (ARRAY['approved'::text, 'rejected'::text])) = (decided_by_user_id IS NOT NULL))`,
+    ),
+    check('ai_tool_confirmations_input_check', sql`jsonb_typeof(input) = 'object'::text`),
+    check('ai_tool_confirmations_reason_check', sql`length(reason) <= 2000`),
+    check(
+      'ai_tool_confirmations_status_check',
+      sql`status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text, 'expired'::text])`,
+    ),
+    check('ai_tool_confirmations_tool_name_check', sql`tool_name ~ '^[A-Za-z0-9_./-]{1,128}$'::text`),
+    check('ai_tool_confirmations_tool_use_id_check', sql`(btrim(tool_use_id) <> ''::text) AND (length(tool_use_id) <= 200)`),
+  ],
+);
+
+export const aiUsage = pgTable(
+  'ai_usage',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    runId: uuid('run_id'),
+    messageId: uuid('message_id'),
+    conversationId: uuid('conversation_id'),
+    userId: uuid('user_id'),
+    agentId: uuid('agent_id'),
+    providerId: uuid('provider_id').notNull(),
+    model: text().notNull(),
+    purpose: text().default('chat').notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    inputTokens: bigint('input_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    outputTokens: bigint('output_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }).default(0).notNull(),
+    priceId: uuid('price_id'),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    costMicros: bigint('cost_micros', { mode: 'number' }),
+    currency: text(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_usage_agent_id_idx').using(
+      'btree',
+      table.agentId.asc().nullsLast().op('uuid_ops'),
+      table.createdAt.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('ai_usage_conversation_id_idx').using('btree', table.conversationId.asc().nullsLast().op('uuid_ops')),
+    index('ai_usage_created_at_idx').using('btree', table.createdAt.asc().nullsLast().op('timestamptz_ops')),
+    index('ai_usage_message_id_idx').using('btree', table.messageId.asc().nullsLast().op('uuid_ops')),
+    index('ai_usage_price_id_idx').using('btree', table.priceId.asc().nullsLast().op('uuid_ops')),
+    index('ai_usage_provider_id_idx').using('btree', table.providerId.asc().nullsLast().op('uuid_ops')),
+    index('ai_usage_run_id_idx').using('btree', table.runId.asc().nullsLast().op('uuid_ops')),
+    index('ai_usage_user_id_idx').using(
+      'btree',
+      table.userId.asc().nullsLast().op('timestamptz_ops'),
+      table.createdAt.asc().nullsLast().op('uuid_ops'),
+    ),
+    foreignKey({
+      columns: [table.agentId],
+      foreignColumns: [aiAgents.id],
+      name: 'ai_usage_agent_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.conversationId],
+      foreignColumns: [aiConversations.id],
+      name: 'ai_usage_conversation_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.messageId],
+      foreignColumns: [aiMessages.id],
+      name: 'ai_usage_message_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.priceId],
+      foreignColumns: [aiModelPrices.id],
+      name: 'ai_usage_price_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.providerId],
+      foreignColumns: [aiProviders.id],
+      name: 'ai_usage_provider_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.runId],
+      foreignColumns: [aiRuns.id],
+      name: 'ai_usage_run_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'ai_usage_user_id_fkey',
+    }).onDelete('set null'),
+    check(
+      'ai_usage_cost_check',
+      sql`(cost_micros >= 0) AND ((cost_micros IS NULL) = (currency IS NULL)) AND ((price_id IS NULL) OR (cost_micros IS NOT NULL))`,
+    ),
+    check('ai_usage_currency_check', sql`currency = ANY (ARRAY['USD'::text, 'BRL'::text])`),
+    check('ai_usage_model_check', sql`model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text`),
+    check('ai_usage_purpose_check', sql`purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text])`),
+    check(
+      'ai_usage_tokens_check',
+      sql`(input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)`,
+    ),
+  ],
+);
+
+export const userApiTokens = pgTable(
+  'user_api_tokens',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    userId: uuid('user_id').notNull(),
+    name: text().notNull(),
+    tokenHash: text('token_hash').notNull(),
+    tokenPrefix: text('token_prefix').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'string' }),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true, mode: 'string' }),
+    lastUsedIp: inet('last_used_ip'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('user_api_tokens_name_key').using('btree', sql`user_id`, sql`lower(name)`).where(sql`(revoked_at IS NULL)`),
+    index('user_api_tokens_user_id_idx').using(
+      'btree',
+      table.userId.asc().nullsLast().op('uuid_ops'),
+      table.createdAt.asc().nullsLast().op('uuid_ops'),
+    ),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'user_api_tokens_user_id_fkey',
+    }).onDelete('cascade'),
+    unique('user_api_tokens_token_hash_key').on(table.tokenHash),
+    check('user_api_tokens_expires_at_check', sql`expires_at > created_at`),
+    check('user_api_tokens_name_check', sql`(btrim(name) <> ''::text) AND (length(name) <= 120)`),
+    check('user_api_tokens_token_hash_check', sql`token_hash ~ '^[0-9a-f]{64}$'::text`),
+    check('user_api_tokens_token_prefix_check', sql`token_prefix ~ '^[A-Za-z0-9_-]{4,16}$'::text`),
+  ],
+);
+
+export const aiEmbeddings = pgTable(
+  'ai_embeddings',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    objectType: text('object_type').notNull(),
+    objectId: uuid('object_id').notNull(),
+    caixaId: uuid('caixa_id'),
+    model: text().notNull(),
+    sourceText: text('source_text').notNull(),
+    sourceHash: text('source_hash').notNull().generatedAlwaysAs(sql`ai_text_sha256(source_text)`),
+    embedding: vector({ dimensions: 1536 }),
+    embeddedHash: text('embedded_hash'),
+    embeddedAt: timestamp('embedded_at', { withTimezone: true, mode: 'string' }),
+    needsReindex: boolean('needs_reindex')
+      .notNull()
+      .generatedAlwaysAs(sql`((embedding IS NULL) OR (embedded_hash IS DISTINCT FROM ai_text_sha256(source_text)))`),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_embeddings_caixa_id_idx').using('btree', table.caixaId.asc().nullsLast().op('uuid_ops')),
+    index('ai_embeddings_embedding_idx').using('hnsw', table.embedding.asc().nullsLast().op('vector_cosine_ops')),
+    index('ai_embeddings_object_idx').using(
+      'btree',
+      table.objectType.asc().nullsLast().op('text_ops'),
+      table.objectId.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('ai_embeddings_reindex_idx')
+      .using('btree', table.model.asc().nullsLast().op('timestamptz_ops'), table.updatedAt.asc().nullsLast().op('timestamptz_ops'))
+      .where(sql`needs_reindex`),
+    foreignKey({
+      columns: [table.caixaId],
+      foreignColumns: [caixas.id],
+      name: 'ai_embeddings_caixa_id_fkey',
+    }).onDelete('cascade'),
+    unique('ai_embeddings_object_key').on(table.model, table.objectId, table.objectType),
+    check(
+      'ai_embeddings_embedded_check',
+      sql`((embedding IS NULL) = (embedded_hash IS NULL)) AND ((embedding IS NULL) = (embedded_at IS NULL))`,
+    ),
+    check('ai_embeddings_embedded_hash_check', sql`embedded_hash ~ '^[0-9a-f]{64}$'::text`),
+    check('ai_embeddings_model_check', sql`model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text`),
+    check(
+      'ai_embeddings_object_type_check',
+      sql`object_type = ANY (ARRAY['entity'::text, 'caixa'::text, 'financial_account'::text, 'category'::text, 'title'::text, 'card_purchase'::text, 'statement_line'::text, 'nfe_document'::text, 'attachment'::text, 'classification_rule'::text])`,
+    ),
+    check('ai_embeddings_source_text_check', sql`(btrim(source_text) <> ''::text) AND (length(source_text) <= 32000)`),
+  ],
+);
 export const titleBalances = pgView('title_balances', {
   titleId: uuid('title_id'),
   caixaId: uuid('caixa_id'),
@@ -1915,6 +2565,22 @@ export const cardInvoicePayerTotals = pgView('card_invoice_payer_totals', {
     sql`SELECT v.id AS card_invoice_id, v.card_caixa_id, v.reference_month, v.due_date, p.payer_caixa_id, COALESCE(it.items_cents, 0::numeric)::bigint AS items_cents, COALESCE(tt.billed_cents, 0::numeric)::bigint AS billed_cents, COALESCE(tt.settled_cents, 0::numeric)::bigint AS settled_cents, COALESCE(tt.open_cents, 0::numeric)::bigint AS open_cents, COALESCE(co.carried_out_cents, 0::numeric)::bigint AS carried_out_cents FROM card_invoices v JOIN LATERAL ( SELECT i.payer_caixa_id FROM card_invoice_items i WHERE i.card_invoice_id = v.id UNION SELECT t.counterparty_caixa_id FROM titles t WHERE t.card_invoice_id = v.id AND t.caixa_id = v.card_caixa_id) p ON true LEFT JOIN LATERAL ( SELECT sum(i.amount_cents) AS items_cents FROM card_invoice_items i WHERE i.card_invoice_id = v.id AND i.payer_caixa_id = p.payer_caixa_id) it ON true LEFT JOIN LATERAL ( SELECT sum(b.amount_cents) FILTER (WHERE b.status <> 'canceled'::text) AS billed_cents, sum(b.settled_cents) AS settled_cents, sum(b.open_cents) AS open_cents FROM title_balances b JOIN titles t ON t.id = b.title_id WHERE t.card_invoice_id = v.id AND t.caixa_id = v.card_caixa_id AND t.counterparty_caixa_id = p.payer_caixa_id) tt ON true LEFT JOIN LATERAL ( SELECT sum(i.amount_cents) AS carried_out_cents FROM card_invoice_items i WHERE i.carried_from_invoice_id = v.id AND i.payer_caixa_id = p.payer_caixa_id) co ON true`,
   );
 
+export const effectiveAgentMcpServers = pgView('effective_agent_mcp_servers', {
+  agentId: uuid('agent_id'),
+  mcpServerId: uuid('mcp_server_id'),
+  name: text(),
+  url: text(),
+  visibility: text(),
+  linked: boolean(),
+  enabledTools: text('enabled_tools'),
+  tools: jsonb(),
+  toolsCachedAt: timestamp('tools_cached_at', { withTimezone: true, mode: 'string' }),
+})
+  .with({ securityInvoker: true })
+  .as(
+    sql`SELECT a.id AS agent_id, s.id AS mcp_server_id, s.name, s.url, s.visibility, l.id IS NOT NULL AS linked, l.enabled_tools, CASE WHEN s.tools_cache IS NULL OR l.enabled_tools IS NULL THEN s.tools_cache ELSE COALESCE(( SELECT jsonb_agg(x.t ORDER BY x.ord) AS jsonb_agg FROM jsonb_array_elements(s.tools_cache) WITH ORDINALITY x(t, ord) WHERE (x.t ->> 'name'::text) = ANY (l.enabled_tools)), '[]'::jsonb) END AS tools, s.tools_cached_at FROM ai_agents a JOIN mcp_servers s ON s.is_active AND s.archived_at IS NULL LEFT JOIN agent_mcp_servers l ON l.agent_id = a.id AND l.mcp_server_id = s.id WHERE s.visibility = 'global'::text OR l.id IS NOT NULL`,
+  );
+
 export const cardInvoiceLines = pgView('card_invoice_lines', {
   cardInvoiceItemId: uuid('card_invoice_item_id'),
   cardInvoiceId: uuid('card_invoice_id'),
@@ -1986,5 +2652,75 @@ export const attachmentLinks = pgView('attachment_links', {
 })
   .with({ securityInvoker: true })
   .as(
-    sql`SELECT title_attachments.attachment_id, 'title'::text AS target_kind, title_attachments.title_id AS target_id FROM title_attachments UNION ALL SELECT settlement_attachments.attachment_id, 'settlement'::text AS target_kind, settlement_attachments.settlement_id AS target_id FROM settlement_attachments UNION ALL SELECT movement_attachments.attachment_id, 'movement'::text AS target_kind, movement_attachments.movement_id AS target_id FROM movement_attachments UNION ALL SELECT entity_attachments.attachment_id, 'entity'::text AS target_kind, entity_attachments.entity_id AS target_id FROM entity_attachments UNION ALL SELECT nfe_documents.xml_attachment_id AS attachment_id, 'nfe_document'::text AS target_kind, nfe_documents.id AS target_id FROM nfe_documents WHERE nfe_documents.xml_attachment_id IS NOT NULL UNION ALL SELECT card_purchase_attachments.attachment_id, 'card_purchase'::text AS target_kind, card_purchase_attachments.card_purchase_id AS target_id FROM card_purchase_attachments UNION ALL SELECT statement_imports.attachment_id, 'statement_import'::text AS target_kind, statement_imports.id AS target_id FROM statement_imports`,
+    sql`SELECT title_attachments.attachment_id, 'title'::text AS target_kind, title_attachments.title_id AS target_id FROM title_attachments UNION ALL SELECT settlement_attachments.attachment_id, 'settlement'::text AS target_kind, settlement_attachments.settlement_id AS target_id FROM settlement_attachments UNION ALL SELECT movement_attachments.attachment_id, 'movement'::text AS target_kind, movement_attachments.movement_id AS target_id FROM movement_attachments UNION ALL SELECT entity_attachments.attachment_id, 'entity'::text AS target_kind, entity_attachments.entity_id AS target_id FROM entity_attachments UNION ALL SELECT nfe_documents.xml_attachment_id AS attachment_id, 'nfe_document'::text AS target_kind, nfe_documents.id AS target_id FROM nfe_documents WHERE nfe_documents.xml_attachment_id IS NOT NULL UNION ALL SELECT card_purchase_attachments.attachment_id, 'card_purchase'::text AS target_kind, card_purchase_attachments.card_purchase_id AS target_id FROM card_purchase_attachments UNION ALL SELECT statement_imports.attachment_id, 'statement_import'::text AS target_kind, statement_imports.id AS target_id FROM statement_imports UNION ALL SELECT ai_message_attachments.attachment_id, 'ai_message'::text AS target_kind, ai_message_attachments.message_id AS target_id FROM ai_message_attachments`,
+  );
+
+export const aiMessageUsage = pgView('ai_message_usage', {
+  messageId: uuid('message_id'),
+  currency: text(),
+  calls: integer(),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  inputTokens: bigint('input_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  outputTokens: bigint('output_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  costMicros: bigint('cost_micros', { mode: 'number' }),
+  hasUnpriced: boolean('has_unpriced'),
+})
+  .with({ securityInvoker: true })
+  .as(
+    sql`SELECT message_id, currency, count(*)::integer AS calls, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced FROM ai_usage u WHERE message_id IS NOT NULL GROUP BY message_id, currency`,
+  );
+
+export const aiUsageMonthlyByUser = pgView('ai_usage_monthly_by_user', {
+  month: date(),
+  userId: uuid('user_id'),
+  currency: text(),
+  calls: integer(),
+  runs: integer(),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  inputTokens: bigint('input_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  outputTokens: bigint('output_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  costMicros: bigint('cost_micros', { mode: 'number' }),
+  hasUnpriced: boolean('has_unpriced'),
+})
+  .with({ securityInvoker: true })
+  .as(
+    sql`SELECT date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date AS month, user_id, currency, count(*)::integer AS calls, count(DISTINCT run_id)::integer AS runs, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced FROM ai_usage u GROUP BY (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date), user_id, currency`,
+  );
+
+export const aiUsageMonthlyByAgent = pgView('ai_usage_monthly_by_agent', {
+  month: date(),
+  agentId: uuid('agent_id'),
+  providerId: uuid('provider_id'),
+  model: text(),
+  currency: text(),
+  calls: integer(),
+  runs: integer(),
+  users: integer(),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  inputTokens: bigint('input_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  outputTokens: bigint('output_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  costMicros: bigint('cost_micros', { mode: 'number' }),
+  hasUnpriced: boolean('has_unpriced'),
+})
+  .with({ securityInvoker: true })
+  .as(
+    sql`SELECT date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date AS month, agent_id, provider_id, model, currency, count(*)::integer AS calls, count(DISTINCT run_id)::integer AS runs, count(DISTINCT user_id)::integer AS users, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced FROM ai_usage u GROUP BY (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date), agent_id, provider_id, model, currency`,
   );
