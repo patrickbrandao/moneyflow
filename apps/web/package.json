@@ -1,0 +1,29 @@
+{
+  "name": "@moneyflow/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@moneyflow/shared": "workspace:*",
+    "@xyflow/react": "12.12.0",
+    "cmdk": "1.1.1",
+    "lucide-react": "1.55.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-router-dom": "7.18.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "5.2.0",
+    "tailwindcss": "4.3.3",
+    "vite": "7.3.7"
+  }
+}

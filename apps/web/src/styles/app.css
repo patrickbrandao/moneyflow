@@ -1,0 +1,179 @@
+/* ============================================================
+   MONEYFLOW — peças do domínio sobre o template do console.
+   Só tokens (nenhum hex), sem sombra em superfície fixa.
+   ============================================================ */
+
+/* cor da categoria: categories.color_slot (1–12) → --port-N */
+.cat-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  flex: none;
+  background: var(--surface-4);
+}
+.cat-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+/* dinheiro: entrada, saída e neutro */
+.money {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.money.in {
+  color: var(--ok);
+}
+.money.out {
+  color: var(--danger);
+}
+.money.muted {
+  color: var(--text-faint);
+}
+
+/* seletor de cor da categoria */
+.slot-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.slot-picker button {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-sunken);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.slot-picker button:hover {
+  box-shadow: var(--ring);
+}
+.slot-picker button.active {
+  border-color: var(--accent-soft);
+  box-shadow: var(--ring-accent);
+}
+.slot-picker .cat-dot {
+  width: 12px;
+  height: 12px;
+}
+
+/* busca com lista suspensa (entidade) */
+.picker {
+  position: relative;
+}
+.picker .menu {
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  max-height: 260px;
+  overflow-y: auto;
+}
+.picker .picked {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.picker .picked .field {
+  flex: 1;
+}
+
+/* árvore de categorias */
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: var(--radius-control);
+  min-height: 36px;
+}
+.tree-row:hover {
+  background: var(--surface-2);
+}
+.tree-row.child {
+  margin-left: 22px;
+}
+.tree-row.is-off {
+  opacity: 0.55;
+}
+.tree-row .nm {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  font-size: 13.5px;
+}
+
+/* totais no rodapé de uma tabela */
+table.data tfoot td {
+  padding: 10px 14px;
+  border-top: 1px solid var(--surface-3);
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* lista de chave/valor compacta dentro de painéis da entidade */
+.item-list {
+  display: grid;
+  gap: 6px;
+}
+.item-list .item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-surface);
+  background: var(--bg-sunken);
+  min-width: 0;
+}
+.item-list .item .grow {
+  flex: 1;
+  min-width: 0;
+}
+.item-list .item .row-actions {
+  opacity: 1;
+}
+
+.form-grid {
+  display: grid;
+  gap: 14px;
+}
+@media (min-width: 640px) {
+  .form-grid.cols-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .form-grid.cols-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .form-grid .span-all {
+    grid-column: 1 / -1;
+  }
+}
+.modal .form-grid {
+  margin-top: 4px;
+}
+.modal-body {
+  max-height: min(70vh, 640px);
+  overflow-y: auto;
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+.boot {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  background: var(--bg-chrome);
+}
+
+/* `.field` vale 100% e não está numa camada: os utilitários do Tailwind não o sobrescrevem */
+.field.field-auto {
+  width: auto;
+}
+.field[aria-invalid="true"] {
+  border-color: var(--danger);
+}

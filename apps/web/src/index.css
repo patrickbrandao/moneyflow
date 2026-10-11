@@ -1,0 +1,10 @@
+@import "tailwindcss";
+/* O CSS do React Flow entra na camada `base` para o nosso canvas.css vencer sem !important. */
+@import "@xyflow/react/dist/style.css" layer(base);
+
+@import "./styles/tokens.css";
+@import "./styles/base.css";
+@import "./styles/shell.css";
+@import "./styles/canvas.css";
+@import "./styles/login.css";
+@import "./styles/app.css";

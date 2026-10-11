@@ -1,0 +1,122 @@
+/* ============================================================
+   CONSOLE — entrada (login, recuperar senha, nova senha).
+   O cartão flutua sobre o mesmo fundo pontilhado do palco; é a
+   única superfície fora dos menus/modais com sombra.
+   ============================================================ */
+.login-shell {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  /* Mesmo fundo pontilhado do palco (.stage-wrap). */
+  background-color: var(--bg-sunken);
+  background-image: radial-gradient(var(--grid-dot) 1px, transparent 1px);
+  background-size: 24px 24px;
+  background-position: 12px 12px;
+  overflow: auto;
+}
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  border: 1px solid var(--surface-3);
+  border-radius: 12px;
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-float);
+  padding: 32px 28px 26px;
+}
+.login-card .brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.login-card .brand img {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+}
+.login-card .brand .nm {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.login-card .brand .sb {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.login-card h1 {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+.login-card .sub {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-top: 4px;
+}
+.login-field {
+  position: relative;
+  margin-top: 14px;
+}
+.login-field:first-of-type {
+  margin-top: 22px;
+}
+.login-field svg {
+  position: absolute;
+  top: 50%;
+  left: 11px;
+  width: 15px;
+  height: 15px;
+  transform: translateY(-50%);
+  color: var(--text-faint);
+  pointer-events: none;
+}
+.login-field input {
+  padding-left: 34px;
+  height: 38px;
+}
+.form-error,
+.form-notice {
+  margin-top: 12px;
+  border-radius: var(--radius-control);
+  font-size: 12.5px;
+  padding: 8px 11px;
+  line-height: 1.45;
+}
+.form-error {
+  background: var(--danger-tint);
+  color: var(--danger);
+}
+.form-notice {
+  background: var(--ok-tint);
+  color: var(--ok);
+}
+.login-links {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 16px;
+  font-size: 12.5px;
+}
+.login-links button {
+  color: var(--accent-soft);
+  background: none;
+  border: 0;
+  padding: 0;
+  text-align: left;
+}
+.login-links button:hover {
+  text-decoration: underline;
+}
+.login-links .hint {
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.login-note {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--surface-3);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}

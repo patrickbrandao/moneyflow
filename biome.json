@@ -29,7 +29,7 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
+      "preset": "recommended",
       "a11y": {
         "noAutofocus": "off",
         "noStaticElementInteractions": "off",
@@ -66,6 +66,23 @@
         "rules": {
           "suspicious": {
             "noExplicitAny": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["apps/web/src/styles/**", "apps/web/index.html"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noDescendingSpecificity": "off"
+          },
+          "complexity": {
+            "noImportantStyles": "off"
+          },
+          "correctness": {
+            "noInnerDeclarations": "off",
+            "noUnusedVariables": "off"
           }
         }
       }
