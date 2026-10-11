@@ -24,7 +24,9 @@ async function migrate(ownerUrl: string) {
   await client.connect();
   try {
     const dir = join(DATABASE_DIR, 'migrations');
-    for (const file of readdirSync(dir).filter((f) => f.endsWith('.sql')).sort()) {
+    for (const file of readdirSync(dir)
+      .filter((f) => f.endsWith('.sql'))
+      .sort()) {
       await client.query('BEGIN');
       await client.query(upSection(readFileSync(join(dir, file), 'utf8')));
       await client.query('COMMIT');
@@ -42,9 +44,17 @@ export async function setup(project: TestProject) {
     project.provide('databaseUrl', external);
     return;
   }
-  const image = await GenericContainer.fromDockerfile(DATABASE_DIR, 'docker/Dockerfile').withCache(true).build('moneyflow-postgres:test', { deleteOnExit: false });
+  const image = await GenericContainer.fromDockerfile(DATABASE_DIR, 'docker/Dockerfile')
+    .withCache(true)
+    .build('moneyflow-postgres:test', { deleteOnExit: false });
   container = await image
-    .withEnvironment({ POSTGRES_USER: 'moneyflow', POSTGRES_PASSWORD: 'moneyflow', POSTGRES_DB: 'moneyflow', APP_DB_PASSWORD: 'moneyflow_app', TZ: 'America/Sao_Paulo' })
+    .withEnvironment({
+      POSTGRES_USER: 'moneyflow',
+      POSTGRES_PASSWORD: 'moneyflow',
+      POSTGRES_DB: 'moneyflow',
+      APP_DB_PASSWORD: 'moneyflow_app',
+      TZ: 'America/Sao_Paulo',
+    })
     .withExposedPorts(5432)
     .withTmpFs({ '/var/lib/postgresql': 'rw' })
     .withWaitStrategy(Wait.forLogMessage(/database system is ready to accept connections/, 2))

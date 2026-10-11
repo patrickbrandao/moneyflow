@@ -108,7 +108,7 @@ export const addressInput = z.object({
     .string()
     .nullish()
     .transform((v, ctx) => {
-      if (!v || !v.trim()) return null;
+      if (!v?.trim()) return null;
       const cep = normalizeCep(v);
       if (!cep) ctx.addIssue({ code: 'custom', message: E.invalidCep });
       return cep;

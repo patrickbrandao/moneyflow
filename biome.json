@@ -6,14 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": [
-      "**",
-      "!database",
-      "!**/dist",
-      "!**/node_modules",
-      "!**/playwright-report",
-      "!**/test-results"
-    ]
+    "includes": ["**", "!database", "!**/dist", "!**/node_modules", "!**/playwright-report", "!**/test-results"]
   },
   "formatter": {
     "enabled": true,
@@ -59,14 +52,22 @@
   },
   "overrides": [
     {
-      "includes": [
-        "packages/db/src/generated/**"
-      ],
+      "includes": ["packages/db/src/generated/**"],
       "linter": {
         "enabled": false
       },
       "assist": {
         "enabled": false
+      }
+    },
+    {
+      "includes": ["**/test/**", "**/e2e/**"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noExplicitAny": "off"
+          }
+        }
       }
     }
   ],

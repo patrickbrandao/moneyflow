@@ -11,10 +11,17 @@ export type Harness = { app: FastifyInstance; db: Database; close: () => Promise
 export async function startApp(): Promise<Harness> {
   const pool = createPool(inject('databaseUrl'), 5);
   const db = createDb(pool);
-  const config = loadConfig({ DATABASE_URL: inject('databaseUrl'), LOOKUP_TIMEOUT_MS: '1500' });
+  const config = loadConfig({ DATABASE_URL: inject('databaseUrl'), LOOKUP_TIMEOUT_MS: '1500', LOGIN_RATE_LIMIT: '10000' });
   const app = await buildApp({ db, config, logger: false });
   await app.ready();
-  return { app, db, close: async () => { await app.close(); await pool.end(); } };
+  return {
+    app,
+    db,
+    close: async () => {
+      await app.close();
+      await pool.end();
+    },
+  };
 }
 
 export const uid = () => randomUUID().slice(0, 8);
@@ -37,7 +44,12 @@ export async function login(h: Harness, loginName: string, password: string) {
 
 /** Atalho de chamada autenticada que falha com o corpo da resposta se o status não for o esperado. */
 export function client(h: Harness, cookie: string) {
-  const call = async <T = any>(method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE', url: string, payload?: unknown, expected = 200): Promise<T> => {
+  const call = async <T = any>(
+    method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
+    url: string,
+    payload?: unknown,
+    expected = 200,
+  ): Promise<T> => {
     const res = await h.app.inject({ method, url, payload: payload as object, headers: { cookie } });
     if (res.statusCode !== expected) throw new Error(`${method} ${url} → ${res.statusCode} (esperado ${expected}): ${res.body}`);
     return res.json() as T;
@@ -54,7 +66,7 @@ export function client(h: Harness, cookie: string) {
 }
 
 /** Cenário básico: categorias de despesa/receita, entidades titulares, caixas e contas. */
-export async function scenario(h: Harness, admin: ReturnType<typeof client>) {
+export async function scenario(_h: Harness, admin: ReturnType<typeof client>) {
   const tag = uid();
   const expense = await admin.post('/api/categories', { kind: 'expense', name: `Despesa ${tag}`, colorSlot: 4 });
   const income = await admin.post('/api/categories', { kind: 'income', name: `Receita ${tag}`, colorSlot: 7 });
@@ -63,7 +75,18 @@ export async function scenario(h: Harness, admin: ReturnType<typeof client>) {
   const supplier = await admin.post('/api/entities', { kind: 'company', name: `Fornecedor ${tag}` });
   const caixaA = await admin.post('/api/caixas', { name: `Caixa A ${tag}`, holderEntityId: holderA.id, isPrimary: true });
   const caixaB = await admin.post('/api/caixas', { name: `Caixa B ${tag}`, holderEntityId: holderB.id, isPrimary: true });
-  const accountA = await admin.post(`/api/caixas/${caixaA.id}/accounts`, { kind: 'checking', name: 'Banco A', bankCode: '077', openingBalanceCents: 100_000, openingDate: '2026-01-01' });
-  const accountB = await admin.post(`/api/caixas/${caixaB.id}/accounts`, { kind: 'cash', name: 'Cofre B', openingBalanceCents: 0, openingDate: '2026-01-01' });
+  const accountA = await admin.post(`/api/caixas/${caixaA.id}/accounts`, {
+    kind: 'checking',
+    name: 'Banco A',
+    bankCode: '077',
+    openingBalanceCents: 100_000,
+    openingDate: '2026-01-01',
+  });
+  const accountB = await admin.post(`/api/caixas/${caixaB.id}/accounts`, {
+    kind: 'cash',
+    name: 'Cofre B',
+    openingBalanceCents: 0,
+    openingDate: '2026-01-01',
+  });
   return { tag, expense, income, holderA, holderB, supplier, caixaA, caixaB, accountA, accountB };
 }

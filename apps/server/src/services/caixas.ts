@@ -286,7 +286,7 @@ export async function addAdjustment(ctx: ServiceContext, accountId: string, inpu
 
 export async function deleteAdjustment(ctx: ServiceContext, movementId: string) {
   const [movement] = await ctx.db.select().from(movements).where(eq(movements.id, movementId));
-  if (!movement || movement.kind !== 'adjustment') throw notFound();
+  if (movement?.kind !== 'adjustment') throw notFound();
   const account = await getAccount(ctx, movement.financialAccountId);
   ctx.access.assertWrite(account.caixaId);
   await ctx.db.delete(movements).where(eq(movements.id, movementId));

@@ -95,11 +95,19 @@ describe('baixas (spec 005)', () => {
     expect(statement.closingCents).toBe(100_000 - 40_500);
     expect(statement.rows[0].titleId).toBe(title.id);
 
-    const over = await admin.post(`/api/titles/${title.id}/settlements`, { settledOn: '2026-10-17', amountCents: 60_000, financialAccountId: s.accountA.id }, 422);
+    const over = await admin.post(
+      `/api/titles/${title.id}/settlements`,
+      { settledOn: '2026-10-17', amountCents: 60_000, financialAccountId: s.accountA.id },
+      422,
+    );
     expect(over.error.code).toBe('settlements_overpayment_check');
     expect(over.error.message).toMatch(/saldo em aberto/);
 
-    const paid = await admin.post(`/api/titles/${title.id}/settlements`, { settledOn: '2026-10-17', amountCents: 50_000, financialAccountId: s.accountA.id });
+    const paid = await admin.post(`/api/titles/${title.id}/settlements`, {
+      settledOn: '2026-10-17',
+      amountCents: 50_000,
+      financialAccountId: s.accountA.id,
+    });
     expect(paid.status).toBe('paid');
   });
 
@@ -150,7 +158,10 @@ describe('baixas (spec 005)', () => {
       financialAccountId: s.accountB.id,
       sourceAccountId: s.accountA.id,
     });
-    const reversed = await admin.post(`/api/settlements/${settled.settlements[0].id}/reverse`, { reason: 'Pago em duplicidade', reversedOn: '2026-10-16' });
+    const reversed = await admin.post(`/api/settlements/${settled.settlements[0].id}/reverse`, {
+      reason: 'Pago em duplicidade',
+      reversedOn: '2026-10-16',
+    });
     expect(reversed.status).toBe('open');
     expect(reversed.settlements[0].reversedAt).toBeTruthy();
     const accounts = await admin.get('/api/accounts');
@@ -173,7 +184,11 @@ describe('baixas (spec 005)', () => {
     await admin.put(`/api/users/${authorUser.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'editor' }] });
     const author = client(h, authorUser.cookie);
     const title = await author.post('/api/titles', base(s));
-    const settled = await author.post(`/api/titles/${title.id}/settlements`, { settledOn: '2026-10-15', amountCents: 90_000, financialAccountId: s.accountA.id });
+    const settled = await author.post(`/api/titles/${title.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 90_000,
+      financialAccountId: s.accountA.id,
+    });
     expect(settled.status).toBe('paid');
     const mirror = await admin.get(`/api/titles/${title.mirror.id}`);
     expect(mirror.status).toBe('paid');
@@ -198,11 +213,20 @@ describe('séries (recorrência e parcelamento)', () => {
     const admin = client(h, (await userSession(h, 'admin')).cookie);
     const s = await scenario(h, admin);
     const today = todayIso();
-    const first = await admin.post('/api/titles', { ...base(s), dueDate: today, competenceDate: today, series: { kind: 'installments', count: 3 } });
+    const first = await admin.post('/api/titles', {
+      ...base(s),
+      dueDate: today,
+      competenceDate: today,
+      series: { kind: 'installments', count: 3 },
+    });
     expect(first.occurrence).toBe(1);
     expect(first.installmentsTotal).toBe(3);
     const series = await admin.get(`/api/titles?caixaId=${s.caixaA.id}`);
-    expect(series.filter((t: { recurrenceRuleId: string }) => t.recurrenceRuleId === first.recurrenceRuleId).map((t: { occurrence: number }) => t.occurrence)).toEqual([1, 2, 3]);
+    expect(
+      series
+        .filter((t: { recurrenceRuleId: string }) => t.recurrenceRuleId === first.recurrenceRuleId)
+        .map((t: { occurrence: number }) => t.occurrence),
+    ).toEqual([1, 2, 3]);
     const mirrors = await admin.get(`/api/titles?caixaId=${s.caixaB.id}`);
     expect(mirrors.filter((t: { recurrenceRuleId: string }) => t.recurrenceRuleId === first.recurrenceRuleId)).toHaveLength(3);
 

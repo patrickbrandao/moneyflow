@@ -10,6 +10,8 @@ export type Config = {
   workerIntervalMs: number;
   lookupTimeoutMs: number;
   logLevel: string;
+  /** Tentativas de login por minuto por IP. */
+  loginRateLimit: number;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -30,5 +32,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     workerIntervalMs: Number(env.WORKER_INTERVAL_MS ?? 60 * 60 * 1000),
     lookupTimeoutMs: Number(env.LOOKUP_TIMEOUT_MS ?? 5000),
     logLevel: env.LOG_LEVEL ?? 'info',
+    loginRateLimit: Number(env.LOGIN_RATE_LIMIT ?? 10),
   };
 }

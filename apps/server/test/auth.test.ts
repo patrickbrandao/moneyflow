@@ -10,7 +10,11 @@ afterAll(() => h.close());
 describe('autenticação', () => {
   it('entra por username ou e-mail e devolve o usuário sem senha', async () => {
     const user = await userSession(h);
-    const byEmail = await h.app.inject({ method: 'POST', url: '/api/auth/login', payload: { login: `${user.username.toUpperCase()}@TESTE.LOCAL`, password: user.password } });
+    const byEmail = await h.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { login: `${user.username.toUpperCase()}@TESTE.LOCAL`, password: user.password },
+    });
     expect(byEmail.statusCode).toBe(200);
     expect(byEmail.body).not.toContain(user.password);
     const cookie = byEmail.cookies.find((c) => c.name === 'mf_session')!;
