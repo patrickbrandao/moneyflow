@@ -12,7 +12,9 @@ SELECT has_table('titles');
 SELECT columns_are('titles', ARRAY['id', 'caixa_id', 'direction', 'entity_id', 'category_id', 'description',
                                    'competence_date', 'due_date', 'amount_cents', 'status', 'origin',
                                    'recurrence_rule_id', 'occurrence', 'counterparty_caixa_id', 'mirror_title_id',
-                                   'mirror_status', 'notes', 'archived_at', 'created_at', 'updated_at']);
+                                   'mirror_status', 'notes', 'archived_at', 'created_at', 'updated_at',
+                                   -- 0012 (entrada de títulos) e 0013 (cartão)
+                                   'boleto_barcode', 'pix_payload', 'nfe_document_id', 'card_invoice_id']);
 SELECT col_type_is('titles', 'amount_cents', 'bigint');
 SELECT col_type_is('titles', 'due_date', 'date');
 SELECT col_type_is('titles', 'competence_date', 'date');
@@ -103,10 +105,11 @@ SELECT throws_ok($$INSERT INTO titles (caixa_id, direction, entity_id, category_
                            '00000000-0000-7000-8000-00000000ca02', 'X', '2026-10-01', '2026-10-10', 100)$$,
                  '23514', 'titles: credit card caixa 00000000-0000-7000-8000-0000000c0010 only accepts card_invoice titles',
                  'caixa de cartão não recebe título manual');
-SELECT lives_ok($$INSERT INTO titles (caixa_id, direction, entity_id, category_id, description, competence_date, due_date, amount_cents, origin)
+-- A fatura-título (origin = card_invoice) exige a fatura e o espelho desde 0013; o fluxo completo está em 0013_credit_cards.
+SELECT throws_ok($$INSERT INTO titles (caixa_id, direction, entity_id, category_id, description, competence_date, due_date, amount_cents, origin)
                   VALUES ('00000000-0000-7000-8000-0000000c0010', 'receivable', '00000000-0000-7000-8000-00000000e002',
                           '00000000-0000-7000-8000-00000000ca02', 'Fatura 10/2026', '2026-10-01', '2026-10-10', 100, 'card_invoice')$$,
-                'caixa de cartão aceita a fatura-título');
+                 '23514', NULL, 'fatura-título sem fatura nem espelho é rejeitada');
 
 -- Recorrência e parcelamento --------------------------------------------------------------------
 INSERT INTO recurrence_rules (id, frequency, anchor_day, starts_on, installments_total) VALUES
@@ -273,7 +276,7 @@ SELECT throws_like($$
           '00000000-0000-7000-8000-00000000e004', '00000000-0000-7000-8000-00000000ca01', 'X', '2026-10-01', '2026-10-20', 100,
           '00000000-0000-7000-8000-0000000c0003', '00000000-0000-7000-8000-0000000b0301', 'pending');
   SELECT pg_temp.commit_check();
-$$, '%must share origin and recurrence occurrence%', 'espelho de ocorrência repete origem, regra e número');
+$$, '%must share origin, recurrence occurrence%', 'espelho de ocorrência repete origem, regra e número');
 SELECT throws_like($$
   INSERT INTO titles (id, caixa_id, direction, entity_id, category_id, description, competence_date, due_date, amount_cents,
                       counterparty_caixa_id, mirror_title_id)

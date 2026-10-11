@@ -23,13 +23,16 @@ INSERT INTO categories (kind, name, color_slot, icon) VALUES
   ('expense', 'Serviços profissionais',   3, 'briefcase'),
   ('expense', 'Tributos da empresa',      4, 'receipt'),
   ('expense', 'Outras despesas',          5, 'circle-ellipsis'),
+  ('expense', 'Cartão de crédito',        6, 'credit-card'),
   -- Receitas
   ('income',  'Trabalho',                7, 'wallet'),
   ('income',  'Vendas e serviços',       8, 'store'),
   ('income',  'Investimentos',           9, 'trending-up'),
   ('income',  'Aluguéis recebidos',     10, 'key-round'),
   ('income',  'Reembolsos',             11, 'undo-2'),
-  ('income',  'Outras receitas',        12, 'circle-ellipsis')
+  ('income',  'Outras receitas',        12, 'circle-ellipsis'),
+  -- Lado do cartão da fatura-título (spec 007): "a receber" na caixa do cartão.
+  ('income',  'Cartão de crédito',       6, 'credit-card')
 ON CONFLICT (kind, parent_id, lower(name)) DO UPDATE
   SET color_slot = EXCLUDED.color_slot, icon = EXCLUDED.icon;
 
@@ -150,6 +153,10 @@ SELECT v.kind, g.id, v.name
     ('expense', 'Tributos da empresa', 'IRPJ e CSLL'),
     ('expense', 'Tributos da empresa', 'IBS e CBS'),
     ('expense', 'Tributos da empresa', 'Alvarás e licenças'),
+
+    -- Fatura-título na caixa pagadora (spec 007). As compras do cartão têm as próprias categorias.
+    ('expense', 'Cartão de crédito', 'Fatura do cartão'),
+    ('income', 'Cartão de crédito', 'Fatura a receber'),
 
     ('expense', 'Outras despesas', 'Diversos'),
     ('expense', 'Outras despesas', 'Ajustes'),
