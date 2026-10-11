@@ -16,9 +16,11 @@ SELECT has_function('audit_write', ARRAY['text', 'text', 'jsonb', 'jsonb', 'text
 SELECT is_empty($$
   SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
    WHERE n.nspname = 'public' AND c.relkind = 'r'
-     -- Estado de login, de interface e fila operacional ficam fora (0019–0021).
+     -- Estado de login, de interface e fila operacional ficam fora (0019–0021), assim como o volume dos
+     -- agentes de IA: conversas, mensagens, execuções, eventos, confirmações, uso e embeddings (0026–0029).
      AND c.relname NOT IN ('sessions', 'audit_log', 'schema_migrations', 'canvas_node_positions', 'notifications',
-                           'message_outbox')
+                           'message_outbox', 'ai_conversations', 'ai_messages', 'ai_message_attachments', 'ai_runs',
+                           'ai_run_events', 'ai_tool_confirmations', 'ai_usage', 'ai_embeddings')
      AND NOT EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid = c.oid AND t.tgname = c.relname || '_audit')
 $$, 'todas as tabelas de negócio têm trigger <tabela>_audit');
 
@@ -45,12 +47,12 @@ SELECT results_eq($$SELECT user_id, actor_kind, changed_columns, old_data ->> 'n
                   $$VALUES ('00000000-0000-7000-8000-0000000000a1'::uuid, 'human', ARRAY['name'],
                             'Patrick', 'Patrick Brandão')$$, 'update com app.user_id = humano, antes e depois');
 
+-- (A execução do agente em app.agent_run_id é validada contra ai_runs: ver tests/0030_audit_agent_run.sql.)
 SELECT set_config('app.actor_kind', 'agent', true);
-SELECT set_config('app.agent_run_id', 'run-42', true);
 UPDATE entities SET notes = 'via agente' WHERE id = '00000000-0000-7000-8000-00000000e001';
 SELECT results_eq($$SELECT actor_kind, agent_run_id, user_id FROM audit_log
                      WHERE table_name = 'entities' AND changed_columns @> ARRAY['notes']$$,
-                  $$VALUES ('agent', 'run-42', '00000000-0000-7000-8000-0000000000a1'::uuid)$$, 'agente agindo pelo usuário');
+                  $$VALUES ('agent', NULL::text, '00000000-0000-7000-8000-0000000000a1'::uuid)$$, 'agente agindo pelo usuário');
 SELECT set_config('app.actor_kind', '', true);
 SELECT set_config('app.agent_run_id', '', true);
 

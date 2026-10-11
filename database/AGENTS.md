@@ -59,4 +59,5 @@ Nunca edite uma migration que já está na branch `main`; crie uma nova. Antes d
 
 - As migrations rodam com o dono do banco. A aplicação conecta como `moneyflow_app`, que só tem DML (sem DDL) e recebe os GRANTs nas migrations.
 - `users.password` é texto puro por decisão do produto. `moneyflow_app` **não** tem SELECT nessa coluna: a senha só é lida pelas funções `SECURITY DEFINER` `auth_login(login, password)` e `admin_reveal_password(target_user_id, actor_user_id)`. Nunca dê acesso direto à coluna nem a exponha em views.
+- Mesma blindagem (INSERT/UPDATE sim, SELECT não, leitura só por função `SECURITY DEFINER`, fora do `audit_log` pela lista `secrets` de `audit_row()`) para `message_destinations.bot_token`, `ai_providers.api_key`, `mcp_servers.secret_headers` e `user_api_tokens.token_hash`. Coluna nova nessas tabelas precisa de `GRANT SELECT` explícito; segredo novo entra na lista `secrets` de `audit_row()`.
 - Credenciais locais vêm do `.env` (veja `.env.example`); nunca commite o `.env`.

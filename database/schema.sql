@@ -106,6 +106,71 @@ COMMENT ON FUNCTION public.account_daily_balances(p_account_id uuid, p_from date
 
 
 --
+-- Name: admin_ai_provider_api_key(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_ai_provider_api_key(p_provider_id uuid, p_actor_user_id uuid) RETURNS text
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  k text;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.users a
+                  WHERE a.id = p_actor_user_id AND a.role = 'admin' AND a.is_active) THEN
+    RAISE EXCEPTION 'admin_ai_provider_api_key: actor % is not an active admin', p_actor_user_id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  SELECT p.api_key INTO k FROM public.ai_providers p WHERE p.id = p_provider_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'admin_ai_provider_api_key: provider % not found', p_provider_id
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  RETURN k;
+END
+$$;
+
+
+--
+-- Name: FUNCTION admin_ai_provider_api_key(p_provider_id uuid, p_actor_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.admin_ai_provider_api_key(p_provider_id uuid, p_actor_user_id uuid) IS 'Chave do provedor para uso INTERNO da API em ações do admin (testar conexão, listar modelos); nunca devolva o valor ao cliente. Erro 42501 se o ator não é admin ativo (ator = sessão autenticada) e P0002 se o provedor não existe.';
+
+
+--
+-- Name: admin_mcp_server_headers(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_mcp_server_headers(p_server_id uuid, p_actor_user_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  h jsonb;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.users a
+                  WHERE a.id = p_actor_user_id AND a.role = 'admin' AND a.is_active) THEN
+    RAISE EXCEPTION 'admin_mcp_server_headers: actor % is not an active admin', p_actor_user_id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  SELECT s.secret_headers INTO h FROM public.mcp_servers s WHERE s.id = p_server_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'admin_mcp_server_headers: server % not found', p_server_id USING ERRCODE = 'no_data_found';
+  END IF;
+  RETURN h;
+END
+$$;
+
+
+--
+-- Name: FUNCTION admin_mcp_server_headers(p_server_id uuid, p_actor_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.admin_mcp_server_headers(p_server_id uuid, p_actor_user_id uuid) IS 'Cabeçalhos do servidor para uso INTERNO da API em ações do admin (testar, atualizar a lista de tools); nunca devolva ao cliente. Erro 42501 se o ator não é admin ativo e P0002 se o servidor não existe.';
+
+
+--
 -- Name: admin_reveal_password(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -139,6 +204,1231 @@ $$;
 --
 
 COMMENT ON FUNCTION public.admin_reveal_password(target_user_id uuid, actor_user_id uuid) IS 'Revela a senha de target_user_id se actor_user_id for admin ativo; senão erro 42501. actor_user_id vem da sessão autenticada na aplicação (o banco confia nele).';
+
+
+--
+-- Name: ai_agent_params_valid(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_params_valid(p_params jsonb) RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $_$
+DECLARE
+  k text;
+  v jsonb;
+BEGIN
+  IF p_params IS NULL OR jsonb_typeof(p_params) <> 'object' THEN
+    RETURN false;
+  END IF;
+  FOR k, v IN SELECT * FROM jsonb_each(p_params) LOOP
+    CASE k
+      WHEN 'temperature' THEN
+        IF jsonb_typeof(v) <> 'number' OR v::text::numeric NOT BETWEEN 0 AND 2 THEN RETURN false; END IF;
+      WHEN 'top_p' THEN
+        IF jsonb_typeof(v) <> 'number' OR v::text::numeric <= 0 OR v::text::numeric > 1 THEN RETURN false; END IF;
+      WHEN 'max_tokens', 'max_tool_iterations', 'thinking_budget_tokens' THEN
+        IF jsonb_typeof(v) <> 'number' OR v::text !~ '^[0-9]{1,7}$' THEN RETURN false; END IF;
+        IF (k = 'max_tokens' AND v::text::int NOT BETWEEN 1 AND 1000000)
+           OR (k = 'max_tool_iterations' AND v::text::int NOT BETWEEN 1 AND 200)
+           OR (k = 'thinking_budget_tokens' AND v::text::int > 1000000) THEN
+          RETURN false;
+        END IF;
+      WHEN 'reasoning_effort' THEN
+        IF jsonb_typeof(v) <> 'string' OR v #>> '{}' NOT IN ('minimal', 'low', 'medium', 'high') THEN RETURN false; END IF;
+      ELSE
+        RETURN false;
+    END CASE;
+  END LOOP;
+  RETURN true;
+END
+$_$;
+
+
+--
+-- Name: FUNCTION ai_agent_params_valid(p_params jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_agent_params_valid(p_params jsonb) IS 'true se params é um objeto só com chaves conhecidas e valores na faixa: temperature 0–2, top_p (0,1], max_tokens 1–1000000, max_tool_iterations 1–200, thinking_budget_tokens 0–1000000, reasoning_effort minimal|low|medium|high.';
+
+
+--
+-- Name: ai_conversation_fork(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text DEFAULT NULL::text) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  src ai_conversations;
+  upto integer;
+  new_id uuid;
+BEGIN
+  SELECT c.* INTO src
+    FROM ai_messages m JOIN ai_conversations c ON c.id = m.conversation_id
+   WHERE m.id = p_message_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_conversation_fork: message % not found', p_message_id USING ERRCODE = 'no_data_found';
+  END IF;
+  SELECT m.seq INTO upto FROM ai_messages m WHERE m.id = p_message_id;
+
+  INSERT INTO ai_conversations (user_id, agent_id, title, title_source, forked_from_conversation_id,
+                                forked_from_message_id, screen_context)
+  VALUES (p_user_id, src.agent_id, coalesce(nullif(btrim(p_title), ''), src.title),
+          CASE WHEN nullif(btrim(p_title), '') IS NOT NULL THEN 'user' ELSE src.title_source END,
+          src.id, p_message_id, src.screen_context)
+  RETURNING id INTO new_id;
+
+  INSERT INTO ai_messages (conversation_id, seq, role, content)
+  SELECT new_id, m.seq, m.role, m.content
+    FROM ai_messages m
+   WHERE m.conversation_id = src.id AND m.seq <= upto
+   ORDER BY m.seq;
+  RETURN new_id;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text) IS 'Bifurca: cria uma conversa de p_user_id com o mesmo agente, copia as mensagens da origem até p_message_id (inclusive, mesmos seq, sem run_id; anexos religados) e devolve o id. Título = p_title ou o da origem. Corte a bifurcação numa mensagem que não deixe tool_use sem tool_result (a aplicação escolhe). P0002 se a mensagem não existe.';
+
+
+--
+-- Name: ai_conversation_search(text, uuid, boolean, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_conversation_search(p_query text, p_user_id uuid DEFAULT NULL::uuid, p_include_archived boolean DEFAULT false, p_limit integer DEFAULT 50) RETURNS TABLE(conversation_id uuid, user_id uuid, title text, last_message_at timestamp with time zone, score real, message_id uuid, snippet text)
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+  q   text := btrim(coalesce(p_query, ''));
+  tsq tsquery;
+BEGIN
+  IF q = '' OR length(q) > 500 OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 500 THEN
+    RAISE EXCEPTION 'ai_conversation_search: query must have 1..500 characters and limit 1..500'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  tsq := websearch_to_tsquery('portuguese', q);
+
+  RETURN QUERY
+  WITH hits AS (
+    SELECT DISTINCT ON (m.conversation_id) m.conversation_id, m.id AS message_id, m.content,
+           ts_rank(m.search_tsv, tsq) AS rank
+      FROM ai_messages m
+      JOIN ai_conversations c ON c.id = m.conversation_id
+     WHERE numnode(tsq) > 0 AND m.search_tsv @@ tsq
+       AND (p_user_id IS NULL OR c.user_id = p_user_id)
+       AND (p_include_archived OR c.archived_at IS NULL)
+     ORDER BY m.conversation_id, ts_rank(m.search_tsv, tsq) DESC, m.seq DESC
+  )
+  SELECT c.id, c.user_id, c.title, c.last_message_at,
+         greatest(coalesce(similarity(c.title, q), 0), coalesce(h.rank, 0))::real AS score,
+         h.message_id,
+         CASE WHEN h.message_id IS NOT NULL
+              THEN ts_headline('portuguese', ai_message_text(h.content), tsq,
+                               'MaxFragments=1, MaxWords=24, MinWords=8, StartSel=«, StopSel=»') END
+    FROM ai_conversations c
+    LEFT JOIN hits h ON h.conversation_id = c.id
+   WHERE (p_user_id IS NULL OR c.user_id = p_user_id)
+     AND (p_include_archived OR c.archived_at IS NULL)
+     AND (h.conversation_id IS NOT NULL
+          OR c.title ILIKE '%' || replace(replace(replace(q, '\', '\\'), '%', '\%'), '_', '\_') || '%'
+          OR c.title % q)
+   ORDER BY 5 DESC, c.last_message_at DESC NULLS LAST, c.id
+   LIMIT p_limit;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_conversation_search(p_query text, p_user_id uuid, p_include_archived boolean, p_limit integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_conversation_search(p_query text, p_user_id uuid, p_include_archived boolean, p_limit integer) IS 'Busca conversas pelo título (trigram: contém ou parecido) e pelo texto das mensagens (full-text em português, sintaxe de websearch: "frase", -excluir, OR). p_user_id nulo = de todos (só para admin; a aplicação aplica). Devolve a melhor mensagem e um trecho com o termo entre « ». Erro 22023 se a busca é vazia/longa ou o limite inválido.';
+
+
+--
+-- Name: ai_embedding_credentials(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_embedding_credentials() RETURNS TABLE(provider_id uuid, kind text, base_url text, api_key text, embedding_model text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+  SELECT p.id, p.kind, p.base_url, p.api_key, p.embedding_model
+    FROM public.ai_providers p
+   WHERE p.embedding_model IS NOT NULL AND p.is_active
+$$;
+
+
+--
+-- Name: FUNCTION ai_embedding_credentials(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_embedding_credentials() IS 'Worker (indexação e busca semântica): credenciais do provedor de embeddings ativo (0 ou 1 linha). Sem linha = sem embeddings; a busca dos agentes cai para trigram.';
+
+
+--
+-- Name: ai_embedding_store(uuid, text, public.vector); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_embedding_store(p_embedding_id uuid, p_source_hash text, p_embedding public.vector) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE ai_embeddings e
+     SET embedding = p_embedding, embedded_hash = p_source_hash, embedded_at = clock_timestamp()
+   WHERE e.id = p_embedding_id AND e.source_hash = p_source_hash;
+  RETURN FOUND;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_embedding_store(p_embedding_id uuid, p_source_hash text, p_embedding public.vector); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_embedding_store(p_embedding_id uuid, p_source_hash text, p_embedding public.vector) IS 'Worker: grava o vetor calculado para o texto de hash p_source_hash (lido junto com source_text). Se o texto mudou nesse meio-tempo, não grava e devolve false (a linha continua em needs_reindex).';
+
+
+--
+-- Name: ai_embeddings_purge_orphans(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_embeddings_purge_orphans() RETURNS bigint
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  n bigint;
+BEGIN
+  DELETE FROM ai_embeddings e
+   WHERE NOT CASE e.object_type
+     WHEN 'entity' THEN EXISTS (SELECT 1 FROM entities x WHERE x.id = e.object_id)
+     WHEN 'caixa' THEN EXISTS (SELECT 1 FROM caixas x WHERE x.id = e.object_id)
+     WHEN 'financial_account' THEN EXISTS (SELECT 1 FROM financial_accounts x WHERE x.id = e.object_id)
+     WHEN 'category' THEN EXISTS (SELECT 1 FROM categories x WHERE x.id = e.object_id)
+     WHEN 'title' THEN EXISTS (SELECT 1 FROM titles x WHERE x.id = e.object_id)
+     WHEN 'card_purchase' THEN EXISTS (SELECT 1 FROM card_purchases x WHERE x.id = e.object_id)
+     WHEN 'statement_line' THEN EXISTS (SELECT 1 FROM statement_lines x WHERE x.id = e.object_id)
+     WHEN 'nfe_document' THEN EXISTS (SELECT 1 FROM nfe_documents x WHERE x.id = e.object_id)
+     WHEN 'attachment' THEN EXISTS (SELECT 1 FROM attachments x WHERE x.id = e.object_id)
+     WHEN 'classification_rule' THEN EXISTS (SELECT 1 FROM classification_rules x WHERE x.id = e.object_id)
+     ELSE false
+   END;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_embeddings_purge_orphans(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_embeddings_purge_orphans() IS 'Apaga os embeddings cujo objeto não existe mais e devolve quantos. O worker chama periodicamente (ou a aplicação apaga o embedding na mesma transação em que exclui o objeto).';
+
+
+--
+-- Name: ai_embeddings_search(public.vector, text, uuid[], text[], integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_embeddings_search(p_query public.vector, p_model text, p_caixa_ids uuid[], p_object_types text[] DEFAULT NULL::text[], p_limit integer DEFAULT 20) RETURNS TABLE(object_type text, object_id uuid, caixa_id uuid, source_text text, distance double precision)
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+  IF p_query IS NULL OR p_model IS NULL OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 200 THEN
+    RAISE EXCEPTION 'ai_embeddings_search: query vector, model and limit 1..200 are required'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  RETURN QUERY
+  SELECT e.object_type, e.object_id, e.caixa_id, e.source_text, (e.embedding <=> p_query)::double precision
+    FROM ai_embeddings e
+   WHERE e.model = p_model AND e.embedding IS NOT NULL
+     AND (e.caixa_id IS NULL OR e.caixa_id = ANY (coalesce(p_caixa_ids, '{}')))
+     AND (p_object_types IS NULL OR e.object_type = ANY (p_object_types))
+   ORDER BY e.embedding <=> p_query
+   LIMIT p_limit;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_embeddings_search(p_query public.vector, p_model text, p_caixa_ids uuid[], p_object_types text[], p_limit integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_embeddings_search(p_query public.vector, p_model text, p_caixa_ids uuid[], p_object_types text[], p_limit integer) IS 'Vizinhos mais próximos (distância de cosseno, menor = mais parecido) do vetor de consulta, no mesmo modelo, só de objetos globais (caixa_id nulo) ou das caixas listadas (as que o usuário lê), opcionalmente por tipos. Vetores velhos (needs_reindex) ainda entram. Erro 22023 sem vetor/modelo ou com limite fora de 1..200.';
+
+
+--
+-- Name: ai_message_content_valid(text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_message_content_valid(p_role text, p_content jsonb) RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $_$
+DECLARE
+  b jsonb;
+  t text;
+BEGIN
+  IF p_content IS NULL OR jsonb_typeof(p_content) <> 'array' OR jsonb_array_length(p_content) NOT BETWEEN 1 AND 1000 THEN
+    RETURN false;
+  END IF;
+  FOR b IN SELECT * FROM jsonb_array_elements(p_content) LOOP
+    IF jsonb_typeof(b) <> 'object' OR jsonb_typeof(b -> 'type') IS DISTINCT FROM 'string' THEN
+      RETURN false;
+    END IF;
+    t := b ->> 'type';
+    IF NOT (CASE p_role
+              WHEN 'user' THEN t IN ('text', 'attachment')
+              WHEN 'assistant' THEN t IN ('text', 'thinking', 'redacted_thinking', 'tool_use')
+              WHEN 'tool' THEN t = 'tool_result'
+              ELSE false
+            END) THEN
+      RETURN false;
+    END IF;
+    IF (t = 'text' AND jsonb_typeof(b -> 'text') IS DISTINCT FROM 'string')
+       OR (t = 'attachment' AND ((b ->> 'attachment_id') IS NULL OR (b ->> 'attachment_id') !~*
+             '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'))
+       OR (t = 'tool_use' AND (jsonb_typeof(b -> 'id') IS DISTINCT FROM 'string'
+                               OR jsonb_typeof(b -> 'name') IS DISTINCT FROM 'string'
+                               OR jsonb_typeof(b -> 'input') IS DISTINCT FROM 'object'))
+       OR (t = 'tool_result' AND (jsonb_typeof(b -> 'tool_use_id') IS DISTINCT FROM 'string'
+                                  OR NOT b ? 'content'
+                                  OR (b ? 'is_error' AND jsonb_typeof(b -> 'is_error') <> 'boolean'))) THEN
+      RETURN false;
+    END IF;
+  END LOOP;
+  RETURN true;
+END
+$_$;
+
+
+--
+-- Name: FUNCTION ai_message_content_valid(p_role text, p_content jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_message_content_valid(p_role text, p_content jsonb) IS 'true se content é um array de 1–1000 blocos válidos para o papel: user = text|attachment; assistant = text|thinking|redacted_thinking|tool_use; tool = tool_result. Campos obrigatórios por tipo (ver a migration 0026).';
+
+
+--
+-- Name: ai_message_text(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_message_text(p_content jsonb) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT CASE WHEN jsonb_typeof(p_content) = 'array' THEN
+           (SELECT coalesce(string_agg(b ->> 'text', E'\n' ORDER BY ord), '')
+              FROM jsonb_array_elements(p_content) WITH ORDINALITY x (b, ord)
+             WHERE jsonb_typeof(b) = 'object' AND b ->> 'type' = 'text')
+         ELSE '' END
+$$;
+
+
+--
+-- Name: FUNCTION ai_message_text(p_content jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_message_text(p_content jsonb) IS 'Texto dos blocos text de uma mensagem, unidos por quebra de linha (base da busca full-text).';
+
+
+--
+-- Name: ai_messages_after_insert(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_messages_after_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE ai_conversations c
+     SET last_message_at = greatest(coalesce(c.last_message_at, NEW.created_at), NEW.created_at)
+   WHERE c.id = NEW.conversation_id;
+  INSERT INTO ai_message_attachments (message_id, attachment_id)
+  SELECT DISTINCT NEW.id, (b ->> 'attachment_id')::uuid
+    FROM jsonb_array_elements(NEW.content) b
+   WHERE b ->> 'type' = 'attachment'
+  ON CONFLICT DO NOTHING;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: ai_messages_before_insert(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_messages_before_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM 1 FROM ai_conversations c WHERE c.id = NEW.conversation_id FOR NO KEY UPDATE;
+  IF NEW.seq IS NULL THEN
+    SELECT coalesce(max(m.seq), 0) + 1 INTO NEW.seq FROM ai_messages m WHERE m.conversation_id = NEW.conversation_id;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: ai_messages_validate_update(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_messages_validate_update() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.conversation_id <> OLD.conversation_id OR NEW.seq <> OLD.seq OR NEW.role <> OLD.role
+     OR NEW.content <> OLD.content OR (NEW.run_id IS DISTINCT FROM OLD.run_id AND NEW.run_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'ai_messages: message % is immutable', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_messages_immutable_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: ai_model_prices; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_model_prices (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    provider_id uuid NOT NULL,
+    model text NOT NULL,
+    currency text DEFAULT 'USD'::text NOT NULL,
+    input_price_per_million numeric(14,6) NOT NULL,
+    output_price_per_million numeric(14,6) NOT NULL,
+    cache_write_price_per_million numeric(14,6),
+    cache_read_price_per_million numeric(14,6),
+    valid_from timestamp with time zone DEFAULT now() NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_model_prices_currency_check CHECK ((currency = ANY (ARRAY['USD'::text, 'BRL'::text]))),
+    CONSTRAINT ai_model_prices_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
+    CONSTRAINT ai_model_prices_values_check CHECK (((input_price_per_million >= (0)::numeric) AND (output_price_per_million >= (0)::numeric) AND (cache_write_price_per_million >= (0)::numeric) AND (cache_read_price_per_million >= (0)::numeric)))
+);
+
+
+--
+-- Name: TABLE ai_model_prices; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_model_prices IS 'Tabela de preços por provedor e modelo, com vigência (valid_from): o preço de um instante é a linha mais recente com valid_from <= instante (ai_model_price_at). Só para custo ESTIMADO (spec 011: medição, sem teto). Preço novo = linha nova.';
+
+
+--
+-- Name: COLUMN ai_model_prices.model; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_model_prices.model IS 'Nome exato do modelo na API (ex.: claude-sonnet-4-5, gpt-4.1-mini).';
+
+
+--
+-- Name: COLUMN ai_model_prices.currency; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_model_prices.currency IS 'Moeda da tabela do provedor: USD (padrão, como as APIs cobram) ou BRL.';
+
+
+--
+-- Name: COLUMN ai_model_prices.input_price_per_million; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_model_prices.input_price_per_million IS 'Preço por 1 milhão de tokens de entrada (sem cache), na moeda da linha.';
+
+
+--
+-- Name: COLUMN ai_model_prices.output_price_per_million; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_model_prices.output_price_per_million IS 'Preço por 1 milhão de tokens de saída.';
+
+
+--
+-- Name: COLUMN ai_model_prices.cache_write_price_per_million; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_model_prices.cache_write_price_per_million IS 'Preço por 1 milhão de tokens gravados no cache de prompt. Nulo = preço de entrada.';
+
+
+--
+-- Name: COLUMN ai_model_prices.cache_read_price_per_million; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_model_prices.cache_read_price_per_million IS 'Preço por 1 milhão de tokens lidos do cache de prompt. Nulo = preço de entrada.';
+
+
+--
+-- Name: COLUMN ai_model_prices.valid_from; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_model_prices.valid_from IS 'Início da vigência deste preço.';
+
+
+--
+-- Name: ai_model_price_at(uuid, text, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_model_price_at(p_provider_id uuid, p_model text, p_at timestamp with time zone DEFAULT now()) RETURNS public.ai_model_prices
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT p.* FROM ai_model_prices p
+   WHERE p.provider_id = p_provider_id AND p.model = p_model AND p.valid_from <= p_at
+   ORDER BY p.valid_from DESC
+   LIMIT 1
+$$;
+
+
+--
+-- Name: FUNCTION ai_model_price_at(p_provider_id uuid, p_model text, p_at timestamp with time zone); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_model_price_at(p_provider_id uuid, p_model text, p_at timestamp with time zone) IS 'Preço vigente do modelo no instante (linha mais recente com valid_from <= p_at); todos os campos nulos se não há preço.';
+
+
+--
+-- Name: ai_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_runs (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    conversation_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    agent_id uuid NOT NULL,
+    provider_id uuid NOT NULL,
+    model text NOT NULL,
+    trigger_message_id uuid,
+    status text DEFAULT 'queued'::text NOT NULL,
+    error text,
+    cancel_requested_at timestamp with time zone,
+    locked_at timestamp with time zone,
+    lock_token uuid,
+    attempts smallint DEFAULT 0 NOT NULL,
+    max_attempts smallint DEFAULT 3 NOT NULL,
+    started_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    last_event_seq integer DEFAULT 0 NOT NULL,
+    input_tokens bigint DEFAULT 0 NOT NULL,
+    output_tokens bigint DEFAULT 0 NOT NULL,
+    cache_write_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    cost_micros bigint DEFAULT 0 NOT NULL,
+    cost_currency text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_runs_attempts_check CHECK ((((max_attempts >= 1) AND (max_attempts <= 20)) AND ((attempts >= 0) AND (attempts <= max_attempts)))),
+    CONSTRAINT ai_runs_cost_currency_check CHECK ((cost_currency = ANY (ARRAY['USD'::text, 'BRL'::text]))),
+    CONSTRAINT ai_runs_error_check CHECK ((length(error) <= 4000)),
+    CONSTRAINT ai_runs_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'awaiting_confirmation'::text, 'completed'::text, 'failed'::text, 'canceled'::text]))),
+    CONSTRAINT ai_runs_status_fields_check CHECK ((((status = 'running'::text) = (locked_at IS NOT NULL)) AND ((status = 'running'::text) = (lock_token IS NOT NULL)) AND ((status = ANY (ARRAY['completed'::text, 'failed'::text, 'canceled'::text])) = (finished_at IS NOT NULL)) AND ((status <> 'failed'::text) OR (error IS NOT NULL)) AND ((status <> ALL (ARRAY['running'::text, 'awaiting_confirmation'::text, 'completed'::text])) OR (started_at IS NOT NULL)))),
+    CONSTRAINT ai_runs_usage_check CHECK (((last_event_seq >= 0) AND (input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0) AND (cost_micros >= 0)))
+);
+
+
+--
+-- Name: TABLE ai_runs; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_runs IS 'Execuções do loop do agente, consumidas pelo worker (spec 011): queued → running (ai_run_claim, SKIP LOCKED) → awaiting_confirmation (espera ai_tool_confirmations) → queued … → completed | failed | canceled. Uma ativa por conversa. O id é o app.agent_run_id da auditoria. Tokens e custo agregados de ai_usage (por trigger). Fora da auditoria.';
+
+
+--
+-- Name: COLUMN ai_runs.user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.user_id IS 'Quem acionou (= dono da conversa). As tools rodam com as permissões dele.';
+
+
+--
+-- Name: COLUMN ai_runs.provider_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.provider_id IS 'Provedor usado (cópia do agente ao enfileirar, se não informado).';
+
+
+--
+-- Name: COLUMN ai_runs.model; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.model IS 'Modelo usado (cópia do agente ao enfileirar, se não informado).';
+
+
+--
+-- Name: COLUMN ai_runs.trigger_message_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.trigger_message_id IS 'Mensagem do usuário que acionou a execução (da mesma conversa).';
+
+
+--
+-- Name: COLUMN ai_runs.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.status IS 'queued (na fila), running (reservada por um worker: locked_at), awaiting_confirmation (parada esperando o usuário decidir tools de escrita), completed, failed (error), canceled. Os três últimos são finais.';
+
+
+--
+-- Name: COLUMN ai_runs.error; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.error IS 'Mensagem de erro (obrigatória em failed; opcional em canceled). Nunca contém chaves.';
+
+
+--
+-- Name: COLUMN ai_runs.cancel_requested_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.cancel_requested_at IS 'O usuário pediu para parar uma execução em running: o worker vê em ai_run_heartbeat e encerra como canceled.';
+
+
+--
+-- Name: COLUMN ai_runs.locked_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.locked_at IS 'Reserva/heartbeat do worker (só em running). Mais velha que o limite = worker caiu; ai_run_claim retoma.';
+
+
+--
+-- Name: COLUMN ai_runs.lock_token; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.lock_token IS 'Cerca (fencing) da reserva atual, nova a cada claim (só em running): ai_run_heartbeat exige o token, então um worker cuja reserva foi retomada por outro descobre e para.';
+
+
+--
+-- Name: COLUMN ai_runs.attempts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.attempts IS 'Reservas da vez atual (o claim soma 1; volta a 0 quando a execução sai de running para queued ou awaiting_confirmation). Limita as retomadas depois de queda do worker (max_attempts).';
+
+
+--
+-- Name: COLUMN ai_runs.last_event_seq; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.last_event_seq IS 'Último seq de ai_run_events desta execução (contador do ai_run_event_append).';
+
+
+--
+-- Name: COLUMN ai_runs.cost_micros; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.cost_micros IS 'Custo estimado agregado em milionésimos de cost_currency (ex.: micro-dólares). Medição, sem teto.';
+
+
+--
+-- Name: COLUMN ai_runs.cost_currency; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_runs.cost_currency IS 'Moeda do custo agregado (a do preço do modelo); nula até haver custo.';
+
+
+--
+-- Name: ai_run_claim(integer, interval); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_run_claim(p_limit integer DEFAULT 1, p_stale_after interval DEFAULT '00:02:00'::interval) RETURNS SETOF public.ai_runs
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 OR p_stale_after IS NULL OR p_stale_after < interval '10 seconds' THEN
+    RAISE EXCEPTION 'ai_run_claim: limit must be 1..100 and stale_after >= 10 seconds'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Reserva abandonada (worker caiu): com cancelamento pedido, cancela; sem tentativas restantes, falha.
+  UPDATE ai_runs r
+     SET status = CASE WHEN r.cancel_requested_at IS NOT NULL THEN 'canceled' ELSE 'failed' END,
+         error = CASE WHEN r.cancel_requested_at IS NOT NULL THEN r.error
+                      ELSE 'stale_lock: worker stopped and the run has no attempts left' END
+   WHERE r.id IN (SELECT x.id FROM ai_runs x
+                   WHERE x.status = 'running' AND x.locked_at < clock_timestamp() - p_stale_after
+                     AND (x.attempts >= x.max_attempts OR x.cancel_requested_at IS NOT NULL)
+                   FOR UPDATE SKIP LOCKED);
+
+  RETURN QUERY
+  UPDATE ai_runs r
+     SET status = 'running', locked_at = clock_timestamp(), lock_token = gen_random_uuid(), attempts = r.attempts + 1
+   WHERE r.id IN (SELECT x.id FROM ai_runs x
+                   WHERE x.status = 'queued'
+                      OR (x.status = 'running' AND x.locked_at < clock_timestamp() - p_stale_after
+                          AND x.attempts < x.max_attempts AND x.cancel_requested_at IS NULL)
+                   ORDER BY x.created_at, x.id
+                   LIMIT p_limit
+                   FOR UPDATE SKIP LOCKED)
+  RETURNING r.*;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_run_claim(p_limit integer, p_stale_after interval); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_run_claim(p_limit integer, p_stale_after interval) IS 'Reserva até p_limit execuções (queued, ou running com reserva mais velha que p_stale_after = worker caiu) com FOR UPDATE SKIP LOCKED: status = running, locked_at = agora, lock_token novo, attempts + 1 (started_at na primeira). Reserva velha sem tentativas vira failed; com cancelamento pedido, canceled. Rode numa transação curta e faça COMMIT antes de chamar o modelo. Guarde lock_token: é a cerca de ai_run_heartbeat. Erro 22023: parâmetros inválidos.';
+
+
+--
+-- Name: ai_run_event_append(uuid, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_run_event_append(p_run_id uuid, p_event_type text, p_payload jsonb DEFAULT '{}'::jsonb) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  s integer;
+BEGIN
+  UPDATE ai_runs r SET last_event_seq = r.last_event_seq + 1 WHERE r.id = p_run_id RETURNING r.last_event_seq INTO s;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_run_event_append: run % not found', p_run_id USING ERRCODE = 'no_data_found';
+  END IF;
+  INSERT INTO ai_run_events (run_id, seq, event_type, payload) VALUES (p_run_id, s, p_event_type, coalesce(p_payload, '{}'));
+  PERFORM pg_notify('ai_run_events', json_build_object('run_id', p_run_id, 'seq', s)::text);
+  RETURN s;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_run_event_append(p_run_id uuid, p_event_type text, p_payload jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_run_event_append(p_run_id uuid, p_event_type text, p_payload jsonb) IS 'Grava o próximo evento da execução (seq = last_event_seq + 1, trava a linha da execução) e avisa por NOTIFY no canal ai_run_events com {"run_id", "seq"} (entregue no COMMIT). A API escuta (LISTEN) e lê WHERE run_id = … AND seq > último enviado. Devolve o seq. P0002 se a execução não existe.';
+
+
+--
+-- Name: ai_run_events_purge(interval); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_run_events_purge(p_keep interval DEFAULT '7 days'::interval) RETURNS bigint
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  n bigint;
+BEGIN
+  IF p_keep IS NULL OR p_keep < interval '1 hour' THEN
+    RAISE EXCEPTION 'ai_run_events_purge: keep must be >= 1 hour' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  DELETE FROM ai_run_events e
+   USING ai_runs r
+   WHERE r.id = e.run_id AND r.finished_at < clock_timestamp() - p_keep;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_run_events_purge(p_keep interval); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_run_events_purge(p_keep interval) IS 'Retenção: apaga os eventos de execuções terminadas há mais de p_keep (padrão 7 dias; mínimo 1 hora) e devolve quantos. As mensagens e o uso ficam. O worker chama periodicamente. Erro 22023 se p_keep < 1 hora.';
+
+
+--
+-- Name: ai_run_heartbeat(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_run_heartbeat(p_run_id uuid, p_lock_token uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  cancel boolean;
+BEGIN
+  UPDATE ai_runs r SET locked_at = clock_timestamp()
+   WHERE r.id = p_run_id AND r.status = 'running' AND r.lock_token = p_lock_token
+  RETURNING r.cancel_requested_at IS NOT NULL INTO cancel;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_run_heartbeat: run % is not running under this lock', p_run_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_runs_lock_check';
+  END IF;
+  RETURN cancel;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_run_heartbeat(p_run_id uuid, p_lock_token uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_run_heartbeat(p_run_id uuid, p_lock_token uuid) IS 'O worker renova a reserva (locked_at) de tempos em tempos (bem menos que o stale_after do claim). Devolve true se o usuário pediu cancelamento. Erro 23514 (ai_runs_lock_check) se a execução não está mais running com este lock_token (foi retomada por outro worker, cancelada ou terminou): pare o loop sem gravar mais nada.';
+
+
+--
+-- Name: ai_run_mcp_headers(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_run_mcp_headers(p_run_id uuid, p_mcp_server_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  r public.ai_runs;
+  h jsonb;
+BEGIN
+  SELECT * INTO r FROM public.ai_runs x WHERE x.id = p_run_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_run_mcp_headers: run % not found', p_run_id USING ERRCODE = 'no_data_found';
+  END IF;
+  IF r.status <> 'running' THEN
+    RAISE EXCEPTION 'ai_run_mcp_headers: run % is not running (status %)', p_run_id, r.status
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  SELECT s.secret_headers INTO h
+    FROM public.mcp_servers s
+    LEFT JOIN public.agent_mcp_servers l ON l.mcp_server_id = s.id AND l.agent_id = r.agent_id
+   WHERE s.id = p_mcp_server_id AND s.is_active AND s.archived_at IS NULL
+     AND (s.visibility = 'global' OR l.id IS NOT NULL);
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_run_mcp_headers: server % is not enabled for the agent of run %', p_mcp_server_id, p_run_id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN h;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_run_mcp_headers(p_run_id uuid, p_mcp_server_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_run_mcp_headers(p_run_id uuid, p_mcp_server_id uuid) IS 'Worker: cabeçalhos secretos de um servidor MCP efetivo para o agente de uma execução RESERVADA (running). Erro 42501 se a execução não está running ou o servidor não está ativo/habilitado para o agente; P0002 se a execução não existe.';
+
+
+--
+-- Name: ai_run_provider_credentials(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_run_provider_credentials(p_run_id uuid) RETURNS TABLE(provider_id uuid, kind text, base_url text, api_key text, model text)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  r public.ai_runs;
+  p public.ai_providers;
+BEGIN
+  SELECT * INTO r FROM public.ai_runs x WHERE x.id = p_run_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_run_provider_credentials: run % not found', p_run_id USING ERRCODE = 'no_data_found';
+  END IF;
+  IF r.status <> 'running' THEN
+    RAISE EXCEPTION 'ai_run_provider_credentials: run % is not running (status %)', p_run_id, r.status
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  SELECT * INTO p FROM public.ai_providers x WHERE x.id = r.provider_id;
+  IF NOT p.is_active OR p.archived_at IS NOT NULL THEN
+    RAISE EXCEPTION 'ai_run_provider_credentials: provider % is not active', p.id USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN QUERY SELECT p.id, p.kind, p.base_url, p.api_key, r.model;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_run_provider_credentials(p_run_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_run_provider_credentials(p_run_id uuid) IS 'Worker: provedor, URL, chave e modelo de uma execução RESERVADA (status running). Erro 42501 em outro status ou com o provedor inativo; P0002 se a execução não existe. Única forma de ler ai_providers.api_key durante o loop.';
+
+
+--
+-- Name: ai_runs_expire_awaiting(interval); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_runs_expire_awaiting(p_after interval DEFAULT '7 days'::interval) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  n integer;
+BEGIN
+  IF p_after IS NULL OR p_after < interval '1 minute' THEN
+    RAISE EXCEPTION 'ai_runs_expire_awaiting: after must be >= 1 minute' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  UPDATE ai_runs r SET status = 'canceled', error = 'confirmation_expired'
+   WHERE r.status = 'awaiting_confirmation' AND r.updated_at < clock_timestamp() - p_after;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_runs_expire_awaiting(p_after interval); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_runs_expire_awaiting(p_after interval) IS 'Cancela (error = confirmation_expired) execuções paradas em awaiting_confirmation há mais de p_after (padrão 7 dias); as confirmações pendentes expiram junto. Devolve quantas. O worker chama periodicamente.';
+
+
+--
+-- Name: ai_runs_expire_confirmations(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_runs_expire_confirmations() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE ai_tool_confirmations c SET status = 'expired'
+   WHERE c.run_id = NEW.id AND c.status = 'pending';
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: ai_runs_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_runs_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  conv ai_conversations;
+  ag   ai_agents;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.status <> 'queued' THEN
+      RAISE EXCEPTION 'ai_runs: new runs must be queued'
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_runs_transition_check';
+    END IF;
+    SELECT * INTO conv FROM ai_conversations c WHERE c.id = NEW.conversation_id;
+    IF FOUND AND conv.user_id <> NEW.user_id THEN
+      RAISE EXCEPTION 'ai_runs: run user must be the owner of conversation %', NEW.conversation_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_runs_owner_check';
+    END IF;
+    IF FOUND AND conv.agent_id <> NEW.agent_id THEN
+      RAISE EXCEPTION 'ai_runs: run agent must be the agent of conversation %', NEW.conversation_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_runs_agent_check';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM users u WHERE u.id = NEW.user_id AND u.is_active) THEN
+      RAISE EXCEPTION 'ai_runs: user % is not active', NEW.user_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_runs_user_active_check';
+    END IF;
+    SELECT * INTO ag FROM ai_agents a WHERE a.id = NEW.agent_id;
+    IF NOT FOUND OR NOT ag.is_active OR ag.archived_at IS NOT NULL THEN
+      RAISE EXCEPTION 'ai_runs: agent % is not active', NEW.agent_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_runs_agent_active_check';
+    END IF;
+    NEW.provider_id := coalesce(NEW.provider_id, ag.provider_id);
+    NEW.model := coalesce(NEW.model, ag.model);
+    IF NOT EXISTS (SELECT 1 FROM ai_providers p WHERE p.id = NEW.provider_id AND p.is_active AND p.archived_at IS NULL) THEN
+      RAISE EXCEPTION 'ai_runs: provider % is not active', NEW.provider_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_runs_provider_active_check';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.conversation_id <> OLD.conversation_id OR NEW.user_id <> OLD.user_id OR NEW.agent_id <> OLD.agent_id
+     OR NEW.provider_id <> OLD.provider_id OR NEW.model <> OLD.model OR NEW.max_attempts <> OLD.max_attempts
+     OR (NEW.trigger_message_id IS DISTINCT FROM OLD.trigger_message_id AND OLD.trigger_message_id IS NOT NULL
+         AND NEW.trigger_message_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'ai_runs: conversation, user, agent, provider, model and trigger message of run % are immutable', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_runs_immutable_check';
+  END IF;
+
+  IF OLD.status IN ('completed', 'failed', 'canceled') THEN
+    -- Final: só os contadores (eventos e uso que chegam depois) ainda mudam.
+    IF (to_jsonb(NEW) - ARRAY['updated_at', 'last_event_seq', 'input_tokens', 'output_tokens', 'cache_write_tokens',
+                              'cache_read_tokens', 'cost_micros', 'cost_currency', 'trigger_message_id'])
+       <> (to_jsonb(OLD) - ARRAY['updated_at', 'last_event_seq', 'input_tokens', 'output_tokens', 'cache_write_tokens',
+                                 'cache_read_tokens', 'cost_micros', 'cost_currency', 'trigger_message_id']) THEN
+      RAISE EXCEPTION 'ai_runs: run % is % and cannot change', OLD.id, OLD.status
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_runs_transition_check';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.status <> OLD.status AND NOT (
+       (OLD.status = 'queued' AND NEW.status IN ('running', 'canceled'))
+    OR (OLD.status = 'running' AND NEW.status IN ('queued', 'awaiting_confirmation', 'completed', 'failed', 'canceled'))
+    OR (OLD.status = 'awaiting_confirmation' AND NEW.status IN ('queued', 'failed', 'canceled'))
+  ) THEN
+    RAISE EXCEPTION 'ai_runs: invalid transition % -> % (run %)', OLD.status, NEW.status, OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_runs_transition_check';
+  END IF;
+
+  -- Campos derivados do status.
+  IF NEW.status <> 'running' THEN
+    NEW.locked_at := NULL;
+    NEW.lock_token := NULL;
+  END IF;
+  IF OLD.status = 'running' AND NEW.status IN ('queued', 'awaiting_confirmation') THEN
+    NEW.attempts := 0;
+  END IF;
+  IF NEW.status = 'running' AND NEW.started_at IS NULL THEN
+    NEW.started_at := clock_timestamp();
+  END IF;
+  IF NEW.status IN ('completed', 'failed', 'canceled') AND NEW.finished_at IS NULL THEN
+    NEW.finished_at := clock_timestamp();
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: ai_text_sha256(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_text_sha256(p_text text) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+    AS $$
+  SELECT encode(sha256(convert_to(p_text, 'UTF8')), 'hex')
+$$;
+
+
+--
+-- Name: FUNCTION ai_text_sha256(p_text text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_text_sha256(p_text text) IS 'SHA-256 (hex minúsculo) do texto em UTF-8. Igual ao sha256 de Node sobre a string.';
+
+
+--
+-- Name: ai_tool_confirmations_decide(uuid, uuid, text, uuid[], text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_tool_confirmations_decide(p_run_id uuid, p_actor_user_id uuid, p_decision text, p_confirmation_ids uuid[] DEFAULT NULL::uuid[], p_reason text DEFAULT NULL::text) RETURNS TABLE(decided integer, pending integer, run_status text)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  r ai_runs;
+  n integer;
+  left_pending integer;
+BEGIN
+  IF p_decision IS NULL OR p_decision NOT IN ('approved', 'rejected') THEN
+    RAISE EXCEPTION 'ai_tool_confirmations_decide: decision must be approved or rejected'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  SELECT * INTO r FROM ai_runs x WHERE x.id = p_run_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_tool_confirmations_decide: run % not found', p_run_id USING ERRCODE = 'no_data_found';
+  END IF;
+  IF r.user_id IS DISTINCT FROM p_actor_user_id THEN
+    RAISE EXCEPTION 'ai_tool_confirmations_decide: only the user who started run % can decide', p_run_id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
+  UPDATE ai_tool_confirmations c
+     SET status = p_decision, decided_by_user_id = p_actor_user_id, decided_at = clock_timestamp(),
+         reason = CASE WHEN p_decision = 'rejected' THEN p_reason END
+   WHERE c.run_id = p_run_id AND c.status = 'pending'
+     AND (p_confirmation_ids IS NULL OR c.id = ANY (p_confirmation_ids));
+  GET DIAGNOSTICS n = ROW_COUNT;
+
+  SELECT count(*) INTO left_pending FROM ai_tool_confirmations c WHERE c.run_id = p_run_id AND c.status = 'pending';
+  IF left_pending = 0 AND r.status = 'awaiting_confirmation' THEN
+    UPDATE ai_runs x SET status = 'queued' WHERE x.id = p_run_id;
+    r.status := 'queued';
+  END IF;
+  RETURN QUERY SELECT n, left_pending, r.status;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_tool_confirmations_decide(p_run_id uuid, p_actor_user_id uuid, p_decision text, p_confirmation_ids uuid[], p_reason text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_tool_confirmations_decide(p_run_id uuid, p_actor_user_id uuid, p_decision text, p_confirmation_ids uuid[], p_reason text) IS 'Decide confirmações pendentes de uma execução: todas (p_confirmation_ids nulo = "aprovar tudo") ou as listadas. Só o usuário da execução (42501 se outro; P0002 se a execução não existe; 22023 se a decisão é inválida). Sem pendentes e com a execução em awaiting_confirmation, devolve-a à fila (queued) para o worker continuar. Devolve quantas decidiu, quantas ainda pendem e o status da execução.';
+
+
+--
+-- Name: ai_tool_confirmations_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_tool_confirmations_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.status <> 'pending' THEN
+      RAISE EXCEPTION 'ai_tool_confirmations: new confirmations must be pending'
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_tool_confirmations_transition_check';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM ai_runs r WHERE r.id = NEW.run_id AND r.status = 'running') THEN
+      RAISE EXCEPTION 'ai_tool_confirmations: run % is not running', NEW.run_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_tool_confirmations_run_check';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.run_id <> OLD.run_id OR NEW.tool_use_id <> OLD.tool_use_id OR NEW.tool_name <> OLD.tool_name
+     OR NEW.input <> OLD.input OR NEW.preview IS DISTINCT FROM OLD.preview THEN
+    RAISE EXCEPTION 'ai_tool_confirmations: confirmation % is immutable (only the decision changes)', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_tool_confirmations_immutable_check';
+  END IF;
+  IF OLD.status <> 'pending' THEN
+    IF (to_jsonb(NEW) - 'updated_at') <> (to_jsonb(OLD) - 'updated_at') THEN
+      RAISE EXCEPTION 'ai_tool_confirmations: confirmation % is already %', OLD.id, OLD.status
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_tool_confirmations_transition_check';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.status IN ('approved', 'rejected') THEN
+    IF NOT EXISTS (SELECT 1 FROM ai_runs r WHERE r.id = NEW.run_id AND r.user_id = NEW.decided_by_user_id) THEN
+      RAISE EXCEPTION 'ai_tool_confirmations: only the user who started run % can decide', NEW.run_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_tool_confirmations_decider_check';
+    END IF;
+  END IF;
+  IF NEW.status <> 'pending' AND NEW.decided_at IS NULL THEN
+    NEW.decided_at := clock_timestamp();
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: ai_tool_list_valid(text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_tool_list_valid(p_tools text[]) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $_$
+  SELECT p_tools IS NULL
+      OR (cardinality(p_tools) <= 500
+          AND array_position(p_tools, NULL) IS NULL
+          AND NOT EXISTS (SELECT 1 FROM unnest(p_tools) t WHERE t !~ '^[A-Za-z0-9_./-]{1,128}$')
+          AND (SELECT count(DISTINCT t) FROM unnest(p_tools) t) = cardinality(p_tools))
+$_$;
+
+
+--
+-- Name: FUNCTION ai_tool_list_valid(p_tools text[]); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_tool_list_valid(p_tools text[]) IS 'true se a lista de tools é NULL (= todas) ou tem até 500 nomes distintos, não nulos, no formato de nome de tool do MCP ([A-Za-z0-9_./-], 1–128). Lista vazia = nenhuma tool.';
+
+
+--
+-- Name: ai_usage_after_insert(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_usage_after_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.run_id IS NOT NULL THEN
+    UPDATE ai_runs r
+       SET input_tokens = r.input_tokens + NEW.input_tokens,
+           output_tokens = r.output_tokens + NEW.output_tokens,
+           cache_write_tokens = r.cache_write_tokens + NEW.cache_write_tokens,
+           cache_read_tokens = r.cache_read_tokens + NEW.cache_read_tokens,
+           cost_currency = coalesce(r.cost_currency, NEW.currency),
+           cost_micros = r.cost_micros + CASE WHEN NEW.currency = coalesce(r.cost_currency, NEW.currency)
+                                              THEN NEW.cost_micros ELSE 0 END
+     WHERE r.id = NEW.run_id;
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: ai_usage_before_insert(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_usage_before_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  r  ai_runs;
+  mc uuid;
+  p  ai_model_prices;
+BEGIN
+  IF NEW.run_id IS NOT NULL THEN
+    SELECT * INTO r FROM ai_runs x WHERE x.id = NEW.run_id;
+    IF FOUND THEN
+      NEW.conversation_id := coalesce(NEW.conversation_id, r.conversation_id);
+      NEW.user_id := coalesce(NEW.user_id, r.user_id);
+      NEW.agent_id := coalesce(NEW.agent_id, r.agent_id);
+      NEW.provider_id := coalesce(NEW.provider_id, r.provider_id);
+      NEW.model := coalesce(NEW.model, r.model);
+      IF NEW.conversation_id <> r.conversation_id THEN
+        RAISE EXCEPTION 'ai_usage: run % belongs to another conversation', NEW.run_id
+          USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_usage_links_check';
+      END IF;
+    END IF;
+  END IF;
+  IF NEW.message_id IS NOT NULL THEN
+    SELECT m.conversation_id INTO mc FROM ai_messages m WHERE m.id = NEW.message_id;
+    IF FOUND THEN
+      NEW.conversation_id := coalesce(NEW.conversation_id, mc);
+      IF NEW.conversation_id <> mc THEN
+        RAISE EXCEPTION 'ai_usage: message % belongs to another conversation', NEW.message_id
+          USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_usage_links_check';
+      END IF;
+    END IF;
+  END IF;
+
+  IF NEW.price_id IS NULL AND NEW.provider_id IS NOT NULL AND NEW.model IS NOT NULL THEN
+    p := ai_model_price_at(NEW.provider_id, NEW.model, NEW.created_at);
+    NEW.price_id := p.id;
+  ELSIF NEW.price_id IS NOT NULL THEN
+    SELECT * INTO p FROM ai_model_prices x WHERE x.id = NEW.price_id;
+    IF FOUND AND (p.provider_id <> NEW.provider_id OR p.model <> NEW.model) THEN
+      RAISE EXCEPTION 'ai_usage: price % is not for this provider and model', NEW.price_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_usage_price_check';
+    END IF;
+  END IF;
+  IF p.id IS NOT NULL THEN
+    NEW.cost_micros := round(NEW.input_tokens * p.input_price_per_million
+                             + NEW.output_tokens * p.output_price_per_million
+                             + NEW.cache_write_tokens * coalesce(p.cache_write_price_per_million, p.input_price_per_million)
+                             + NEW.cache_read_tokens * coalesce(p.cache_read_price_per_million, p.input_price_per_million))::bigint;
+    NEW.currency := p.currency;
+  ELSE
+    NEW.cost_micros := NULL;
+    NEW.currency := NULL;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: api_token_authenticate(text, inet); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.api_token_authenticate(p_token_hash text, p_ip inet DEFAULT NULL::inet) RETURNS TABLE(user_id uuid, token_id uuid)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  t public.user_api_tokens;
+BEGIN
+  SELECT k.* INTO t
+    FROM public.user_api_tokens k
+    JOIN public.users u ON u.id = k.user_id AND u.is_active
+   WHERE k.token_hash = lower(p_token_hash)
+     AND k.revoked_at IS NULL
+     AND (k.expires_at IS NULL OR k.expires_at > clock_timestamp());
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+  IF t.last_used_at IS NULL OR t.last_used_at < clock_timestamp() - interval '1 minute'
+     OR t.last_used_ip IS DISTINCT FROM coalesce(p_ip, t.last_used_ip) THEN
+    UPDATE public.user_api_tokens k
+       SET last_used_at = clock_timestamp(), last_used_ip = coalesce(p_ip, k.last_used_ip)
+     WHERE k.id = t.id;
+  END IF;
+  RETURN QUERY SELECT t.user_id, t.id;
+END
+$$;
+
+
+--
+-- Name: FUNCTION api_token_authenticate(p_token_hash text, p_ip inet); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.api_token_authenticate(p_token_hash text, p_ip inet) IS 'Autentica um token pessoal pelo SHA-256 (hex) do token apresentado: devolve (user_id, token_id) se o token existe, não está revogado nem expirado e o dono está ativo; senão nenhuma linha. Atualiza last_used_at/ip (no máximo uma vez por minuto, ou quando o IP muda).';
 
 
 --
@@ -207,7 +1497,7 @@ CREATE FUNCTION public.audit_row() RETURNS trigger
     AS $$
 DECLARE
   quiet   text[] := coalesce(string_to_array(nullif(TG_ARGV[0], ''), ','), '{}');
-  secrets constant text[] := ARRAY['password', 'bot_token'];
+  secrets constant text[] := ARRAY['password', 'bot_token', 'api_key', 'secret_headers', 'token_hash'];
   o       jsonb;
   n       jsonb;
   changed text[];
@@ -234,7 +1524,7 @@ $$;
 -- Name: FUNCTION audit_row(); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de auditoria. Remove os segredos (password, bot_token): a troca aparece só em changed_columns, sem o valor. TG_ARGV[0] = colunas que sozinhas não geram linha.';
+COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de auditoria. Remove os segredos (password, bot_token, api_key, secret_headers, token_hash): a troca aparece só em changed_columns, sem o valor. TG_ARGV[0] = colunas que sozinhas não geram linha.';
 
 
 --
@@ -248,6 +1538,7 @@ CREATE FUNCTION public.audit_write(p_table text, p_action text, p_old jsonb, p_n
 DECLARE
   uid_text text := nullif(current_setting('app.user_id', true), '');
   kind     text := nullif(current_setting('app.actor_kind', true), '');
+  run_text text := nullif(current_setting('app.agent_run_id', true), '');
   uid      uuid;
 BEGIN
   IF uid_text IS NOT NULL THEN
@@ -262,12 +1553,23 @@ BEGIN
     RAISE EXCEPTION 'audit: app.actor_kind % requires app.user_id and must be human, agent or system', kind
       USING ERRCODE = 'check_violation', CONSTRAINT = 'audit_log_actor_check';
   END IF;
+  IF run_text IS NOT NULL THEN
+    IF kind <> 'agent' THEN
+      RAISE EXCEPTION 'audit: app.agent_run_id is only allowed with app.actor_kind = agent'
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'audit_log_actor_check';
+    END IF;
+    IF run_text !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+       OR NOT EXISTS (SELECT 1 FROM public.ai_runs r WHERE r.id = run_text::uuid AND r.user_id = uid) THEN
+      RAISE EXCEPTION 'audit: app.agent_run_id % is not a run started by user %', run_text, uid
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'audit_log_actor_check';
+    END IF;
+    run_text := lower(run_text);
+  END IF;
 
   INSERT INTO public.audit_log (table_name, record_id, action, old_data, new_data, changed_columns,
                                 user_id, actor_kind, agent_run_id, transaction_id)
   VALUES (p_table, coalesce(p_new ->> 'id', p_old ->> 'id')::uuid, p_action, p_old, p_new, p_changed,
-          uid, kind, nullif(current_setting('app.agent_run_id', true), ''),
-          pg_current_xact_id()::text::bigint);
+          uid, kind, run_text, pg_current_xact_id()::text::bigint);
 END
 $_$;
 
@@ -276,7 +1578,7 @@ $_$;
 -- Name: FUNCTION audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[]); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[]) IS 'Interna: grava em audit_log com o ator de app.user_id / app.actor_kind / app.agent_run_id. Erro 23514 (audit_log_actor_check) se app.user_id não é uuid, se actor_kind é inválido ou se human/agent vem sem usuário.';
+COMMENT ON FUNCTION public.audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[]) IS 'Interna: grava em audit_log com o ator de app.user_id / app.actor_kind / app.agent_run_id. Erro 23514 (audit_log_actor_check) se app.user_id não é uuid, se actor_kind é inválido, se human/agent vem sem usuário, ou se app.agent_run_id vem sem actor_kind = agent ou não é uma execução (ai_runs) do mesmo usuário.';
 
 
 --
@@ -1484,6 +2786,97 @@ COMMENT ON FUNCTION public.is_valid_nfe_access_key(access_key text) IS 'Valida a
 
 
 --
+-- Name: mcp_header_names(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.mcp_header_names(p_headers jsonb) RETURNS text[]
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT coalesce(array_agg(k ORDER BY lower(k)), '{}') FROM jsonb_object_keys(p_headers) k
+$$;
+
+
+--
+-- Name: FUNCTION mcp_header_names(p_headers jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.mcp_header_names(p_headers jsonb) IS 'Nomes dos cabeçalhos (sem os valores), em ordem alfabética.';
+
+
+--
+-- Name: mcp_headers_valid(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.mcp_headers_valid(p_headers jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $_$
+  SELECT p_headers IS NOT NULL
+     AND jsonb_typeof(p_headers) = 'object'
+     AND (SELECT count(*) FROM jsonb_object_keys(p_headers)) <= 30
+     AND NOT EXISTS (
+       SELECT 1 FROM jsonb_each(p_headers) h
+        WHERE h.key !~ '^[A-Za-z0-9!#$%&''*+.^_`|~-]{1,100}$'
+           OR jsonb_typeof(h.value) <> 'string'
+           OR length(h.value #>> '{}') > 8000
+           OR (h.value #>> '{}') ~ '[\r\n]'
+           OR lower(h.key) IN ('host', 'content-length', 'content-type', 'accept', 'mcp-session-id',
+                               'mcp-protocol-version', 'connection', 'transfer-encoding'))
+     AND (SELECT count(DISTINCT lower(k)) FROM jsonb_object_keys(p_headers) k)
+         = (SELECT count(*) FROM jsonb_object_keys(p_headers))
+$_$;
+
+
+--
+-- Name: FUNCTION mcp_headers_valid(p_headers jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.mcp_headers_valid(p_headers jsonb) IS 'true se os cabeçalhos são um objeto nome → valor (string) com até 30 nomes de token HTTP distintos sem distinção de maiúsculas, valores até 8000 caracteres sem quebra de linha, e sem os cabeçalhos que o transporte controla (Host, Content-Type, Accept, Mcp-Session-Id, Mcp-Protocol-Version…).';
+
+
+--
+-- Name: mcp_server_merge_headers(uuid, jsonb, text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.mcp_server_merge_headers(p_server_id uuid, p_set jsonb DEFAULT '{}'::jsonb, p_remove text[] DEFAULT '{}'::text[]) RETURNS text[]
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  names text[];
+  cur   jsonb;
+  k     text;
+BEGIN
+  IF p_set IS NULL OR jsonb_typeof(p_set) <> 'object' THEN
+    RAISE EXCEPTION 'mcp_server_merge_headers: p_set must be a json object'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  SELECT s.secret_headers INTO cur FROM public.mcp_servers s WHERE s.id = p_server_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'mcp_server_merge_headers: server % not found', p_server_id USING ERRCODE = 'no_data_found';
+  END IF;
+  -- Nomes sem distinção de maiúsculas: remover ou redefinir "authorization" troca "Authorization".
+  FOR k IN SELECT jsonb_object_keys(cur) LOOP
+    IF lower(k) = ANY (SELECT lower(r) FROM unnest(coalesce(p_remove, '{}')) r)
+       OR lower(k) IN (SELECT lower(s) FROM jsonb_object_keys(p_set) s) THEN
+      cur := cur - k;
+    END IF;
+  END LOOP;
+  UPDATE public.mcp_servers s SET secret_headers = cur || p_set
+   WHERE s.id = p_server_id
+  RETURNING s.secret_header_names INTO names;
+  RETURN names;
+END
+$$;
+
+
+--
+-- Name: FUNCTION mcp_server_merge_headers(p_server_id uuid, p_set jsonb, p_remove text[]); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.mcp_server_merge_headers(p_server_id uuid, p_set jsonb, p_remove text[]) IS 'Troca só alguns cabeçalhos sem ler os demais: remove os nomes de p_remove e define os de p_set (nomes sem distinção de maiúsculas). Devolve os nomes resultantes. P0002 se o servidor não existe; 22023 se p_set não é objeto; 23514 (mcp_servers_secret_headers_check) se o resultado é inválido. Auditado como UPDATE (sem os valores).';
+
+
+--
 -- Name: message_destination_token(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1534,10 +2927,6 @@ BEGIN
 END
 $$;
 
-
-SET default_tablespace = '';
-
-SET default_table_access_method = heap;
 
 --
 -- Name: message_outbox; Type: TABLE; Schema: public; Owner: -
@@ -1670,6 +3059,32 @@ $$;
 --
 
 COMMENT ON FUNCTION public.message_outbox_claim(p_limit integer, p_stale_after interval) IS 'Reserva até p_limit mensagens prontas (pending com next_attempt_at <= agora, ou sending com reserva mais velha que p_stale_after) com FOR UPDATE SKIP LOCKED: status = sending, locked_at = agora, attempts + 1; devolve as linhas. Reserva velha sem tentativas restantes vira failed. Rode numa transação curta e faça COMMIT antes de enviar. Erro 22023: parâmetros inválidos.';
+
+
+--
+-- Name: message_outbox_claim_one(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.message_outbox_claim_one(p_message_id uuid) RETURNS SETOF public.message_outbox
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RETURN QUERY
+  UPDATE message_outbox o
+     SET status = 'sending', locked_at = clock_timestamp(), attempts = o.attempts + 1
+   WHERE o.id IN (SELECT x.id FROM message_outbox x
+                   WHERE x.id = p_message_id AND x.status = 'pending' AND x.attempts < x.max_attempts
+                   FOR UPDATE SKIP LOCKED)
+  RETURNING o.*;
+END
+$$;
+
+
+--
+-- Name: FUNCTION message_outbox_claim_one(p_message_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.message_outbox_claim_one(p_message_id uuid) IS 'Reserva UMA mensagem pendente (ex.: o "enviar teste" logo após enfileirar), com a mesma transição do message_outbox_claim: status = sending, locked_at = agora, attempts + 1. Ignora next_attempt_at. Devolve a linha, ou nada se ela não existe, não está pending, esgotou as tentativas ou está travada por outro worker (SKIP LOCKED).';
 
 
 --
@@ -3092,6 +4507,27 @@ $$;
 
 
 --
+-- Name: user_api_tokens_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.user_api_tokens_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.token_hash <> OLD.token_hash OR NEW.token_prefix <> OLD.token_prefix OR NEW.user_id <> OLD.user_id THEN
+    RAISE EXCEPTION 'user_api_tokens: token, prefix and owner of token % are immutable (create a new token)', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'user_api_tokens_immutable_check';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
+    RAISE EXCEPTION 'user_api_tokens: token % is revoked', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'user_api_tokens_revoked_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: users_revoke_sessions_on_deactivate(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3103,6 +4539,762 @@ BEGIN
   RETURN NULL;
 END
 $$;
+
+
+--
+-- Name: agent_mcp_servers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.agent_mcp_servers (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    agent_id uuid NOT NULL,
+    mcp_server_id uuid NOT NULL,
+    enabled_tools text[],
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT agent_mcp_servers_enabled_tools_check CHECK (public.ai_tool_list_valid(enabled_tools))
+);
+
+
+--
+-- Name: TABLE agent_mcp_servers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.agent_mcp_servers IS 'Servidores MCP de um agente: public escolhido na configuração do agente ou private vinculado pelo admin. Servidor global entra em todos os agentes sem linha aqui; uma linha para um global só serve para restringir as tools.';
+
+
+--
+-- Name: COLUMN agent_mcp_servers.enabled_tools; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.agent_mcp_servers.enabled_tools IS 'Tools habilitadas daquele servidor para o agente. NULL = todas; {} = nenhuma.';
+
+
+--
+-- Name: ai_agents; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_agents (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    name text NOT NULL,
+    description text,
+    system_prompt text DEFAULT ''::text NOT NULL,
+    provider_id uuid,
+    model text,
+    params jsonb DEFAULT '{}'::jsonb NOT NULL,
+    enabled_tools text[],
+    require_write_confirmation boolean DEFAULT true NOT NULL,
+    color_slot smallint DEFAULT 1 NOT NULL,
+    icon text,
+    is_active boolean DEFAULT true NOT NULL,
+    created_by_user_id uuid,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_agents_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
+    CONSTRAINT ai_agents_color_slot_check CHECK (((color_slot >= 1) AND (color_slot <= 12))),
+    CONSTRAINT ai_agents_description_check CHECK ((length(description) <= 2000)),
+    CONSTRAINT ai_agents_enabled_tools_check CHECK (public.ai_tool_list_valid(enabled_tools)),
+    CONSTRAINT ai_agents_icon_check CHECK ((icon ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text)),
+    CONSTRAINT ai_agents_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
+    CONSTRAINT ai_agents_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
+    CONSTRAINT ai_agents_params_check CHECK (public.ai_agent_params_valid(params)),
+    CONSTRAINT ai_agents_ready_check CHECK (((NOT is_active) OR ((provider_id IS NOT NULL) AND (model IS NOT NULL)))),
+    CONSTRAINT ai_agents_system_prompt_check CHECK ((length(system_prompt) <= 200000))
+);
+
+
+--
+-- Name: TABLE ai_agents; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_agents IS 'Agentes de IA, criados só pelo admin (spec 011; a aplicação aplica). Ativo exige provedor e modelo; agente usado é arquivado, não excluído (as conversas e o uso o referenciam).';
+
+
+--
+-- Name: COLUMN ai_agents.system_prompt; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agents.system_prompt IS 'Prompt de sistema (até 200 mil caracteres).';
+
+
+--
+-- Name: COLUMN ai_agents.provider_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agents.provider_id IS 'Provedor de LLM. Nulo só em agente inativo (rascunho).';
+
+
+--
+-- Name: COLUMN ai_agents.model; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agents.model IS 'Modelo no provedor (nome exato da API). Nulo só em agente inativo.';
+
+
+--
+-- Name: COLUMN ai_agents.params; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agents.params IS 'Parâmetros do modelo validados por ai_agent_params_valid (temperature, max_tokens…).';
+
+
+--
+-- Name: COLUMN ai_agents.enabled_tools; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agents.enabled_tools IS 'Tools internas habilitadas (nomes de packages/shared). NULL = todas; {} = nenhuma. As tools de MCP são escolhidas por servidor em agent_mcp_servers.';
+
+
+--
+-- Name: COLUMN ai_agents.require_write_confirmation; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agents.require_write_confirmation IS 'true (padrão) = tools de escrita (inclusive "enviar mensagem") pedem confirmação do usuário (ai_tool_confirmations).';
+
+
+--
+-- Name: COLUMN ai_agents.color_slot; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agents.color_slot IS 'Cor do agente: slot 1–12 do design system (token --port-N), como nas categorias.';
+
+
+--
+-- Name: COLUMN ai_agents.icon; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agents.icon IS 'Nome de ícone lucide em kebab-case (ex.: bot).';
+
+
+--
+-- Name: COLUMN ai_agents.is_active; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agents.is_active IS 'false = não aparece para novas conversas nem inicia execuções.';
+
+
+--
+-- Name: ai_conversations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_conversations (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    user_id uuid NOT NULL,
+    agent_id uuid NOT NULL,
+    title text,
+    title_source text DEFAULT 'auto'::text NOT NULL,
+    pinned_at timestamp with time zone,
+    archived_at timestamp with time zone,
+    forked_from_conversation_id uuid,
+    forked_from_message_id uuid,
+    screen_context jsonb,
+    last_message_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_conversations_fork_check CHECK ((forked_from_conversation_id <> id)),
+    CONSTRAINT ai_conversations_screen_context_check CHECK ((jsonb_typeof(screen_context) = 'object'::text)),
+    CONSTRAINT ai_conversations_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 200))),
+    CONSTRAINT ai_conversations_title_source_check CHECK ((title_source = ANY (ARRAY['auto'::text, 'user'::text])))
+);
+
+
+--
+-- Name: TABLE ai_conversations; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_conversations IS 'Conversas do usuário com um agente (spec 011): título automático e editável, fixar, arquivar, excluir (apaga mensagens, execuções e eventos; o uso fica em ai_usage), buscar (ai_conversation_search) e bifurcar (ai_conversation_fork). O admin pode ler as de todos (a aplicação aplica). Fora da auditoria.';
+
+
+--
+-- Name: COLUMN ai_conversations.user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_conversations.user_id IS 'Dono da conversa (quem conversa; as execuções rodam com as permissões dele).';
+
+
+--
+-- Name: COLUMN ai_conversations.title; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_conversations.title IS 'Título (nulo até o título automático ser gerado).';
+
+
+--
+-- Name: COLUMN ai_conversations.title_source; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_conversations.title_source IS 'auto (gerado pelo agente; pode ser regerado) ou user (renomeado: não sobrescrever).';
+
+
+--
+-- Name: COLUMN ai_conversations.pinned_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_conversations.pinned_at IS 'Fixada desde (nulo = não fixada). Fixadas primeiro, mais recente primeiro.';
+
+
+--
+-- Name: COLUMN ai_conversations.forked_from_conversation_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_conversations.forked_from_conversation_id IS 'Conversa de origem da bifurcação (nula se não é bifurcação ou se a origem foi excluída). Anda junto com forked_from_message_id (FK composta MATCH FULL para a mensagem).';
+
+
+--
+-- Name: COLUMN ai_conversations.forked_from_message_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_conversations.forked_from_message_id IS 'Última mensagem copiada da origem (a bifurcação continua a partir dela).';
+
+
+--
+-- Name: COLUMN ai_conversations.screen_context; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_conversations.screen_context IS 'Contexto da tela mais recente enviado pelo console (caixa aberta, registro selecionado, filtros), objeto JSON.';
+
+
+--
+-- Name: COLUMN ai_conversations.last_message_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_conversations.last_message_at IS 'Instante da última mensagem (mantido por trigger de ai_messages).';
+
+
+--
+-- Name: ai_embeddings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_embeddings (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    object_type text NOT NULL,
+    object_id uuid NOT NULL,
+    caixa_id uuid,
+    model text NOT NULL,
+    source_text text NOT NULL,
+    source_hash text GENERATED ALWAYS AS (public.ai_text_sha256(source_text)) STORED NOT NULL,
+    embedding public.vector(1536),
+    embedded_hash text,
+    embedded_at timestamp with time zone,
+    needs_reindex boolean GENERATED ALWAYS AS (((embedding IS NULL) OR (embedded_hash IS DISTINCT FROM public.ai_text_sha256(source_text)))) STORED NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_embeddings_embedded_check CHECK ((((embedding IS NULL) = (embedded_hash IS NULL)) AND ((embedding IS NULL) = (embedded_at IS NULL)))),
+    CONSTRAINT ai_embeddings_embedded_hash_check CHECK ((embedded_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT ai_embeddings_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
+    CONSTRAINT ai_embeddings_object_type_check CHECK ((object_type = ANY (ARRAY['entity'::text, 'caixa'::text, 'financial_account'::text, 'category'::text, 'title'::text, 'card_purchase'::text, 'statement_line'::text, 'nfe_document'::text, 'attachment'::text, 'classification_rule'::text]))),
+    CONSTRAINT ai_embeddings_source_text_check CHECK (((btrim(source_text) <> ''::text) AND (length(source_text) <= 32000)))
+);
+
+
+--
+-- Name: TABLE ai_embeddings; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_embeddings IS 'Embeddings dos registros para a busca semântica dos agentes (vector(1536), HNSW por cosseno). Um por objeto e modelo. Sem FK para o objeto (polimórfico): ai_embeddings_purge_orphans limpa os de objetos excluídos. Derivado: fora da auditoria. A busca SEMPRE filtra pelas caixas que o usuário lê (caixa_id) e a aplicação revalida o objeto.';
+
+
+--
+-- Name: COLUMN ai_embeddings.object_type; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embeddings.object_type IS 'Tipo do objeto: entity, caixa, financial_account, category, title, card_purchase, statement_line, nfe_document, attachment, classification_rule.';
+
+
+--
+-- Name: COLUMN ai_embeddings.caixa_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embeddings.caixa_id IS 'Caixa do objeto, para filtrar por permissão (nulo = cadastro global: entidades, categorias, regras globais).';
+
+
+--
+-- Name: COLUMN ai_embeddings.model; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embeddings.model IS 'Modelo de embeddings (ex.: text-embedding-3-small). Busque sempre com o mesmo modelo do vetor de consulta.';
+
+
+--
+-- Name: COLUMN ai_embeddings.source_text; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embeddings.source_text IS 'Texto que gerou (ou vai gerar) o vetor, montado pela aplicação (até 32 mil caracteres).';
+
+
+--
+-- Name: COLUMN ai_embeddings.source_hash; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embeddings.source_hash IS 'SHA-256 (hex) de source_text, gerado pelo banco.';
+
+
+--
+-- Name: COLUMN ai_embeddings.embedding; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embeddings.embedding IS 'Vetor de 1536 dimensões (nulo = ainda não calculado).';
+
+
+--
+-- Name: COLUMN ai_embeddings.embedded_hash; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embeddings.embedded_hash IS 'source_hash do texto usado para calcular o vetor atual. Diferente de source_hash = vetor velho.';
+
+
+--
+-- Name: COLUMN ai_embeddings.needs_reindex; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embeddings.needs_reindex IS 'true = falta o vetor ou o texto mudou depois dele (gerado). Fila do worker (índice parcial).';
+
+
+--
+-- Name: ai_message_attachments; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_message_attachments (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    message_id uuid NOT NULL,
+    attachment_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE ai_message_attachments; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_message_attachments IS 'Anexos (imagem, PDF…) de mensagens do agente. Criada automaticamente a partir dos blocos attachment de ai_messages (anexo inexistente = 23503). Fora da auditoria.';
+
+
+--
+-- Name: ai_usage; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_usage (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    run_id uuid,
+    message_id uuid,
+    conversation_id uuid,
+    user_id uuid,
+    agent_id uuid,
+    provider_id uuid NOT NULL,
+    model text NOT NULL,
+    purpose text DEFAULT 'chat'::text NOT NULL,
+    input_tokens bigint DEFAULT 0 NOT NULL,
+    output_tokens bigint DEFAULT 0 NOT NULL,
+    cache_write_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    price_id uuid,
+    cost_micros bigint,
+    currency text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_usage_cost_check CHECK (((cost_micros >= 0) AND ((cost_micros IS NULL) = (currency IS NULL)) AND ((price_id IS NULL) OR (cost_micros IS NOT NULL)))),
+    CONSTRAINT ai_usage_currency_check CHECK ((currency = ANY (ARRAY['USD'::text, 'BRL'::text]))),
+    CONSTRAINT ai_usage_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
+    CONSTRAINT ai_usage_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text]))),
+    CONSTRAINT ai_usage_tokens_check CHECK (((input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)))
+);
+
+
+--
+-- Name: TABLE ai_usage; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_usage IS 'Uso de uma chamada ao modelo (spec 011: tokens e custo estimado por mensagem, agente e usuário; só medição). Uma linha por chamada (ou por mensagem do assistente). Ao inserir, o banco completa conversa/usuário/agente/provedor/modelo da execução e calcula o custo pelo preço vigente; a execução recebe os totais. Imutável para a aplicação. Sobrevive à exclusão da conversa (ligações anuladas). Fora da auditoria.';
+
+
+--
+-- Name: COLUMN ai_usage.message_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_usage.message_id IS 'Mensagem do assistente que a chamada produziu (opcional).';
+
+
+--
+-- Name: COLUMN ai_usage.purpose; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_usage.purpose IS 'chat (loop do agente), title (título automático) ou embedding (indexação/busca semântica, sem agente).';
+
+
+--
+-- Name: COLUMN ai_usage.input_tokens; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_usage.input_tokens IS 'Tokens de entrada SEM cache. Normalize por provedor: Anthropic input_tokens; OpenAI prompt_tokens − cached_tokens.';
+
+
+--
+-- Name: COLUMN ai_usage.cache_write_tokens; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_usage.cache_write_tokens IS 'Tokens gravados no cache de prompt (Anthropic cache_creation_input_tokens; OpenAI 0).';
+
+
+--
+-- Name: COLUMN ai_usage.cache_read_tokens; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_usage.cache_read_tokens IS 'Tokens lidos do cache (Anthropic cache_read_input_tokens; OpenAI cached_tokens).';
+
+
+--
+-- Name: COLUMN ai_usage.price_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_usage.price_id IS 'Preço usado (vigente no created_at). Nulo = sem preço cadastrado: custo desconhecido (nulo).';
+
+
+--
+-- Name: COLUMN ai_usage.cost_micros; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_usage.cost_micros IS 'Custo estimado em milionésimos de currency (ex.: 1500000 = US$ 1,50). Nulo sem preço.';
+
+
+--
+-- Name: ai_message_usage; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.ai_message_usage WITH (security_invoker='true') AS
+ SELECT message_id,
+    currency,
+    (count(*))::integer AS calls,
+    (sum(input_tokens))::bigint AS input_tokens,
+    (sum(output_tokens))::bigint AS output_tokens,
+    (sum(cache_write_tokens))::bigint AS cache_write_tokens,
+    (sum(cache_read_tokens))::bigint AS cache_read_tokens,
+    (sum(cost_micros))::bigint AS cost_micros,
+    bool_or((cost_micros IS NULL)) AS has_unpriced
+   FROM public.ai_usage u
+  WHERE (message_id IS NOT NULL)
+  GROUP BY message_id, currency;
+
+
+--
+-- Name: VIEW ai_message_usage; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.ai_message_usage IS 'Tokens e custo por mensagem do assistente (uma linha por moeda; currency nula = chamadas sem preço cadastrado).';
+
+
+--
+-- Name: ai_messages; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_messages (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    conversation_id uuid NOT NULL,
+    seq integer NOT NULL,
+    role text NOT NULL,
+    content jsonb NOT NULL,
+    run_id uuid,
+    search_tsv tsvector GENERATED ALWAYS AS (to_tsvector('portuguese'::regconfig, public.ai_message_text(content))) STORED NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_messages_content_check CHECK (public.ai_message_content_valid(role, content)),
+    CONSTRAINT ai_messages_role_check CHECK ((role = ANY (ARRAY['user'::text, 'assistant'::text, 'tool'::text]))),
+    CONSTRAINT ai_messages_seq_check CHECK ((seq >= 1))
+);
+
+
+--
+-- Name: TABLE ai_messages; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_messages IS 'Mensagens de uma conversa, em ordem (seq 1, 2, 3… por conversa; omita seq no INSERT e o banco atribui o próximo). Conteúdo em blocos neutros entre provedores (ai_message_content_valid) e imutável. Tokens e custo por mensagem: ai_usage / ai_message_usage. Fora da auditoria.';
+
+
+--
+-- Name: COLUMN ai_messages.seq; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_messages.seq IS 'Ordem na conversa (1, 2, 3…), atribuída pelo banco quando omitida (trava a conversa).';
+
+
+--
+-- Name: COLUMN ai_messages.role; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_messages.role IS 'user (pessoa), assistant (modelo: texto, raciocínio, pedidos de tool) ou tool (resultados das tools).';
+
+
+--
+-- Name: COLUMN ai_messages.content; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_messages.content IS 'Array de blocos: text, attachment, thinking, redacted_thinking, tool_use, tool_result. Imutável.';
+
+
+--
+-- Name: COLUMN ai_messages.run_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_messages.run_id IS 'Execução que produziu a mensagem (da mesma conversa); nula na mensagem do usuário e nas cópias de bifurcação.';
+
+
+--
+-- Name: COLUMN ai_messages.search_tsv; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_messages.search_tsv IS 'Full-text (português) dos blocos text, gerado pelo banco.';
+
+
+--
+-- Name: ai_providers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_providers (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    name text NOT NULL,
+    kind text NOT NULL,
+    base_url text,
+    api_key text,
+    api_key_hint text GENERATED ALWAYS AS (
+CASE
+    WHEN (api_key IS NOT NULL) THEN ('…'::text || "right"(api_key, 4))
+    ELSE NULL::text
+END) STORED,
+    embedding_model text,
+    is_active boolean DEFAULT true NOT NULL,
+    created_by_user_id uuid,
+    notes text,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_providers_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
+    CONSTRAINT ai_providers_api_key_check CHECK (((api_key ~ '^[[:graph:]]+$'::text) AND ((length(api_key) >= 8) AND (length(api_key) <= 1000)))),
+    CONSTRAINT ai_providers_base_url_check CHECK (((base_url ~ '^https?://[^[:space:]]+$'::text) AND (length(base_url) <= 500))),
+    CONSTRAINT ai_providers_credentials_check CHECK (((api_key IS NOT NULL) OR (base_url IS NOT NULL))),
+    CONSTRAINT ai_providers_embedding_model_check CHECK (((embedding_model IS NULL) OR ((embedding_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text) AND (kind = 'openai'::text)))),
+    CONSTRAINT ai_providers_kind_check CHECK ((kind = ANY (ARRAY['anthropic'::text, 'openai'::text]))),
+    CONSTRAINT ai_providers_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120)))
+);
+
+
+--
+-- Name: TABLE ai_providers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_providers IS 'Provedores de LLM cadastrados pelo admin (spec 011). kind anthropic (Claude API, padrão) ou openai (OpenAI API e APIs compatíveis, com base_url). A chave é segredo: moneyflow_app grava mas não lê api_key.';
+
+
+--
+-- Name: COLUMN ai_providers.kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.kind IS 'anthropic (Messages API) ou openai (Chat Completions/Responses; cobre APIs compatíveis via base_url).';
+
+
+--
+-- Name: COLUMN ai_providers.base_url; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.base_url IS 'URL base da API (nulo = a oficial do kind). Ex.: proxy, Azure, Ollama, OpenRouter.';
+
+
+--
+-- Name: COLUMN ai_providers.api_key; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.api_key IS 'SEGREDO: chave da API. moneyflow_app grava mas NÃO lê esta coluna; leitura só por ai_run_provider_credentials, ai_embedding_credentials e admin_ai_provider_api_key. Nula só com base_url (servidor local sem chave). Nunca vai para o audit_log, respostas da API, logs ou tools de agente. Na edição, campo vazio mantém a atual.';
+
+
+--
+-- Name: COLUMN ai_providers.api_key_hint; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.api_key_hint IS 'Parte pública da chave (…últimos 4 caracteres), gerada pelo banco, para a tela.';
+
+
+--
+-- Name: COLUMN ai_providers.embedding_model; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.embedding_model IS 'Modelo de embeddings deste provedor (só kind openai; ex.: text-embedding-3-small, 1536 dimensões). Nulo = o provedor não gera embeddings. No máximo um provedor ativo com embeddings; sem nenhum, a busca dos agentes cai para trigram.';
+
+
+--
+-- Name: COLUMN ai_providers.is_active; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.is_active IS 'false = agentes deste provedor não iniciam execuções novas.';
+
+
+--
+-- Name: ai_run_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_run_events (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    run_id uuid NOT NULL,
+    seq integer NOT NULL,
+    event_type text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_run_events_event_type_check CHECK ((event_type ~ '^[a-z][a-z0-9_.]{0,63}$'::text)),
+    CONSTRAINT ai_run_events_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
+    CONSTRAINT ai_run_events_seq_check CHECK ((seq >= 1))
+);
+
+
+--
+-- Name: TABLE ai_run_events; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_run_events IS 'Eventos de uma execução para o streaming via SSE (deltas de texto, tool chamada, confirmação pedida, status…), em ordem por seq. Grave com ai_run_event_append (seq + NOTIFY ai_run_events). Append-only (sem UPDATE para a aplicação, sem updated_at); limpeza por ai_run_events_purge. Fora da auditoria.';
+
+
+--
+-- Name: COLUMN ai_run_events.seq; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_run_events.seq IS 'Ordem na execução (1, 2, 3…, sem buracos); serve de Last-Event-ID no SSE.';
+
+
+--
+-- Name: COLUMN ai_run_events.event_type; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_run_events.event_type IS 'Tipo do evento, definido pela aplicação (ex.: status, text_delta, tool_use, tool_result, confirmation, error, done).';
+
+
+--
+-- Name: COLUMN ai_run_events.payload; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_run_events.payload IS 'Dados do evento (objeto JSON). Nunca chaves, tokens ou senhas.';
+
+
+--
+-- Name: ai_tool_confirmations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_tool_confirmations (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    run_id uuid NOT NULL,
+    tool_use_id text NOT NULL,
+    tool_name text NOT NULL,
+    input jsonb NOT NULL,
+    preview jsonb,
+    status text DEFAULT 'pending'::text NOT NULL,
+    decided_by_user_id uuid,
+    decided_at timestamp with time zone,
+    reason text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_tool_confirmations_decision_check CHECK ((((status = 'pending'::text) = (decided_at IS NULL)) AND ((status = ANY (ARRAY['approved'::text, 'rejected'::text])) = (decided_by_user_id IS NOT NULL)))),
+    CONSTRAINT ai_tool_confirmations_input_check CHECK ((jsonb_typeof(input) = 'object'::text)),
+    CONSTRAINT ai_tool_confirmations_reason_check CHECK ((length(reason) <= 2000)),
+    CONSTRAINT ai_tool_confirmations_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text, 'expired'::text]))),
+    CONSTRAINT ai_tool_confirmations_tool_name_check CHECK ((tool_name ~ '^[A-Za-z0-9_./-]{1,128}$'::text)),
+    CONSTRAINT ai_tool_confirmations_tool_use_id_check CHECK (((btrim(tool_use_id) <> ''::text) AND (length(tool_use_id) <= 200)))
+);
+
+
+--
+-- Name: TABLE ai_tool_confirmations; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_tool_confirmations IS 'Cartão "Aplicar?" (spec 011): uma linha por chamada de tool de escrita que precisa de confirmação, com o diff/prévia. Criada pelo worker com a execução em running (antes de passá-la a awaiting_confirmation). Decidida só pelo usuário da execução, uma a uma ou em lote (ai_tool_confirmations_decide). Execução que termina expira as pendentes. Fora da auditoria (o que a tool aplica é auditado como agente).';
+
+
+--
+-- Name: COLUMN ai_tool_confirmations.tool_use_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_confirmations.tool_use_id IS 'id do bloco tool_use da mensagem do assistente (único na execução).';
+
+
+--
+-- Name: COLUMN ai_tool_confirmations.input; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_confirmations.input IS 'Entrada da tool (imutável): é exatamente o que será aplicado se aprovado.';
+
+
+--
+-- Name: COLUMN ai_tool_confirmations.preview; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_confirmations.preview IS 'Diff/prévia para o cartão (antes/depois, registros afetados). Nunca senhas nem tokens.';
+
+
+--
+-- Name: COLUMN ai_tool_confirmations.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_confirmations.status IS 'pending → approved | rejected (pelo usuário da execução) | expired (execução terminou ou expirou).';
+
+
+--
+-- Name: COLUMN ai_tool_confirmations.reason; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_confirmations.reason IS 'Motivo opcional da rejeição (vai para o modelo no tool_result).';
+
+
+--
+-- Name: ai_usage_monthly_by_agent; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.ai_usage_monthly_by_agent WITH (security_invoker='true') AS
+ SELECT (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text)))::date AS month,
+    agent_id,
+    provider_id,
+    model,
+    currency,
+    (count(*))::integer AS calls,
+    (count(DISTINCT run_id))::integer AS runs,
+    (count(DISTINCT user_id))::integer AS users,
+    (sum(input_tokens))::bigint AS input_tokens,
+    (sum(output_tokens))::bigint AS output_tokens,
+    (sum(cache_write_tokens))::bigint AS cache_write_tokens,
+    (sum(cache_read_tokens))::bigint AS cache_read_tokens,
+    (sum(cost_micros))::bigint AS cost_micros,
+    bool_or((cost_micros IS NULL)) AS has_unpriced
+   FROM public.ai_usage u
+  GROUP BY ((date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text)))::date), agent_id, provider_id, model, currency;
+
+
+--
+-- Name: VIEW ai_usage_monthly_by_agent; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.ai_usage_monthly_by_agent IS 'Uso por mês (America/Sao_Paulo), agente, provedor, modelo e moeda. agent_id nulo = embeddings (sem agente).';
+
+
+--
+-- Name: ai_usage_monthly_by_user; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.ai_usage_monthly_by_user WITH (security_invoker='true') AS
+ SELECT (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text)))::date AS month,
+    user_id,
+    currency,
+    (count(*))::integer AS calls,
+    (count(DISTINCT run_id))::integer AS runs,
+    (sum(input_tokens))::bigint AS input_tokens,
+    (sum(output_tokens))::bigint AS output_tokens,
+    (sum(cache_write_tokens))::bigint AS cache_write_tokens,
+    (sum(cache_read_tokens))::bigint AS cache_read_tokens,
+    (sum(cost_micros))::bigint AS cost_micros,
+    bool_or((cost_micros IS NULL)) AS has_unpriced
+   FROM public.ai_usage u
+  GROUP BY ((date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text)))::date), user_id, currency;
+
+
+--
+-- Name: VIEW ai_usage_monthly_by_user; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.ai_usage_monthly_by_user IS 'Uso por mês (America/Sao_Paulo), usuário e moeda. user_id nulo = sistema (embeddings) ou usuário excluído.';
 
 
 --
@@ -3373,7 +5565,12 @@ UNION ALL
  SELECT statement_imports.attachment_id,
     'statement_import'::text AS target_kind,
     statement_imports.id AS target_id
-   FROM public.statement_imports;
+   FROM public.statement_imports
+UNION ALL
+ SELECT ai_message_attachments.attachment_id,
+    'ai_message'::text AS target_kind,
+    ai_message_attachments.message_id AS target_id
+   FROM public.ai_message_attachments;
 
 
 --
@@ -3527,7 +5724,7 @@ COMMENT ON COLUMN public.audit_log.actor_kind IS 'app.actor_kind: human (padrão
 -- Name: COLUMN audit_log.agent_run_id; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.audit_log.agent_run_id IS 'app.agent_run_id: execução do agente que fez a alteração (opcional).';
+COMMENT ON COLUMN public.audit_log.agent_run_id IS 'app.agent_run_id: id (uuid em texto) da execução do agente (ai_runs) que fez a alteração. Nulo para humanos, sistema e para o agente externo do servidor MCP próprio (/mcp).';
 
 
 --
@@ -4461,6 +6658,124 @@ COMMENT ON COLUMN public.classification_rules.created_from_line_id IS 'Linha de 
 --
 
 COMMENT ON COLUMN public.classification_rules.usage_count IS 'Quantas vezes a regra classificou uma linha (a aplicação incrementa).';
+
+
+--
+-- Name: mcp_servers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.mcp_servers (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    name text NOT NULL,
+    url text NOT NULL,
+    secret_headers jsonb DEFAULT '{}'::jsonb NOT NULL,
+    secret_header_names text[] GENERATED ALWAYS AS (public.mcp_header_names(secret_headers)) STORED NOT NULL,
+    visibility text DEFAULT 'public'::text NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    tools_cache jsonb,
+    tools_cached_at timestamp with time zone,
+    tools_error text,
+    created_by_user_id uuid,
+    notes text,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT mcp_servers_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
+    CONSTRAINT mcp_servers_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
+    CONSTRAINT mcp_servers_secret_headers_check CHECK (public.mcp_headers_valid(secret_headers)),
+    CONSTRAINT mcp_servers_tools_cache_check CHECK (((tools_cache IS NULL) OR ((jsonb_typeof(tools_cache) = 'array'::text) AND (tools_cached_at IS NOT NULL)))),
+    CONSTRAINT mcp_servers_tools_error_check CHECK ((length(tools_error) <= 2000)),
+    CONSTRAINT mcp_servers_url_check CHECK (((url ~ '^https?://[^[:space:]]+$'::text) AND (length(url) <= 2000))),
+    CONSTRAINT mcp_servers_visibility_check CHECK ((visibility = ANY (ARRAY['global'::text, 'public'::text, 'private'::text])))
+);
+
+
+--
+-- Name: TABLE mcp_servers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.mcp_servers IS 'Servidores MCP remotos (Streamable HTTP, sem stdio) cadastrados pelo admin (spec 011). Os cabeçalhos são segredo: moneyflow_app grava mas não lê secret_headers.';
+
+
+--
+-- Name: COLUMN mcp_servers.url; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.mcp_servers.url IS 'Endpoint Streamable HTTP do servidor (http ou https).';
+
+
+--
+-- Name: COLUMN mcp_servers.secret_headers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.mcp_servers.secret_headers IS 'SEGREDO: cabeçalhos HTTP enviados ao servidor (ex.: {"Authorization": "Bearer …"}). moneyflow_app grava mas NÃO lê; troca parcial por mcp_server_merge_headers; leitura só por ai_run_mcp_headers e admin_mcp_server_headers. Nunca vai para o audit_log, respostas da API, logs ou tools de agente.';
+
+
+--
+-- Name: COLUMN mcp_servers.secret_header_names; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.mcp_servers.secret_header_names IS 'Nomes dos cabeçalhos configurados (sem valores), gerados pelo banco, para a tela.';
+
+
+--
+-- Name: COLUMN mcp_servers.visibility; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.mcp_servers.visibility IS 'global: entra em todos os agentes sem vínculo; public: escolhível na configuração de qualquer agente; private: só nos agentes que o admin vincular. public e private só valem com linha em agent_mcp_servers.';
+
+
+--
+-- Name: COLUMN mcp_servers.tools_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.mcp_servers.tools_cache IS 'Cache do resultado de tools/list (array de objetos {name, description, inputSchema, annotations…}). Nulo = nunca listado.';
+
+
+--
+-- Name: COLUMN mcp_servers.tools_cached_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.mcp_servers.tools_cached_at IS 'Quando tools_cache foi atualizado.';
+
+
+--
+-- Name: COLUMN mcp_servers.tools_error; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.mcp_servers.tools_error IS 'Erro da última tentativa de listar as tools (nulo = a última deu certo).';
+
+
+--
+-- Name: effective_agent_mcp_servers; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.effective_agent_mcp_servers WITH (security_invoker='true') AS
+ SELECT a.id AS agent_id,
+    s.id AS mcp_server_id,
+    s.name,
+    s.url,
+    s.visibility,
+    (l.id IS NOT NULL) AS linked,
+    l.enabled_tools,
+        CASE
+            WHEN ((s.tools_cache IS NULL) OR (l.enabled_tools IS NULL)) THEN s.tools_cache
+            ELSE COALESCE(( SELECT jsonb_agg(x.t ORDER BY x.ord) AS jsonb_agg
+               FROM jsonb_array_elements(s.tools_cache) WITH ORDINALITY x(t, ord)
+              WHERE ((x.t ->> 'name'::text) = ANY (l.enabled_tools))), '[]'::jsonb)
+        END AS tools,
+    s.tools_cached_at
+   FROM ((public.ai_agents a
+     JOIN public.mcp_servers s ON ((s.is_active AND (s.archived_at IS NULL))))
+     LEFT JOIN public.agent_mcp_servers l ON (((l.agent_id = a.id) AND (l.mcp_server_id = s.id))))
+  WHERE ((s.visibility = 'global'::text) OR (l.id IS NOT NULL));
+
+
+--
+-- Name: VIEW effective_agent_mcp_servers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.effective_agent_mcp_servers IS 'Servidores MCP efetivos de cada agente: os global ativos (sempre) mais os public/private vinculados e ativos. tools = tools_cache filtrado por enabled_tools (NULL = todas). Sem os cabeçalhos.';
 
 
 --
@@ -5573,6 +7888,78 @@ COMMENT ON COLUMN public.transfers.settlement_id IS 'Baixa que originou a transf
 
 
 --
+-- Name: user_api_tokens; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_api_tokens (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    user_id uuid NOT NULL,
+    name text NOT NULL,
+    token_hash text NOT NULL,
+    token_prefix text NOT NULL,
+    expires_at timestamp with time zone,
+    revoked_at timestamp with time zone,
+    last_used_at timestamp with time zone,
+    last_used_ip inet,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_api_tokens_expires_at_check CHECK ((expires_at > created_at)),
+    CONSTRAINT user_api_tokens_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
+    CONSTRAINT user_api_tokens_token_hash_check CHECK ((token_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT user_api_tokens_token_prefix_check CHECK ((token_prefix ~ '^[A-Za-z0-9_-]{4,16}$'::text))
+);
+
+
+--
+-- Name: TABLE user_api_tokens; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.user_api_tokens IS 'Tokens pessoais de API (spec 011: autenticação do servidor MCP próprio /mcp, com as permissões do dono). Só o hash é guardado. Revogar = revoked_at (irreversível); usuário desativado não autentica.';
+
+
+--
+-- Name: COLUMN user_api_tokens.token_hash; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_api_tokens.token_hash IS 'SHA-256 (hex minúsculo) do token inteiro. moneyflow_app grava mas NÃO lê esta coluna: autentique com api_token_authenticate(hash). Nunca vai para o audit_log.';
+
+
+--
+-- Name: COLUMN user_api_tokens.token_prefix; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_api_tokens.token_prefix IS 'Começo do token (4–16 caracteres, ex.: mf_3k9X), para o usuário reconhecer qual é.';
+
+
+--
+-- Name: COLUMN user_api_tokens.expires_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_api_tokens.expires_at IS 'Expiração (nula = não expira).';
+
+
+--
+-- Name: COLUMN user_api_tokens.revoked_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_api_tokens.revoked_at IS 'Revogado em (irreversível; nulo = válido).';
+
+
+--
+-- Name: COLUMN user_api_tokens.last_used_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_api_tokens.last_used_at IS 'Último uso (atualizado pela autenticação no máximo uma vez por minuto).';
+
+
+--
+-- Name: COLUMN user_api_tokens.last_used_ip; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_api_tokens.last_used_ip IS 'IP do último uso.';
+
+
+--
 -- Name: users; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5633,6 +8020,174 @@ COMMENT ON COLUMN public.users.role IS 'Papel global: admin (todos os poderes) o
 --
 
 COMMENT ON COLUMN public.users.is_active IS 'false = desativado: não autentica e as sessões são apagadas na hora.';
+
+
+--
+-- Name: agent_mcp_servers agent_mcp_servers_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_mcp_servers
+    ADD CONSTRAINT agent_mcp_servers_key UNIQUE (agent_id, mcp_server_id);
+
+
+--
+-- Name: agent_mcp_servers agent_mcp_servers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_mcp_servers
+    ADD CONSTRAINT agent_mcp_servers_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_agents ai_agents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agents
+    ADD CONSTRAINT ai_agents_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_conversations ai_conversations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_conversations
+    ADD CONSTRAINT ai_conversations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_embeddings ai_embeddings_object_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_embeddings
+    ADD CONSTRAINT ai_embeddings_object_key UNIQUE (object_type, object_id, model);
+
+
+--
+-- Name: ai_embeddings ai_embeddings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_embeddings
+    ADD CONSTRAINT ai_embeddings_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_message_attachments ai_message_attachments_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_message_attachments
+    ADD CONSTRAINT ai_message_attachments_key UNIQUE (message_id, attachment_id);
+
+
+--
+-- Name: ai_message_attachments ai_message_attachments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_message_attachments
+    ADD CONSTRAINT ai_message_attachments_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_messages ai_messages_conversation_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_messages
+    ADD CONSTRAINT ai_messages_conversation_id_key UNIQUE (conversation_id, id);
+
+
+--
+-- Name: ai_messages ai_messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_messages
+    ADD CONSTRAINT ai_messages_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_messages ai_messages_seq_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_messages
+    ADD CONSTRAINT ai_messages_seq_key UNIQUE (conversation_id, seq);
+
+
+--
+-- Name: ai_model_prices ai_model_prices_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_model_prices
+    ADD CONSTRAINT ai_model_prices_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_model_prices ai_model_prices_valid_from_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_model_prices
+    ADD CONSTRAINT ai_model_prices_valid_from_key UNIQUE (provider_id, model, valid_from);
+
+
+--
+-- Name: ai_providers ai_providers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_providers
+    ADD CONSTRAINT ai_providers_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_run_events ai_run_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_run_events
+    ADD CONSTRAINT ai_run_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_run_events ai_run_events_seq_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_run_events
+    ADD CONSTRAINT ai_run_events_seq_key UNIQUE (run_id, seq);
+
+
+--
+-- Name: ai_runs ai_runs_conversation_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_runs
+    ADD CONSTRAINT ai_runs_conversation_id_key UNIQUE (conversation_id, id);
+
+
+--
+-- Name: ai_runs ai_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_runs
+    ADD CONSTRAINT ai_runs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_tool_confirmations ai_tool_confirmations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_tool_confirmations
+    ADD CONSTRAINT ai_tool_confirmations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_tool_confirmations ai_tool_confirmations_tool_use_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_tool_confirmations
+    ADD CONSTRAINT ai_tool_confirmations_tool_use_key UNIQUE (run_id, tool_use_id);
+
+
+--
+-- Name: ai_usage ai_usage_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_usage
+    ADD CONSTRAINT ai_usage_pkey PRIMARY KEY (id);
 
 
 --
@@ -5892,6 +8447,14 @@ ALTER TABLE ONLY public.financial_accounts
 
 
 --
+-- Name: mcp_servers mcp_servers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mcp_servers
+    ADD CONSTRAINT mcp_servers_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: message_destinations message_destinations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6140,6 +8703,22 @@ ALTER TABLE ONLY public.transfers
 
 
 --
+-- Name: user_api_tokens user_api_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_api_tokens
+    ADD CONSTRAINT user_api_tokens_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: user_api_tokens user_api_tokens_token_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_api_tokens
+    ADD CONSTRAINT user_api_tokens_token_hash_key UNIQUE (token_hash);
+
+
+--
 -- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6161,6 +8740,265 @@ ALTER TABLE ONLY public.users
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_username_key UNIQUE (username);
+
+
+--
+-- Name: agent_mcp_servers_mcp_server_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX agent_mcp_servers_mcp_server_id_idx ON public.agent_mcp_servers USING btree (mcp_server_id);
+
+
+--
+-- Name: ai_agents_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_agents_created_by_user_id_idx ON public.ai_agents USING btree (created_by_user_id);
+
+
+--
+-- Name: ai_agents_name_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ai_agents_name_key ON public.ai_agents USING btree (lower(name));
+
+
+--
+-- Name: ai_agents_provider_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_agents_provider_id_idx ON public.ai_agents USING btree (provider_id);
+
+
+--
+-- Name: ai_conversations_agent_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_conversations_agent_id_idx ON public.ai_conversations USING btree (agent_id);
+
+
+--
+-- Name: ai_conversations_forked_from_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_conversations_forked_from_idx ON public.ai_conversations USING btree (forked_from_conversation_id, forked_from_message_id);
+
+
+--
+-- Name: ai_conversations_title_trgm_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_conversations_title_trgm_idx ON public.ai_conversations USING gin (title public.gin_trgm_ops);
+
+
+--
+-- Name: ai_conversations_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_conversations_user_id_idx ON public.ai_conversations USING btree (user_id, last_message_at DESC NULLS LAST);
+
+
+--
+-- Name: ai_embeddings_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_embeddings_caixa_id_idx ON public.ai_embeddings USING btree (caixa_id);
+
+
+--
+-- Name: ai_embeddings_embedding_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_embeddings_embedding_idx ON public.ai_embeddings USING hnsw (embedding public.vector_cosine_ops);
+
+
+--
+-- Name: ai_embeddings_object_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_embeddings_object_idx ON public.ai_embeddings USING btree (object_type, object_id);
+
+
+--
+-- Name: ai_embeddings_reindex_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_embeddings_reindex_idx ON public.ai_embeddings USING btree (model, updated_at) WHERE needs_reindex;
+
+
+--
+-- Name: ai_message_attachments_attachment_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_message_attachments_attachment_id_idx ON public.ai_message_attachments USING btree (attachment_id);
+
+
+--
+-- Name: ai_messages_run_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_messages_run_id_idx ON public.ai_messages USING btree (run_id);
+
+
+--
+-- Name: ai_messages_run_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_messages_run_idx ON public.ai_messages USING btree (conversation_id, run_id);
+
+
+--
+-- Name: ai_messages_search_tsv_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_messages_search_tsv_idx ON public.ai_messages USING gin (search_tsv);
+
+
+--
+-- Name: ai_providers_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_providers_created_by_user_id_idx ON public.ai_providers USING btree (created_by_user_id);
+
+
+--
+-- Name: ai_providers_embedding_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ai_providers_embedding_key ON public.ai_providers USING btree ((true)) WHERE ((embedding_model IS NOT NULL) AND is_active);
+
+
+--
+-- Name: ai_providers_name_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ai_providers_name_key ON public.ai_providers USING btree (lower(name));
+
+
+--
+-- Name: ai_runs_agent_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_runs_agent_id_idx ON public.ai_runs USING btree (agent_id);
+
+
+--
+-- Name: ai_runs_conversation_active_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ai_runs_conversation_active_key ON public.ai_runs USING btree (conversation_id) WHERE (status = ANY (ARRAY['queued'::text, 'running'::text, 'awaiting_confirmation'::text]));
+
+
+--
+-- Name: ai_runs_finished_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_runs_finished_at_idx ON public.ai_runs USING btree (finished_at) WHERE (finished_at IS NOT NULL);
+
+
+--
+-- Name: ai_runs_provider_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_runs_provider_id_idx ON public.ai_runs USING btree (provider_id);
+
+
+--
+-- Name: ai_runs_queued_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_runs_queued_idx ON public.ai_runs USING btree (created_at) WHERE (status = 'queued'::text);
+
+
+--
+-- Name: ai_runs_running_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_runs_running_idx ON public.ai_runs USING btree (locked_at) WHERE (status = 'running'::text);
+
+
+--
+-- Name: ai_runs_trigger_message_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_runs_trigger_message_idx ON public.ai_runs USING btree (conversation_id, trigger_message_id);
+
+
+--
+-- Name: ai_runs_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_runs_user_id_idx ON public.ai_runs USING btree (user_id, created_at);
+
+
+--
+-- Name: ai_tool_confirmations_decided_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_tool_confirmations_decided_by_user_id_idx ON public.ai_tool_confirmations USING btree (decided_by_user_id);
+
+
+--
+-- Name: ai_tool_confirmations_pending_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_tool_confirmations_pending_idx ON public.ai_tool_confirmations USING btree (run_id) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: ai_usage_agent_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_usage_agent_id_idx ON public.ai_usage USING btree (agent_id, created_at);
+
+
+--
+-- Name: ai_usage_conversation_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_usage_conversation_id_idx ON public.ai_usage USING btree (conversation_id);
+
+
+--
+-- Name: ai_usage_created_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_usage_created_at_idx ON public.ai_usage USING btree (created_at);
+
+
+--
+-- Name: ai_usage_message_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_usage_message_id_idx ON public.ai_usage USING btree (message_id);
+
+
+--
+-- Name: ai_usage_price_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_usage_price_id_idx ON public.ai_usage USING btree (price_id);
+
+
+--
+-- Name: ai_usage_provider_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_usage_provider_id_idx ON public.ai_usage USING btree (provider_id);
+
+
+--
+-- Name: ai_usage_run_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_usage_run_id_idx ON public.ai_usage USING btree (run_id);
+
+
+--
+-- Name: ai_usage_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_usage_user_id_idx ON public.ai_usage USING btree (user_id, created_at);
 
 
 --
@@ -6441,6 +9279,20 @@ CREATE UNIQUE INDEX entity_pix_keys_primary_key ON public.entity_pix_keys USING 
 --
 
 CREATE INDEX financial_accounts_caixa_id_idx ON public.financial_accounts USING btree (caixa_id);
+
+
+--
+-- Name: mcp_servers_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX mcp_servers_created_by_user_id_idx ON public.mcp_servers USING btree (created_by_user_id);
+
+
+--
+-- Name: mcp_servers_name_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX mcp_servers_name_key ON public.mcp_servers USING btree (lower(name));
 
 
 --
@@ -6948,6 +9800,181 @@ CREATE INDEX transfers_to_account_id_idx ON public.transfers USING btree (to_acc
 
 
 --
+-- Name: user_api_tokens_name_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX user_api_tokens_name_key ON public.user_api_tokens USING btree (user_id, lower(name)) WHERE (revoked_at IS NULL);
+
+
+--
+-- Name: user_api_tokens_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX user_api_tokens_user_id_idx ON public.user_api_tokens USING btree (user_id, created_at);
+
+
+--
+-- Name: agent_mcp_servers agent_mcp_servers_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER agent_mcp_servers_audit AFTER INSERT OR DELETE OR UPDATE ON public.agent_mcp_servers FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: agent_mcp_servers agent_mcp_servers_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER agent_mcp_servers_set_updated_at BEFORE UPDATE ON public.agent_mcp_servers FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_agents ai_agents_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agents_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_agents FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: ai_agents ai_agents_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agents_set_updated_at BEFORE UPDATE ON public.ai_agents FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_conversations ai_conversations_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_conversations_set_updated_at BEFORE UPDATE ON public.ai_conversations FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_embeddings ai_embeddings_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_embeddings_set_updated_at BEFORE UPDATE ON public.ai_embeddings FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_message_attachments ai_message_attachments_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_message_attachments_set_updated_at BEFORE UPDATE ON public.ai_message_attachments FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_messages ai_messages_after_insert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_messages_after_insert AFTER INSERT ON public.ai_messages FOR EACH ROW EXECUTE FUNCTION public.ai_messages_after_insert();
+
+
+--
+-- Name: ai_messages ai_messages_before_insert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_messages_before_insert BEFORE INSERT ON public.ai_messages FOR EACH ROW EXECUTE FUNCTION public.ai_messages_before_insert();
+
+
+--
+-- Name: ai_messages ai_messages_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_messages_set_updated_at BEFORE UPDATE ON public.ai_messages FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_messages ai_messages_validate_update; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_messages_validate_update BEFORE UPDATE ON public.ai_messages FOR EACH ROW EXECUTE FUNCTION public.ai_messages_validate_update();
+
+
+--
+-- Name: ai_model_prices ai_model_prices_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_model_prices_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_model_prices FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: ai_model_prices ai_model_prices_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_model_prices_set_updated_at BEFORE UPDATE ON public.ai_model_prices FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_providers ai_providers_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_providers_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_providers FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: ai_providers ai_providers_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_providers_set_updated_at BEFORE UPDATE ON public.ai_providers FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_runs ai_runs_expire_confirmations; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_runs_expire_confirmations AFTER UPDATE OF status ON public.ai_runs FOR EACH ROW WHEN (((new.status = ANY (ARRAY['completed'::text, 'failed'::text, 'canceled'::text])) AND (old.status <> new.status))) EXECUTE FUNCTION public.ai_runs_expire_confirmations();
+
+
+--
+-- Name: ai_runs ai_runs_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_runs_set_updated_at BEFORE UPDATE ON public.ai_runs FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_runs ai_runs_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_runs_validate BEFORE INSERT OR UPDATE ON public.ai_runs FOR EACH ROW EXECUTE FUNCTION public.ai_runs_validate();
+
+
+--
+-- Name: ai_tool_confirmations ai_tool_confirmations_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_tool_confirmations_set_updated_at BEFORE UPDATE ON public.ai_tool_confirmations FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_tool_confirmations ai_tool_confirmations_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_tool_confirmations_validate BEFORE INSERT OR UPDATE ON public.ai_tool_confirmations FOR EACH ROW EXECUTE FUNCTION public.ai_tool_confirmations_validate();
+
+
+--
+-- Name: ai_usage ai_usage_after_insert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_usage_after_insert AFTER INSERT ON public.ai_usage FOR EACH ROW EXECUTE FUNCTION public.ai_usage_after_insert();
+
+
+--
+-- Name: ai_usage ai_usage_before_insert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_usage_before_insert BEFORE INSERT ON public.ai_usage FOR EACH ROW EXECUTE FUNCTION public.ai_usage_before_insert();
+
+
+--
+-- Name: ai_usage ai_usage_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_usage_set_updated_at BEFORE UPDATE ON public.ai_usage FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
 -- Name: attachments attachments_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -7302,6 +10329,20 @@ CREATE TRIGGER financial_accounts_validate BEFORE INSERT OR UPDATE OF caixa_id O
 --
 
 CREATE TRIGGER financial_accounts_validate_history BEFORE UPDATE OF caixa_id, opening_date ON public.financial_accounts FOR EACH ROW EXECUTE FUNCTION public.financial_accounts_validate_history();
+
+
+--
+-- Name: mcp_servers mcp_servers_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mcp_servers_audit AFTER INSERT OR DELETE OR UPDATE ON public.mcp_servers FOR EACH ROW EXECUTE FUNCTION public.audit_row('tools_cache,tools_cached_at,tools_error');
+
+
+--
+-- Name: mcp_servers mcp_servers_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mcp_servers_set_updated_at BEFORE UPDATE ON public.mcp_servers FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -7718,6 +10759,27 @@ CREATE TRIGGER transfers_set_updated_at BEFORE UPDATE ON public.transfers FOR EA
 
 
 --
+-- Name: user_api_tokens user_api_tokens_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER user_api_tokens_audit AFTER INSERT OR DELETE OR UPDATE ON public.user_api_tokens FOR EACH ROW EXECUTE FUNCTION public.audit_row('last_used_at,last_used_ip');
+
+
+--
+-- Name: user_api_tokens user_api_tokens_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER user_api_tokens_set_updated_at BEFORE UPDATE ON public.user_api_tokens FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: user_api_tokens user_api_tokens_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER user_api_tokens_validate BEFORE UPDATE ON public.user_api_tokens FOR EACH ROW EXECUTE FUNCTION public.user_api_tokens_validate();
+
+
+--
 -- Name: users users_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -7736,6 +10798,238 @@ CREATE TRIGGER users_revoke_sessions_on_deactivate AFTER UPDATE OF is_active ON 
 --
 
 CREATE TRIGGER users_set_updated_at BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: agent_mcp_servers agent_mcp_servers_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_mcp_servers
+    ADD CONSTRAINT agent_mcp_servers_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.ai_agents(id) ON DELETE CASCADE;
+
+
+--
+-- Name: agent_mcp_servers agent_mcp_servers_mcp_server_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_mcp_servers
+    ADD CONSTRAINT agent_mcp_servers_mcp_server_id_fkey FOREIGN KEY (mcp_server_id) REFERENCES public.mcp_servers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_agents ai_agents_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agents
+    ADD CONSTRAINT ai_agents_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_agents ai_agents_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agents
+    ADD CONSTRAINT ai_agents_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.ai_providers(id);
+
+
+--
+-- Name: ai_conversations ai_conversations_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_conversations
+    ADD CONSTRAINT ai_conversations_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.ai_agents(id);
+
+
+--
+-- Name: ai_conversations ai_conversations_forked_from_message_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_conversations
+    ADD CONSTRAINT ai_conversations_forked_from_message_fkey FOREIGN KEY (forked_from_conversation_id, forked_from_message_id) REFERENCES public.ai_messages(conversation_id, id) MATCH FULL ON DELETE SET NULL;
+
+
+--
+-- Name: ai_conversations ai_conversations_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_conversations
+    ADD CONSTRAINT ai_conversations_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_embeddings ai_embeddings_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_embeddings
+    ADD CONSTRAINT ai_embeddings_caixa_id_fkey FOREIGN KEY (caixa_id) REFERENCES public.caixas(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_message_attachments ai_message_attachments_attachment_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_message_attachments
+    ADD CONSTRAINT ai_message_attachments_attachment_id_fkey FOREIGN KEY (attachment_id) REFERENCES public.attachments(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_message_attachments ai_message_attachments_message_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_message_attachments
+    ADD CONSTRAINT ai_message_attachments_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.ai_messages(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_messages ai_messages_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_messages
+    ADD CONSTRAINT ai_messages_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.ai_conversations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_messages ai_messages_run_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_messages
+    ADD CONSTRAINT ai_messages_run_fkey FOREIGN KEY (conversation_id, run_id) REFERENCES public.ai_runs(conversation_id, id) ON DELETE SET NULL (run_id);
+
+
+--
+-- Name: ai_model_prices ai_model_prices_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_model_prices
+    ADD CONSTRAINT ai_model_prices_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.ai_providers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_providers ai_providers_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_providers
+    ADD CONSTRAINT ai_providers_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_run_events ai_run_events_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_run_events
+    ADD CONSTRAINT ai_run_events_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.ai_runs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_runs ai_runs_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_runs
+    ADD CONSTRAINT ai_runs_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.ai_agents(id);
+
+
+--
+-- Name: ai_runs ai_runs_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_runs
+    ADD CONSTRAINT ai_runs_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.ai_conversations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_runs ai_runs_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_runs
+    ADD CONSTRAINT ai_runs_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.ai_providers(id);
+
+
+--
+-- Name: ai_runs ai_runs_trigger_message_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_runs
+    ADD CONSTRAINT ai_runs_trigger_message_fkey FOREIGN KEY (conversation_id, trigger_message_id) REFERENCES public.ai_messages(conversation_id, id) ON DELETE SET NULL (trigger_message_id);
+
+
+--
+-- Name: ai_runs ai_runs_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_runs
+    ADD CONSTRAINT ai_runs_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_tool_confirmations ai_tool_confirmations_decided_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_tool_confirmations
+    ADD CONSTRAINT ai_tool_confirmations_decided_by_user_id_fkey FOREIGN KEY (decided_by_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_tool_confirmations ai_tool_confirmations_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_tool_confirmations
+    ADD CONSTRAINT ai_tool_confirmations_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.ai_runs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_usage ai_usage_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_usage
+    ADD CONSTRAINT ai_usage_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.ai_agents(id);
+
+
+--
+-- Name: ai_usage ai_usage_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_usage
+    ADD CONSTRAINT ai_usage_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.ai_conversations(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_usage ai_usage_message_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_usage
+    ADD CONSTRAINT ai_usage_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.ai_messages(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_usage ai_usage_price_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_usage
+    ADD CONSTRAINT ai_usage_price_id_fkey FOREIGN KEY (price_id) REFERENCES public.ai_model_prices(id);
+
+
+--
+-- Name: ai_usage ai_usage_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_usage
+    ADD CONSTRAINT ai_usage_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.ai_providers(id);
+
+
+--
+-- Name: ai_usage ai_usage_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_usage
+    ADD CONSTRAINT ai_usage_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.ai_runs(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_usage ai_usage_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_usage
+    ADD CONSTRAINT ai_usage_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
 
 
 --
@@ -8016,6 +11310,14 @@ ALTER TABLE ONLY public.entity_pix_keys
 
 ALTER TABLE ONLY public.financial_accounts
     ADD CONSTRAINT financial_accounts_caixa_id_fkey FOREIGN KEY (caixa_id) REFERENCES public.caixas(id);
+
+
+--
+-- Name: mcp_servers mcp_servers_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mcp_servers
+    ADD CONSTRAINT mcp_servers_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
 
 
 --
@@ -8504,6 +11806,14 @@ ALTER TABLE ONLY public.transfers
 
 ALTER TABLE ONLY public.transfers
     ADD CONSTRAINT transfers_to_account_id_fkey FOREIGN KEY (to_account_id) REFERENCES public.financial_accounts(id);
+
+
+--
+-- Name: user_api_tokens user_api_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_api_tokens
+    ADD CONSTRAINT user_api_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --

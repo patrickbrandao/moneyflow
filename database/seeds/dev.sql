@@ -194,4 +194,17 @@ SELECT v.kind, g.id, v.name
   JOIN categories g ON g.kind = v.kind AND g.parent_id IS NULL AND lower(g.name) = lower(v.parent_name)
 ON CONFLICT (kind, parent_id, lower(name)) DO NOTHING;
 
+-- Agente de exemplo (spec 011) ------------------------------------------------------------
+-- Sem provedor nem chave (segredos não entram em seed): nasce INATIVO. O admin escolhe o
+-- provedor e o modelo na tela de agentes e o ativa.
+INSERT INTO ai_agents (name, description, system_prompt, params, enabled_tools, require_write_confirmation,
+                       color_slot, icon, is_active)
+VALUES ('Assistente geral',
+        'Responde sobre contas, caixas e títulos e ajuda a lançar e conciliar, com as permissões de quem o aciona.',
+        'Você é o assistente financeiro do MoneyFlow. Responda em português do Brasil, de forma objetiva. '
+        'Valores em reais (R$). Use as ferramentas para consultar os dados antes de responder e nunca invente '
+        'números. Antes de alterar qualquer registro, explique o que vai fazer.',
+        '{"temperature": 0.3, "max_tool_iterations": 20}', NULL, true, 1, 'bot', false)
+ON CONFLICT ((lower(name))) DO NOTHING;
+
 COMMIT;
