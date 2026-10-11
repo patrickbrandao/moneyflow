@@ -12,18 +12,54 @@ As especificações em `docs/nnn-titulo.md` são a fonte da verdade do produto. 
 
 Tudo o que é banco (PostgreSQL 18 + pgvector) fica em `database/` e é responsabilidade exclusiva do subagente **dba** (`.claude/agents/dba.md`, regras em [database/AGENTS.md](database/AGENTS.md)). Não edite `database/`: descreva a necessidade e delegue ao dba. Detalhes em [docs/016-banco-de-dados.md](docs/016-banco-de-dados.md).
 
-## Estado do projeto
+## Comandos
 
-O banco está em construção em `database/` (comandos em `database/AGENTS.md`); a aplicação ainda não tem código. A implementação segue as fases de [docs/015-fases.md](docs/015-fases.md). Quando o monorepo existir, registre aqui os comandos reais de build, lint e teste, inclusive como rodar um teste isolado.
+Node 22.12+ e pnpm 9 (`corepack enable`). Copie `.env.example` para `.env` na raiz.
 
-## Arquitetura prevista
+```bash
+pnpm install
+make -C database migrate seed   # banco de desenvolvimento (Postgres 18 na 5432), migrations e seeds
+pnpm dev                        # API (http://localhost:3001) + Vite (http://localhost:5174, encaminha /api)
+pnpm dev:worker                 # worker (materialização das séries) em modo watch
+pnpm lint                       # Biome (lint + formato); `pnpm format` corrige
+pnpm typecheck                  # tsc em todos os pacotes
+pnpm test                       # unitários (shared) + integração da API
+pnpm test:unit                  # só packages/shared
+pnpm test:integration           # API contra Postgres 18 real: o Testcontainers builda database/docker e aplica as migrations
+pnpm build                      # SPA (apps/web/dist) + bundle da API/worker (apps/server/dist/main.mjs)
+pnpm db:pull                    # regenera packages/db/src/generated depois de uma migration nova (nunca edite à mão)
+docker compose up --build -d    # pilha completa: Postgres (5433), migrations, api (http://localhost:3000, serve o SPA) e worker
+pnpm e2e                        # Playwright contra a pilha no ar (E2E_BASE_URL, padrão http://localhost:3000)
+make release                    # build multi-arch e push de tmsoftbrasil/moneyflow:<versão> e :latest
+```
 
-- Monorepo pnpm: `apps/web` (console React 19 + Vite), `apps/server` (Fastify, um único artefato rodando como `api` ou `worker`), `packages/shared` (schemas Zod, tipos, definições das tools dos agentes) e `packages/db` (schema Drizzle gerado do banco por `drizzle-kit pull`, nunca editado à mão).
-- Imagem única `tmsoftbrasil/moneyflow`; a API serve o SPA compilado. O compose da aplicação inclui `database/docker-compose.yml` e sobe api e worker. O GitHub Actions publica imagens multi-arch nas tags `v*`.
-- A UI parte da skill `web-interface-admin-with-canva` do MCP `purple-skills-public` (use `get_skill` e `get_skill_file`). Siga as regras de design dela: só tokens, nenhum hex em componente, um único acento roxo, sem sombra em superfície fixa.
-- As tools dos agentes são definidas uma vez em `packages/shared`, rodam com as permissões do usuário que acionou o agente e também são expostas pelo endpoint `/mcp` do próprio app. Tools de escrita exigem confirmação do usuário.
-- Dinheiro em BRL, em centavos inteiros. Textos da UI em pt-BR e centralizados; identificadores de código e banco em inglês.
-- Senhas ficam em texto puro de propósito. Nunca devolva senha pela API nem a inclua em logs, exports ou tools de agente; só a ação "revelar" do admin pode exibi-la.
+Teste isolado:
+
+```bash
+pnpm --filter @moneyflow/server exec vitest run test/titles.test.ts -t "estorno"   # integração, um caso
+pnpm --filter @moneyflow/shared exec vitest run test/documents.test.ts           # unitário, um arquivo
+MONEYFLOW_TEST_DATABASE_URL=postgres://moneyflow_app:moneyflow_app@localhost:5432/moneyflow_test pnpm test:integration  # banco já migrado, sem Testcontainers
+pnpm --filter @moneyflow/e2e exec playwright test -g "baixa"                     # um e2e
+```
+
+O banco tem comandos próprios (`make -C database test`, pgTAP) em [database/AGENTS.md](database/AGENTS.md).
+
+## Estrutura
+
+- `apps/server` (Fastify, `@moneyflow/server`): um único artefato, `node dist/main.mjs api|worker` (ou `MODE`). `src/routes` (REST em `/api`), `src/services` (regras e transações; recebem um `ServiceContext`), `src/authz/access.ts` (autorização central: admin global vê tudo; os demais por `caixa_members` editor/viewer), `src/auth` (sessão em cookie httpOnly, `sessions.id` = sha256 do token, admin inicial por `ADMIN_*`), `src/errors.ts` (erros do banco 23514/23505/23503/42501 traduzidos para pt-BR), `src/worker.ts` (séries até 12 meses à frente, com advisory lock). Testes de integração em `test/`.
+- `apps/web` (`@moneyflow/web`): console React 19 + Vite + Tailwind 4 a partir do template da skill `web-interface-admin-with-canva`. `src/pages` (telas), `src/components/{titles,caixa,entity}` (formulários e gavetas do domínio), `src/components/shell` e `ui.tsx` (do template), `src/components/canvas` (React Flow, reservado para a F3), `src/lib/api.ts` (cliente da API), `src/config/navigation.tsx` (menu, trilha e "Ir para" da paleta).
+- `packages/shared`: schemas Zod de entrada, DTOs, documentos (CPF/CNPJ alfanumérico), PIX, datas, dinheiro, recorrência e os textos pt-BR (`t`). Usado pela API e pelo front.
+- `packages/db`: client Drizzle e o schema gerado (`src/generated`, por `pnpm db:pull`).
+- `e2e`: Playwright (login → entidade → título → baixa).
+- `Dockerfile` (imagem única `tmsoftbrasil/moneyflow`), `docker-compose.yml` (inclui `database/docker-compose.yml` + `docker/database.override.yml`, one-shot `migrate` com dbmate, `api` e `worker`), `.github/workflows` (`ci.yml` e `release.yml`), `Makefile` (`release`).
+
+## Regras da aplicação
+
+- A aplicação conecta como `moneyflow_app` e nunca seleciona `users.password` (use `userColumns`); login só por `auth_login()`, revelar só por `admin_reveal_password()`. Nunca devolva senha pela API nem a inclua em logs, exports ou tools de agente.
+- Fluxos que tocam várias tabelas (espelho, baixa com duas pernas, transferência, estorno) rodam numa transação só: as checagens do banco são deferidas para o COMMIT (docs/016).
+- Toda permissão passa por `Access` (`assertRead`/`assertWrite`/`assertAdmin`); serviços nunca consultam `caixa_members` por conta própria. As tools dos agentes (F4) reaproveitarão os mesmos serviços.
+- UI: só tokens (nenhum hex em componente), um único acento roxo, sem sombra em superfície fixa; cor de categoria = `var(--port-N)` com N = `color_slot` (1–12). Textos em pt-BR vindos de `@moneyflow/shared` (`t`).
+- Dinheiro em BRL, em centavos inteiros; datas de negócio como `YYYY-MM-DD` no fuso `America/Sao_Paulo`.
 
 ## Configuração
 
