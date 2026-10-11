@@ -3,10 +3,13 @@ import { Building2, Plus, Search, UserRound } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { LoadError, PageHead, SkelRows } from '../components/domain';
+import { ExportMenu } from '../components/ExportMenu';
 import { EntityFormModal } from '../components/entity/EntityFormModal';
 import { Badge, Button, CopyButton, EmptyRow, Tabs, useDebounced } from '../components/ui';
+import { api } from '../lib/api';
 import { useUser } from '../lib/auth';
 import { useRegisterCommands } from '../lib/commands';
+import { entitiesTable } from '../lib/export-tables';
 import { useApi } from '../lib/hooks';
 import { useParamState } from '../lib/params';
 
@@ -47,6 +50,14 @@ export function EntitiesPage() {
                 aria-label="Buscar entidades"
               />
             </label>
+            <ExportMenu
+              size="md"
+              build={async () => {
+                const all = new URLSearchParams(qs);
+                all.set('limit', '500');
+                return entitiesTable(await api.get<EntitySummary[]>(`/api/entities?${all}`));
+              }}
+            />
             {user.canEditRegistry && (
               <Button onClick={() => setNew('1')}>
                 <Plus /> {t.palette.newEntity}

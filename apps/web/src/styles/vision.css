@@ -1,0 +1,617 @@
+/* ============================================================
+   FASE 3 — canvas de fluxo, relatórios, mensagens.
+   Só tokens (nenhum hex); cor por tipo/categoria = --port-N.
+   ============================================================ */
+
+/* ---- filtros comuns ---- */
+.caixa-filter {
+  max-height: 320px;
+  overflow: auto;
+  min-width: 240px;
+}
+.caixa-filter label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: var(--radius-control);
+}
+.caixa-filter label:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.caixa-filter svg {
+  width: 14px;
+  height: 14px;
+  color: var(--text-faint);
+  flex: none;
+}
+.period-picker {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ============================================================
+   CANVAS DE FLUXO
+   ============================================================ */
+.flow-sub {
+  font-size: 12px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flow-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.flow-loading {
+  display: grid;
+  place-items: center;
+}
+.flow-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* Handles discretos: o canvas não liga nós à mão. */
+.react-flow__handle.flow-handle {
+  width: 8px;
+  height: 8px;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface-4);
+  border: 1px solid var(--bg-elev);
+  opacity: 0.8;
+}
+
+/* Caixa (hub). */
+.flow-caixa {
+  width: 264px;
+}
+.flow-caixa .flow-balance,
+.flow-caixa .flow-meter-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.flow-caixa .flow-balance b,
+.flow-caixa .flow-meter-row b {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.flow-caixa .flow-balance b.out {
+  color: var(--danger);
+}
+.flow-meter {
+  display: grid;
+  gap: 6px;
+}
+.flow-bar {
+  margin: 0 14px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.flow-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent-soft);
+}
+.flow-bar i.high {
+  background: var(--warn);
+}
+.flow-bar i.over {
+  background: var(--danger);
+}
+.flow-io {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 14px 10px;
+  border-top: 1px solid var(--surface-3);
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.flow-io .in {
+  color: var(--ok);
+}
+.flow-io .out {
+  color: var(--danger);
+}
+.flow-io .money {
+  color: var(--text-dim);
+}
+
+/* Entidade e cluster (folhas). */
+.flow-entity {
+  width: 240px;
+  min-height: 56px;
+  padding: 8px 12px;
+}
+.flow-entity .node-ic {
+  width: 30px;
+  height: 30px;
+}
+.flow-entity .sl {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.flow-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--port, var(--text-faint));
+}
+.flow-amt {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Realce do selecionado: o resto esmaece. */
+.node-hub.is-dim,
+.node-item.is-dim {
+  opacity: 0.35;
+}
+.react-flow__edge-path.flow-edge {
+  stroke-linecap: round;
+  opacity: 0.75;
+  transition: opacity 0.15s ease;
+}
+.react-flow__edge-path.flow-edge.is-on {
+  opacity: 1;
+}
+.react-flow__edge-path.flow-edge.is-dim {
+  opacity: 0.12;
+}
+.react-flow__edge-path.flow-edge-forecast {
+  stroke-dasharray: 6 5;
+  animation: flow-dash 1.2s linear infinite;
+}
+@keyframes flow-dash {
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__edge-path.flow-edge-forecast {
+    animation: none;
+  }
+}
+.flow-edge-label {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  pointer-events: none;
+}
+.flow-edge-label.show {
+  opacity: 1;
+}
+.flow-edge-label .dot {
+  background: var(--port);
+}
+.flow-edge-label .money {
+  color: var(--text);
+}
+.flow-legend-dash {
+  padding-left: 10px;
+  border-left: 1px solid var(--surface-3);
+}
+@media (max-width: 900px) {
+  .stage-legend {
+    flex-wrap: wrap;
+    max-width: calc(100% - 80px);
+  }
+}
+
+/* Gaveta. */
+.flow-kind-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex: none;
+}
+.flow-route {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+.flow-route svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--text-faint);
+}
+.flow-lines {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.flow-lines li > a,
+.flow-lines li > div {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  margin: 0 -10px;
+  border-radius: var(--radius-control);
+  color: inherit;
+  text-decoration: none;
+}
+.flow-lines li > a:hover {
+  background: var(--surface-2);
+}
+.flow-lines .fl-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.flow-lines .fl-desc {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flow-lines .fl-sub {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flow-lines .fl-sub .cat-dot {
+  display: inline-block;
+  vertical-align: middle;
+}
+.flow-lines .fl-val {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  flex: none;
+  font-size: 12.5px;
+}
+
+/* ============================================================
+   RELATÓRIOS
+   ============================================================ */
+.report-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 16px;
+}
+.report-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: 16px;
+}
+@media (max-width: 1100px) {
+  .report-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.report-table table.data td,
+.report-table table.data th {
+  white-space: nowrap;
+}
+.report-table tr.report-group td {
+  color: var(--text);
+  font-weight: 500;
+}
+.report-table tr.report-child td {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  background: var(--bg-sunken);
+}
+.report-table tr.report-total td {
+  font-weight: 600;
+  color: var(--text);
+  border-top: 1px solid var(--border-strong);
+}
+.report-caret {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  color: var(--text-faint);
+}
+.report-caret svg {
+  width: 14px;
+  height: 14px;
+}
+.report-trail {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-left: 22px;
+}
+.report-trail > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.report-trail svg {
+  width: 12px;
+  height: 12px;
+  color: var(--text-faint);
+}
+
+/* Gráfico de barras empilhadas por mês. */
+.chart {
+  margin: 0;
+}
+.chart-bars {
+  display: grid;
+  grid-template-columns: repeat(var(--n), minmax(0, 1fr));
+  align-items: end;
+  gap: 10px;
+  height: 220px;
+}
+.chart-col {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100%;
+  min-width: 0;
+  gap: 4px;
+}
+.chart-stack {
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-start;
+  gap: 1px;
+  min-height: 0;
+  border-radius: 4px 4px 0 0;
+  overflow: hidden;
+}
+.chart-stack i {
+  display: block;
+  width: 100%;
+  min-height: 2px;
+}
+.chart-total {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chart-x {
+  font-size: 11px;
+  color: var(--text-faint);
+  text-align: center;
+  border-top: 1px solid var(--surface-3);
+  padding-top: 4px;
+}
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 14px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.chart-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+/* Ranking. */
+.rank {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rank li {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+.rank-n {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.rank-body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.rank-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+.rank-sub {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.rank-bar {
+  display: block;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.rank-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+}
+.rank-v {
+  display: grid;
+  justify-items: end;
+  font-size: 12.5px;
+}
+.rank-share {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* ============================================================
+   MENSAGENS
+   ============================================================ */
+.sub-card {
+  display: grid;
+  gap: 4px;
+}
+.sub-card .hint {
+  margin: 0 0 0 24px;
+}
+.sub-card.on {
+  border-color: var(--accent-soft);
+}
+.sub-params {
+  display: grid;
+  gap: 10px;
+  margin: 8px 0 2px 24px;
+}
+.sub-params > label {
+  display: grid;
+  gap: 4px;
+  max-width: 240px;
+}
+.sub-caixas {
+  display: grid;
+  gap: 6px;
+}
+td.msg-error {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--danger);
+}
+tr.msg-detail td {
+  background: var(--bg-sunken);
+}
+.msg-preview {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--surface-3);
+  background: var(--bg-elev);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow: auto;
+}
+
+/* ============================================================
+   SINO (notificações)
+   ============================================================ */
+.notif .ni.unread {
+  color: var(--text);
+}
+.notif .notif-title {
+  display: block;
+  font-size: 13px;
+  line-height: 1.35;
+}
+.notif .ni.unread .notif-title {
+  font-weight: 500;
+}
+.notif .notif-body {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.notif .notif-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+}
+.notif-readall {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  padding: 2px 4px;
+  border-radius: var(--radius-control);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.notif-readall:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.notif-readall svg {
+  width: 14px;
+  height: 14px;
+}
+.react-flow__handle.flow-handle.is-hidden {
+  opacity: 0;
+}
+.stage-hint.flow-hint {
+  bottom: 54px;
+}
+@media (max-width: 1280px) {
+  .stage-hint.flow-hint {
+    display: none;
+  }
+}
+/* Primeira coluna presa ao rolar os meses para o lado. */
+.report-table table.data th:first-child,
+.report-table table.data td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--bg-elev);
+}
+.report-table table.data th:first-child {
+  z-index: 2;
+  background: var(--surface-2);
+}
+.report-table table.data tr.report-child td:first-child {
+  background: var(--bg-sunken);
+}

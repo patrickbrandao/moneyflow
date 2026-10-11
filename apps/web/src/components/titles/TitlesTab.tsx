@@ -2,10 +2,13 @@ import { type CaixaDetail, formatDate, type TitleRow, t } from '@moneyflow/share
 import { CircleDollarSign, Paperclip, Plus, Search } from 'lucide-react';
 import { useState } from 'react';
 import '../../styles/attachments.css';
+import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
+import { titlesTable } from '../../lib/export-tables';
 import { useApi } from '../../lib/hooks';
 import { useParamState, useSetParams } from '../../lib/params';
 import { CategoryLabel, LoadError, MirrorBadge, Money, SkelRows, TitleStatusBadge } from '../domain';
+import { ExportMenu } from '../ExportMenu';
 import { Badge, Button, cx, EmptyRow, Tabs, useDebounced } from '../ui';
 import { TitleDrawer } from './TitleDrawer';
 import { TitleFormModal } from './TitleFormModal';
@@ -99,6 +102,20 @@ export function TitlesTab({
           <input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} /> {t.common.showArchived}
         </label>
         <span className="flex-1" />
+        <ExportMenu
+          build={async () => {
+            const all = new URLSearchParams(params);
+            all.set('limit', '500');
+            const rows = await api.get<TitleRow[]>(`/api/titles?${all}`);
+            return titlesTable(rows, {
+              caixaName: caixa.name,
+              direction,
+              filter: FILTERS.find((f) => f.key === filter)?.label ?? '',
+              from,
+              to,
+            });
+          }}
+        />
         {caixa.canWrite && (
           <Button onClick={() => setNew('1')}>
             <Plus /> {label}

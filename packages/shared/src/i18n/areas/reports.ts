@@ -37,6 +37,7 @@ export const reportsStrings = {
   projectionSub:
     'Saldo de hoje mais o que já está lançado e os títulos em aberto até cada horizonte. Caixas de cartão entram pela fatura na pagadora.',
   horizon: (days: number) => `${days} dias`,
+  horizonDays: 'Horizonte (dias)',
   balanceToday: 'Saldo hoje',
   scheduled: 'Lançados',
   receivable: 'A receber',

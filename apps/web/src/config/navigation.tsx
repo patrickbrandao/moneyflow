@@ -1,5 +1,18 @@
 import { t } from '@moneyflow/shared';
-import { ArrowLeftRight, Building2, CalendarDays, History, LayoutGrid, Tags, UserRound, Users, Wallet } from 'lucide-react';
+import {
+  ArrowLeftRight,
+  Building2,
+  CalendarDays,
+  ChartColumn,
+  History,
+  LayoutGrid,
+  Send,
+  Tags,
+  UserRound,
+  Users,
+  Wallet,
+  Waypoints,
+} from 'lucide-react';
 import type { ReactNode } from 'react';
 
 /*
@@ -49,6 +62,11 @@ export const NAVIGATION: NavEntry[][] = [
     { kind: 'link', to: '/entities', label: t.nav.entities, icon: <Building2 />, shortcut: 'g e' },
     { kind: 'link', to: '/transfers', label: t.nav.transfers, icon: <ArrowLeftRight />, shortcut: 'g t' },
     { kind: 'link', to: '/calendar', label: t.nav.calendar, icon: <CalendarDays />, shortcut: 'g a' },
+  ],
+  [
+    { kind: 'link', to: '/flow', label: t.nav.flow, icon: <Waypoints />, shortcut: 'g f' },
+    { kind: 'link', to: '/reports', label: t.nav.reports, icon: <ChartColumn />, shortcut: 'g r' },
+    { kind: 'link', to: '/messages', label: t.nav.messages, icon: <Send />, shortcut: 'g m' },
   ],
   [
     { kind: 'link', to: '/categories', label: t.nav.categories, icon: <Tags /> },

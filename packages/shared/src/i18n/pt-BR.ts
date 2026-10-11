@@ -36,6 +36,7 @@ export const ptBR = {
     yes: 'Sim',
     no: 'Não',
     none: 'Nenhum',
+    choose: 'Escolha…',
     all: 'Todos',
     optional: 'opcional',
     actions: 'Ações',

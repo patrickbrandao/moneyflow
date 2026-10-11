@@ -2,10 +2,13 @@ import { type CardPurchaseRow, formatDate, t } from '@moneyflow/shared';
 import { Paperclip, Plus, Search } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { api } from '../../lib/api';
+import { purchasesTable } from '../../lib/export-tables';
 import { useApi } from '../../lib/hooks';
 import { entityLink } from '../../lib/links';
 import { useParamState } from '../../lib/params';
 import { CategoryLabel, LoadError, Money, SkelRows } from '../domain';
+import { ExportMenu } from '../ExportMenu';
 import { Badge, Button, cx, EmptyRow, useDebounced } from '../ui';
 import { PurchaseDrawer } from './PurchaseDrawer';
 import { useGeneralCaixas, useReloadOn } from './shared';
@@ -13,12 +16,14 @@ import { useGeneralCaixas, useReloadOn } from './shared';
 /** Compras do cartão: filtros (período, pagadora, tipo, busca) e a gaveta da compra. */
 export function PurchasesTab({
   cardCaixaId,
+  cardName,
   canWrite,
   onNew,
   version,
   onChanged,
 }: {
   cardCaixaId: string;
+  cardName: string;
   canWrite: boolean;
   onNew: () => void;
   version: number;
@@ -101,6 +106,13 @@ export function PurchasesTab({
           ))}
         </select>
         <span className="flex-1" />
+        <ExportMenu
+          build={async () => {
+            const all = new URLSearchParams(params);
+            all.set('limit', '1000');
+            return purchasesTable(await api.get<CardPurchaseRow[]>(`/api/cards/${cardCaixaId}/purchases?${all}`), cardName);
+          }}
+        />
         {canWrite && (
           <Button onClick={onNew}>
             <Plus /> {t.card.newPurchase}

@@ -28,7 +28,7 @@ export type ExportTable = {
   boldRows?: number[];
 };
 
-export const CSV_BOM = '﻿';
+export const CSV_BOM = '\uFEFF';
 
 /** Centavos → '1234,56' (sinal só no negativo). */
 export function centsToCsv(cents: number): string {
@@ -85,7 +85,7 @@ export function exportFileName(...parts: string[]): string {
   return parts
     .join('-')
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');

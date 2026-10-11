@@ -182,6 +182,7 @@ export function CardCaixaView({ caixa, tab: rawTab, onChanged }: { caixa: CaixaD
       {tab === 'purchases' && (
         <PurchasesTab
           cardCaixaId={caixa.id}
+          cardName={caixa.name}
           canWrite={canWrite}
           onNew={() => setAction('purchase')}
           version={version}

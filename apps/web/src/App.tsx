@@ -17,10 +17,13 @@ import { CalendarPage } from './pages/CalendarPage';
 import { CategoriesPage } from './pages/CategoriesPage';
 import { EntitiesPage } from './pages/EntitiesPage';
 import { EntityPage } from './pages/EntityPage';
+import { FlowPage } from './pages/FlowPage';
 import { InvoicePage } from './pages/InvoicePage';
 import { LoginPage } from './pages/LoginPage';
+import { MessagesPage } from './pages/MessagesPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { OverviewPage } from './pages/OverviewPage';
+import { ReportsPage } from './pages/ReportsPage';
 import { TransfersPage } from './pages/TransfersPage';
 import { UsersPage } from './pages/UsersPage';
 
@@ -62,11 +65,17 @@ function Console() {
           <Route path="transfers" element={<TransfersPage />} />
           <Route path="calendar" element={<CalendarPage />} />
           <Route path="card-invoices/:id" element={<InvoicePage />} />
+          <Route path="reports" element={<ReportsPage />} />
+          <Route path="reports/:tab" element={<ReportsPage />} />
+          <Route path="messages" element={<MessagesPage />} />
           <Route path="audit" element={<AuditPage />} />
           <Route path="categories" element={<CategoriesPage />} />
           <Route path="users" element={<UsersPage />} />
           <Route path="account" element={<AccountPage />} />
           <Route path="*" element={<NotFoundPage />} />
+        </Route>
+        <Route element={<Layout stage />}>
+          <Route path="flow" element={<FlowPage />} />
         </Route>
       </Routes>
     </CommandProvider>

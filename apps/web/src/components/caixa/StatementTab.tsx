@@ -3,11 +3,13 @@ import { FileText, Paperclip, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
+import { statementTable } from '../../lib/export-tables';
 import { useAction, useApi } from '../../lib/hooks';
 import { titleLink } from '../../lib/links';
 import { useParamState } from '../../lib/params';
 import { AttachmentsModal } from '../attachments/AttachmentsPanel';
 import { LoadError, Money, SkelRows } from '../domain';
+import { ExportMenu } from '../ExportMenu';
 import { Badge, EmptyRow, EmptyState, useConfirm } from '../ui';
 
 /** Extrato por conta: movimentos do período com saldo corrente. */
@@ -73,6 +75,7 @@ export function StatementTab({ caixa, onChanged }: { caixa: CaixaDetail; onChang
           title={t.common.to}
         />
         <span className="flex-1" />
+        <ExportMenu disabled={!data} build={() => statementTable(data!, caixa.name)} />
         {data && (
           <span className="text-[13px] text-muted">
             {t.statement.opening}: <Money cents={data.openingCents} /> · {t.statement.closing}: <Money cents={data.closingCents} />

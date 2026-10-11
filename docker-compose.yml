@@ -17,6 +17,13 @@ x-app: &app
     DATABASE_URL: postgres://moneyflow_app:${APP_DB_PASSWORD:-moneyflow_app}@postgres:5432/${POSTGRES_DB:-moneyflow}
     LOG_LEVEL: ${LOG_LEVEL:-info}
     TZ: America/Sao_Paulo
+    # Bot API do Telegram (spec 013). Nos e2e, aponte para a Bot API falsa do Playwright:
+    # TELEGRAM_API_BASE=http://host.docker.internal:18081 docker compose up -d
+    TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-https://api.telegram.org}
+    APP_URL: ${APP_URL:-}
+  # host.docker.internal também no Linux (a Bot API falsa dos e2e roda no host).
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   depends_on:
     migrate:
       condition: service_completed_successfully
@@ -65,6 +72,8 @@ services:
       MODE: worker
       WORKER_INTERVAL_MS: ${WORKER_INTERVAL_MS:-3600000}
       CARD_AUTO_CLOSE: ${CARD_AUTO_CLOSE:-false}
+      MESSAGE_INTERVAL_MS: ${MESSAGE_INTERVAL_MS:-30000}
+      NOTIFY_AT: ${NOTIFY_AT:-08:00}
     depends_on:
       migrate:
         condition: service_completed_successfully

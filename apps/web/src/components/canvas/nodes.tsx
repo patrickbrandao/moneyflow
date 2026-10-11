@@ -1,126 +1,129 @@
+import { formatBRL, t } from '@moneyflow/shared';
 import { Handle, type NodeProps, Position } from '@xyflow/react';
-import { Boxes, Layers, Radio } from 'lucide-react';
-import { memo } from 'react';
-import { Badge, TileIcon } from '../ui';
-import { type EntryNode, type GroupNode, type HubNode, type ItemNode, inHandle, outHandle, PORTS, type PortId, portStyle } from './types';
+import { Building2, CreditCard, Layers, UserRound, Wallet } from 'lucide-react';
+import { type CSSProperties, memo } from 'react';
+import { cx } from '../ui';
+import type { CaixaFlowNode, ClusterFlowNode, EntityFlowNode } from './graph';
 
 /*
- * Os quatro tipos de nó. `memo` é obrigatório: sem ele, arrastar um nó
- * re-renderiza todos os outros. Nenhum nó faz fetch — tudo chega por `data`,
- * montado no nível do palco.
+ * Os nós do canvas de fluxo. `memo` é obrigatório (arrastar um nó não
+ * re-renderiza os outros) e nenhum nó busca dado: tudo chega por `data`.
+ * Entrada à esquerda (handle "in"), saída à direita ("out").
  */
 
-function HubNodeImpl({ data, selected }: NodeProps<HubNode>) {
+const Handles = ({ vertical }: { vertical?: boolean }) => (
+  <>
+    <Handle type="target" position={Position.Left} id="in" isConnectable={false} className="flow-handle" />
+    <Handle type="source" position={Position.Right} id="out" isConnectable={false} className="flow-handle" />
+    {vertical && (
+      <>
+        {/* Entre caixas da mesma coluna (transferência, espelho), a aresta sai por baixo/cima. */}
+        <Handle type="source" position={Position.Bottom} id="out-b" isConnectable={false} className="flow-handle" />
+        <Handle type="target" position={Position.Top} id="in-t" isConnectable={false} className="flow-handle" />
+        <Handle type="source" position={Position.Top} id="out-t" isConnectable={false} className="flow-handle is-hidden" />
+        <Handle type="target" position={Position.Bottom} id="in-b" isConnectable={false} className="flow-handle is-hidden" />
+      </>
+    )}
+  </>
+);
+
+function CaixaNodeImpl({ data, selected }: NodeProps<CaixaFlowNode>) {
+  const ref = data.ref;
+  const used = ref.cardUsedCents ?? 0;
+  const limit = ref.cardLimitCents ?? 0;
+  const percent = limit > 0 ? Math.min(100, Math.round((used * 100) / limit)) : 0;
   return (
-    <div className={`node-hub${selected ? ' selected' : ''}${data.isActive ? '' : ' off'}`}>
-      <Handle type="target" position={Position.Left} id="in" className="in-handle" isConnectable={false} />
+    <div className={cx('node-hub flow-caixa', selected && 'selected', data.dim && 'is-dim')}>
+      <Handles vertical />
       <div className="hd">
-        <span className="node-ic">
-          <Boxes />
-        </span>
+        <span className="node-ic">{data.isCard ? <CreditCard /> : <Wallet />}</span>
         <span className="min-w-0 flex-1">
-          <span className="nm">{data.title}</span>
-          <span className="sl">{data.subtitle}</span>
+          <span className="nm">{data.name}</span>
+          <span className="sl">{data.isCard ? t.flow.cardNode : t.flow.caixaNode}</span>
         </span>
       </div>
-      {data.badges.length > 0 && (
-        <div className="st">
-          {data.badges.map((badge) => (
-            <Badge key={badge.label} tone={badge.tone}>
-              {badge.label}
-            </Badge>
-          ))}
+      {data.isCard ? (
+        <div className="flow-meter" title={`${t.flow.cardUsed}: ${formatBRL(used)} / ${formatBRL(limit)}`}>
+          <div className="flow-meter-row">
+            <span>{t.flow.cardUsed}</span>
+            <b className="money">{formatBRL(used)}</b>
+          </div>
+          <div className="flow-bar" aria-hidden>
+            <i style={{ width: `${percent}%` }} className={percent >= 100 ? 'over' : percent >= 80 ? 'high' : ''} />
+          </div>
+        </div>
+      ) : (
+        <div className="flow-balance">
+          <span>{t.flow.balance}</span>
+          <b className={cx('money', (ref.balanceCents ?? 0) < 0 && 'out')}>{formatBRL(ref.balanceCents ?? 0)}</b>
         </div>
       )}
-      <div className="ports">
-        {PORTS.map((port) => (
-          <div key={port.id} className="port" style={portStyle(port.id)}>
-            <span className="pd" />
-            <span className="pl">{port.label}</span>
-            <span className="pc">{data.counts?.[port.id] ?? 0}</span>
-            <Handle type="source" position={Position.Right} id={outHandle(port.id)} />
-          </div>
-        ))}
+      <div className="flow-io">
+        <span className="in">
+          ↓ <span className="money">{formatBRL(data.inCents)}</span>
+        </span>
+        <span className="out">
+          ↑ <span className="money">{formatBRL(data.outCents)}</span>
+        </span>
       </div>
     </div>
   );
 }
 
-/** Um handle de entrada por porta, na ordem das portas do hub: cheio quando ligado. */
-function InHandles({ ports }: { ports: PortId[] | undefined }) {
-  return (
-    <>
-      {PORTS.map((port, index) => (
-        <Handle
-          key={port.id}
-          type="target"
-          position={Position.Left}
-          id={inHandle(port.id)}
-          className={ports?.includes(port.id) ? 'on' : undefined}
-          style={portStyle(port.id, { top: `${((index + 1) / (PORTS.length + 1)) * 100}%` })}
-          title={port.label}
-        />
-      ))}
-    </>
-  );
-}
+const slotStyle = (slot: number | null) => (slot ? { '--port': `var(--port-${slot})` } : undefined) as CSSProperties | undefined;
 
-function ItemNodeImpl({ data, selected }: NodeProps<ItemNode>) {
+function EntityNodeImpl({ data, selected }: NodeProps<EntityFlowNode>) {
+  const value = data.side === 'left' ? data.outCents : data.inCents;
   return (
-    <div className={`node-item${selected ? ' selected' : ''}${data.isActive ? '' : ' off'}`} title={data.title}>
-      <InHandles ports={data.ports} />
-      <TileIcon icon={data.icon} name={data.title} />
+    <div
+      className={cx('node-item flow-entity', selected && 'selected', data.dim && 'is-dim')}
+      title={data.name}
+      style={slotStyle(data.colorSlot)}
+    >
+      <Handles />
+      <span className="node-ic">{data.ref.entityKind === 'company' ? <Building2 /> : <UserRound />}</span>
       <span className="tx">
-        <span className="nm">{data.title}</span>
-        <span className="sl">{data.subtitle}</span>
+        <span className="nm">{data.name}</span>
+        <span className="sl">
+          <i className="flow-dot" aria-hidden />
+          {data.groupName ?? (data.ref.holderEntityId ? t.flow.outside : t.flow.entityNode)}
+        </span>
       </span>
-      {data.busy && <span className="busy" aria-label="salvando" />}
+      <span className="flow-amt money">{formatBRL(value)}</span>
     </div>
   );
 }
 
-function GroupNodeImpl({ data, selected }: NodeProps<GroupNode>) {
-  const empty = data.count === 0;
+function ClusterNodeImpl({ data, selected }: NodeProps<ClusterFlowNode>) {
+  const value = data.side === 'left' ? data.outCents : data.inCents;
   return (
-    <div className={`node-item node-group${selected ? ' selected' : ''}${data.isActive ? '' : ' off'}`} title={data.title}>
-      <InHandles ports={data.ports} />
+    <div
+      className={cx('node-item node-group flow-entity', selected && 'selected', data.dim && 'is-dim')}
+      title={t.flow.groupOf(data.name || t.flow.otherGroup)}
+      style={slotStyle(data.colorSlot)}
+    >
+      <Handles />
       <span className="node-ic">
         <Layers />
       </span>
       <span className="tx">
-        <span className="nm">{data.title}</span>
-        <span className="sl">{data.subtitle}</span>
+        <span className="nm">{data.name || t.flow.otherGroup}</span>
+        <span className="sl">
+          <i className="flow-dot" aria-hidden />
+          {formatBRL(value)}
+        </span>
       </span>
-      <span className={`cnt${empty ? ' zero' : ''}`}>
-        <b>{data.count}</b>
-        <small>{data.count === 1 ? data.countLabel[0] : data.countLabel[1]}</small>
+      <span className="cnt">
+        <b>{data.entityIds.length}</b>
+        <small>{t.flow.entityWord(data.entityIds.length)}</small>
       </span>
-      {data.busy && <span className="busy" aria-label="salvando" />}
     </div>
   );
 }
 
-function EntryNodeImpl({ data, selected }: NodeProps<EntryNode>) {
-  return (
-    <div className={`node-entry${data.live > 0 ? ' live' : ''}${selected ? ' selected' : ''}`}>
-      <div className="globe">
-        <Radio />
-        <Handle type="source" position={Position.Right} id="out" isConnectable={false} />
-      </div>
-      <span className="lb">{data.label}</span>
-    </div>
-  );
-}
-
-/**
- * Declarados fora de qualquer componente: dentro, remontariam todos os nós a
- * cada render. NÃO use as chaves `group`, `default`, `input` ou `output`: são
- * tipos nativos do React Flow e o wrapper `.react-flow__node-<tipo>` traz
- * fundo, borda e padding próprios (por isso o grupo aqui se chama `cluster`).
- */
-export const nodeTypes = {
-  hub: memo(HubNodeImpl),
-  item: memo(ItemNodeImpl),
-  cluster: memo(GroupNodeImpl),
-  entry: memo(EntryNodeImpl),
+/** Fora de qualquer componente (dentro, remontaria tudo a cada render). Nada de `group`/`default`: são tipos nativos. */
+export const flowNodeTypes = {
+  caixa: memo(CaixaNodeImpl),
+  entity: memo(EntityNodeImpl),
+  cluster: memo(ClusterNodeImpl),
 };

@@ -22,6 +22,7 @@ export const flowStrings = {
   outflow: 'Saiu',
   forecastIn: 'Previsto entrar',
   forecastOut: 'Previsto sair',
+  entityWord: (n: number) => (n === 1 ? 'entidade' : 'entidades'),
   entities: (n: number) => `${n} entidade${n === 1 ? '' : 's'}`,
   group: 'Grupo',
   groupOf: (name: string) => `Entidades de ${name}`,

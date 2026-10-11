@@ -1,129 +1,73 @@
-import { BaseEdge, EdgeLabelRenderer, type EdgeProps, getBezierPath, getSmoothStepPath } from '@xyflow/react';
-import { X } from 'lucide-react';
-import { createContext, memo, useContext, useMemo } from 'react';
-import { type FlowEdge, type PortEdge, portDef } from './types';
+import { formatBRL, t } from '@moneyflow/shared';
+import { BaseEdge, EdgeLabelRenderer, type EdgeProps, getBezierPath } from '@xyflow/react';
+import { createContext, memo, useContext } from 'react';
+import { cx } from '../ui';
+import { EDGE_COLOR, type MoneyEdge } from './graph';
 
 /*
- * Duas arestas, uma por relação:
- * - `port` (hub → folha): Bézier estática, na cor da porta. O rótulo com o ✕
- *   aparece no hover e na seleção.
- * - `flow` (entrada → hub): smooth-step "viva" — brilho, partículas (uma por
- *   conexão, até 8) e o contador clicável no meio.
+ * A aresta de dinheiro: Bézier na cor do tipo (--port-N), espessura pelo
+ * valor. Realizado = traço contínuo; previsto = tracejado andando (parado com
+ * prefers-reduced-motion). No modo "realizado + previsto" o previsto corre
+ * ao lado, levemente deslocado. O valor aparece no hover e na seleção.
  */
 
-/** O que as arestas pedem ao palco, sem window events. */
-export type EdgeApi = {
-  hovered: string | null;
-  hoverEnter: (id: string) => void;
-  hoverLeave: () => void;
-  removeEdge: (id: string) => void;
-  openEntry: () => void;
-  canEdit: boolean;
-};
+export const EdgeHoverContext = createContext<{ hovered: string | null }>({ hovered: null });
 
-export const EdgeContext = createContext<EdgeApi>({
-  hovered: null,
-  hoverEnter: () => {},
-  hoverLeave: () => {},
-  removeEdge: () => {},
-  openEntry: () => {},
-  canEdit: false,
-});
-
-function PortEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, selected }: EdgeProps<PortEdge>) {
-  const api = useContext(EdgeContext);
+function MoneyEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, selected }: EdgeProps<MoneyEdge>) {
+  const { hovered } = useContext(EdgeHoverContext);
+  if (!data) return null;
+  const color = EDGE_COLOR[data.kind];
+  const showRealized = data.mode !== 'forecast' && data.realizedCents !== 0;
+  const showForecast = data.mode !== 'realized' && data.forecastCents !== 0;
+  const offset = showRealized && showForecast ? Math.max(3, data.width / 2 + 2) : 0;
   const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
-  const port = data ? portDef(data.port) : undefined;
-  const show = selected || api.hovered === id;
+  const [forecastPath] = getBezierPath({
+    sourceX,
+    sourceY: sourceY + offset,
+    sourcePosition,
+    targetX,
+    targetY: targetY + offset,
+    targetPosition,
+  });
+  const show = selected || hovered === id;
+  const value = (showRealized ? data.realizedCents : 0) + (showForecast ? data.forecastCents : 0);
 
   return (
     <>
-      <BaseEdge
-        id={id}
-        path={path}
-        interactionWidth={16}
-        className={data?.saving ? 'saving' : undefined}
-        style={{ stroke: port?.color, strokeDasharray: data?.saving ? '5 4' : undefined }}
-      />
+      {showRealized && (
+        <BaseEdge
+          id={id}
+          path={path}
+          interactionWidth={18}
+          className={cx('flow-edge', data.dim && 'is-dim', show && 'is-on')}
+          style={{ stroke: color, strokeWidth: data.width }}
+        />
+      )}
+      {showForecast && (
+        <BaseEdge
+          id={showRealized ? `${id}:forecast` : id}
+          path={forecastPath}
+          interactionWidth={18}
+          className={cx('flow-edge flow-edge-forecast', data.dim && 'is-dim', show && 'is-on')}
+          style={{ stroke: color, strokeWidth: Math.max(1.5, data.width * 0.8) }}
+        />
+      )}
       <EdgeLabelRenderer>
         <div
-          className={`edge-label port nodrag nopan${show ? ' show' : ''}`}
-          style={{ position: 'absolute', transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
-          onMouseEnter={() => api.hoverEnter(id)}
-          onMouseLeave={api.hoverLeave}
+          className={cx('edge-label flow-edge-label nodrag nopan', show && 'show')}
+          style={{
+            position: 'absolute',
+            transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+            ['--port' as string]: color,
+          }}
         >
-          <span>{port?.label ?? ''}</span>
-          {api.canEdit && !data?.saving && (
-            <button
-              type="button"
-              className="x"
-              title="Remover a ligação"
-              onClick={(event) => {
-                event.stopPropagation();
-                api.removeEdge(id);
-              }}
-            >
-              <X />
-            </button>
-          )}
+          <span className="dot" />
+          <span>{t.flow.edgeKinds[data.kind]}</span>
+          <span className="money">{formatBRL(value)}</span>
         </div>
       </EdgeLabelRenderer>
     </>
   );
 }
 
-const PARTICLE_MAX = 8;
-
-function FlowEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data }: EdgeProps<FlowEdge>) {
-  const api = useContext(EdgeContext);
-  const [path, labelX, labelY] = getSmoothStepPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, borderRadius: 8 });
-  const live = data?.live ?? 0;
-
-  // Atraso aleatório por partícula: sem ele marcham em bloco e viram um
-  // tracejado. Desligadas em prefers-reduced-motion.
-  const particles = useMemo(() => {
-    const reduced = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (reduced) return [];
-    return Array.from({ length: Math.min(PARTICLE_MAX, Math.max(0, live)) }, (_, index) => ({
-      key: index,
-      delay: -(Math.random() * 4).toFixed(2),
-      duration: (3.6 + Math.random() * 1.2).toFixed(2),
-    }));
-  }, [live]);
-
-  return (
-    <>
-      {live > 0 && <path d={path} className="edge-flow-glow" aria-hidden />}
-      <BaseEdge id={id} path={path} />
-      {particles.map((particle) => (
-        <circle
-          key={particle.key}
-          r={2.2}
-          className="edge-particle"
-          style={{
-            offsetPath: `path("${path}")`,
-            offsetRotate: '0deg',
-            animation: `flow-in ${particle.duration}s linear ${particle.delay}s infinite`,
-          }}
-        />
-      ))}
-      <EdgeLabelRenderer>
-        <button
-          type="button"
-          className={`edge-label nodrag nopan${live > 0 ? ' live' : ''}`}
-          style={{ position: 'absolute', transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
-          title="Conexões ativas agora — clique para ver os detalhes"
-          onClick={api.openEntry}
-        >
-          <span className="dot" />
-          <span className="n">{live}</span> {live === 1 ? 'conexão ativa' : 'conexões ativas'}
-        </button>
-      </EdgeLabelRenderer>
-    </>
-  );
-}
-
-export const edgeTypes = {
-  port: memo(PortEdgeImpl),
-  flow: memo(FlowEdgeImpl),
-};
+export const flowEdgeTypes = { money: memo(MoneyEdgeImpl) };

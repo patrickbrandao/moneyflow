@@ -176,7 +176,7 @@ describe('exportação CSV', () => {
       '"Linha\nquebrada";31/01/2026;0,00;1',
       '',
     ]);
-    expect(CSV_BOM).toBe('﻿');
+    expect(CSV_BOM).toBe('\uFEFF');
   });
 
   it('formatos de célula e nome de arquivo', () => {
