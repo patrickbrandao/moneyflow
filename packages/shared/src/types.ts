@@ -120,6 +120,8 @@ export type CaixaSummary = {
   isPrimary: boolean;
   description: string | null;
   archivedAt: string | null;
+  /** Cartão: 4 últimos dígitos (null em caixa geral). */
+  cardLast4: string | null;
   myRole: EffectiveRole;
   balanceCents: number;
   payableOpenCents: number;
@@ -561,6 +563,7 @@ export type ClassificationRuleRow = {
   entityName: string | null;
   categoryId: string | null;
   categoryName: string | null;
+  categoryColorSlot: number | null;
   priority: number;
   origin: 'manual' | 'correction' | 'agent';
   usageCount: number;
@@ -700,6 +703,14 @@ export type CalendarItem = {
   status: string;
   calendarStatus: CalendarStatus;
   canWrite: boolean;
+  /** Pode arrastar para outro dia (título, com escrita; no lado espelho, também na caixa do original). */
+  canReschedule: boolean;
+  isMirrorSide: boolean;
 };
 
+/**
+ * Saldo por dia (fim do dia): realized = contas (movimentos até o dia, inclusive os já lançados no futuro);
+ * scheduled = saldo aberto ACUMULADO dos títulos e faturas abertas até o dia, a partir de hoje (vencidos entram
+ * hoje; antes de hoje é 0); projected = realized + scheduled.
+ */
 export type DailyBalance = { day: string; realizedCents: number | null; scheduledCents: number; projectedCents: number | null };

@@ -46,21 +46,26 @@ export function parseCsv(text: string, delimiter: string): string[][] {
   return rows;
 }
 
-/** Escolhe o separador mais consistente nas primeiras linhas (fora de aspas). */
+/**
+ * Escolhe o separador mais consistente nas primeiras linhas (fora de aspas).
+ * Linhas de preâmbulo sem o separador (ex.: "Extrato conta…") não contam: vale
+ * a contagem mais frequente entre as linhas que o têm.
+ */
 export function detectDelimiter(text: string): CsvDelimiter {
   const lines = text
     .split(/\r?\n/)
     .filter((l) => l.trim())
-    .slice(0, 20);
+    .slice(0, 30);
   const candidates: CsvDelimiter[] = [';', ',', '\t', '|'];
   let best: CsvDelimiter = ',';
   let bestScore = 0;
   for (const d of candidates) {
-    const counts = lines.map((l) => l.replace(/"[^"]*"/g, '').split(d).length - 1);
-    const first = counts[0] ?? 0;
-    if (!first) continue;
-    const consistent = counts.filter((n) => n === first).length;
-    const score = consistent * 1000 + first;
+    const counts = lines.map((l) => l.replace(/"[^"]*"/g, '').split(d).length - 1).filter((n) => n > 0);
+    if (counts.length === 0) continue;
+    const freq = new Map<number, number>();
+    for (const n of counts) freq.set(n, (freq.get(n) ?? 0) + 1);
+    const [mode, consistent] = [...freq].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0]!;
+    const score = consistent * 1000 + mode;
     if (score > bestScore) {
       best = d;
       bestScore = score;

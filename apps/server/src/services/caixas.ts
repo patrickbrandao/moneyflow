@@ -43,7 +43,7 @@ export function readableFilter(access: Access, column = sql`c.id`) {
 }
 
 const summarySql = (today: string) => sql`
-  c.id, c.name, c.kind, c.holder_entity_id, e.name AS holder_name, c.is_primary, c.description, c.archived_at,
+  c.id, c.name, c.kind, c.holder_entity_id, e.name AS holder_name, c.is_primary, c.description, c.archived_at, c.card_last4,
   coalesce((SELECT sum(b.balance_cents) FROM financial_account_balances b WHERE b.caixa_id = c.id AND b.archived_at IS NULL), 0)::bigint AS balance_cents,
   coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.direction = 'payable' AND tb.archived_at IS NULL), 0)::bigint AS payable_open_cents,
   coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.direction = 'receivable' AND tb.archived_at IS NULL), 0)::bigint AS receivable_open_cents,

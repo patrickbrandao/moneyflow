@@ -178,9 +178,7 @@ describe('cartão de crédito (spec 007)', () => {
 
     const closed = await admin.post(`/api/card-invoices/${oct.id}/close`, {});
     expect(closed.payers).toHaveLength(2);
-    const bTitle = (await payer.get(`/api/titles?caixaId=${s.caixaB.id}&direction=payable`)).find(
-      (tr: any) => tr.cardInvoiceId === oct.id,
-    );
+    const bTitle = (await payer.get(`/api/titles?caixaId=${s.caixaB.id}&direction=payable`)).find((tr: any) => tr.cardInvoiceId === oct.id);
     expect(bTitle.amountCents).toBe(5_000);
     // Sem o payerCaixaId, a pagadora não enxerga a fatura; com ele, só as compras dela.
     await payer.get(`/api/card-invoices/${oct.id}`, 404);

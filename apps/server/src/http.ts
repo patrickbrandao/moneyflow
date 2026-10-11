@@ -5,6 +5,10 @@ import type { ServiceContext } from './context';
 import { AppError, fromZod } from './errors';
 
 declare module 'fastify' {
+  interface FastifyContextConfig {
+    /** Rota de upload: o corpo chega cru (Buffer), qualquer que seja o Content-Type. */
+    rawUpload?: boolean;
+  }
   interface FastifyRequest {
     actor: Actor | null;
     sessionId: string | null;

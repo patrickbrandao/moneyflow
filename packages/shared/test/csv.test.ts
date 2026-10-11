@@ -113,3 +113,13 @@ describe('applyCsvMapping', () => {
     ).toThrow(/não encontrada/);
   });
 });
+
+describe('detectDelimiter com preâmbulo', () => {
+  it('ignora a linha de título sem separador', () => {
+    expect(
+      detectDelimiter(
+        'Extrato conta corrente, outubro\nData;Historico;Valor;Saldo\n01/10/2026;PIX;10,00;20,00\n02/10/2026;TED;-5,00;15,00',
+      ),
+    ).toBe(';');
+  });
+});

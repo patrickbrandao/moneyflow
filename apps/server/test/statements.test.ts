@@ -112,7 +112,11 @@ describe('extratos e conciliação (spec 009)', () => {
     expect(summary).toMatchObject({ matchedLines: 4, newLines: 1, ignoredLines: 1, suggestedLines: 0 });
 
     // O arquivo original fica como anexo.
-    const file = await h.app.inject({ method: 'GET', url: `/api/attachments/${summary.attachmentId}/download`, headers: { cookie: adminSession.cookie } });
+    const file = await h.app.inject({
+      method: 'GET',
+      url: `/api/attachments/${summary.attachmentId}/download`,
+      headers: { cookie: adminSession.cookie },
+    });
     expect(file.statusCode).toBe(200);
     expect(file.body).toContain('OFX2-0001');
   });
@@ -121,7 +125,11 @@ describe('extratos e conciliação (spec 009)', () => {
     const adminSession = await userSession(h, 'admin');
     const admin = client(h, adminSession.cookie);
     const s = await scenario(h, admin);
-    const noMapping = await upload(adminSession.cookie, `/api/statement-imports?accountId=${s.accountA.id}&fileName=x.csv`, fixture('extrato-itau.csv'));
+    const noMapping = await upload(
+      adminSession.cookie,
+      `/api/statement-imports?accountId=${s.accountA.id}&fileName=x.csv`,
+      fixture('extrato-itau.csv'),
+    );
     expect(noMapping.statusCode).toBe(422);
     expect(noMapping.json().error.code).toBe('csv_mapping_required');
 
@@ -137,7 +145,12 @@ describe('extratos e conciliação (spec 009)', () => {
       columns: { date: 'data', description: 'lançamento', amount: 'valor', balance: 'saldo' },
       isDefault: true,
     });
-    const res = await upload(adminSession.cookie, `/api/statement-imports?accountId=${s.accountA.id}&fileName=x.csv`, fixture('extrato-itau.csv'), 'text/csv');
+    const res = await upload(
+      adminSession.cookie,
+      `/api/statement-imports?accountId=${s.accountA.id}&fileName=x.csv`,
+      fixture('extrato-itau.csv'),
+      'text/csv',
+    );
     expect(res.statusCode, res.body).toBe(200);
     const imp = res.json();
     expect(imp.lineCount).toBe(6);
@@ -168,7 +181,11 @@ describe('extratos e conciliação (spec 009)', () => {
       description: 'Posto Estrela',
       amountCents: 12_000,
     });
-    const res = await upload(adminSession.cookie, `/api/statement-imports?cardCaixaId=${card.id}&fileName=fatura.ofx`, fixture('fatura-cartao.ofx'));
+    const res = await upload(
+      adminSession.cookie,
+      `/api/statement-imports?cardCaixaId=${card.id}&fileName=fatura.ofx`,
+      fixture('fatura-cartao.ofx'),
+    );
     expect(res.statusCode, res.body).toBe(200);
     const imp = res.json();
     expect(imp.lineCount).toBe(7);

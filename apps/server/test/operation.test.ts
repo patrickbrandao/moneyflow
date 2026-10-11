@@ -140,7 +140,11 @@ describe('fechamento de mês (spec 008)', () => {
     expect(res.statusCode).toBe(422);
     expect(res.json().error.code).toBe('period_closings_locked_check');
     // Sem desfazer a transferência, o estorno sai (na data do estorno).
-    await admin.post(`/api/settlements/${settled.settlements[0].id}/reverse`, { reason: 'erro', reversedOn: '2026-10-11', undoTransfer: false });
+    await admin.post(`/api/settlements/${settled.settlements[0].id}/reverse`, {
+      reason: 'erro',
+      reversedOn: '2026-10-11',
+      undoTransfer: false,
+    });
     // Caixa com fechamento é arquivada em vez de excluída.
     expect(await admin.del(`/api/caixas/${s.caixaB.id}`)).toEqual({ deleted: false, archived: true });
   });
@@ -173,15 +177,37 @@ describe('anexos', () => {
     expect((await admin.get(`/api/titles/${title.id}`)).attachmentCount).toBe(1);
     const list = await admin.get(`/api/attachments?target=title&targetId=${title.id}`);
     expect(list).toHaveLength(1);
-    const file = await h.app.inject({ method: 'GET', url: `/api/attachments/${attachment.id}/download`, headers: { cookie: session.cookie } });
+    const file = await h.app.inject({
+      method: 'GET',
+      url: `/api/attachments/${attachment.id}/download`,
+      headers: { cookie: session.cookie },
+    });
     expect(file.headers['content-type']).toBe('application/pdf');
     expect(file.body).toContain('conteúdo de teste');
     // Quem não lê a caixa não baixa.
     const outsider = await userSession(h);
-    const denied = await h.app.inject({ method: 'GET', url: `/api/attachments/${attachment.id}/download`, headers: { cookie: outsider.cookie } });
+    const denied = await h.app.inject({
+      method: 'GET',
+      url: `/api/attachments/${attachment.id}/download`,
+      headers: { cookie: outsider.cookie },
+    });
     expect(denied.statusCode).toBe(404);
+    // Texto puro e JSON também chegam crus (não passam pelos parsers de JSON/texto).
+    for (const [mime, content] of [
+      ['text/plain', 'recibo em texto'],
+      ['application/json', '{"a":1}'],
+    ]) {
+      const sent = await h.app.inject({
+        method: 'POST',
+        url: `/api/attachments?target=title&targetId=${title.id}&fileName=arquivo`,
+        payload: content,
+        headers: { cookie: session.cookie, 'content-type': mime! },
+      });
+      expect(sent.statusCode, sent.body).toBe(200);
+      expect(sent.json()).toMatchObject({ mimeType: mime, sizeBytes: Buffer.byteLength(content!) });
+    }
     await admin.del(`/api/attachments/${attachment.id}?target=title&targetId=${title.id}`);
-    expect(await admin.get(`/api/attachments?target=title&targetId=${title.id}`)).toEqual([]);
+    expect((await admin.get(`/api/attachments?target=title&targetId=${title.id}`)).map((a: any) => a.id)).not.toContain(attachment.id);
   });
 });
 
@@ -203,7 +229,10 @@ describe('entrada de títulos (spec 010)', () => {
     const title = await admin.post('/api/titles', base);
     expect(title.boletoBarcode).toBe('34191160500001234561790010104351004791020150');
     expect((await admin.raw('POST', '/api/titles', base)).statusCode).toBe(409);
-    expect((await admin.raw('POST', '/api/titles', { ...base, boletoBarcode: '34191.79001 10104.351001 47910.201509 2 16050000123456' })).statusCode).toBe(422);
+    expect(
+      (await admin.raw('POST', '/api/titles', { ...base, boletoBarcode: '34191.79001 10104.351001 47910.201509 2 16050000123456' }))
+        .statusCode,
+    ).toBe(422);
   });
 
   it('PIX copia-e-cola acha ou cria o recebedor pela chave', async () => {

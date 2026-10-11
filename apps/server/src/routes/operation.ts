@@ -31,14 +31,14 @@ export async function operationRoutes(app: FastifyInstance) {
   app.delete('/api/caixas/:id/closings/:month', (r: Req) => audit.reopenMonth(r.ctx, id(r), parse(monthStart, r.params.month)));
 
   app.post('/api/title-entry/pix', (r: Req) => entry.pixEntry(r.ctx, parse(pixEntryInput, r.body)));
-  app.post('/api/title-entry/nfe', { bodyLimit: UPLOAD_BODY_LIMIT }, (r: Req) =>
+  app.post('/api/title-entry/nfe', { bodyLimit: UPLOAD_BODY_LIMIT, config: { rawUpload: true } }, (r: Req) =>
     entry.nfeEntry(r.ctx, {
       name: parse(nfeEntryQuery, r.query).fileName,
       mime: r.headers['content-type'] ?? '',
       content: assertUpload(r.body),
     }),
   );
-  app.post('/api/title-entry/document', { bodyLimit: UPLOAD_BODY_LIMIT }, (r: Req) =>
+  app.post('/api/title-entry/document', { bodyLimit: UPLOAD_BODY_LIMIT, config: { rawUpload: true } }, (r: Req) =>
     entry.readDocument(r.ctx, {
       name: String(r.query.fileName ?? 'documento'),
       mime: r.headers['content-type'] ?? '',

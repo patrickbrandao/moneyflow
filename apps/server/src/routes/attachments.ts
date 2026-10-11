@@ -14,7 +14,7 @@ export function contentDisposition(fileName: string, inline = false) {
 
 export async function attachmentRoutes(app: FastifyInstance) {
   app.get('/api/attachments', (r: Req) => attachments.listAttachments(r.ctx, parse(attachmentTargetQuery, r.query)));
-  app.post('/api/attachments', { bodyLimit: UPLOAD_BODY_LIMIT }, (r: Req) =>
+  app.post('/api/attachments', { bodyLimit: UPLOAD_BODY_LIMIT, config: { rawUpload: true } }, (r: Req) =>
     attachments.uploadAttachment(r.ctx, parse(attachmentUploadQuery, r.query), {
       mime: r.headers['content-type'] ?? '',
       content: attachments.assertUpload(r.body),

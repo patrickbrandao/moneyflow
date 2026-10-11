@@ -51,9 +51,23 @@ export async function buildApp({
   app.decorateRequest('sessionId', null);
   app.decorateRequest('ctx', null as never);
 
-  // Uploads (anexos, extratos, NF-e): o arquivo vai cru no corpo, com o próprio Content-Type.
-  // JSON continua no parser padrão; o limite de cada rota de upload é UPLOAD_BODY_LIMIT.
-  app.addContentTypeParser('*', { parseAs: 'buffer', bodyLimit: UPLOAD_BODY_LIMIT }, (_request, body, done) => done(null, body));
+  // Uploads (anexos, extratos, NF-e): o arquivo vai cru no corpo, com o próprio Content-Type
+  // (rotas com config.rawUpload). JSON e texto puro só são interpretados nas demais rotas.
+  app.removeContentTypeParser(['application/json', 'text/plain']);
+  const isUpload = (request: { routeOptions: { config: unknown } }) =>
+    Boolean((request.routeOptions.config as { rawUpload?: boolean } | undefined)?.rawUpload);
+  app.addContentTypeParser('application/json', { parseAs: 'buffer', bodyLimit: UPLOAD_BODY_LIMIT }, (request, body, done) => {
+    if (isUpload(request)) return done(null, body);
+    if (body.length > 1024 * 1024) return done(Object.assign(new Error('payload too large'), { statusCode: 413 }), undefined);
+    try {
+      done(null, body.length === 0 ? {} : JSON.parse(body.toString('utf8')));
+    } catch {
+      done(Object.assign(new Error('invalid json'), { statusCode: 400 }), undefined);
+    }
+  });
+  app.addContentTypeParser(['text/plain', '*'], { parseAs: 'buffer', bodyLimit: UPLOAD_BODY_LIMIT }, (request, body, done) =>
+    done(null, isUpload(request) || !String(request.headers['content-type'] ?? '').startsWith('text/plain') ? body : body.toString('utf8')),
+  );
 
   await app.register(cookie);
   await app.register(rateLimit, { global: false });

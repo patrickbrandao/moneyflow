@@ -420,11 +420,12 @@ export async function deleteMapping(ctx: ServiceContext, id: string) {
 
 const ruleSql = sql`
   SELECT r.id, r.caixa_id, c.name AS caixa_name, r.match_kind, r.pattern, r.direction, r.entity_id, e.name AS entity_name,
-         r.category_id, cat.name AS category_name, r.priority, r.origin, r.usage_count, r.last_used_at, r.archived_at
+         r.category_id, cat.name AS category_name, coalesce(cat.color_slot, pcat.color_slot) AS category_color_slot, r.priority, r.origin, r.usage_count, r.last_used_at, r.archived_at
     FROM classification_rules r
     LEFT JOIN caixas c ON c.id = r.caixa_id
     LEFT JOIN entities e ON e.id = r.entity_id
-    LEFT JOIN categories cat ON cat.id = r.category_id`;
+    LEFT JOIN categories cat ON cat.id = r.category_id
+    LEFT JOIN categories pcat ON pcat.id = cat.parent_id`;
 
 function toRule(ctx: ServiceContext, row: Record<string, unknown>): ClassificationRuleRow {
   const r = camel<ClassificationRuleRow>(row);

@@ -204,7 +204,8 @@ export async function getPurchase(ctx: ServiceContext, id: string): Promise<Card
   const raw = result.rows[0];
   if (!raw) throw notFound();
   const row = camel<CardPurchaseRow>(raw);
-  ctx.access.assertRead(row.cardCaixaId);
+  // Quem lê a pagadora vê as compras dela (navegação a partir da fatura-título).
+  if (!ctx.access.canRead(row.payerCaixaId)) ctx.access.assertRead(row.cardCaixaId);
   const [items, refunds] = await Promise.all([
     ctx.db.execute(sql`
       SELECT i.id, i.card_invoice_id AS invoice_id, v.reference_month, i.installment_number, i.amount_cents,
