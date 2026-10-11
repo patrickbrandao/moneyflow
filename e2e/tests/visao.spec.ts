@@ -161,5 +161,10 @@ test.describe('mensagens', () => {
     await page.getByRole('tab', { name: 'Histórico de envios' }).click();
     const row = page.locator('table.data tbody tr', { hasText: `Grupo E2E ${tag}` }).first();
     await expect(row).toContainText('Enviada');
+
+    // Desativa o destino de teste: o worker da pilha não tenta enviar o resumo diário a um bot falso.
+    const destinations = await (await page.request.get('/api/message-destinations')).json();
+    const created = destinations.find((d: { name: string }) => d.name === `Grupo E2E ${tag}`);
+    expect((await page.request.patch(`/api/message-destinations/${created.id}`, { data: { isActive: false } })).ok()).toBeTruthy();
   });
 });
