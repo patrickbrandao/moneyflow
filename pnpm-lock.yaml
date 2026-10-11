@@ -44,6 +44,9 @@ importers:
       fastify:
         specifier: 5.12.5
         version: 5.12.5
+      fflate:
+        specifier: 0.8.2
+        version: 0.8.2
       openai:
         specifier: 7.32.0
         version: 7.32.0(undici@8.11.2)(zod@4.6.5)
@@ -2259,6 +2262,9 @@ packages:
     peerDependenciesMeta:
       picomatch:
         optional: true
+
+  fflate@0.8.2:
+    resolution: {integrity: sha512-cPJU47OaAoCbg0pBvzsgpTPhmhqI5eJjh/JIu8tPj5q+T7iLvW/JAYUqmE7KOB4R1ZyEhzBaIQpQpardBF5z8A==}
 
   fflate@0.8.3:
     resolution: {integrity: sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA==}
@@ -5269,6 +5275,8 @@ snapshots:
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
       picomatch: 4.0.7
+
+  fflate@0.8.2: {}
 
   fflate@0.8.3: {}
 

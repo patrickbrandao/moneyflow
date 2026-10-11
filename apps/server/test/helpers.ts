@@ -1,17 +1,18 @@
 import { randomUUID } from 'node:crypto';
-import { createDb, createPool, type Database } from '@moneyflow/db';
+import { createDb, createPool, type Database, pg } from '@moneyflow/db';
 import type { FastifyInstance } from 'fastify';
 import { inject } from 'vitest';
 import { buildApp } from '../src/app';
 import { type Config, loadConfig } from '../src/config';
 import { insertUser } from '../src/services/users';
+import { migrate } from './migrate';
 
 export type Harness = { app: FastifyInstance; db: Database; config: Config; close: () => Promise<void> };
 
-export async function startApp(env: Record<string, string> = {}): Promise<Harness> {
-  const pool = createPool(inject('databaseUrl'), 5);
+export async function startApp(env: Record<string, string> = {}, databaseUrl = inject('databaseUrl')): Promise<Harness> {
+  const pool = createPool(databaseUrl, 5);
   const db = createDb(pool);
-  const config = loadConfig({ DATABASE_URL: inject('databaseUrl'), LOOKUP_TIMEOUT_MS: '1500', LOGIN_RATE_LIMIT: '10000', ...env });
+  const config = loadConfig({ DATABASE_URL: databaseUrl, LOOKUP_TIMEOUT_MS: '1500', LOGIN_RATE_LIMIT: '10000', ...env });
   const app = await buildApp({ db, config, logger: false });
   await app.ready();
   return {
@@ -26,6 +27,30 @@ export async function startApp(env: Record<string, string> = {}): Promise<Harnes
 }
 
 export const uid = () => randomUUID().slice(0, 8);
+
+/**
+ * Um banco novo e vazio no mesmo servidor, migrado do zero (testes de backup:
+ * importar num sistema limpo). Devolve a conexão como moneyflow_app, ou null
+ * sem a conexão do dono (MONEYFLOW_TEST_OWNER_URL no modo de banco externo).
+ */
+export async function freshDatabase(): Promise<string | null> {
+  const owner = inject('ownerDatabaseUrl');
+  if (!owner) return null;
+  const name = `moneyflow_bk_${uid().replace(/-/g, '')}`;
+  const admin = new pg.Client({ connectionString: owner });
+  await admin.connect();
+  try {
+    await admin.query(`CREATE DATABASE ${name}`);
+  } finally {
+    await admin.end();
+  }
+  const ownerUrl = new URL(owner);
+  ownerUrl.pathname = `/${name}`;
+  await migrate(ownerUrl.toString());
+  const appUrl = new URL(inject('databaseUrl'));
+  appUrl.pathname = `/${name}`;
+  return appUrl.toString();
+}
 
 /** Cria um usuário direto no banco e devolve o cookie de sessão dele. */
 export async function userSession(h: Harness, role: 'admin' | 'user' = 'user') {

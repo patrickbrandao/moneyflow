@@ -15,6 +15,7 @@ import { AppError, translateDbError } from './errors';
 import { agentRoutes } from './routes/agents';
 import { attachmentRoutes, UPLOAD_BODY_LIMIT } from './routes/attachments';
 import { authRoutes } from './routes/auth';
+import { backupRoutes } from './routes/backup';
 import { caixaRoutes } from './routes/caixas';
 import { cardRoutes } from './routes/cards';
 import { entityRoutes } from './routes/entities';
@@ -128,6 +129,7 @@ export async function buildApp({
   await app.register(visionRoutes);
   await app.register(agentRoutes);
   await app.register(mcpRoutes);
+  await app.register(backupRoutes);
 
   // Em produção a API serve o SPA compilado (imagem única).
   const webDist = config.webDist ? resolve(config.webDist) : null;
