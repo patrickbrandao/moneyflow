@@ -298,7 +298,7 @@ describe('entrada de títulos (spec 010)', () => {
       nfeDocumentId: nfe.nfeDocumentId,
     });
     expect(title.nfeDocumentId).toBe(nfe.nfeDocumentId);
-    // Leitura de PDF/imagem por IA: ponto de extensão, chega na F4.
+    // Leitura de PDF/imagem por IA: sem agente de IA configurado, 501 (o caminho com agente está em agents.test.ts).
     const reader = await h.app.inject({
       method: 'POST',
       url: '/api/title-entry/document?fileName=boleto.pdf',

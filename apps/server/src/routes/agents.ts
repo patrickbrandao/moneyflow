@@ -1,0 +1,170 @@
+import {
+  aiAgentCreateInput,
+  aiAgentUpdateInput,
+  aiPriceInput,
+  aiProviderCreateInput,
+  aiProviderUpdateInput,
+  aiUsageQuery,
+  apiTokenCreateInput,
+  confirmationDecisionInput,
+  conversationCreateInput,
+  conversationForkInput,
+  conversationListQuery,
+  conversationUpdateInput,
+  formatSse,
+  mcpServerCreateInput,
+  mcpServerUpdateInput,
+  messageSendInput,
+  suggestionDecisionInput,
+} from '@moneyflow/shared';
+import type { FastifyInstance } from 'fastify';
+import type { RunEventsHub } from '../agents/events-hub';
+import { param, parse, type Req } from '../http';
+import * as admin from '../services/ai-admin';
+import { suggestImportClassifications } from '../services/ai-flows';
+import * as tokens from '../services/api-tokens';
+import * as conversations from '../services/conversations';
+import { decideSuggestions } from '../services/reconciliation';
+import { UPLOAD_BODY_LIMIT } from './attachments';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    runEvents: RunEventsHub;
+  }
+}
+
+const FINAL = new Set(['completed', 'failed', 'canceled']);
+
+/* Agentes de IA (spec 011): conversas, execuções (SSE), administração, tokens e a IA nos fluxos. */
+export async function agentRoutes(app: FastifyInstance) {
+  const id = (r: Req) => param(r, 'id');
+
+  /* ---------------- conversas ---------------- */
+  app.get('/api/agents', (r: Req) => conversations.listAgentOptions(r.ctx));
+  app.get('/api/conversations', (r: Req) => conversations.listConversations(r.ctx, parse(conversationListQuery, r.query)));
+  app.post('/api/conversations', (r: Req) => conversations.createConversation(r.ctx, parse(conversationCreateInput, r.body)));
+  app.get('/api/conversations/:id', (r: Req) => conversations.getConversation(r.ctx, id(r)));
+  app.patch('/api/conversations/:id', (r: Req) => conversations.updateConversation(r.ctx, id(r), parse(conversationUpdateInput, r.body)));
+  app.delete('/api/conversations/:id', (r: Req) => conversations.deleteConversation(r.ctx, id(r)));
+  app.post('/api/conversations/:id/fork', (r: Req) => conversations.forkConversation(r.ctx, id(r), parse(conversationForkInput, r.body)));
+  app.post('/api/conversations/:id/attachments', { bodyLimit: UPLOAD_BODY_LIMIT, config: { rawUpload: true } }, (r: Req) =>
+    conversations.uploadMessageAttachment(r.ctx, id(r), {
+      name: String(r.query.fileName ?? 'arquivo'),
+      mime: r.headers['content-type'] ?? '',
+      content: r.body,
+    }),
+  );
+  app.post('/api/conversations/:id/messages', (r: Req) => conversations.sendMessage(r.ctx, id(r), parse(messageSendInput, r.body)));
+
+  /* ---------------- execuções ---------------- */
+  app.get('/api/runs/:id', (r: Req) => conversations.getRun(r.ctx, id(r)));
+  app.post('/api/runs/:id/cancel', (r: Req) => conversations.cancelRun(r.ctx, id(r)));
+  app.post('/api/runs/:id/confirmations', (r: Req) =>
+    conversations.decideConfirmations(r.ctx, id(r), parse(confirmationDecisionInput, r.body)),
+  );
+
+  // SSE: tudo depois de Last-Event-ID (ou ?after), depois ao vivo pelo LISTEN; fecha no "done".
+  app.get('/api/runs/:id/events', async (r: Req, reply) => {
+    const runId = id(r);
+    const run = await conversations.getRun(r.ctx, runId);
+    const header = r.headers['last-event-id'];
+    let last = Number(Array.isArray(header) ? header[0] : (header ?? r.query.after ?? 0)) || 0;
+
+    reply.hijack();
+    const res = reply.raw;
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    res.write(': conectado\n\n');
+
+    let closed = false;
+    let running = false;
+    let again = false;
+    let unsubscribe: () => void = () => {};
+    let ping: NodeJS.Timeout | null = null;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      unsubscribe();
+      if (ping) clearInterval(ping);
+      res.end();
+    };
+    const pump = async () => {
+      if (closed) return;
+      if (running) {
+        again = true;
+        return;
+      }
+      running = true;
+      try {
+        do {
+          again = false;
+          const events = await conversations.runEvents(app.db, runId, last);
+          for (const event of events) {
+            res.write(formatSse({ id: event.seq, event: event.type, data: { type: event.type, ...event.payload } }));
+            last = event.seq;
+            if (event.type === 'done') {
+              close();
+              return;
+            }
+          }
+          if (events.length === 500) again = true;
+        } while (again && !closed);
+        // Execução já terminada sem o "done" (eventos expurgados): encerra com o estado final.
+        const current = await conversations.getRun(r.ctx, runId);
+        if (FINAL.has(current.status)) {
+          res.write(formatSse({ event: 'done', data: { type: 'done', status: current.status, error: current.error } }));
+          close();
+        }
+      } catch (error) {
+        r.log.warn({ err: error, runId }, 'sse: falha ao ler eventos');
+        close();
+      } finally {
+        running = false;
+      }
+    };
+    unsubscribe = app.runEvents.subscribe(runId, () => void pump());
+    ping = setInterval(() => {
+      if (!closed) res.write(': ping\n\n');
+    }, 15_000);
+    r.raw.on('close', close);
+    void run;
+    await pump();
+  });
+
+  /* ---------------- tokens pessoais ---------------- */
+  app.get('/api/account/api-tokens', (r: Req) => tokens.listApiTokens(r.ctx));
+  app.post('/api/account/api-tokens', (r: Req) => tokens.createApiToken(r.ctx, parse(apiTokenCreateInput, r.body)));
+  app.delete('/api/account/api-tokens/:id', (r: Req) => tokens.revokeApiToken(r.ctx, id(r)));
+
+  /* ---------------- IA na conciliação ---------------- */
+  app.post('/api/statement-imports/:id/ai-suggest', (r: Req) => suggestImportClassifications(r.ctx, id(r)));
+  app.post('/api/statement-lines/suggestions', (r: Req) => {
+    const input = parse(suggestionDecisionInput, r.body);
+    return decideSuggestions(r.ctx, input.lineIds, input.decision);
+  });
+
+  /* ---------------- administração ---------------- */
+  app.get('/api/admin/ai/providers', (r: Req) => admin.listProviders(r.ctx));
+  app.post('/api/admin/ai/providers', (r: Req) => admin.createProvider(r.ctx, parse(aiProviderCreateInput, r.body)));
+  app.patch('/api/admin/ai/providers/:id', (r: Req) => admin.updateProvider(r.ctx, id(r), parse(aiProviderUpdateInput, r.body)));
+  app.delete('/api/admin/ai/providers/:id', (r: Req) => admin.deleteProvider(r.ctx, id(r)));
+  app.post('/api/admin/ai/providers/:id/test', (r: Req) => admin.testProvider(r.ctx, id(r)));
+  app.get('/api/admin/ai/prices', (r: Req) => admin.listPrices(r.ctx));
+  app.post('/api/admin/ai/prices', (r: Req) => admin.createPrice(r.ctx, parse(aiPriceInput, r.body)));
+  app.delete('/api/admin/ai/prices/:id', (r: Req) => admin.deletePrice(r.ctx, id(r)));
+  app.get('/api/admin/ai/tools', async (r: Req) => admin.listToolCatalog(r.ctx));
+  app.get('/api/admin/ai/agents', (r: Req) => admin.listAgents(r.ctx));
+  app.post('/api/admin/ai/agents', (r: Req) => admin.createAgent(r.ctx, parse(aiAgentCreateInput, r.body)));
+  app.patch('/api/admin/ai/agents/:id', (r: Req) => admin.updateAgent(r.ctx, id(r), parse(aiAgentUpdateInput, r.body)));
+  app.delete('/api/admin/ai/agents/:id', (r: Req) => admin.deleteAgent(r.ctx, id(r)));
+  app.get('/api/admin/ai/mcp-servers', (r: Req) => admin.listMcpServers(r.ctx));
+  app.post('/api/admin/ai/mcp-servers', (r: Req) => admin.createMcpServer(r.ctx, parse(mcpServerCreateInput, r.body)));
+  app.patch('/api/admin/ai/mcp-servers/:id', (r: Req) => admin.updateMcpServer(r.ctx, id(r), parse(mcpServerUpdateInput, r.body)));
+  app.delete('/api/admin/ai/mcp-servers/:id', (r: Req) => admin.deleteMcpServer(r.ctx, id(r)));
+  app.post('/api/admin/ai/mcp-servers/:id/refresh', (r: Req) => admin.refreshMcpServer(r.ctx, id(r)));
+  app.get('/api/admin/ai/usage', (r: Req) => admin.usageReport(r.ctx, parse(aiUsageQuery, r.query)));
+}

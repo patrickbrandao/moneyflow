@@ -23,6 +23,16 @@ export type Config = {
   publicUrl: string | null;
   /** Horário (HH:MM, São Paulo) dos avisos diários do sino (vencem hoje, atrasados). */
   notifyAt: string;
+  /** Agentes (spec 011): intervalo de busca de execuções na fila, em ms. */
+  agentPollMs: number;
+  /** Execuções de agente simultâneas por worker. */
+  agentConcurrency: number;
+  /** Manutenção dos agentes (retenção de eventos, expiração de confirmações, embeddings), em ms. */
+  agentMaintenanceMs: number;
+  /** Agente usado nos fluxos (leitura de documento, sugestões da conciliação), pelo nome; vazio = o primeiro ativo. */
+  aiFlowAgent: string | null;
+  /** Espera máxima da leitura de documento por IA, em ms. */
+  aiDocumentTimeoutMs: number;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -50,5 +60,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     messageIntervalMs: Number(env.MESSAGE_INTERVAL_MS ?? 30_000),
     publicUrl: env.APP_URL ? env.APP_URL.replace(/\/+$/, '') : null,
     notifyAt: /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(env.NOTIFY_AT ?? '') ? env.NOTIFY_AT! : '08:00',
+    agentPollMs: Number(env.AGENT_POLL_MS ?? 1000),
+    agentConcurrency: Math.max(1, Number(env.AGENT_CONCURRENCY ?? 4)),
+    agentMaintenanceMs: Number(env.AGENT_MAINTENANCE_MS ?? 5 * 60 * 1000),
+    aiFlowAgent: env.AI_FLOW_AGENT?.trim() || null,
+    aiDocumentTimeoutMs: Number(env.AI_DOCUMENT_TIMEOUT_MS ?? 120_000),
   };
 }

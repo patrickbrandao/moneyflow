@@ -13,6 +13,7 @@ import {
 } from '@moneyflow/shared';
 import type { FastifyInstance } from 'fastify';
 import { param, parse, type Req } from '../http';
+import { suggestImportClassifications } from '../services/ai-flows';
 import { assertUpload } from '../services/attachments';
 import * as rec from '../services/reconciliation';
 import * as statements from '../services/statements';
@@ -26,12 +27,17 @@ export async function statementRoutes(app: FastifyInstance) {
     statements.inspectStatement(r.ctx, assertUpload(r.body)),
   );
   app.get('/api/statement-imports', (r: Req) => statements.listImports(r.ctx, parse(statementTargetQuery, r.query)));
-  app.post('/api/statement-imports', { bodyLimit: UPLOAD_BODY_LIMIT, config: { rawUpload: true } }, (r: Req) =>
-    statements.importStatement(r.ctx, parse(statementImportQuery, r.query), {
+  app.post('/api/statement-imports', { bodyLimit: UPLOAD_BODY_LIMIT, config: { rawUpload: true } }, async (r: Req) => {
+    const result = await statements.importStatement(r.ctx, parse(statementImportQuery, r.query), {
       mime: r.headers['content-type'] ?? '',
       content: assertUpload(r.body),
-    }),
-  );
+    });
+    // Linhas sem regra recebem sugestão do agente dos fluxos (spec 009/011), em segundo plano no worker.
+    await suggestImportClassifications(r.ctx, result.id, { auto: true }).catch((error) =>
+      r.log.warn({ err: error }, 'conciliação: sugestão do agente não enfileirada'),
+    );
+    return result;
+  });
   app.get('/api/statement-imports/:id', (r: Req) => statements.getImport(r.ctx, id(r)));
   app.delete('/api/statement-imports/:id', (r: Req) => statements.deleteImport(r.ctx, id(r)));
   app.post('/api/statement-imports/:id/rematch', (r: Req) => statements.rematchImport(r.ctx, id(r)));

@@ -492,3 +492,61 @@ export async function archiveRule(ctx: ServiceContext, id: string) {
   );
   return { deleted: false, archived: true };
 }
+
+/* ---------------- sugestões do agente (spec 009/011) ---------------- */
+
+/**
+ * Grava a sugestão do agente (entidade/categoria) nas linhas ainda sem
+ * classificação (nem regra, nem do usuário): ficam como "sugerido pelo
+ * agente" até o usuário aprovar ou descartar em lote. Linhas já classificadas,
+ * conciliadas ou ignoradas são puladas.
+ */
+export async function suggestClassifications(
+  ctx: ServiceContext,
+  suggestions: { lineId: string; entityId?: string | null; categoryId?: string | null }[],
+) {
+  let updated = 0;
+  const skipped: string[] = [];
+  await withTx(ctx, async (tx) => {
+    for (const s of suggestions) {
+      const line = await loadLine(ctx, tx, s.lineId);
+      const free = line.classificationSource === null || line.classificationSource === 'agent';
+      if (!free || line.status === 'matched' || line.status === 'ignored' || (!s.entityId && !s.categoryId)) {
+        skipped.push(s.lineId);
+        continue;
+      }
+      if (s.entityId) {
+        const found = await tx.execute(sql`SELECT 1 FROM entities WHERE id = ${s.entityId}`);
+        if (found.rows.length === 0) throw notFound();
+      }
+      const categoryId = s.categoryId && (await categoryFits(tx, s.categoryId, line)) ? s.categoryId : null;
+      await tx
+        .update(statementLines)
+        .set({ entityId: s.entityId ?? null, categoryId, classificationSource: 'agent', classificationRuleId: null })
+        .where(eq(statementLines.id, line.id));
+      updated += 1;
+    }
+  });
+  return { updated, skipped };
+}
+
+/** Aprova (vira classificação do usuário) ou descarta (limpa) as sugestões do agente. */
+export async function decideSuggestions(ctx: ServiceContext, lineIds: string[], decision: 'approve' | 'reject') {
+  let updated = 0;
+  await withTx(ctx, async (tx) => {
+    for (const lineId of lineIds) {
+      const line = await loadLine(ctx, tx, lineId);
+      if (line.classificationSource !== 'agent') continue;
+      await tx
+        .update(statementLines)
+        .set(
+          decision === 'approve'
+            ? { classificationSource: 'user' }
+            : { classificationSource: null, entityId: null, categoryId: null, classificationRuleId: null },
+        )
+        .where(eq(statementLines.id, line.id));
+      updated += 1;
+    }
+  });
+  return { updated };
+}

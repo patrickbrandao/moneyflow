@@ -7,15 +7,18 @@ import type { Database } from '@moneyflow/db';
 import { t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { RunEventsHub } from './agents/events-hub';
 import { resolveSession, SESSION_COOKIE } from './auth/session';
 import { loadAccess } from './authz/access';
 import type { Config } from './config';
 import { AppError, translateDbError } from './errors';
+import { agentRoutes } from './routes/agents';
 import { attachmentRoutes, UPLOAD_BODY_LIMIT } from './routes/attachments';
 import { authRoutes } from './routes/auth';
 import { caixaRoutes } from './routes/caixas';
 import { cardRoutes } from './routes/cards';
 import { entityRoutes } from './routes/entities';
+import { mcpRoutes } from './routes/mcp';
 import { operationRoutes } from './routes/operation';
 import { statementRoutes } from './routes/statements';
 import { titleRoutes } from './routes/titles';
@@ -48,6 +51,11 @@ export async function buildApp({
   });
   app.decorate('db', db);
   app.decorate('config', config);
+  // Eventos dos agentes (LISTEN ai_run_events → SSE) e o aviso de conclusão.
+  const runEvents = new RunEventsHub(db, config, app.log);
+  app.decorate('runEvents', runEvents);
+  await runEvents.start();
+  app.addHook('onClose', async () => runEvents.stop());
   app.decorateRequest('actor', null);
   app.decorateRequest('sessionId', null);
   app.decorateRequest('ctx', null as never);
@@ -118,6 +126,8 @@ export async function buildApp({
   await app.register(statementRoutes);
   await app.register(operationRoutes);
   await app.register(visionRoutes);
+  await app.register(agentRoutes);
+  await app.register(mcpRoutes);
 
   // Em produção a API serve o SPA compilado (imagem única).
   const webDist = config.webDist ? resolve(config.webDist) : null;

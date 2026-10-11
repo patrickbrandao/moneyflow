@@ -1,5 +1,6 @@
 import type { Database } from '@moneyflow/db';
 import type { FastifyBaseLogger } from 'fastify';
+import { startAgentWorker } from './agents/worker';
 import { purgeExpiredSessions } from './auth/session';
 import type { Config } from './config';
 import { cardMaintenance } from './services/cards';
@@ -16,6 +17,9 @@ import { materializeAll } from './services/recurrence';
  * Um segundo laço, a cada MESSAGE_INTERVAL_MS (padrão 30 s), cuida das
  * mensagens (spec 013) e do sino: produz os eventos do horário com dedup,
  * cria as notificações e consome a outbox (Telegram), com retry e backoff.
+ *
+ * O terceiro é o dos agentes de IA (agents/worker.ts): a fila de execuções
+ * (AGENT_POLL_MS) e a manutenção (AGENT_MAINTENANCE_MS).
  */
 export function startWorker(db: Database, config: Config, log: FastifyBaseLogger) {
   let running = false;
@@ -52,8 +56,12 @@ export function startWorker(db: Database, config: Config, log: FastifyBaseLogger
   };
   void messages();
   const messageTimer = setInterval(messages, config.messageIntervalMs);
-  return () => {
+
+  // Agentes de IA (spec 011): execuções, manutenção e embeddings.
+  const stopAgents = startAgentWorker(db, config, log);
+  return async () => {
     clearInterval(timer);
     clearInterval(messageTimer);
+    await stopAgents();
   };
 }

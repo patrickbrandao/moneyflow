@@ -1,6 +1,7 @@
 import type { Executor } from '@moneyflow/db';
 import type { destinationCreateInput, destinationUpdateInput, outboxQuery, subscriptionInput } from '@moneyflow/shared';
 import {
+  agentMessage,
   formatDateTime,
   type MessageDestinationDto,
   type MessageEventKind,
@@ -332,13 +333,43 @@ export async function sendTest(ctx: ServiceContext, destinationId: string): Prom
       RETURNING id`);
     return result.rows[0]!.id;
   });
-  // Reserva só esta mensagem (mesma transição do message_outbox_claim), numa transação curta.
-  const claimed = await ctx.db.execute(sql`
-    UPDATE message_outbox SET status = 'sending', locked_at = clock_timestamp(), attempts = attempts + 1
-     WHERE id = ${messageId} AND status = 'pending' RETURNING id`);
+  return deliverNow(ctx, messageId, d, payload);
+}
+
+/** Reserva só esta mensagem (message_outbox_claim_one, transação curta) e entrega fora de transação. */
+async function deliverNow(ctx: ServiceContext, messageId: string, d: DestRow, payload: MessagePayload): Promise<TestSendResult> {
+  const claimed = await ctx.db.execute(sql`SELECT id FROM message_outbox_claim_one(${messageId}::uuid)`);
   if (claimed.rows.length === 0) return { messageId, status: 'pending', error: null };
   const outcome = await deliver(ctx.db, ctx.config, { id: messageId, chatId: d.chatId!, destinationName: d.name, payload });
   return { messageId, status: outcome.status, error: outcome.error };
+}
+
+/**
+ * Mensagem de agente para um destino (tool "enviar mensagem", spec 011/013):
+ * só para destinos que o usuário gerencia; enfileira como agent_message com a
+ * execução do agente e tenta entregar na hora (o worker repete se falhar).
+ */
+export async function sendAgentMessage(
+  ctx: ServiceContext,
+  destinationId: string,
+  text: string,
+  dedupKey: string,
+): Promise<TestSendResult> {
+  const d = await manageable(ctx, destinationId);
+  if (d.archivedAt) throw unprocessable(t.errors.destinationArchived);
+  if (!d.isActive) throw unprocessable(t.errors.destinationInactive);
+  const payload = agentMessage('agent_message', null, text, null);
+  const messageId = await withTx(ctx, async (tx) => {
+    const result = await tx.execute<{ id: string }>(sql`
+      INSERT INTO message_outbox (destination_id, event_kind, dedup_key, user_id, agent_run_id, payload)
+      VALUES (${destinationId}, 'agent_message', ${dedupKey.slice(0, 300)}, ${ctx.access.actor.id}, ${ctx.agentRunId ?? null},
+              ${JSON.stringify(payload)}::jsonb)
+      ON CONFLICT (destination_id, dedup_key) DO NOTHING
+      RETURNING id`);
+    return result.rows[0]?.id ?? null;
+  });
+  if (!messageId) return { messageId: '', status: 'pending', error: null };
+  return deliverNow(ctx, messageId, d, payload);
 }
 
 export type ClaimedMessage = { id: string; chatId: string; destinationName: string; payload: MessagePayload };

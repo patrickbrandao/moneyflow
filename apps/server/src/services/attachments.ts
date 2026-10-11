@@ -159,6 +159,15 @@ async function assertReadable(ctx: ServiceContext, attachmentId: string) {
     sql`SELECT target_kind, target_id FROM attachment_links WHERE attachment_id = ${attachmentId}`,
   );
   for (const link of links.rows) {
+    if (link.target_kind === 'ai_message') {
+      // Anexo de mensagem de agente: o dono da conversa (e o admin, que lê todas).
+      if (ctx.access.isAdmin) return;
+      const owner = await ctx.db.execute<{ user_id: string }>(
+        sql`SELECT c.user_id FROM ai_messages m JOIN ai_conversations c ON c.id = m.conversation_id WHERE m.id = ${link.target_id}`,
+      );
+      if (owner.rows[0]?.user_id === ctx.access.actor.id) return;
+      continue;
+    }
     const caixaId = await targetCaixa(ctx.db, link.target_kind as AttachmentTarget, link.target_id).catch(() => undefined);
     if (caixaId === null || (caixaId && ctx.access.canRead(caixaId))) return;
   }

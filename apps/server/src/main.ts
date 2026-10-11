@@ -19,7 +19,7 @@ async function main() {
     const log = pino({ level: config.logLevel, base: { mode: 'worker' } });
     const stop = startWorker(db, config, log);
     const shutdown = async () => {
-      stop();
+      await stop();
       await pool.end();
       process.exit(0);
     };

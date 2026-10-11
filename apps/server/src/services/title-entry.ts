@@ -1,5 +1,6 @@
 import { type Executor, entities, entityAddresses, entityPixKeys, nfeDocuments, nfeItems, type Tx } from '@moneyflow/db';
 import {
+  type DocumentReadingDto,
   isValidCnpj,
   isValidCpf,
   type NfeData,
@@ -15,7 +16,8 @@ import {
 } from '@moneyflow/shared';
 import { eq, sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
-import { AppError, notFound, unprocessable } from '../errors';
+import { notFound, unprocessable } from '../errors';
+import { readDocumentWithAi } from './ai-flows';
 import { storeAttachment } from './attachments';
 import { withTx } from './tx';
 import { camel } from './util';
@@ -210,21 +212,12 @@ export async function getNfe(ctx: ServiceContext, id: string): Promise<NfeDetail
 }
 
 /**
- * Ponto de extensão da leitura de PDF/imagem por IA (spec 010, chega na F4 com
- * os agentes, spec 011): um leitor recebe o arquivo e devolve campos do título
- * para pré-preencher o formulário.
+ * Leitura de PDF/imagem por IA (spec 010/011): por padrão, uma execução do
+ * agente dos fluxos (services/ai-flows.ts); `registerDocumentReader` troca o
+ * leitor (testes, outro motor).
  */
-export type DocumentReading = {
-  kind: 'boleto' | 'invoice' | 'receipt' | 'unknown';
-  entityName?: string | null;
-  document?: string | null;
-  amountCents?: number | null;
-  dueDate?: string | null;
-  boletoLine?: string | null;
-  pixPayload?: string | null;
-  description?: string | null;
-};
-export type DocumentReader = (file: { name: string; mime: string; content: Buffer }) => Promise<DocumentReading>;
+export type DocumentReading = DocumentReadingDto;
+export type DocumentReader = (ctx: ServiceContext, file: { name: string; mime: string; content: Buffer }) => Promise<DocumentReading>;
 
 let documentReader: DocumentReader | null = null;
 
@@ -233,7 +226,6 @@ export function registerDocumentReader(reader: DocumentReader | null) {
 }
 
 export async function readDocument(ctx: ServiceContext, file: { name: string; mime: string; content: Buffer }) {
-  void ctx;
-  if (!documentReader) throw new AppError(501, 'document_reader_unavailable', t.errors.documentReaderUnavailable);
-  return documentReader(file);
+  if (documentReader) return documentReader(ctx, file);
+  return readDocumentWithAi(ctx, file);
 }
