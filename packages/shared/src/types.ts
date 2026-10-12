@@ -252,6 +252,24 @@ export type RecurrenceRuleDto = {
   installmentsTotal: number | null;
 };
 
+/** Uma ocorrência da série afetada pelo encerramento (lado original). */
+export type SeriesOccurrence = { id: string; occurrence: number; dueDate: string; amountCents: number; status: TitleStatus };
+
+/** Prévia/resultado de "Encerrar série" (spec 005). */
+export type SeriesEndPreview = {
+  ruleId: string;
+  currentEndsOn: string | null;
+  endsOn: string | null;
+  /** Em aberto depois da nova data: passam a canceladas (com o espelho). */
+  toCancel: SeriesOccurrence[];
+  /** Canceladas depois do fim anterior que voltam a valer (estender). */
+  toReopen: SeriesOccurrence[];
+  /** Com baixa depois da nova data: impedem o encerramento até serem estornadas. */
+  blocked: SeriesOccurrence[];
+};
+
+export type SeriesEndResult = SeriesEndPreview & { created: number; title: TitleDetail };
+
 export type TitleDetail = TitleRow & {
   canWrite: boolean;
   settlements: SettlementRow[];

@@ -260,3 +260,110 @@ describe('séries (recorrência e parcelamento)', () => {
     expect((await materializeAll(h.db, addMonths(today, 30))).created).toBe(0);
   });
 });
+
+describe('encerrar série (spec 005)', () => {
+  type Row = { id: string; occurrence: number; status: string; recurrenceRuleId: string; dueDate: string };
+  const seriesOf = async (c: ReturnType<typeof client>, caixaId: string, ruleId: string) =>
+    ((await c.get(`/api/titles?caixaId=${caixaId}&limit=1000`)) as Row[])
+      .filter((t) => t.recurrenceRuleId === ruleId)
+      .sort((a, b) => a.occurrence - b.occurrence);
+
+  it('mantém N meses, cancela as seguintes com o espelho, bloqueia com baixa e estende depois', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const first = await admin.post('/api/titles', {
+      ...base(s),
+      description: 'Contrato Jorge',
+      dueDate: today,
+      competenceDate: today,
+      amountCents: 50_000,
+      series: { kind: 'recurrence', frequency: 'monthly' },
+    });
+    const ruleId = first.recurrenceRuleId;
+    expect(first.mirror).not.toBeNull();
+    const all = await seriesOf(admin, s.caixaA.id, ruleId);
+    expect(all).toHaveLength(13);
+
+    // Uma ocorrência depois da data com baixa bloqueia o encerramento.
+    const sixth = all[5]!;
+    await admin.post(`/api/titles/${sixth.id}/settlements`, { settledOn: today, amountCents: 10_000, financialAccountId: null });
+    const keepUntil = addMonths(today, 2);
+    const blockedPreview = await admin.get(`/api/titles/${first.id}/series/end?endsOn=${keepUntil}`);
+    expect(blockedPreview.blocked.map((o: { occurrence: number }) => o.occurrence)).toEqual([6]);
+    const refused = await admin.raw('POST', `/api/titles/${first.id}/series/end`, { endsOn: keepUntil });
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json().error.code).toBe('series_end_blocked');
+    expect(refused.json().error.message).toContain('#6');
+    expect((await seriesOf(admin, s.caixaA.id, ruleId)).every((t) => t.status !== 'canceled')).toBe(true);
+
+    // Estornada a baixa, encerra mantendo 3 meses (1 a 3); a prévia bate com o resultado.
+    const sixthDetail = await admin.get(`/api/titles/${sixth.id}`);
+    await admin.post(`/api/settlements/${sixthDetail.settlements[0].id}/reverse`, { reason: 'contrato cancelado', reversedOn: today });
+    const preview = await admin.get(`/api/titles/${first.id}/series/end?endsOn=${keepUntil}`);
+    expect(preview.blocked).toEqual([]);
+    expect(preview.toCancel).toHaveLength(10);
+    const ended = await admin.post(`/api/titles/${all[1]!.id}/series/end`, { endsOn: keepUntil });
+    expect(ended.toCancel.map((o: { occurrence: number }) => o.occurrence)).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(ended.title.rule.endsOn).toBe(keepUntil);
+
+    const after = await seriesOf(admin, s.caixaA.id, ruleId);
+    expect(after).toHaveLength(13); // nada some: ficam canceladas, com histórico
+    expect(after.filter((t) => t.status === 'canceled').map((t) => t.occurrence)).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(after.slice(0, 3).every((t) => t.status === 'open')).toBe(true);
+    const mirrors = await seriesOf(admin, s.caixaB.id, ruleId);
+    expect(mirrors.filter((t) => t.status === 'canceled').map((t) => t.occurrence)).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+
+    // O worker não recria as canceladas nem passa do fim.
+    expect((await materializeAll(h.db, addMonths(today, 30))).created).toBe(0);
+    expect(await seriesOf(admin, s.caixaA.id, ruleId)).toHaveLength(13);
+
+    // Estender até 5 meses reabre 4 a 6 (com o espelho); sem fim reabre o resto e volta a materializar.
+    const extended = await admin.post(`/api/titles/${first.id}/series/end`, { endsOn: addMonths(today, 5) });
+    expect(extended.toReopen.map((o: { occurrence: number }) => o.occurrence)).toEqual([4, 5, 6]);
+    expect(extended.toCancel).toEqual([]);
+    expect((await seriesOf(admin, s.caixaB.id, ruleId)).filter((t) => t.status === 'open').map((t) => t.occurrence)).toEqual([
+      1, 2, 3, 4, 5, 6,
+    ]);
+    const open = await admin.post(`/api/titles/${first.id}/series/end`, { endsOn: null });
+    expect(open.toReopen).toHaveLength(7);
+    expect(open.title.rule.endsOn).toBeNull();
+    expect((await seriesOf(admin, s.caixaA.id, ruleId)).every((t) => t.status === 'open')).toBe(true);
+    expect((await materializeAll(h.db, addMonths(today, 14))).created).toBeGreaterThanOrEqual(2);
+  });
+
+  it('um cancelamento avulso antes do fim anterior não é reaberto ao estender', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const first = await admin.post('/api/titles', {
+      ...base(s),
+      mirrorCaixaId: null,
+      dueDate: today,
+      competenceDate: today,
+      series: { kind: 'recurrence', frequency: 'monthly', endsOn: addMonths(today, 3) },
+    });
+    const all = await seriesOf(admin, s.caixaA.id, first.recurrenceRuleId);
+    expect(all).toHaveLength(4);
+    await admin.post(`/api/titles/${all[1]!.id}/cancel`);
+    const extended = await admin.post(`/api/titles/${first.id}/series/end`, { endsOn: addMonths(today, 5) });
+    expect(extended.toReopen).toEqual([]);
+    expect(extended.created).toBe(2);
+    const after = await seriesOf(admin, s.caixaA.id, first.recurrenceRuleId);
+    expect(after.map((t) => t.status)).toEqual(['open', 'canceled', 'open', 'open', 'open', 'open']);
+  });
+
+  it('parcelamento, data antes do início e leitor são recusados', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const installments = await admin.post('/api/titles', { ...base(s), series: { kind: 'installments', count: 3 } });
+    await admin.post(`/api/titles/${installments.id}/series/end`, { endsOn: '2026-11-15' }, 422);
+    const monthly = await admin.post('/api/titles', { ...base(s), series: { kind: 'recurrence', frequency: 'monthly' } });
+    await admin.post(`/api/titles/${monthly.id}/series/end`, { endsOn: '2026-01-01' }, 422);
+
+    const viewerUser = await userSession(h);
+    await admin.put(`/api/users/${viewerUser.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
+    const viewer = client(h, viewerUser.cookie);
+    await viewer.post(`/api/titles/${monthly.id}/series/end`, { endsOn: '2026-12-15' }, 403);
+  });
+});

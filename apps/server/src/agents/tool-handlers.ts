@@ -1,7 +1,17 @@
-import { type AgentToolInput, type AgentToolName, diffRows, type PreviewField, type ToolPreview, t, todayIso } from '@moneyflow/shared';
+import {
+  type AgentToolInput,
+  type AgentToolName,
+  diffRows,
+  formatDate,
+  type PreviewField,
+  type PreviewRow,
+  type ToolPreview,
+  t,
+  todayIso,
+} from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
-import { forbidden, notFound } from '../errors';
+import { forbidden, notFound, unprocessable } from '../errors';
 import * as caixas from '../services/caixas';
 import { calendarItems } from '../services/calendar';
 import * as cards from '../services/cards';
@@ -241,6 +251,34 @@ export const TOOL_HANDLERS: Handlers = {
       return { title: 'Editar título', summary: before.description, action: 'update', rows: diffRows(TITLE_FIELDS, after, old) };
     },
     run: (ctx, i) => titles.updateTitle(ctx, i.titleId, i.changes),
+  },
+  end_series: {
+    preview: async (ctx, i) => {
+      const title = await titles.getTitle(ctx, i.titleId);
+      const plan = await titles.previewSeriesEnd(ctx, i.titleId, i.endsOn);
+      if (plan.blocked.length > 0) {
+        const list = plan.blocked.map((o) => `#${o.occurrence} ${formatDate(o.dueDate)}`).join(', ');
+        throw unprocessable(t.errors.seriesEndBlocked(list), 'series_end_blocked');
+      }
+      const listed = (items: typeof plan.toCancel) => items.map((o) => `#${o.occurrence} ${formatDate(o.dueDate)}`).join(', ') || null;
+      const rows: PreviewRow[] = [
+        {
+          label: 'Termina em',
+          before: plan.currentEndsOn ? formatDate(plan.currentEndsOn) : 'Sem fim',
+          after: plan.endsOn ? formatDate(plan.endsOn) : 'Sem fim',
+        },
+      ];
+      if (plan.toCancel.length) rows.push({ label: 'Canceladas', after: listed(plan.toCancel) });
+      if (plan.toReopen.length) rows.push({ label: 'Reabertas', after: listed(plan.toReopen) });
+      return {
+        title: 'Encerrar série',
+        summary: `${title.description} (${title.entityName})`,
+        action: plan.toCancel.length ? 'delete' : 'update',
+        rows,
+        warnings: title.mirrorTitleId && plan.toCancel.length ? ['O espelho de cada ocorrência também é cancelado.'] : [],
+      };
+    },
+    run: (ctx, i) => titles.endSeries(ctx, i.titleId, i.endsOn),
   },
   settle_title: {
     preview: async (ctx, i) => {

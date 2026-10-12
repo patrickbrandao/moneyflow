@@ -278,6 +278,18 @@ export const AGENT_TOOLS = [
     input: z.object({ titleId: id, changes: titleUpdateInput }),
   }),
   define({
+    name: 'end_series',
+    title: 'Encerrar série recorrente',
+    description:
+      'Encerra (ou estende) a série recorrente de um título numa data: as ocorrências que vencem até endsOn continuam; as seguintes em aberto são canceladas (com o espelho), sem apagar. endsOn null = sem fim (reabre as canceladas por um encerramento anterior). Falha se houver ocorrência com baixa depois da data.',
+    kind: 'write',
+    destructive: true,
+    input: z.object({
+      titleId: id.describe('Qualquer ocorrência da série.'),
+      endsOn: date.nullable().describe('Último vencimento a manter (AAAA-MM-DD); null = sem fim.'),
+    }),
+  }),
+  define({
     name: 'settle_title',
     title: 'Baixar título',
     description:
