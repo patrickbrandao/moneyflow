@@ -3,6 +3,8 @@ import {
   AGENT_TOOL_NAMES,
   AGENT_TOOLS,
   agentTool,
+  aiAgentCreateInput,
+  aiAgentUpdateInput,
   balanceToolUses,
   blocksText,
   diffRows,
@@ -152,5 +154,21 @@ describe('SSE', () => {
   it('aceita CRLF e evento sem nome (message)', () => {
     const parser = new SseParser();
     expect(parser.push('data: oi\r\n\r\n')).toEqual([{ id: null, event: 'message', data: 'oi' }]);
+  });
+});
+
+describe('entrada do agente (admin)', () => {
+  it('criação aplica os padrões; a edição parcial só traz o que veio (sem desativar nem zerar o prompt)', () => {
+    expect(aiAgentCreateInput.parse({ name: 'A' })).toMatchObject({
+      systemPrompt: '',
+      isActive: false,
+      useForFlows: false,
+      requireWriteConfirmation: true,
+      colorSlot: 1,
+      enabledTools: null,
+      params: {},
+    });
+    expect(aiAgentUpdateInput.parse({ useForFlows: true })).toEqual({ useForFlows: true });
+    expect(aiAgentUpdateInput.parse({ isActive: false })).toEqual({ isActive: false });
   });
 });

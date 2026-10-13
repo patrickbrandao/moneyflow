@@ -245,6 +245,12 @@ export const agentsUiStrings = {
       iconHint: 'Nome em kebab-case, ex.: bot, sparkles, receipt.',
       active: 'Ativo (aparece para os usuários)',
       activeHint: 'Para ativar, escolha provedor e modelo.',
+      useForFlows: 'Usar nos fluxos automáticos',
+      useForFlowsHint:
+        'Lê documentos na criação de títulos e os PDFs dos contratos e sugere a classificação do extrato. Só um agente por vez: marcar este desmarca o atual. Sem nenhum marcado, vale o primeiro agente ativo.',
+      useForFlowsNeedsActive: 'Só um agente ativo pode atender os fluxos automáticos.',
+      flowsBadge: 'Fluxos',
+      flowsBadgeTitle: 'Agente dos fluxos automáticos',
       mcpServers: 'Servidores MCP',
       mcpNone: 'Nenhum servidor MCP cadastrado.',
       mcpGlobal: 'Global: sempre incluído',

@@ -63,6 +63,8 @@ export type AiAgentDto = {
   colorSlot: number;
   icon: string | null;
   isActive: boolean;
+  /** Atende os fluxos automáticos (só um por vez; precisa estar ativo). */
+  useForFlows: boolean;
   archivedAt: string | null;
   createdAt: string;
   mcpServers: AgentMcpLinkDto[];

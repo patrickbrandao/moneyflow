@@ -187,6 +187,67 @@ describe('backup: recursos num sistema novo', () => {
     expect(prices.some((p: any) => p.providerId === provider.id && p.model === 'gpt-x')).toBe(true);
   });
 
+  it('agente dos fluxos entra sem a marca se já há um marcado; conversa de backup antigo ganha a finalidade do screen_context', async () => {
+    if (skip) return;
+    const api = client(b, adminB.cookie);
+    const provider = await api.post('/api/admin/ai/providers', { name: `Provedor fluxos ${uid()}`, kind: 'openai', apiKey: `sk-${uid()}` });
+    const base = { systemPrompt: 'Fluxos.', providerId: provider.id, model: 'gpt-x', isActive: true };
+    const marked = await api.post('/api/admin/ai/agents', { ...base, name: `Marcado ${uid()}`, useForFlows: true });
+    const conversation = await api.post('/api/conversations', { agentId: marked.id });
+
+    // O arquivo: um agente marcado e uma conversa de antes da coluna purpose (finalidade no screen_context).
+    const full = await b.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminB.cookie } });
+    expect(full.statusCode, full.body.slice(0, 300)).toBe(200);
+    const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+    const agentRow = json.tables.ai_agents.find((a: any) => a.id === marked.id);
+    expect(agentRow.use_for_flows).toBe(true);
+    const conversationRow = json.tables.ai_conversations.find((c: any) => c.id === conversation.id);
+    const { purpose: _purpose, ...legacyConversation } = conversationRow;
+    const fileWith = (agentName: string) => {
+      const agentId = randomUUID();
+      const conversationId = randomUUID();
+      return {
+        agentId,
+        conversationId,
+        file: {
+          ...json,
+          tables: {
+            ai_agents: [{ ...agentRow, id: agentId, name: agentName }],
+            ai_conversations: [
+              {
+                ...legacyConversation,
+                id: conversationId,
+                agent_id: agentId,
+                screen_context: { purpose: 'document_reading', fileName: 'antigo.pdf' },
+              },
+            ],
+          },
+          references: {},
+        },
+      };
+    };
+
+    const first = fileWith(`Do arquivo ${uid()}`);
+    const report = await importFile(b, adminB.cookie, 'full', first.file);
+    expect(failures(report)).toEqual([]);
+    expect(sum(report, 'ai_agents').imported).toBe(1);
+    const agents = await api.get('/api/admin/ai/agents');
+    expect(agents.find((a: any) => a.id === first.agentId).useForFlows).toBe(false);
+    expect(agents.filter((a: any) => a.useForFlows).map((a: any) => a.id)).toEqual([marked.id]);
+    const imported = await b.db.execute<{ purpose: string; screen_context: Record<string, unknown> }>(
+      sql`SELECT purpose, screen_context FROM ai_conversations WHERE id = ${first.conversationId}`,
+    );
+    expect(imported.rows[0]).toEqual({ purpose: 'document_reading', screen_context: { fileName: 'antigo.pdf' } });
+    expect((await api.get('/api/conversations?archived=1')).map((c: any) => c.id)).not.toContain(first.conversationId);
+
+    // Sem marcado no banco, o agente do arquivo entra com a marca.
+    await api.patch(`/api/admin/ai/agents/${marked.id}`, { useForFlows: false });
+    const second = fileWith(`Do arquivo ${uid()}`);
+    expect(failures(await importFile(b, adminB.cookie, 'full', second.file))).toEqual([]);
+    const after = await api.get('/api/admin/ai/agents');
+    expect(after.filter((a: any) => a.useForFlows).map((a: any) => a.id)).toEqual([second.agentId]);
+  });
+
   it('caixas exigem o titular; entidades casam pelo documento e conflitos de chave PIX voltam com o motivo', async () => {
     if (skip) return;
     const adminA = await userSession(h, 'admin');

@@ -275,6 +275,8 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   ai_agents_enabled_tools_check: 'Lista de tools inválida.',
   ai_agents_model_check: 'Nome de modelo inválido.',
   ai_agents_active_check: 'Um agente arquivado não pode ficar ativo.',
+  ai_agents_use_for_flows_key: 'Outro agente já atende os fluxos automáticos. Desmarque-o antes ou marque este pela tela.',
+  ai_agents_use_for_flows_check: 'Só um agente ativo e não arquivado pode atender os fluxos automáticos.',
   mcp_servers_name_key: 'Já existe um servidor MCP com esse nome.',
   mcp_servers_url_check: 'URL do servidor MCP inválida (http ou https).',
   mcp_servers_secret_headers_check:
@@ -283,6 +285,9 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   agent_mcp_servers_key: 'Esse servidor MCP já está vinculado ao agente.',
   agent_mcp_servers_enabled_tools_check: 'Lista de tools do servidor MCP inválida.',
   ai_conversations_title_check: 'Título inválido (até 200 caracteres).',
+  ai_conversations_purpose_check: 'Finalidade da conversa inválida.',
+  ai_conversations_purpose_immutable_check: 'A finalidade de uma conversa não muda depois de criada.',
+  ai_usage_purpose_check: 'Finalidade de uso de IA inválida.',
   ai_runs_conversation_active_key: 'Já há uma execução em andamento nesta conversa. Aguarde ou pare a execução.',
   ai_runs_owner_check: 'Só o dono da conversa pode conversar nela.',
   ai_runs_agent_check: 'A execução precisa usar o agente da conversa.',

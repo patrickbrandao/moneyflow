@@ -22,18 +22,21 @@ import { withTx } from './tx';
 /*
  * IA nos fluxos (specs 009, 010, 011): cada uso abre uma conversa arquivada
  * (marcada em ai_conversations.purpose, fora da lista de conversas) com o
- * "agente dos fluxos" — o de AI_FLOW_AGENT ou o primeiro ativo — e enfileira
+ * "agente dos fluxos" — o marcado em /admin/ai ou o primeiro ativo — e enfileira
  * uma execução normal no worker (credenciais pelo banco, uso e custo medidos,
  * auditoria como agente).
  */
 
-/** Agente dos fluxos: AI_FLOW_AGENT (nome) ou o primeiro ativo com provedor ativo. */
+/**
+ * Agente dos fluxos: o marcado em /admin/ai (ai_agents.use_for_flows), se ele e o
+ * provedor estiverem ativos; senão o primeiro ativo com provedor ativo (uma
+ * instalação nova funciona sem configurar nada).
+ */
 export async function flowAgentId(ctx: ServiceContext): Promise<string | null> {
   const result = await ctx.db.execute<{ id: string }>(sql`
     SELECT a.id FROM ai_agents a JOIN ai_providers p ON p.id = a.provider_id
      WHERE a.is_active AND a.archived_at IS NULL AND p.is_active AND p.archived_at IS NULL
-       ${ctx.config.aiFlowAgent ? sql`AND lower(a.name) = lower(${ctx.config.aiFlowAgent})` : sql``}
-     ORDER BY a.created_at, a.id LIMIT 1`);
+     ORDER BY a.use_for_flows DESC, a.created_at, a.id LIMIT 1`);
   return result.rows[0]?.id ?? null;
 }
 

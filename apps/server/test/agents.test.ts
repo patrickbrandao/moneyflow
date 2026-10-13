@@ -882,7 +882,7 @@ describe('IA nos fluxos', () => {
       const after = (await admin.get(`/api/statement-imports/${importId}`)).lines.find((l: any) => l.id === lines[0].id);
       expect(after.classificationSource).toBe('user');
 
-      // Uso por finalidade (tarefa 011): cada fluxo grava a sua, e o painel separa os custos.
+      // Uso por finalidade (tarefa 011): cada fluxo grava a sua, e o painel separa os custos (o contrato rodou no teste anterior).
       const usage = async (conversationId: string) =>
         (await h.db.execute<{ purpose: string }>(sql`SELECT purpose FROM ai_usage WHERE conversation_id = ${conversationId}`)).rows.map(
           (r) => r.purpose,
@@ -894,7 +894,7 @@ describe('IA nos fluxos', () => {
       expect(await usage(classify.rows[0]!.id)).toEqual(['classify_lines']);
       const report = await admin.get('/api/admin/ai/usage');
       const purposes = new Set(report.byPurpose.map((r: any) => r.purpose));
-      for (const purpose of ['chat', 'title', 'document_reading', 'classify_lines', 'contract_reading', 'contract_markdown']) {
+      for (const purpose of ['document_reading', 'classify_lines', 'contract_reading', 'contract_markdown']) {
         expect(purposes, purpose).toContain(purpose);
       }
       const doc = report.byPurpose.find((r: any) => r.purpose === 'document_reading');
@@ -905,6 +905,61 @@ describe('IA nos fluxos', () => {
     } finally {
       await stop();
     }
+  });
+
+  it('agente dos fluxos escolhido no admin: marcar B faz a leitura usar B; um marcado por vez; desativar ou arquivar tira a marca (tarefa 012)', async () => {
+    const base = { systemPrompt: 'Fluxos.', providerId: provider.id, model: 'claude-sonnet-5-5', isActive: true };
+    const b = await admin.post('/api/admin/ai/agents', { ...base, name: `Fluxos B ${uid()}`, useForFlows: true });
+    expect(b.useForFlows).toBe(true);
+    const flowAgentOf = async (fileName: string) => {
+      const stop = startAgentWorker(h.db, h.config, log, { pollMs: 100, maintenanceMs: 3_600_000 });
+      try {
+        const res = await h.app.inject({
+          method: 'POST',
+          url: `/api/title-entry/document?fileName=${fileName}`,
+          payload: Buffer.from('%PDF-1.4\n% boleto\n'),
+          headers: { cookie: adminSession.cookie, 'content-type': 'application/pdf' },
+        });
+        expect(res.statusCode, res.body).toBe(200);
+        const row = await h.db.execute<{ agent_id: string }>(
+          sql`SELECT agent_id FROM ai_conversations WHERE id = ${res.json().conversationId}`,
+        );
+        return row.rows[0]!.agent_id;
+      } finally {
+        await stop();
+      }
+    };
+    expect(await flowAgentOf('b.pdf')).toBe(b.id);
+
+    // Marcar C desmarca B na mesma transação.
+    const c = await admin.post('/api/admin/ai/agents', { ...base, name: `Fluxos C ${uid()}` });
+    expect(c).toMatchObject({ useForFlows: false, isActive: true });
+    expect((await admin.patch(`/api/admin/ai/agents/${c.id}`, { useForFlows: true })).useForFlows).toBe(true);
+    const marked = (await admin.get('/api/admin/ai/agents')).filter((a: any) => a.useForFlows).map((a: any) => a.id);
+    expect(marked).toEqual([c.id]);
+    expect(await flowAgentOf('c.pdf')).toBe(c.id);
+
+    // Marcar um agente inativo é recusado com a mensagem traduzida.
+    const off = await admin.raw('PATCH', `/api/admin/ai/agents/${b.id}`, { isActive: false, useForFlows: true });
+    expect(off.statusCode).toBe(422);
+    expect(off.json().error).toMatchObject({ code: 'ai_agents_use_for_flows_check' });
+    expect(off.json().error.message).toMatch(/Só um agente ativo/);
+
+    // Desativar o marcado tira a marca; sem marcado vale o primeiro ativo.
+    const disabled = await admin.patch(`/api/admin/ai/agents/${c.id}`, { isActive: false });
+    expect(disabled).toMatchObject({ isActive: false, useForFlows: false });
+    const first = await h.db.execute<{ id: string }>(sql`
+      SELECT a.id FROM ai_agents a JOIN ai_providers p ON p.id = a.provider_id
+       WHERE a.is_active AND a.archived_at IS NULL AND p.is_active AND p.archived_at IS NULL
+       ORDER BY a.created_at, a.id LIMIT 1`);
+    expect(await flowAgentOf('primeiro.pdf')).toBe(first.rows[0]!.id);
+
+    // Arquivar o marcado (tem conversas, então arquiva em vez de excluir) também tira a marca.
+    await admin.patch(`/api/admin/ai/agents/${b.id}`, { useForFlows: true });
+    await admin.del(`/api/admin/ai/agents/${b.id}`);
+    const archived = (await admin.get('/api/admin/ai/agents')).find((a: any) => a.id === b.id);
+    expect(archived).toMatchObject({ isActive: false, useForFlows: false });
+    expect(archived.archivedAt).not.toBeNull();
   });
 
   it('a finalidade da conversa do fluxo fica na coluna: mandar mensagem com screenContext não a põe na lista (tarefa 013)', async () => {
