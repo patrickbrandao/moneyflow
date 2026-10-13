@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
@@ -14,6 +15,15 @@ const fixture = (name: string) => readFileSync(join(import.meta.dirname, 'fixtur
 /** Upload cru (o arquivo no corpo, parâmetros na query). */
 async function upload(cookie: string, url: string, body: Buffer, contentType = 'application/octet-stream') {
   return h.app.inject({ method: 'POST', url, payload: body, headers: { cookie, 'content-type': contentType } });
+}
+
+/** Título baixado pela linha conciliada (linha → movimento → baixa). */
+async function titleOfLine(lineId: string) {
+  const r = await h.db.execute<{ title_id: string }>(sql`
+    SELECT st.title_id FROM statement_lines l
+      JOIN movements m ON m.id = l.movement_id JOIN settlements st ON st.id = m.settlement_id
+     WHERE l.id = ${lineId}`);
+  return r.rows[0]?.title_id ?? null;
 }
 
 describe('extratos e conciliação (spec 009)', () => {
@@ -119,6 +129,53 @@ describe('extratos e conciliação (spec 009)', () => {
     });
     expect(file.statusCode).toBe(200);
     expect(file.body).toContain('OFX2-0001');
+  });
+
+  it('lança a linha como título baixado com o espelho escolhido na tela: outra caixa da entidade, a principal ou nenhum (spec 006)', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const caixaB2 = await admin.post('/api/caixas', { name: `Caixa B2 ${s.tag}`, holderEntityId: s.holderB.id });
+    const res = await upload(
+      adminSession.cookie,
+      `/api/statement-imports?accountId=${s.accountA.id}&fileName=extrato.ofx`,
+      fixture('extrato-ofx2.ofx'),
+      'application/x-ofx',
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    const imp = res.json();
+    const line = (fitid: string) => imp.lines.find((l: any) => l.fitid === fitid);
+    const create = (fitid: string, body: Record<string, unknown>, status?: number) =>
+      admin.post(
+        `/api/statement-lines/${line(fitid).id}/create`,
+        { mode: 'title', entityId: s.holderB.id, learnRule: false, ...body },
+        status,
+      );
+
+    // Outra caixa da entidade, com a categoria do espelho escolhida.
+    await create('OFX2-0002', { categoryId: s.income.id, mirrorCaixaId: caixaB2.id, mirrorCategoryId: s.expense.id });
+    const chosen = await admin.get(`/api/titles/${await titleOfLine(line('OFX2-0002').id)}`);
+    expect(chosen).toMatchObject({ direction: 'receivable', status: 'paid', amountCents: 150_000 });
+    expect(chosen.mirror).toMatchObject({ caixaId: caixaB2.id, mirrorStatus: 'accepted' });
+    expect(await admin.get(`/api/titles/${chosen.mirror.id}`)).toMatchObject({
+      direction: 'payable',
+      entityId: s.holderA.id,
+      categoryId: s.expense.id,
+    });
+
+    // Omitido: a caixa principal da entidade.
+    await create('OFX2-0005', { categoryId: s.income.id });
+    const primary = await admin.get(`/api/titles/${await titleOfLine(line('OFX2-0005').id)}`);
+    expect(primary.mirror).toMatchObject({ caixaId: s.caixaB.id });
+
+    // Dispensado.
+    await create('OFX2-0004', { categoryId: s.expense.id, mirrorCaixaId: null });
+    expect(await admin.get(`/api/titles/${await titleOfLine(line('OFX2-0004').id)}`)).toMatchObject({ status: 'paid', mirror: null });
+
+    // Caixa que não é da entidade: recusada, e a linha continua nova.
+    await create('OFX2-0006', { categoryId: s.expense.id, mirrorCaixaId: s.caixaA.id }, 422);
+    const after = await admin.get(`/api/statement-imports/${imp.id}`);
+    expect(after.lines.find((l: any) => l.fitid === 'OFX2-0006')).toMatchObject({ status: 'new' });
   });
 
   it('importa CSV com mapeamento salvo por conta', async () => {

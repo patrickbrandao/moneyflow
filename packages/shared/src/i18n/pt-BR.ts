@@ -321,6 +321,7 @@ export const ptBR = {
     mirrorCaixa: 'Caixa da contraparte (espelho)',
     mirrorNone: 'Sem espelho',
     mirrorCategory: 'Categoria no espelho',
+    mirrorCategoryAuto: 'Automática',
     mirrorPendingHint: 'Você não tem permissão na caixa da contraparte: o espelho nasce aguardando aceite.',
     acceptMirror: 'Aceitar espelho',
     disputeMirror: 'Contestar',

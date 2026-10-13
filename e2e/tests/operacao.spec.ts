@@ -28,7 +28,7 @@ async function base(page: Page, tag: string) {
     return res.json();
   };
   const expense = await post('/api/categories', { kind: 'expense', name: `E2E F2 despesa ${tag}`, colorSlot: 3 });
-  await post('/api/categories', { kind: 'income', name: `E2E F2 receita ${tag}`, colorSlot: 8 });
+  const income = await post('/api/categories', { kind: 'income', name: `E2E F2 receita ${tag}`, colorSlot: 8 });
   const holder = await post('/api/entities', { kind: 'company', name: `E2E F2 Titular ${tag}` });
   const supplier = await post('/api/entities', { kind: 'company', name: `E2E F2 Fornecedor ${tag}` });
   const caixa = await post('/api/caixas', { name: `E2E F2 Caixa ${tag}`, holderEntityId: holder.id, isPrimary: true });
@@ -39,13 +39,13 @@ async function base(page: Page, tag: string) {
     openingBalanceCents: 100_000,
     openingDate: '2026-01-01',
   });
-  return { post, expense, supplier, caixa, account };
+  return { post, expense, income, supplier, caixa, account };
 }
 
 test('importar OFX de exemplo e conciliar', async ({ page }) => {
   const tag = Date.now().toString(36);
   await login(page);
-  const { post, expense, supplier, caixa, account } = await base(page, tag);
+  const { post, expense, income, supplier, caixa, account } = await base(page, tag);
   // Já lançado no app: a assinatura (casa sozinha) e o supermercado a pagar (fica sugerido).
   await post(`/api/accounts/${account.id}/adjustments`, {
     occurredOn: '2026-10-03',
@@ -81,6 +81,30 @@ test('importar OFX de exemplo e conciliar', async ({ page }) => {
   const title = await (await page.request.get(`/api/titles/${market.id}`)).json();
   expect(title.status).toBe('paid');
   expect(title.settlements[0].financialAccountId).toBe(account.id);
+
+  // Linha sem par vira título já baixado. O cliente é titular de duas caixas: a
+  // principal vem como caixa do espelho e dá para trocar (spec 006).
+  const customer = await post('/api/entities', { kind: 'person', name: `E2E F2 Cliente ${tag}` });
+  const customerMain = await post('/api/caixas', { name: `E2E F2 Cliente casa ${tag}`, holderEntityId: customer.id, isPrimary: true });
+  const customerOther = await post('/api/caixas', { name: `E2E F2 Cliente praia ${tag}`, holderEntityId: customer.id });
+  await page
+    .getByRole('row', { name: /Cliente Ômega/ })
+    .getByRole('button', { name: 'Lançar' })
+    .click();
+  const createDialog = page.getByRole('dialog', { name: 'Lançar a linha' });
+  await createDialog.getByLabel('Entidade', { exact: true }).fill(customer.name);
+  await createDialog.getByRole('option', { name: new RegExp(customer.name) }).click();
+  await createDialog.getByLabel('Categoria', { exact: true }).selectOption({ label: income.name });
+  const mirrorCaixa = createDialog.getByLabel('Caixa da contraparte (espelho)');
+  await expect(mirrorCaixa).toHaveValue(customerMain.id);
+  await mirrorCaixa.selectOption(customerOther.id);
+  await createDialog.getByRole('button', { name: 'Lançar', exact: true }).click();
+  await expect(createDialog).toBeHidden();
+
+  const [received] = await (await page.request.get(`/api/titles?caixaId=${caixa.id}&entityId=${customer.id}`)).json();
+  expect(received).toMatchObject({ direction: 'receivable', status: 'paid', amountCents: 150_000 });
+  const detail = await (await page.request.get(`/api/titles/${received.id}`)).json();
+  expect(detail.mirror).toMatchObject({ caixaId: customerOther.id });
 });
 
 test('fechar a fatura do cartão e pagar', async ({ page }) => {
