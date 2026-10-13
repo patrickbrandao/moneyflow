@@ -6,7 +6,7 @@ autor: triage
 responsavel: app
 prioridade: media
 criada: 2026-10-13
-commit:
+commit: 160d538
 ---
 
 # Gravar e mostrar o uso de IA por finalidade (depois da 001)

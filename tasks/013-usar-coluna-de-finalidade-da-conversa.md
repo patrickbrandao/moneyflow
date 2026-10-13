@@ -6,7 +6,7 @@ autor: triage
 responsavel: app
 prioridade: baixa
 criada: 2026-10-13
-commit:
+commit: 1ee173c
 ---
 
 # Usar `ai_conversations.purpose` em vez de `screen_context.purpose` (depois da 003)

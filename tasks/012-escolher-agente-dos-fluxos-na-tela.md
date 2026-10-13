@@ -6,7 +6,7 @@ autor: triage
 responsavel: app
 prioridade: media
 criada: 2026-10-13
-commit:
+commit: 7708396
 ---
 
 # Escolher o agente dos fluxos em /admin/ai e remover `AI_FLOW_AGENT` (depois da 002)
