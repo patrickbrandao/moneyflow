@@ -1,3 +1,4 @@
+import { normalizeDocument } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
 import { embeddingCredentials, embedQuery, vectorLiteral } from './embeddings';
@@ -5,7 +6,9 @@ import { embeddingCredentials, embedQuery, vectorLiteral } from './embeddings';
 /*
  * Busca por significado da tool semantic_search: com provedor de embeddings,
  * ai_embeddings_search (sempre só com as caixas que o usuário lê, e cada
- * objeto é revalidado); sem ele, semelhança de texto (pg_trgm).
+ * objeto é revalidado); sem ele, semelhança de texto (pg_trgm) e, nas
+ * entidades, o prefixo do documento (CPF/CNPJ, inclusive alfanumérico), que
+ * vale pontuação 1 para não ficar abaixo dos trigramas.
  */
 
 export type SearchType = 'entity' | 'title' | 'card_purchase' | 'statement_line';
@@ -45,12 +48,19 @@ export async function semanticSearch(ctx: ServiceContext, query: string, types: 
   }
 
   const caixaList = uuidArray(caixaIds);
+  // Prefixo do documento, como na listagem de entidades (entities_document_prefix_idx); só com algum dígito,
+  // para uma palavra comum não casar com o início de um CNPJ alfanumérico.
+  const doc = normalizeDocument(query);
+  const docPrefix = doc.length >= 3 && /[0-9]/.test(doc) ? `${doc}%` : null;
   const parts = [];
   if (wanted.includes('entity'))
     parts.push(sql`SELECT 'entity' AS type, e.id, NULL::uuid AS caixa_id, concat_ws(' · ', e.name, e.trade_name, e.document) AS text,
-                          greatest(similarity(e.name, ${query}), similarity(coalesce(e.trade_name, ''), ${query})) AS score
+                          ${docPrefix ? sql`CASE WHEN e.document LIKE ${docPrefix} THEN 1 ELSE ` : sql``}
+                          greatest(similarity(e.name, ${query}), similarity(coalesce(e.trade_name, ''), ${query}))
+                          ${docPrefix ? sql`END` : sql``} AS score
                      FROM entities e WHERE e.archived_at IS NULL AND (e.name % ${query} OR e.name ILIKE ${`%${query}%`}
-                       OR e.trade_name ILIKE ${`%${query}%`})`);
+                       OR e.trade_name ILIKE ${`%${query}%`}
+                       ${docPrefix ? sql`OR e.document LIKE ${docPrefix}` : sql``})`);
   if (wanted.includes('title'))
     parts.push(sql`SELECT 'title', t.id, t.caixa_id, concat_ws(' · ', t.description, t.due_date::text, (t.amount_cents / 100.0)::text),
                           similarity(t.description, ${query})

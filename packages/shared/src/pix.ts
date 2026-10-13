@@ -1,4 +1,4 @@
-import { isValidCnpj, isValidCpf, normalizeDocument } from './documents';
+import { formatDocument, isValidCnpj, isValidCpf, normalizeDocument } from './documents';
 
 export const PIX_KEY_TYPES = ['cpf', 'cnpj', 'email', 'phone', 'evp'] as const;
 export type PixKeyType = (typeof PIX_KEY_TYPES)[number];
@@ -61,8 +61,10 @@ export function guessPixKeyType(raw: string): PixKeyType | null {
   return null;
 }
 
-/** Exibição amigável da chave normalizada. */
+/** Exibição amigável da chave normalizada (CPF/CNPJ como o documento, inclusive o CNPJ alfanumérico). */
 export function formatPixKey(type: PixKeyType, value: string): string {
+  if (type === 'cpf' && isValidCpf(value)) return formatDocument(value);
+  if (type === 'cnpj' && isValidCnpj(value)) return formatDocument(value);
   if (type === 'phone' && PHONE.test(value)) {
     const ddd = value.slice(3, 5);
     const num = value.slice(5);

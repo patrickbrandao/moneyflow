@@ -39,6 +39,13 @@ describe('BR Code', () => {
       txid: null,
     });
   });
+  it('monta e relê com chave CNPJ alfanumérica', () => {
+    const code = buildBrCode({ pixKey: '12ABC34501DE35', merchantName: 'Alfa Exemplo', merchantCity: 'Sao Paulo', amountCents: 2500 });
+    expect(parseBrCode(code)).toMatchObject({ ok: true, pixKey: '12ABC34501DE35', pixKeyType: 'cnpj', amountCents: 2500 });
+    // A chave pode vir pontuada e em minúsculas: normaliza como o banco grava.
+    const loose = buildBrCode({ pixKey: '12.abc.345/01de-35', merchantName: 'Alfa Exemplo', merchantCity: 'Sao Paulo' });
+    expect(parseBrCode(loose)).toMatchObject({ ok: true, pixKey: '12ABC34501DE35', pixKeyType: 'cnpj' });
+  });
   it('normaliza telefone e reconhece o dinâmico', () => {
     expect(parseBrCode(buildBrCode({ pixKey: '+5511987654321', merchantName: 'A', merchantCity: 'B', amountCents: 100 }))).toMatchObject({
       pixKey: '+5511987654321',

@@ -7,7 +7,7 @@ import {
   decodeStatementFile,
   detectDelimiter,
   type MatchCandidate,
-  normalizeDescription,
+  normalizeDescriptionForDedup,
   parseCsv,
   parseOfx,
   pickMatch,
@@ -170,12 +170,15 @@ export async function parseStatementFile(db: Executor, target: StatementTarget, 
   };
 }
 
-/** Chave de deduplicação (docs/016): `fitid:<FITID>` ou SHA-256 de data|valor|descrição normalizada|ordem. */
+/**
+ * Chave de deduplicação (docs/016): `fitid:<FITID>` ou SHA-256 de data|valor|descrição normalizada|ordem.
+ * A normalização do dedup é congelada (normalizeDescriptionForDedup): o hash das linhas já importadas não muda.
+ */
 export function dedupHashes(lines: Pick<ParsedLine, 'postedOn' | 'amountCents' | 'description' | 'fitid'>[]): string[] {
   const seen = new Map<string, number>();
   return lines.map((line) => {
     if (line.fitid) return `fitid:${line.fitid}`.slice(0, 200);
-    const base = `${line.postedOn}|${line.amountCents}|${normalizeDescription(line.description)}`;
+    const base = `${line.postedOn}|${line.amountCents}|${normalizeDescriptionForDedup(line.description)}`;
     const ordinal = seen.get(base) ?? 0;
     seen.set(base, ordinal + 1);
     return createHash('sha256').update(`${base}|${ordinal}`).digest('hex');

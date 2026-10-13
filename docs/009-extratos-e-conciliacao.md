@@ -1,6 +1,6 @@
 # 009 — Extratos e conciliação
 
-- Import OFX e CSV (com mapeamento de colunas salvo por conta); o arquivo original é guardado como anexo. Dedup por FITID ou hash.
+- Import OFX e CSV (com mapeamento de colunas salvo por conta); o arquivo original é guardado como anexo. Dedup por FITID ou hash (data, valor, descrição normalizada e ordem). A normalização do hash (`normalizeDescriptionForDedup`) é congelada: mudar a do casamento e das regras (`normalizeDescription`, que também descarta o CNPJ alfanumérico; [003](003-entidades.md)) não muda o hash das linhas já importadas, e o reimport não duplica.
 - Upload do arquivo cru (até 20 MB); OFX 1.x (SGML) e 2.x (XML), CSV com separador, codificação, formato de data e valor pt-BR configuráveis. Na fatura de cartão em CSV com compras positivas, o sinal é invertido (no app, compra sai).
 - Casamento assistido: cada linha procura um movimento ou título em aberto (valor, data ±3 dias, entidade/descrição) e fica `conciliada`, `sugerida` (confirmação em lote) ou `nova` (vira baixa de um título ou movimento avulso).
 - A tela compara o saldo do banco com o do app e aponta a divergência.

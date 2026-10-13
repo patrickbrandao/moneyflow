@@ -97,7 +97,7 @@ function NfeInfo({ id }: { id: string }) {
             <dd className="mono">{formatBRL(nfe.totalCents)}</dd>
             <dt>{t.entry.nfeKey}</dt>
             <dd className="flex items-center gap-1">
-              <span className="code-line">{nfe.accessKey.replace(/(\d{4})(?=\d)/g, '$1 ')}</span>
+              <span className="code-line">{nfe.accessKey.replace(/(.{4})(?=.)/g, '$1 ')}</span>
               <CopyButton text={nfe.accessKey} />
             </dd>
           </dl>

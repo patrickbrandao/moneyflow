@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { formatCnpj } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { strFromU8, unzipSync } from 'fflate';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { client, freshDatabase, type Harness, login, scenario, startApp, uid, userSession } from './helpers';
+import { alphaCnpj, client, freshDatabase, type Harness, login, scenario, startApp, uid, userSession } from './helpers';
 
 /*
  * Backup e restauração (spec 019): exportação com segredos, importação com
@@ -296,6 +297,26 @@ describe('backup: recursos num sistema novo', () => {
     expect(sum(report, 'entities').imported).toBe(1);
     const kept = await client(b, adminB.cookie).get(`/api/entities/${withDoc.id}`);
     expect(kept.name).toBe(`Com CNPJ ${s.tag}`);
+  });
+
+  it('entidade casa pelo CNPJ alfanumérico (cadastrado em minúsculas e pontuado nos dois sistemas)', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const a = client(h, adminA.cookie);
+    const cnpj = alphaCnpj();
+    const typed = formatCnpj(cnpj).toLowerCase();
+    const source = await a.post('/api/entities', { kind: 'company', name: `Alfa no A ${uid()}`, document: typed });
+    const target = await client(b, adminB.cookie).post('/api/entities', { kind: 'company', name: `Alfa no B ${uid()}`, document: typed });
+    expect(source.id).not.toBe(target.id);
+
+    const entities = await exportJson(h, adminA.cookie, 'entities');
+    const row = entities.tables.entities.find((e: any) => e.id === source.id);
+    expect(row.document).toBe(cnpj);
+    const report = await importFile(b, adminB.cookie, 'entities', { ...entities, tables: { entities: [row] } });
+    expect(issuesOf(report, 'entities').find((i) => i.id === source.id)?.reason).toMatch(/mesmo documento/);
+    expect(sum(report, 'entities').imported).toBe(0);
+    expect((await client(b, adminB.cookie).get(`/api/entities/${target.id}`)).name).toBe(target.name);
+    await client(b, adminB.cookie).get(`/api/entities/${source.id}`, 404);
   });
 
   it('entidades levam favorita, tags (arquivada inclusive, arquivada depois das ligações) e casam a tag pelo nome', async () => {

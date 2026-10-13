@@ -3,6 +3,7 @@
  * dias e semelhança de descrição/entidade. Puro, sem acesso ao banco.
  */
 import { diffDays } from './dates';
+import { isValidCnpj, normalizeDocument } from './documents';
 
 export type MatchLine = { postedOn: string; amountCents: number; description: string };
 
@@ -20,11 +21,36 @@ export type MatchResult = { candidate: MatchCandidate; score: number; status: 'm
 
 export const MATCH_MAX_DAYS = 3;
 
-/** Minúsculas, sem acentos e pontuação, sem números longos (≥ 4 dígitos) nem datas dd/mm, espaços colapsados. */
+/**
+ * CNPJ (numérico ou alfanumérico), com ou sem pontuação, como token isolado:
+ * 12.ABC.345/01DE-35, 12abc34501de35, 12.345.678/0001-95.
+ */
+const CNPJ_TOKEN = /(?<![0-9A-Za-z])[0-9A-Za-z]{2}\.?[0-9A-Za-z]{3}\.?[0-9A-Za-z]{3}\/?[0-9A-Za-z]{4}-?[0-9]{2}(?![0-9A-Za-z])/g;
+
+/**
+ * Minúsculas, sem acentos e pontuação, sem CNPJ (numérico ou alfanumérico, com
+ * DV válido), números longos (≥ 4 dígitos) nem datas dd/mm, espaços colapsados.
+ * Usada no casamento e nas regras de classificação; o dedup das linhas usa
+ * normalizeDescriptionForDedup, que não pode mudar.
+ */
 export function normalizeDescription(text: string): string {
+  const withoutCnpj = text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(CNPJ_TOKEN, (token) => (isValidCnpj(normalizeDocument(token)) ? ' ' : token));
+  return normalizeDescriptionForDedup(withoutCnpj);
+}
+
+/**
+ * Normalização CONGELADA do dedup_hash das linhas sem FITID (spec 009): mudar
+ * esta função muda o hash das linhas já importadas e o reimport duplicaria.
+ * Minúsculas, sem acentos e pontuação, sem números longos (≥ 4 dígitos) nem
+ * datas dd/mm, espaços colapsados.
+ */
+export function normalizeDescriptionForDedup(text: string): string {
   return text
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/\b\d{1,2}[/.-]\d{1,2}([/.-]\d{2,4})?\b/g, ' ')
     .replace(/[^a-z0-9\s]/g, ' ')

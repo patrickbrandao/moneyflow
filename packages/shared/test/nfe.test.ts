@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isValidNfeAccessKey, parseNfeXml } from '../src/parsers/nfe';
+import { isValidNfeAccessKey, nfeAccessKeyDv, normalizeNfeAccessKey, parseNfeXml } from '../src/parsers/nfe';
 import { fixtureText } from './fixtures';
 
 // Conferida com is_valid_nfe_access_key do banco.
@@ -93,5 +93,41 @@ describe('NF-e', () => {
     expect(() => parseNfeXml(bad)).toThrow(/Chave de acesso/);
     expect(() => parseNfeXml('<OFX><a>1</a></OFX>')).toThrow(/não é uma NF-e/);
     expect(() => parseNfeXml('texto')).toThrow(/XML/);
+  });
+});
+
+// NT 2025.001: o CNPJ do emitente (posições 7–20) pode ser alfanumérico; DV com ASCII − 48.
+const ALFA_KEY = '35261012ABC34501DE35550010000123461876543224';
+
+describe('NF-e com CNPJ alfanumérico', () => {
+  it('valida a chave como is_valid_nfe_access_key (0036)', () => {
+    expect(nfeAccessKeyDv(ALFA_KEY.slice(0, 43))).toBe(4);
+    expect(isValidNfeAccessKey(ALFA_KEY)).toBe(true);
+    expect(isValidNfeAccessKey(`${ALFA_KEY.slice(0, 43)}0`)).toBe(false);
+    // Já normalizada: minúsculas não passam; normalizar resolve.
+    expect(isValidNfeAccessKey(ALFA_KEY.toLowerCase())).toBe(false);
+    expect(isValidNfeAccessKey(normalizeNfeAccessKey(` ${ALFA_KEY.toLowerCase()} `))).toBe(true);
+    // Letras só nas posições 7–20.
+    const letterOutside = `A${ALFA_KEY.slice(1, 43)}`;
+    expect(isValidNfeAccessKey(`${letterOutside}${nfeAccessKeyDv(letterOutside)}`)).toBe(false);
+    const letterInDv = `${ALFA_KEY.slice(0, 43)}A`;
+    expect(isValidNfeAccessKey(letterInDv)).toBe(false);
+  });
+  it('lê emitente, destinatário e chave alfanuméricos', () => {
+    const nfe = parseNfeXml(fixtureText('nfe-cnpj-alfanumerico.xml'));
+    expect(nfe).toMatchObject({
+      accessKey: ALFA_KEY,
+      number: 12346,
+      totalCents: 25000,
+      issuer: { document: '12ABC34501DE35', name: 'Alfa Exemplo Comércio Ltda' },
+      recipient: { document: 'A1B2C3D4000193' },
+      paymentDueDate: '2026-11-06',
+    });
+  });
+  it('aceita o Id e o chNFe em minúsculas', () => {
+    const xml = fixtureText('nfe-cnpj-alfanumerico.xml').replaceAll(ALFA_KEY, ALFA_KEY.toLowerCase());
+    expect(parseNfeXml(xml).accessKey).toBe(ALFA_KEY);
+    const noId = fixtureText('nfe-cnpj-alfanumerico.xml').replace(/Id="NFe[0-9A-Z]+"/, '');
+    expect(parseNfeXml(noId).accessKey).toBe(ALFA_KEY);
   });
 });
