@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-10-13
-commit:
+commit: f1cd765
 ---
 
 # Agente estorna a baixa de um casamento errado (`reverse_settlement`)
