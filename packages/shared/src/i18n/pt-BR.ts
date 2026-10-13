@@ -165,6 +165,10 @@ export const ptBR = {
     reversalBeforeSettlement: 'O estorno não pode ser antes da data da baixa.',
     transferFromSettlement: 'Esta transferência nasceu de uma baixa: estorne a baixa.',
     seriesHasSettlements: 'Há ocorrências seguintes com baixa; estorne-as antes.',
+    seriesEndInstallments: 'Parcelamento não tem data de fim: exclua as parcelas seguintes.',
+    seriesEndBeforeStart: 'A série não pode terminar antes do início.',
+    seriesEndBlocked: (list: string) =>
+      `Há ocorrências com baixa depois dessa data (${list}); estorne-as ou escolha uma data a partir do vencimento delas.`,
     caixaKindF1: 'Caixas de cartão chegam na fase 2.',
     holderArchived: 'O titular está arquivado.',
     inactiveUser: 'Usuário desativado.',
@@ -340,6 +344,20 @@ export const ptBR = {
     endsOn: 'Termina em',
     scopeThis: 'Só este',
     scopeFollowing: 'Este e os próximos',
+    endSeries: 'Encerrar série…',
+    endSeriesTitle: 'Encerrar ou estender a série',
+    endSeriesHint:
+      'As ocorrências que vencem até a data continuam valendo; as seguintes em aberto ficam canceladas (com o espelho), sem sumir do histórico. Para estender, escolha uma data mais adiante ou deixe sem fim.',
+    endSeriesKeepUntil: 'Manter até (último vencimento)',
+    endSeriesNoEnd: 'Sem data de fim',
+    endSeriesApply: 'Aplicar',
+    endSeriesNothing: 'Nenhuma ocorrência muda.',
+    endSeriesCancelCount: (n: number) => (n === 1 ? '1 ocorrência será cancelada' : `${n} ocorrências serão canceladas`),
+    endSeriesReopenCount: (n: number) => (n === 1 ? '1 ocorrência cancelada volta a valer' : `${n} ocorrências canceladas voltam a valer`),
+    endSeriesBlocked: 'Com baixa depois da data (estorne antes ou escolha outra data):',
+    endSeriesDone: (canceled: number, reopened: number) =>
+      [canceled ? `${canceled} cancelada(s)` : '', reopened ? `${reopened} reaberta(s)` : ''].filter(Boolean).join(', ') ||
+      'Série atualizada.',
     occurrenceOf: (n: number, total?: number | null) => (total ? `${n}/${total}` : `#${n}`),
     settle: 'Baixar',
     receive: 'Receber',

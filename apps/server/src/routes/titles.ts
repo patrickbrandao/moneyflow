@@ -1,6 +1,8 @@
 import {
   mirrorAcceptInput,
   mirrorDisputeInput,
+  seriesEndInput,
+  seriesEndQuery,
   settlementAccountInput,
   settlementCreateInput,
   settlementReverseInput,
@@ -29,6 +31,8 @@ export async function titleRoutes(app: FastifyInstance) {
   app.post('/api/titles/:id/restore', (r: Req) => titles.restoreTitle(r.ctx, id(r)));
   app.post('/api/titles/:id/cancel', (r: Req) => titles.cancelTitle(r.ctx, id(r)));
   app.post('/api/titles/:id/reopen', (r: Req) => titles.reopenTitle(r.ctx, id(r)));
+  app.get('/api/titles/:id/series/end', (r: Req) => titles.previewSeriesEnd(r.ctx, id(r), parse(seriesEndQuery, r.query).endsOn ?? null));
+  app.post('/api/titles/:id/series/end', (r: Req) => titles.endSeries(r.ctx, id(r), parse(seriesEndInput, r.body).endsOn));
   app.post('/api/titles/:id/mirror/accept', (r: Req) => titles.acceptMirror(r.ctx, id(r), parse(mirrorAcceptInput, r.body)));
   app.post('/api/titles/:id/mirror/dispute', (r: Req) => titles.disputeMirror(r.ctx, id(r), parse(mirrorDisputeInput, r.body)));
 

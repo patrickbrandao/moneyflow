@@ -2,6 +2,7 @@ import { contractLink, formatBRL, formatDate, formatDateTime, type TitleDetail, 
 import {
   Ban,
   CalendarDays,
+  CalendarX,
   Check,
   CircleDollarSign,
   CreditCard,
@@ -29,6 +30,7 @@ import { CategoryLabel, LoadError, MirrorBadge, Money, TitleStatusBadge } from '
 import { TitleEntryInfo } from '../entry/TitleEntryInfo';
 import { CategorySelect, ModalActions } from '../forms';
 import { Badge, Button, Field, Modal, Skel, useConfirm } from '../ui';
+import { SeriesEndModal } from './SeriesEndModal';
 import { ReverseModal, SetAccountModal, SettlementModal } from './SettlementModal';
 import { TitleFormModal } from './TitleFormModal';
 
@@ -43,6 +45,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
     | { kind: 'settle' }
     | { kind: 'edit' }
     | { kind: 'accept' }
+    | { kind: 'seriesEnd' }
     | { kind: 'dispute' }
     | { kind: 'reverse'; id: string; hasTransfer: boolean }
     | { kind: 'account'; id: string }
@@ -81,6 +84,8 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
   const awaiting = title?.mirrorStatus === 'pending' || title?.mirrorStatus === 'disputed';
   /** Título de fatura de cartão: valor, vencimento, cancelamento e exclusão mudam pela fatura. */
   const isInvoice = Boolean(title?.cardInvoiceId);
+  /** Recorrência (não parcelamento): pode ser encerrada ou estendida numa data. */
+  const canEndSeries = Boolean(title?.canWrite && title.rule && title.rule.installmentsTotal === null);
 
   async function cancel() {
     if (!title) return;
@@ -148,6 +153,17 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                 },
               ]
             : []),
+          ...(canEndSeries
+            ? [
+                {
+                  id: 't-series-end',
+                  label: `${t.title.endSeries} ${title.description}`,
+                  group: 'Recurso' as const,
+                  icon: <CalendarX />,
+                  run: () => setModal({ kind: 'seriesEnd' }),
+                },
+              ]
+            : []),
           {
             id: 't-history',
             label: t.audit.titleHistory,
@@ -187,7 +203,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
             : []),
         ]
       : [],
-    [title, canSettle, awaiting, navigate],
+    [title, canSettle, canEndSeries, awaiting, navigate],
   );
 
   return (
@@ -315,7 +331,12 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                       {t.title.frequencies[title.rule.frequency]}
                       {title.rule.intervalCount > 1 ? ` (a cada ${title.rule.intervalCount})` : ''}
                       {title.rule.installmentsTotal ? ` · ${title.rule.installmentsTotal} parcelas` : ''}
-                      {title.rule.endsOn ? ` · até ${formatDate(title.rule.endsOn)}` : ''}
+                      {title.rule.endsOn ? ` · ${t.title.endsOn.toLowerCase()} ${formatDate(title.rule.endsOn)}` : ''}
+                      {canEndSeries && (
+                        <Button size="sm" variant="quiet" className="ml-2" onClick={() => setModal({ kind: 'seriesEnd' })}>
+                          <CalendarX /> {t.title.endSeries}
+                        </Button>
+                      )}
                     </dd>
                   </>
                 )}
@@ -464,6 +485,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
       {title && modal?.kind === 'edit' && (
         <TitleFormModal caixaId={title.caixaId} direction={title.direction} title={title} onClose={() => setModal(null)} onSaved={saved} />
       )}
+      {title && modal?.kind === 'seriesEnd' && <SeriesEndModal title={title} onClose={() => setModal(null)} onSaved={saved} />}
       {title && modal?.kind === 'reverse' && (
         <ReverseModal settlementId={modal.id} hasTransfer={modal.hasTransfer} onClose={() => setModal(null)} onSaved={saved} />
       )}

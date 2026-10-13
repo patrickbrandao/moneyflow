@@ -3,12 +3,16 @@ import {
   addDays,
   type DeleteResult,
   dayOfMonth,
+  formatDate,
   isoWeekday,
   type MirrorStatus,
   type mirrorAcceptInput,
   type mirrorDisputeInput,
   parseBoleto,
   type RecurrenceRuleDto,
+  type SeriesEndPreview,
+  type SeriesEndResult,
+  type SeriesOccurrence,
   type SettlementRow,
   t as strings,
   type TitleDetail,
@@ -25,7 +29,7 @@ import type { ServiceContext } from '../context';
 import { notFound, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
 import { clearStatementSuggestions } from './reconciliation-guards';
-import { materializeRule } from './recurrence';
+import { MATERIALIZE_LOCK, materializeRule } from './recurrence';
 import { insertTitlePair, type MirrorPlan, opposite } from './title-pair';
 import { deleteOrArchive, withTx } from './tx';
 import { camel } from './util';
@@ -471,6 +475,102 @@ export async function restoreTitle(ctx: ServiceContext, id: string): Promise<Tit
   const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
   await withTx(ctx, (tx) => tx.update(titles).set({ archivedAt: null }).where(inArray(titles.id, pair)));
   return getTitle(ctx, id);
+}
+
+/* ---------------- encerrar série ---------------- */
+
+/**
+ * Plano de "Encerrar série em <data>" (spec 005). Lê o par de cada ocorrência
+ * (original e espelho dividem a regra). Com a nova data, as ocorrências que
+ * vencem depois dela e estão em aberto passam a canceladas; as com baixa
+ * bloqueiam. Ao estender (data mais adiante ou sem fim), as canceladas depois
+ * do fim anterior voltam a valer. O vencimento de referência é o do lado original.
+ */
+async function seriesEndPlan(ctx: ServiceContext, tx: Executor, titleId: string, endsOn: string | null, lock: boolean) {
+  const title = await loadTitle(tx, titleId);
+  ctx.access.assertRead(title.caixaId);
+  if (!title.recurrenceRuleId) throw unprocessable(strings.errors.validation);
+  const ruleId = title.recurrenceRuleId;
+  if (lock) {
+    // Mesma chave do worker: nada materializa a série enquanto ela muda.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${ruleId}))`);
+  }
+  const ruleQuery = tx.select().from(recurrenceRules).where(eq(recurrenceRules.id, ruleId));
+  const [rule] = lock ? await ruleQuery.for('update') : await ruleQuery;
+  if (!rule) throw notFound();
+  if (rule.installmentsTotal !== null) throw unprocessable(strings.errors.seriesEndInstallments);
+  if (endsOn !== null && endsOn < rule.startsOn) throw unprocessable(strings.errors.seriesEndBeforeStart);
+
+  const query = tx.select().from(titles).where(eq(titles.recurrenceRuleId, ruleId)).orderBy(titles.occurrence);
+  const rows = lock ? await query.for('update') : await query;
+  const originals = rows.filter((r) => r.mirrorStatus === null && r.occurrence !== null);
+  const original = originals[0];
+  if (!original) throw notFound();
+  // A série é do lado original: encerrar pede escrita na caixa dele.
+  ctx.access.assertWrite(original.caixaId);
+
+  const mirrorOf = new Map(rows.filter((r) => r.mirrorTitleId).map((r) => [r.id, r.mirrorTitleId!]));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const asOccurrence = (r: typeof titles.$inferSelect): SeriesOccurrence => ({
+    id: r.id,
+    occurrence: r.occurrence!,
+    dueDate: r.dueDate,
+    amountCents: r.amountCents,
+    status: r.status as TitleStatus,
+  });
+  const preview: SeriesEndPreview = { ruleId, currentEndsOn: rule.endsOn, endsOn, toCancel: [], toReopen: [], blocked: [] };
+  const cancelIds: string[] = [];
+  const reopenIds: string[] = [];
+  for (const o of originals) {
+    const mirror = mirrorOf.has(o.id) ? byId.get(mirrorOf.get(o.id)!) : undefined;
+    const pair = [o, ...(mirror ? [mirror] : [])];
+    const after = endsOn !== null && o.dueDate > endsOn;
+    if (after) {
+      if (pair.some((p) => p.status === 'partial' || p.status === 'paid')) preview.blocked.push(asOccurrence(o));
+      else if (o.status === 'open') {
+        preview.toCancel.push(asOccurrence(o));
+        cancelIds.push(...pair.filter((p) => p.status === 'open').map((p) => p.id));
+      }
+    } else if (o.status === 'canceled' && rule.endsOn !== null && o.dueDate > rule.endsOn) {
+      preview.toReopen.push(asOccurrence(o));
+      reopenIds.push(...pair.filter((p) => p.status === 'canceled').map((p) => p.id));
+    }
+  }
+  return { preview, cancelIds, reopenIds };
+}
+
+export async function previewSeriesEnd(ctx: ServiceContext, titleId: string, endsOn: string | null): Promise<SeriesEndPreview> {
+  return (await seriesEndPlan(ctx, ctx.db, titleId, endsOn, false)).preview;
+}
+
+/**
+ * Encerra (ou estende) a série numa data: ajusta o "Termina em" da regra,
+ * cancela as ocorrências seguintes em aberto (sem apagar: auditoria e
+ * histórico ficam) e reabre as que um encerramento anterior cancelou quando
+ * a série é estendida. As canceladas continuam ocupando a vaga, então o
+ * worker não as recria; ao estender, materializa até o horizonte.
+ */
+export async function endSeries(ctx: ServiceContext, titleId: string, endsOn: string | null): Promise<SeriesEndResult> {
+  const { preview, created } = await withTx(ctx, async (tx) => {
+    const plan = await seriesEndPlan(ctx, tx, titleId, endsOn, true);
+    if (plan.preview.blocked.length > 0) {
+      const list = plan.preview.blocked.map((o) => `#${o.occurrence} ${formatDate(o.dueDate)}`).join(', ');
+      throw unprocessable(strings.errors.seriesEndBlocked(list), 'series_end_blocked');
+    }
+    await tx.update(recurrenceRules).set({ endsOn }).where(eq(recurrenceRules.id, plan.preview.ruleId));
+    if (plan.cancelIds.length > 0) {
+      await clearStatementSuggestions(tx, { titleIds: plan.cancelIds });
+      await tx.update(titles).set({ status: 'canceled' }).where(inArray(titles.id, plan.cancelIds));
+    }
+    if (plan.reopenIds.length > 0) {
+      await tx
+        .update(titles)
+        .set({ status: 'open' })
+        .where(and(inArray(titles.id, plan.reopenIds), eq(titles.status, 'canceled')));
+    }
+    return { preview: plan.preview, created: await materializeRule(tx, plan.preview.ruleId) };
+  });
+  return { ...preview, created, title: await getTitle(ctx, titleId) };
 }
 
 async function endSeriesFrom(tx: Tx, ruleId: string, occurrence: number, dueDate: string) {

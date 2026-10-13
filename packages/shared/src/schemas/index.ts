@@ -376,6 +376,14 @@ export const titleListQuery = z.object({
 });
 
 export const titleDeleteQuery = z.object({ scope: z.enum(SCOPES).default('this') });
+/**
+ * Encerrar (ou estender) uma série recorrente: novo "Termina em". Ocorrências
+ * em aberto que vencem depois são canceladas; null = sem fim (reabre as que o
+ * encerramento anterior cancelou).
+ */
+export const seriesEndInput = z.object({ endsOn: isoDate.nullable() });
+/** Prévia do encerramento: endsOn omitido = sem fim. */
+export const seriesEndQuery = z.object({ endsOn: isoDate.optional() });
 export const mirrorAcceptInput = z.object({ categoryId: id.optional() });
 export const mirrorDisputeInput = z.object({ reason: optionalText(500) });
 
@@ -449,6 +457,7 @@ export type SeriesInput = z.input<typeof seriesInput>;
 export type TitleCreateInput = z.input<typeof titleCreateInput>;
 export type TitleUpdateInput = z.input<typeof titleUpdateInput>;
 export type TitleListQuery = z.input<typeof titleListQuery>;
+export type SeriesEndInput = z.input<typeof seriesEndInput>;
 export type SettlementCreateInput = z.input<typeof settlementCreateInput>;
 export type SettlementReverseInput = z.input<typeof settlementReverseInput>;
 export type TransferCreateInput = z.input<typeof transferCreateInput>;
