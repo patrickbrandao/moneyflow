@@ -877,4 +877,42 @@ describe('IA nos fluxos', () => {
       await stop();
     }
   });
+
+  it('a finalidade da conversa do fluxo fica na coluna: mandar mensagem com screenContext não a põe na lista (tarefa 013)', async () => {
+    const stop = startAgentWorker(h.db, h.config, log, { pollMs: 100, maintenanceMs: 3_600_000 });
+    let conversationId: string;
+    try {
+      const res = await h.app.inject({
+        method: 'POST',
+        url: '/api/title-entry/document?fileName=nota.pdf',
+        payload: Buffer.from('%PDF-1.4\n% nota\n'),
+        headers: { cookie: adminSession.cookie, 'content-type': 'application/pdf' },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      conversationId = res.json().conversationId;
+    } finally {
+      await stop();
+    }
+    const row = async () =>
+      (
+        await h.db.execute<{ purpose: string; screen_context: Record<string, unknown> }>(
+          sql`SELECT purpose, screen_context FROM ai_conversations WHERE id = ${conversationId}`,
+        )
+      ).rows[0]!;
+    expect(await row()).toMatchObject({ purpose: 'document_reading', screen_context: { fileName: 'nota.pdf' } });
+    expect((await row()).screen_context).not.toHaveProperty('purpose');
+
+    // Substituir o screen_context (como o console faz a cada mensagem) não apaga a finalidade.
+    const sent = await admin.post(`/api/conversations/${conversationId}/messages`, {
+      text: 'e agora?',
+      screenContext: { route: '/titulos', title: 'Títulos' },
+    });
+    await admin.post(`/api/runs/${sent.run.id}/cancel`);
+    expect(await row()).toMatchObject({ purpose: 'document_reading', screen_context: { route: '/titulos' } });
+    for (const archived of ['0', '1']) {
+      expect((await admin.get(`/api/conversations?archived=${archived}`)).map((c: any) => c.id)).not.toContain(conversationId);
+    }
+    // A finalidade é imutável no banco.
+    await expect(h.db.execute(sql`UPDATE ai_conversations SET purpose = 'chat' WHERE id = ${conversationId}`)).rejects.toThrow();
+  });
 });

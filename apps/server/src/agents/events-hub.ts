@@ -116,7 +116,7 @@ export class RunEventsHub {
       title: string | null;
       purpose: string | null;
     }>(sql`
-      SELECT e.event_type, e.payload, r.user_id, r.conversation_id, c.title, c.screen_context ->> 'purpose' AS purpose
+      SELECT e.event_type, e.payload, r.user_id, r.conversation_id, c.title, c.purpose
         FROM ai_run_events e JOIN ai_runs r ON r.id = e.run_id JOIN ai_conversations c ON c.id = r.conversation_id
        WHERE e.run_id = ${runId} AND e.seq = ${seq}`);
     const row = result.rows[0];

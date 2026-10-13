@@ -63,7 +63,13 @@ type AgentRow = {
   require_write_confirmation: boolean;
 };
 
-type ConversationRow = { id: string; title: string | null; title_source: 'auto' | 'user'; screen_context: Record<string, unknown> | null };
+type ConversationRow = {
+  id: string;
+  title: string | null;
+  title_source: 'auto' | 'user';
+  screen_context: Record<string, unknown> | null;
+  purpose: string;
+};
 
 /** Prompt de sistema: estável (cacheável) e volátil (data, usuário, tela). */
 export function buildSystemPrompt(
@@ -76,9 +82,8 @@ export function buildSystemPrompt(
     .filter(Boolean)
     .join('\n\n');
   const volatile = [t.agents.systemPrompt.today(formatDate(todayIso()), actor.username)];
-  const visible = screen ? Object.fromEntries(Object.entries(screen).filter(([key]) => key !== 'purpose')) : null;
-  if (visible && Object.keys(visible).length > 0 && !purpose) {
-    volatile.push(`${t.agents.systemPrompt.screen}\n${JSON.stringify(visible as ScreenContext)}`);
+  if (screen && Object.keys(screen).length > 0 && !purpose) {
+    volatile.push(`${t.agents.systemPrompt.screen}\n${JSON.stringify(screen as ScreenContext)}`);
   }
   return { stable, volatile: volatile.join('\n') };
 }
@@ -116,9 +121,7 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
   try {
     const loaded = await loadContext(db, claimed);
     const { agent, conversation, actor } = loaded;
-    const purpose = FLOW_PURPOSES.includes(conversation.screen_context?.purpose as FlowPurpose)
-      ? (conversation.screen_context!.purpose as FlowPurpose)
-      : null;
+    const purpose = FLOW_PURPOSES.includes(conversation.purpose as FlowPurpose) ? (conversation.purpose as FlowPurpose) : null;
     const access = await loadAccess(db, actor);
     const ctx: ServiceContext = { db, config: deps.config, access, actorKind: 'agent', agentRunId: runId };
 
@@ -263,7 +266,7 @@ async function loadContext(db: Database, run: RunRow) {
   const agentResult = await db.execute<AgentRow>(sql`
     SELECT id, name, system_prompt, params, enabled_tools, require_write_confirmation FROM ai_agents WHERE id = ${run.agent_id}`);
   const conversationResult = await db.execute<ConversationRow>(
-    sql`SELECT id, title, title_source, screen_context FROM ai_conversations WHERE id = ${run.conversation_id}`,
+    sql`SELECT id, title, title_source, screen_context, purpose FROM ai_conversations WHERE id = ${run.conversation_id}`,
   );
   const [user] = await db.select(userColumns).from(users).where(eq(users.id, run.user_id));
   if (!user?.isActive) throw new Error('usuário da execução inativo');

@@ -7,7 +7,7 @@ import { suggestClassifications } from '../services/reconciliation';
  * (title-entry/document) e sugestões de classificação das linhas de extrato
  * sem regra. Cada uso é uma execução de agente normal (credenciais pelo banco,
  * uso e custo em ai_usage, auditoria como agente), numa conversa arquivada
- * marcada em screen_context.purpose; o agente responde JSON e não usa tools.
+ * marcada em ai_conversations.purpose; o agente responde JSON e não usa tools.
  */
 
 export const FLOW_PURPOSES = ['document_reading', 'classify_lines', 'contract_reading', 'contract_markdown'] as const;

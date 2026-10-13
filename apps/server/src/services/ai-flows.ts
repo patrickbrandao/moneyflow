@@ -21,7 +21,7 @@ import { withTx } from './tx';
 
 /*
  * IA nos fluxos (specs 009, 010, 011): cada uso abre uma conversa arquivada
- * (marcada em screen_context.purpose, fora da lista de conversas) com o
+ * (marcada em ai_conversations.purpose, fora da lista de conversas) com o
  * "agente dos fluxos" — o de AI_FLOW_AGENT ou o primeiro ativo — e enfileira
  * uma execução normal no worker (credenciais pelo banco, uso e custo medidos,
  * auditoria como agente).
@@ -62,7 +62,7 @@ export async function readDocumentWithAi(
   const conversation = await createConversation(
     ctx,
     { agentId, title: t.agents.flows.documentConversation(file.name).slice(0, 200) },
-    { screenContext: { purpose: 'document_reading', fileName: file.name }, archived: true },
+    { purpose: 'document_reading', screenContext: { fileName: file.name }, archived: true },
   );
   const attachmentId = await withTx(ctx, (tx) => storeAttachment(tx, ctx, { name: file.name, mime: file.mime, content }));
   const sent = await sendMessage(ctx, conversation.id, {
@@ -159,7 +159,7 @@ export async function suggestImportClassifications(
   const conversation = await createConversation(
     ctx,
     { agentId, title: t.agents.flows.classifyConversation(detail.fileName).slice(0, 200) },
-    { screenContext: { purpose: 'classify_lines', importId, lineIds }, archived: true },
+    { purpose: 'classify_lines', screenContext: { importId, lineIds }, archived: true },
   );
   const sent = await sendMessage(ctx, conversation.id, {
     text: `Sugira a classificação destas linhas do extrato ${detail.fileName}:\n${JSON.stringify(payload)}`,

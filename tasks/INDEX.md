@@ -8,7 +8,7 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 | 006 | [Cobrir no e2e os fluxos do agente ainda sem teste contra a API real](006-front-sem-teste-contra-api-real.md) | em-andamento | debito-tecnico | app | agente |
 | 011 | [Gravar e mostrar o uso de IA por finalidade](011-gravar-e-mostrar-uso-ia-por-finalidade.md) (depois da 001 e da 013) | em-andamento | melhoria | app | agente |
 | 012 | [Escolher o agente dos fluxos em /admin/ai e remover `AI_FLOW_AGENT`](012-escolher-agente-dos-fluxos-na-tela.md) (depois da 002) | em-andamento | melhoria | app | agente |
-| 013 | [Usar `ai_conversations.purpose` em vez de `screen_context.purpose`](013-usar-coluna-de-finalidade-da-conversa.md) (depois da 003) | em-andamento | debito-tecnico | app | agente |
+| 013 | [Usar `ai_conversations.purpose` em vez de `screen_context.purpose`](013-usar-coluna-de-finalidade-da-conversa.md) (depois da 003) | concluida | debito-tecnico | app | agente |
 | 005 | [Rastro de ator nas sugestões do agente em linhas de extrato](005-auditoria-das-sugestoes-no-extrato.md) (já atendido: `statement_lines` é auditada desde a 0015) | rejeitada | banco | dba | agente |
 | 001 | [Separar o uso de IA da leitura de documento e da classificação](001-uso-ia-por-finalidade.md) (banco; junto com a 003; depois vêm 013 e 011) | concluida | banco | dba | agente |
 | 002 | [Marcar no banco qual agente atende os fluxos automáticos](002-agente-dos-fluxos-no-banco.md) (banco; depois vem a 012) | concluida | banco | dba | agente |
