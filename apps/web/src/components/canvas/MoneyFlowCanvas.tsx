@@ -1,4 +1,4 @@
-import type { CanvasPosition, FlowGraphData } from '@moneyflow/shared';
+import type { CanvasPosition, FlowGraphData, FlowNodeDto } from '@moneyflow/shared';
 import { t } from '@moneyflow/shared';
 import { type NodeChange, ReactFlow, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow } from '@xyflow/react';
 import { LayoutTemplate, Maximize, Minus, Plus, Waypoints } from 'lucide-react';
@@ -10,7 +10,7 @@ import { useToast } from '../Toast';
 import { EmptyState, useConfirm } from '../ui';
 import { EdgeHoverContext, flowEdgeTypes } from './edges';
 import { FlowDrawer, type FlowSelection } from './FlowDrawer';
-import { buildGraph, EDGE_COLOR, EDGE_KINDS, type FlowMode, type FlowNode, GRID, type MoneyEdge, positionRef } from './graph';
+import { buildGraph, EDGE_COLOR, EDGE_KINDS, type FlowMode, type FlowNode, GRID, highlightIds, type MoneyEdge, positionRef } from './graph';
 import { flowNodeTypes } from './nodes';
 
 const FIT = { padding: 0.2, maxZoom: 1 } as const;
@@ -22,6 +22,8 @@ type Props = {
   mode: FlowMode;
   /** Reorganizar apaga as posições salvas e pede o grafo de novo. */
   onReset: () => void;
+  /** Filtro de entidades (tags e favoritas): destaca sem esconder; null = sem filtro. */
+  match?: ((node: FlowNodeDto) => boolean) | null;
 };
 
 /**
@@ -38,7 +40,7 @@ export function MoneyFlowCanvas(props: Props) {
   );
 }
 
-function Canvas({ data, mode, onReset }: Props) {
+function Canvas({ data, mode, onReset, match = null }: Props) {
   const toast = useToast();
   const confirm = useConfirm();
   const [theme] = useTheme();
@@ -118,11 +120,21 @@ function Canvas({ data, mode, onReset }: Props) {
     [flush],
   );
 
+  // ------------------------------------------------------------ destaque --
+  const highlight = useMemo(() => highlightIds(data, nodes, edges, match), [data, nodes, edges, match]);
+  const matchedNames = useCallback(
+    (entityIds: string[]) =>
+      match ? data.nodes.filter((n) => n.kind === 'entity' && entityIds.includes(n.id) && match(n)).map((n) => n.name) : undefined,
+    [data, match],
+  );
+
   // ------------------------------------------------------------- seleção --
   const selected = useMemo<FlowSelection | null>(() => {
     if (!selection) return null;
     if (selection.type === 'node') {
       const node = nodes.find((n) => n.id === selection.id);
+      if (node?.type === 'cluster')
+        return { type: 'node', node: { ...node, data: { ...node.data, matchedNames: matchedNames(node.data.entityIds) } } };
       return node ? { type: 'node', node } : null;
     }
     const edge = edges.find((e) => e.id === selection.id || `${e.id}:forecast` === selection.id);
@@ -151,9 +163,9 @@ function Canvas({ data, mode, onReset }: Props) {
       nodes.map((n) => ({
         ...n,
         selected: selection?.type === 'node' && selection.id === n.id,
-        data: { ...n.data, dim: focusIds !== null && !focusIds.has(n.id) },
+        data: { ...n.data, dim: (focusIds !== null && !focusIds.has(n.id)) || (highlight !== null && !highlight.has(n.id)) },
       })) as FlowNode[],
-    [nodes, focusIds, selection],
+    [nodes, focusIds, highlight, selection],
   );
   const viewEdges = useMemo(() => {
     const pos = new Map(nodes.map((n) => [n.id, n]));
@@ -171,10 +183,12 @@ function Canvas({ data, mode, onReset }: Props) {
         ...e,
         ...handles,
         selected: selection?.type === 'edge' && (selection.id === e.id || selection.id === `${e.id}:forecast`),
-        data: e.data ? { ...e.data, dim: focusIds !== null && !focusIds.has(e.id) } : e.data,
+        data: e.data
+          ? { ...e.data, dim: (focusIds !== null && !focusIds.has(e.id)) || (highlight !== null && !highlight.has(e.id)) }
+          : e.data,
       };
     });
-  }, [edges, nodes, focusIds, selection]);
+  }, [edges, nodes, focusIds, highlight, selection]);
 
   const focusNode = useCallback(
     (id: string) => {

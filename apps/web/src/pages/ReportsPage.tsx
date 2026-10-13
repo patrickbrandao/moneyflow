@@ -16,6 +16,14 @@ import { useAgentScreenContext } from '../agents/AgentsProvider';
 import { CaixaFilter } from '../components/CaixaFilter';
 import { LoadError, PageHead } from '../components/domain';
 import { ExportMenu } from '../components/ExportMenu';
+import {
+  EntityFilterMenu,
+  entityFilterActive,
+  entityFilterLabel,
+  entityFilterQuery,
+  useEntityFilterParams,
+  useEntityTags,
+} from '../components/entity/tags';
 import { PeriodPicker } from '../components/PeriodPicker';
 import { CategoryReport, categoryExport } from '../components/reports/CategoryReport';
 import { EntityReport, entityExport } from '../components/reports/EntityReport';
@@ -53,19 +61,37 @@ export function ReportsPage() {
   const kind = params.get('kind') === 'income' ? 'income' : 'expense';
   const caixaIds = useMemo(() => (params.get('caixas') ?? '').split(',').filter(Boolean), [params]);
   const scope = params.get('scope'); // null = consolidado
+  // Filtro por entidade (tags e favoritas, spec 014): na URL, resolvido pela API.
+  const [entityFilter, setEntityFilter] = useEntityFilterParams();
+  const tagCatalog = useEntityTags();
+  const filterQuery = entityFilterQuery(entityFilter);
 
   useAgentScreenContext({
     title: t.nav.reports,
-    filters: { report: tab, from, to, basis, kind, caixas: caixaIds.join(',') || null, scope },
+    filters: {
+      report: tab,
+      from,
+      to,
+      basis,
+      kind,
+      caixas: caixaIds.join(',') || null,
+      scope,
+      tags: entityFilter.tagIds.join(',') || null,
+      tagMode: entityFilter.tagIds.length ? entityFilter.tagMode : null,
+      favorites: entityFilter.favorites || null,
+    },
   });
 
-  const qs = new URLSearchParams({ from, to, basis });
+  const qs = new URLSearchParams({ from, to, basis, ...filterQuery });
   if (caixaIds.length) qs.set('caixaIds', caixaIds.join(','));
+  const projectionQs = new URLSearchParams(filterQuery);
+  if (caixaIds.length) projectionQs.set('caixaIds', caixaIds.join(','));
   const categories = useApi<CategoryReportData>(tab === 'categories' ? `/api/reports/categories?${qs}` : null);
   const entities = useApi<EntityReportData>(tab === 'entities' ? `/api/reports/entities?${qs}` : null);
-  const projection = useApi<ProjectionReportData>(
-    tab === 'projection' ? `/api/reports/projection${caixaIds.length ? `?caixaIds=${caixaIds.join(',')}` : ''}` : null,
-  );
+  const projection = useApi<ProjectionReportData>(tab === 'projection' ? `/api/reports/projection?${projectionQs}` : null);
+  const filtering = entityFilterActive(entityFilter);
+  const current = tab === 'categories' ? categories.data : tab === 'entities' ? entities.data : projection.data;
+  const noEntities = current?.entityFilter?.entityCount === 0;
 
   const scopeCaixas = (tab === 'categories' ? categories.data?.caixas : entities.data?.caixas) ?? [];
   const scopeName = scope ? scopeCaixas.find((c) => c.id === scope)?.name : null;
@@ -74,10 +100,12 @@ export function ReportsPage() {
     scope ? `${t.reports.byCaixa}: ${scopeName ?? ''}` : t.reports.consolidated,
   ].filter(Boolean);
 
+  const filterNote = entityFilterLabel(entityFilter, tagCatalog.data);
   const exportBuild = () => {
-    if (tab === 'categories' && categories.data) return categoryExport(categories.data, kind, scope, subtitle);
-    if (tab === 'entities' && entities.data) return entityExport(entities.data, scope, subtitle);
-    if (tab === 'projection' && projection.data) return projectionExport(projection.data, subtitle.slice(1));
+    const withFilter = <T extends { preamble?: string[] }>(table: T) => (filterNote ? { ...table, preamble: [filterNote] } : table);
+    if (tab === 'categories' && categories.data) return withFilter(categoryExport(categories.data, kind, scope, subtitle));
+    if (tab === 'entities' && entities.data) return withFilter(entityExport(entities.data, scope, subtitle));
+    if (tab === 'projection' && projection.data) return withFilter(projectionExport(projection.data, subtitle.slice(1)));
     throw new Error(t.common.loading);
   };
   const ready = tab === 'categories' ? categories.data : tab === 'entities' ? entities.data : projection.data;
@@ -139,6 +167,7 @@ export function ReportsPage() {
             </optgroup>
           </select>
         )}
+        <EntityFilterMenu value={entityFilter} onChange={setEntityFilter} />
         {tab === 'categories' && (
           <div className="segmented" role="group" aria-label={t.reports.category}>
             {(['expense', 'income'] as const).map((k) => (
@@ -156,6 +185,8 @@ export function ReportsPage() {
         )}
       </div>
 
+      {noEntities && <p className="notice warn mb-3">{t.entityTags.noEntitiesForFilter}</p>}
+      {tab === 'projection' && filtering && !noEntities && <p className="notice mb-3">{t.entityTags.projectionNote}</p>}
       {tab === 'categories' &&
         (categories.error ? (
           <LoadError error={categories.error} onRetry={() => void categories.reload()} />

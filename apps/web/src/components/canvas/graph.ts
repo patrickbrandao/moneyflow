@@ -71,6 +71,8 @@ export type ClusterNodeData = {
   outCents: number;
   colorSlot: number | null;
   dim: boolean;
+  /** Membros que casam com o filtro de entidades (destaque, spec 014). */
+  matchedNames?: string[];
 };
 
 export type CaixaFlowNode = Node<CaixaNodeData, 'caixa'>;
@@ -274,6 +276,34 @@ export function buildGraph(
   const nodes: FlowNode[] = [...caixaNodes, ...clusterNodes, ...entityNodes];
   layout(nodes, columns, saved);
   return { nodes, edges: flowEdges, entityCount: entityKeys.length, grouped };
+}
+
+/**
+ * Destaque por tags e favoritas (spec 014): ids (nós e arestas exibidos) que
+ * ficam em destaque — as entidades que casam, os clusters com algum membro que
+ * casa, as arestas que tocam um deles e as caixas dessas arestas. null = sem filtro.
+ */
+export function highlightIds(
+  data: FlowGraphData,
+  nodes: FlowNode[],
+  edges: MoneyEdge[],
+  match: ((node: FlowNodeDto) => boolean) | null,
+): Set<string> | null {
+  if (!match) return null;
+  const byId = new Map(data.nodes.filter((n) => n.kind === 'entity').map((n) => [n.id, n]));
+  const ids = new Set<string>();
+  for (const node of nodes) {
+    if (node.type === 'entity' && match(node.data.ref)) ids.add(node.id);
+    if (node.type === 'cluster' && node.data.entityIds.some((id) => byId.has(id) && match(byId.get(id)!))) ids.add(node.id);
+  }
+  const leaves = new Set(ids);
+  for (const edge of edges) {
+    if (!leaves.has(edge.source) && !leaves.has(edge.target)) continue;
+    ids.add(edge.id);
+    ids.add(edge.source);
+    ids.add(edge.target);
+  }
+  return ids;
 }
 
 /** Auto-layout em colunas (centradas no zero, grade de 24), com as posições salvas por cima. */
