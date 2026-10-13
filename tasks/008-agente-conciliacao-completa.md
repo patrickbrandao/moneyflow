@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-10-13
-commit:
+commit: b3519ae
 ---
 
 # Agente concilia um lote inteiro do extrato (espelho, pagadora, desfazer, ignorar, candidatos e lote)
