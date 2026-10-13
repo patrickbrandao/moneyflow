@@ -1,4 +1,4 @@
-import { categories, classificationRules, movements, statementCsvMappings, statementLines, type Tx, titles } from '@moneyflow/db';
+import { caixas, categories, classificationRules, movements, statementCsvMappings, statementLines, type Tx, titles } from '@moneyflow/db';
 import {
   type ClassificationRuleRow,
   type CsvMappingRow,
@@ -24,6 +24,7 @@ import { insertPurchase, loadCard } from './card-core';
 import { settleInTx } from './settlements';
 import { candidatesFor, listLines, resolveTarget } from './statements';
 import { insertTitlePair } from './title-pair';
+import { resolveMirror } from './titles';
 import { withTx } from './tx';
 import { camel, iso } from './util';
 
@@ -89,6 +90,7 @@ async function settleFromLine(ctx: ServiceContext, tx: Tx, line: Line, titleId: 
 /** Aplica uma sugestão (ou um casamento escolhido) dentro da transação. */
 async function applyMatch(ctx: ServiceContext, tx: Tx, line: Line, ref: z.output<typeof lineMatchInput>) {
   if (line.status === 'matched' || line.status === 'ignored') throw unprocessable(t.errors.lineNotPending);
+  if ([ref.movementId, ref.titleId, ref.cardInvoiceItemId].filter(Boolean).length !== 1) throw unprocessable(t.errors.lineMatchTarget);
   if (ref.movementId) {
     if (!line.financialAccountId) throw unprocessable(t.errors.lineAccountOnly);
     const [movement] = await tx.select().from(movements).where(eq(movements.id, ref.movementId));
@@ -105,33 +107,66 @@ async function applyMatch(ctx: ServiceContext, tx: Tx, line: Line, ref: z.output
   }
 }
 
-/** Confirma em lote as linhas sugeridas; cada linha num savepoint (uma falha não derruba as outras). */
-export async function confirmLines(ctx: ServiceContext, lineIds: string[]) {
-  const failed: { lineId: string; message: string }[] = [];
-  let confirmed = 0;
+type LineFailure = { lineId: string; message: string };
+
+/**
+ * Lote de ações por linha numa transação só, cada linha num savepoint: uma
+ * falha (inclusive das checagens deferidas, forçadas ao fim de cada linha)
+ * desfaz só aquela linha e volta com o motivo.
+ */
+async function eachLine<T extends { lineId: string }>(
+  ctx: ServiceContext,
+  items: T[],
+  apply: (tx: Tx, line: Line, item: T) => Promise<void>,
+): Promise<{ done: number; failed: LineFailure[] }> {
+  const failed: LineFailure[] = [];
+  let done = 0;
   await withTx(ctx, async (tx) => {
-    for (const lineId of lineIds) {
+    for (const item of items) {
       try {
         await tx.transaction(async (sp) => {
-          const line = await loadLine(ctx, sp, lineId);
-          if (line.status !== 'suggested') throw unprocessable(t.errors.lineNotSuggested);
-          await applyMatch(ctx, sp, line, {
-            movementId: line.movementId ?? undefined,
-            titleId: line.titleId ?? undefined,
-            cardInvoiceItemId: line.cardInvoiceItemId ?? undefined,
-          });
+          await apply(sp, await loadLine(ctx, sp, item.lineId), item);
           // As checagens deferidas da baixa rodam no fim da transação; aqui forçamos já, para isolar a falha.
           await sp.execute(sql`SET CONSTRAINTS ALL IMMEDIATE`);
           await sp.execute(sql`SET CONSTRAINTS ALL DEFERRED`);
         });
-        confirmed += 1;
+        done += 1;
       } catch (error) {
         const message = translateDbError(error)?.message ?? (error instanceof Error ? error.message : String(error));
-        failed.push({ lineId, message });
+        failed.push({ lineId: item.lineId, message });
       }
     }
   });
-  return { confirmed, failed };
+  return { done, failed };
+}
+
+/** Confirma em lote as linhas sugeridas; cada linha num savepoint (uma falha não derruba as outras). */
+export async function confirmLines(ctx: ServiceContext, lineIds: string[]) {
+  const { done, failed } = await eachLine(
+    ctx,
+    lineIds.map((lineId) => ({ lineId })),
+    async (tx, line) => {
+      if (line.status !== 'suggested') throw unprocessable(t.errors.lineNotSuggested);
+      await applyMatch(ctx, tx, line, {
+        movementId: line.movementId ?? undefined,
+        titleId: line.titleId ?? undefined,
+        cardInvoiceItemId: line.cardInvoiceItemId ?? undefined,
+      });
+    },
+  );
+  return { confirmed: done, failed };
+}
+
+/** Casa em lote linhas escolhidas (movimento, título em aberto que vira baixa, ou item de fatura). */
+export async function matchLines(ctx: ServiceContext, items: ({ lineId: string } & z.output<typeof lineMatchInput>)[]) {
+  const { done, failed } = await eachLine(ctx, items, (tx, line, item) => applyMatch(ctx, tx, line, item));
+  return { matched: done, failed };
+}
+
+/** Lança em lote linhas novas (movimento avulso, título já baixado ou compra). */
+export async function createFromLines(ctx: ServiceContext, items: ({ lineId: string } & z.output<typeof lineCreateInput>)[]) {
+  const { done, failed } = await eachLine(ctx, items, (tx, line, item) => createInTx(ctx, tx, line, item));
+  return { created: done, failed };
 }
 
 export async function matchLine(ctx: ServiceContext, id: string, input: z.output<typeof lineMatchInput>) {
@@ -152,17 +187,28 @@ export async function unmatchLine(ctx: ServiceContext, id: string) {
   return lineRow(ctx, id);
 }
 
+async function applyIgnored(tx: Tx, line: Line, ignored: boolean) {
+  if (ignored && line.status === 'matched') throw unprocessable(t.errors.lineNotPending);
+  if (!ignored && line.status !== 'ignored') return;
+  await tx
+    .update(statementLines)
+    .set({ status: ignored ? 'ignored' : 'new', matchedAt: null, movementId: null, titleId: null, cardInvoiceItemId: null })
+    .where(eq(statementLines.id, line.id));
+}
+
 export async function setIgnored(ctx: ServiceContext, id: string, ignored: boolean) {
-  await withTx(ctx, async (tx) => {
-    const line = await loadLine(ctx, tx, id);
-    if (ignored && line.status === 'matched') throw unprocessable(t.errors.lineNotPending);
-    if (!ignored && line.status !== 'ignored') return;
-    await tx
-      .update(statementLines)
-      .set({ status: ignored ? 'ignored' : 'new', matchedAt: null, movementId: null, titleId: null, cardInvoiceItemId: null })
-      .where(eq(statementLines.id, id));
-  });
+  await withTx(ctx, async (tx) => applyIgnored(tx, await loadLine(ctx, tx, id), ignored));
   return lineRow(ctx, id);
+}
+
+/** Ignora (ou volta) em lote; linhas conciliadas não são ignoradas e voltam em failed. */
+export async function setIgnoredLines(ctx: ServiceContext, lineIds: string[], ignored: boolean) {
+  const { done, failed } = await eachLine(
+    ctx,
+    lineIds.map((lineId) => ({ lineId })),
+    (tx, line) => applyIgnored(tx, line, ignored),
+  );
+  return { updated: done, failed };
 }
 
 /** Padrão da regra aprendida: a descrição normalizada (sem números longos e datas). */
@@ -207,85 +253,95 @@ export async function classifyLine(ctx: ServiceContext, id: string, input: z.out
  * conciliada com o que foi criado.
  */
 export async function createFromLine(ctx: ServiceContext, id: string, input: z.output<typeof lineCreateInput>) {
-  await withTx(ctx, async (tx) => {
-    const line = await loadLine(ctx, tx, id);
-    if (line.status === 'matched' || line.status === 'ignored') throw unprocessable(t.errors.lineNotPending);
-    const entityId = input.entityId ?? line.entityId;
-    const categoryId = input.categoryId ?? line.categoryId;
-    const description = input.description ?? line.description;
-
-    if (input.mode === 'purchase') {
-      if (!line.cardCaixaId) throw unprocessable(t.errors.lineCardOnly);
-      if (line.amountCents > 0) throw unprocessable(t.errors.lineCreditOnCard);
-      if (!entityId || !categoryId) throw unprocessable(t.errors.lineNeedsClassification);
-      const card = await loadCard(tx, line.cardCaixaId, true);
-      const payerCaixaId = input.payerCaixaId ?? card.defaultPayerCaixaId;
-      ctx.access.assertRead(payerCaixaId);
-      const created = await insertPurchase(tx, card, {
-        kind: 'purchase',
-        payerCaixaId,
-        entityId,
-        categoryId,
-        purchasedOn: line.postedOn,
-        description,
-        amountCents: -line.amountCents,
-        installmentsTotal: 1,
-        firstInstallment: 1,
-      });
-      await setMatched(tx, line.id, { cardInvoiceItemId: created.itemIds[0]! });
-    } else {
-      if (!line.financialAccountId) throw unprocessable(t.errors.lineAccountOnly);
-      if (input.mode === 'adjustment') {
-        const [movement] = await tx
-          .insert(movements)
-          .values({
-            financialAccountId: line.financialAccountId,
-            occurredOn: line.postedOn,
-            amountCents: line.amountCents,
-            kind: 'adjustment',
-            description,
-            entityId,
-            categoryId,
-          })
-          .returning({ id: movements.id });
-        await setMatched(tx, line.id, { movementId: movement!.id });
-      } else {
-        if (!entityId || !categoryId) throw unprocessable(t.errors.lineNeedsClassification);
-        const pair = await insertTitlePair(
-          tx,
-          {
-            caixaId: line.caixaId,
-            direction: line.amountCents < 0 ? 'payable' : 'receivable',
-            entityId,
-            categoryId,
-            description,
-            competenceDate: line.postedOn,
-            dueDate: line.postedOn,
-            amountCents: Math.abs(line.amountCents),
-            notes: null,
-            origin: 'manual',
-            recurrenceRuleId: null,
-            occurrence: null,
-          },
-          null,
-        );
-        const movementId = await settleFromLine(ctx, tx, line, pair.id);
-        await setMatched(tx, line.id, { movementId });
-      }
-    }
-    const corrected = (entityId ?? null) !== (line.entityId ?? null) || (categoryId ?? null) !== (line.categoryId ?? null);
-    await tx
-      .update(statementLines)
-      .set({
-        entityId,
-        categoryId: categoryId && (await categoryFits(tx, categoryId, line)) ? categoryId : null,
-        classificationSource: corrected ? 'user' : line.classificationSource,
-        classificationRuleId: corrected ? null : line.classificationRuleId,
-      })
-      .where(eq(statementLines.id, line.id));
-    if (input.learnRule && (corrected || !line.classificationRuleId)) await learnRule(ctx, tx, line, entityId, categoryId);
-  });
+  await withTx(ctx, async (tx) => createInTx(ctx, tx, await loadLine(ctx, tx, id), input));
   return lineRow(ctx, id);
+}
+
+async function createInTx(ctx: ServiceContext, tx: Tx, line: Line, input: z.output<typeof lineCreateInput>) {
+  if (line.status === 'matched' || line.status === 'ignored') throw unprocessable(t.errors.lineNotPending);
+  const entityId = input.entityId ?? line.entityId;
+  const categoryId = input.categoryId ?? line.categoryId;
+  const description = input.description ?? line.description;
+
+  if (input.mode === 'purchase') {
+    if (!line.cardCaixaId) throw unprocessable(t.errors.lineCardOnly);
+    if (line.amountCents > 0) throw unprocessable(t.errors.lineCreditOnCard);
+    if (!entityId || !categoryId) throw unprocessable(t.errors.lineNeedsClassification);
+    const card = await loadCard(tx, line.cardCaixaId, true);
+    const payerCaixaId = input.payerCaixaId ?? card.defaultPayerCaixaId;
+    ctx.access.assertRead(payerCaixaId);
+    const created = await insertPurchase(tx, card, {
+      kind: 'purchase',
+      payerCaixaId,
+      entityId,
+      categoryId,
+      purchasedOn: line.postedOn,
+      description,
+      amountCents: -line.amountCents,
+      installmentsTotal: 1,
+      firstInstallment: 1,
+    });
+    await setMatched(tx, line.id, { cardInvoiceItemId: created.itemIds[0]! });
+  } else {
+    if (!line.financialAccountId) throw unprocessable(t.errors.lineAccountOnly);
+    if (input.mode === 'adjustment') {
+      const [movement] = await tx
+        .insert(movements)
+        .values({
+          financialAccountId: line.financialAccountId,
+          occurredOn: line.postedOn,
+          amountCents: line.amountCents,
+          kind: 'adjustment',
+          description,
+          entityId,
+          categoryId,
+        })
+        .returning({ id: movements.id });
+      await setMatched(tx, line.id, { movementId: movement!.id });
+    } else {
+      if (!entityId || !categoryId) throw unprocessable(t.errors.lineNeedsClassification);
+      const direction = line.amountCents < 0 ? 'payable' : 'receivable';
+      const [holder] = await tx.select({ id: caixas.holderEntityId }).from(caixas).where(eq(caixas.id, line.caixaId));
+      // Espelho como em create_title (spec 006): caixa principal da entidade por padrão; null = sem espelho.
+      const mirror = await resolveMirror(
+        ctx,
+        tx,
+        { caixaId: line.caixaId, direction, entityId, mirrorCaixaId: input.mirrorCaixaId, mirrorCategoryId: input.mirrorCategoryId },
+        holder!.id,
+      );
+      const pair = await insertTitlePair(
+        tx,
+        {
+          caixaId: line.caixaId,
+          direction,
+          entityId,
+          categoryId,
+          description,
+          competenceDate: line.postedOn,
+          dueDate: line.postedOn,
+          amountCents: Math.abs(line.amountCents),
+          notes: null,
+          origin: 'manual',
+          recurrenceRuleId: null,
+          occurrence: null,
+        },
+        mirror,
+      );
+      const movementId = await settleFromLine(ctx, tx, line, pair.id);
+      await setMatched(tx, line.id, { movementId });
+    }
+  }
+  const corrected = (entityId ?? null) !== (line.entityId ?? null) || (categoryId ?? null) !== (line.categoryId ?? null);
+  await tx
+    .update(statementLines)
+    .set({
+      entityId,
+      categoryId: categoryId && (await categoryFits(tx, categoryId, line)) ? categoryId : null,
+      classificationSource: corrected ? 'user' : line.classificationSource,
+      classificationRuleId: corrected ? null : line.classificationRuleId,
+    })
+    .where(eq(statementLines.id, line.id));
+  if (input.learnRule && (corrected || !line.classificationRuleId)) await learnRule(ctx, tx, line, entityId, categoryId);
 }
 
 async function categoryFits(tx: Tx, categoryId: string, line: Line) {

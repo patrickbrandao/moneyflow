@@ -200,7 +200,15 @@ export const lineCreateInput = z.object({
   entityId: id.nullish().transform((v) => v ?? null),
   categoryId: id.nullish().transform((v) => v ?? null),
   description: optionalText(300),
+  /** purchase: caixa pagadora da compra; omitida = a pagadora padrão do cartão. */
   payerCaixaId: id.nullish(),
+  /**
+   * title: caixa do espelho, como em titleCreateInput (spec 006). Omitida = a
+   * caixa principal da entidade (se houver); null = sem espelho.
+   */
+  mirrorCaixaId: id.nullish(),
+  /** title: categoria do lado espelho; omitida = escolhida automaticamente. */
+  mirrorCategoryId: id.nullish(),
   /** Aprende a regra descrição → entidade/categoria (spec 009). */
   learnRule: z.boolean().default(true),
 });
