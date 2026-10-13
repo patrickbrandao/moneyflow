@@ -142,7 +142,7 @@ export const statementsStrings = {
   modeHints: {
     adjustment: 'Tarifa, rendimento, ajuste: um movimento direto na conta, sem título.',
     title:
-      'Cria o título e a baixa na conta do extrato, na data da linha. Se a entidade tiver uma caixa principal, o título é espelhado nela.',
+      'Cria o título e a baixa na conta do extrato, na data da linha. Se a entidade for titular de outra caixa, o título é espelhado nela: a principal vem escolhida, e dá para trocar ou dispensar.',
     purchase: 'Cria a compra no cartão (à vista) na fatura da linha.',
   } as Record<string, string>,
   payer: 'Caixa pagadora',

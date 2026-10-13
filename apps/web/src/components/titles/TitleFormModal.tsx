@@ -1,5 +1,4 @@
 import {
-  type EntityDetail,
   FREQUENCIES,
   formatCents,
   type SeriesInput,
@@ -9,21 +8,19 @@ import {
   t,
   todayIso,
 } from '@moneyflow/shared';
-import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { canWriteCaixa } from '../../lib/access';
+import { type FormEvent, useCallback, useRef, useState } from 'react';
 import { api } from '../../lib/api';
-import { useUser } from '../../lib/auth';
 import { useAction } from '../../lib/hooks';
 import { type EntryPatch, EntrySources } from '../entry/EntrySources';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
 import { Button, Field, Modal } from '../ui';
+import { MirrorFields, mirrorPayload, useMirrorChoice } from './MirrorFields';
 
 type Direction = 'payable' | 'receivable';
 type SeriesKind = 'none' | 'installments' | 'recurrence';
 type Frequency = (typeof FREQUENCIES)[number];
 
 const kindOf = (direction: Direction) => (direction === 'payable' ? 'expense' : 'income');
-const opposite = (direction: Direction): Direction => (direction === 'payable' ? 'receivable' : 'payable');
 
 /**
  * Novo título (com espelho, parcelas e recorrência) ou edição de um existente.
@@ -43,7 +40,6 @@ export function TitleFormModal({
   onClose: () => void;
   onSaved: (title: TitleDetail) => void;
 }) {
-  const user = useUser();
   const editing = Boolean(title);
   const today = todayIso();
   const [entity, setEntity] = useState<EntityOption | null>(title ? { id: title.entityId, name: title.entityName } : null);
@@ -64,10 +60,7 @@ export function TitleFormModal({
   const [intervalCount, setIntervalCount] = useState(1);
   const [endsOn, setEndsOn] = useState('');
 
-  // Caixas de que a entidade é titular (para o espelho).
-  const [held, setHeld] = useState<EntityDetail['caixas'] | null>(null);
-  const [mirrorCaixaId, setMirrorCaixaId] = useState<string | null>(null);
-  const [mirrorCategoryId, setMirrorCategoryId] = useState<string | null>(null);
+  const mirror = useMirrorChoice(entity?.id ?? null, caixaId, !editing);
   const [error, setError] = useState<string | null>(null);
   const { run, busy } = useAction();
 
@@ -109,31 +102,6 @@ export function TitleFormModal({
     [entityLocked],
   );
 
-  useEffect(() => {
-    if (editing || !entity) {
-      setHeld(null);
-      setMirrorCaixaId(null);
-      return;
-    }
-    let cancelled = false;
-    api
-      .get<EntityDetail>(`/api/entities/${entity.id}`)
-      .then((detail) => {
-        if (cancelled) return;
-        const options = detail.caixas.filter((c) => !c.archivedAt && c.id !== caixaId);
-        setHeld(options);
-        const primary = options.find((c) => c.isPrimary);
-        setMirrorCaixaId(primary?.id ?? null);
-        setMirrorCategoryId(null);
-      })
-      .catch(() => setHeld([]));
-    return () => {
-      cancelled = true;
-    };
-  }, [entity, editing, caixaId]);
-
-  const mirrorWritable = mirrorCaixaId ? canWriteCaixa(user, mirrorCaixaId) : false;
-
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!entity) return setError('Escolha a entidade.');
@@ -169,8 +137,7 @@ export function TitleFormModal({
       dueDate,
       amountCents: amount,
       notes,
-      mirrorCaixaId: held && held.length > 0 ? mirrorCaixaId : null,
-      mirrorCategoryId: mirrorCaixaId && mirrorWritable ? mirrorCategoryId : null,
+      ...mirrorPayload(mirror),
       series,
       boletoBarcode,
       pixPayload,
@@ -251,35 +218,7 @@ export function TitleFormModal({
               />
             </Field>
 
-            {!editing && held && held.length > 0 && (
-              <>
-                <Field label={t.title.mirrorCaixa} hint={mirrorCaixaId && !mirrorWritable ? t.title.mirrorPendingHint : undefined}>
-                  <select className="field" value={mirrorCaixaId ?? ''} onChange={(e) => setMirrorCaixaId(e.target.value || null)}>
-                    <option value="">{t.title.mirrorNone}</option>
-                    {held.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                        {c.isPrimary ? ` (${t.common.primary.toLowerCase()})` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                {mirrorCaixaId && mirrorWritable ? (
-                  <Field label={t.title.mirrorCategory}>
-                    <CategorySelect
-                      kind={kindOf(opposite(direction))}
-                      caixaId={mirrorCaixaId}
-                      value={mirrorCategoryId}
-                      onChange={setMirrorCategoryId}
-                      allowEmpty="Automática"
-                      ariaLabel={t.title.mirrorCategory}
-                    />
-                  </Field>
-                ) : (
-                  <div />
-                )}
-              </>
-            )}
+            {!editing && <MirrorFields mirror={mirror} direction={direction} />}
 
             {!editing && (
               <Field label={t.title.series} className="span-all">
