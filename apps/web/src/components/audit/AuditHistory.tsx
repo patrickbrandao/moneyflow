@@ -1,4 +1,4 @@
-import { type AuditEntry, formatBRL, formatDate, formatDateTime, t } from '@moneyflow/shared';
+import { type AuditEntry, type EntityTag, formatBRL, formatDate, formatDateTime, t } from '@moneyflow/shared';
 import { Bot, Cog, UserRound } from 'lucide-react';
 import '../../styles/attachments.css';
 import { useApi } from '../../lib/hooks';
@@ -19,7 +19,7 @@ export const columnLabel = (column: string) => t.audit.columns[column] ?? column
 export const tableLabel = (table: string) => t.audit.tables[table] ?? table;
 
 /** Valor de uma coluna para exibição. */
-export function formatAuditValue(column: string, value: unknown): string {
+export function formatAuditValue(column: string, value: unknown, names?: Map<string, string>): string {
   if (isSecret(column)) return t.audit.hidden;
   if (value === null || value === undefined || value === '') return '—';
   if (typeof value === 'boolean') return value ? t.common.yes : t.common.no;
@@ -29,7 +29,7 @@ export function formatAuditValue(column: string, value: unknown): string {
   if (typeof value === 'string') {
     if (ISO_DATE.test(value)) return formatDate(value);
     if (ISO_INSTANT.test(value)) return formatDateTime(value);
-    if (UUID.test(value)) return `${value.slice(0, 8)}…`;
+    if (UUID.test(value)) return names?.get(value) ?? `${value.slice(0, 8)}…`;
     return ENUM_COLUMNS.has(column) ? (t.audit.values[value] ?? value) : value;
   }
   if (typeof value === 'number') return value.toLocaleString('pt-BR');
@@ -37,7 +37,10 @@ export function formatAuditValue(column: string, value: unknown): string {
 }
 
 /** As linhas do antes/depois de uma entrada. */
-export function diffRows(entry: AuditEntry): { column: string; before: string | null; after: string | null }[] {
+export function diffRows(
+  entry: AuditEntry,
+  names?: Map<string, string>,
+): { column: string; before: string | null; after: string | null }[] {
   const old = entry.oldData ?? {};
   const next = entry.newData ?? {};
   let columns: string[];
@@ -53,8 +56,8 @@ export function diffRows(entry: AuditEntry): { column: string; before: string | 
     .filter((c) => !NOISE.has(c))
     .map((column) => ({
       column,
-      before: entry.action === 'insert' ? null : formatAuditValue(column, old[column]),
-      after: entry.action === 'delete' ? null : formatAuditValue(column, next[column]),
+      before: entry.action === 'insert' ? null : formatAuditValue(column, old[column], names),
+      after: entry.action === 'delete' ? null : formatAuditValue(column, next[column], names),
     }));
 }
 
@@ -82,8 +85,8 @@ export function ActionBadge({ action }: { action: AuditEntry['action'] }) {
 }
 
 /** Tabela antes → depois. */
-export function AuditDiff({ entry }: { entry: AuditEntry }) {
-  const rows = diffRows(entry);
+export function AuditDiff({ entry, names }: { entry: AuditEntry; names?: Map<string, string> }) {
+  const rows = diffRows(entry, names);
   if (rows.length === 0) return <p className="mt-2 text-[12px] text-faint">{t.audit.noChanges}</p>;
   const showBefore = entry.action !== 'insert';
   const showAfter = entry.action !== 'delete';
@@ -114,6 +117,9 @@ export function AuditDiff({ entry }: { entry: AuditEntry }) {
 /** Lista do histórico de um registro (sem moldura). */
 export function AuditHistoryList({ table, recordId }: { table: string; recordId: string }) {
   const { data, error, reload } = useApi<AuditEntry[]>(`/api/audit/record?table=${encodeURIComponent(table)}&recordId=${recordId}`);
+  // Na entidade, o histórico inclui as ligações com tags (spec 003): mostra o nome da tag.
+  const tags = useApi<EntityTag[]>(table === 'entities' ? '/api/entity-tags?archived=1' : null);
+  const names = tags.data ? new Map(tags.data.map((tag) => [tag.id, tag.name])) : undefined;
   if (error) return <LoadError error={error} onRetry={() => void reload()} />;
   if (!data) {
     return (
@@ -132,8 +138,9 @@ export function AuditHistoryList({ table, recordId }: { table: string; recordId:
             <ActionBadge action={entry.action} />
             <span className="mono">{formatDateTime(entry.createdAt)}</span>
             <ActorLabel entry={entry} />
+            {entry.tableName !== table && <Badge tone="outline">{tableLabel(entry.tableName)}</Badge>}
           </div>
-          <AuditDiff entry={entry} />
+          <AuditDiff entry={entry} names={names} />
         </div>
       ))}
     </div>

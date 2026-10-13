@@ -26,6 +26,11 @@ export type ExportTable = {
   rows: Record<string, ExportCell>[];
   /** Linhas de destaque (ex.: totais), desenhadas em negrito no PDF. */
   boldRows?: number[];
+  /**
+   * Linhas antes do cabeçalho do CSV (ex.: o filtro de entidades de um
+   * relatório, spec 014); no PDF elas entram no subtítulo.
+   */
+  preamble?: string[];
 };
 
 export const CSV_BOM = '\uFEFF';
@@ -72,12 +77,13 @@ export function csvField(text: string, isText: boolean): string {
 }
 
 /** A tabela como CSV (sem BOM; some CSV_BOM ao gravar o arquivo). */
-export function toCsv(table: Pick<ExportTable, 'columns' | 'rows'>): string {
+export function toCsv(table: Pick<ExportTable, 'columns' | 'rows' | 'preamble'>): string {
+  const pre = (table.preamble ?? []).map((line) => csvField(line, true));
   const head = table.columns.map((c) => csvField(c.label, true)).join(';');
   const body = table.rows.map((row) =>
     table.columns.map((c) => csvField(formatCell(row[c.key], c.type, 'csv'), (c.type ?? 'text') === 'text')).join(';'),
   );
-  return `${[head, ...body].join('\r\n')}\r\n`;
+  return `${[...pre, head, ...body].join('\r\n')}\r\n`;
 }
 
 /** Nome de arquivo seguro: sem acento, minúsculo, com hífens. */

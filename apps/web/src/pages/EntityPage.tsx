@@ -28,6 +28,7 @@ import { ContractsTable } from '../components/contracts/ContractsTable';
 import { LoadError, PageHead } from '../components/domain';
 import { AddressModal, BankAccountModal, ContactModal, LinkModal, PixKeyModal } from '../components/entity/ChildModals';
 import { EntityFormModal } from '../components/entity/EntityFormModal';
+import { FavoriteStar, TagChip } from '../components/entity/tags';
 import { useCrumbs } from '../components/shell/Layout';
 import { Badge, Button, CopyButton, Panel, Skel, useConfirm } from '../components/ui';
 import { api } from '../lib/api';
@@ -159,7 +160,12 @@ export function EntityPage() {
   return (
     <div className="page wide">
       <PageHead
-        title={entity.name}
+        title={
+          <span className="inline-flex items-center gap-2">
+            <FavoriteStar entityId={entity.id} favorite={entity.isFavorite} canEdit={canEdit} onChanged={() => void reload()} />
+            <span className="min-w-0">{entity.name}</span>
+          </span>
+        }
         sub={
           <>
             {entity.tradeName && `${entity.tradeName} · `}
@@ -196,6 +202,9 @@ export function EntityPage() {
             {entity.kind === 'company' ? <Building2 /> : <UserRound />} {t.entity.kinds[entity.kind]}
           </Badge>
           {entity.archivedAt && <Badge tone="outline">{t.common.archived}</Badge>}
+          {entity.tags.map((tag) => (
+            <TagChip key={tag.id} tag={tag} />
+          ))}
         </div>
       </PageHead>
 

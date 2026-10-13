@@ -10,9 +10,11 @@ import {
 import { Search } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { api } from '../../lib/api';
+import { useUser } from '../../lib/auth';
 import { useAction } from '../../lib/hooks';
 import { FormError, ModalActions } from '../forms';
 import { Button, Field, Modal } from '../ui';
+import { TagPicker } from './tags';
 
 /** Nova entidade (pessoa/empresa) ou edição; CNPJ preenche pelo CNPJ Aberto ou pela BrasilAPI (falha graciosa). */
 export function EntityFormModal({
@@ -30,6 +32,8 @@ export function EntityFormModal({
   const [document, setDocument] = useState(entity?.document ? formatDocument(entity.document) : '');
   const [birthDate, setBirthDate] = useState(entity?.birthDate ?? '');
   const [notes, setNotes] = useState(entity?.notes ?? '');
+  const [tagIds, setTagIds] = useState<string[]>(entity?.tags.map((tag) => tag.id) ?? []);
+  const user = useUser();
   const [lookup, setLookup] = useState<CnpjLookup | null>(null);
   const [importLookup, setImportLookup] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -67,6 +71,7 @@ export function EntityFormModal({
       document: normalized || null,
       birthDate: kind === 'person' && birthDate ? birthDate : null,
       notes,
+      tagIds,
     };
     const saved = await run(
       async () => {
@@ -153,6 +158,9 @@ export function EntityFormModal({
                 <input className="field" value={tradeName} onChange={(e) => setTradeName(e.target.value)} maxLength={200} />
               </Field>
             )}
+            <Field label={t.entityTags.tags} className="span-all">
+              <TagPicker value={tagIds} onChange={setTagIds} current={entity?.tags} canCreate={user.role === 'admin'} />
+            </Field>
             <Field label={t.common.notes} className="span-all">
               <textarea className="field" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
             </Field>

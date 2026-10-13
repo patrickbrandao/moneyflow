@@ -1,9 +1,10 @@
 import { type CategoryNode, type EntitySummary, formatCents, formatDocument, parseBRL, t } from '@moneyflow/shared';
-import { Search, X } from 'lucide-react';
+import { Search, Star, X } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { useApi } from '../lib/hooks';
 import { CategoryDot } from './domain';
+import { TagDots } from './entity/tags';
 import { cx, useClickOutside, useDebounced } from './ui';
 
 /* Campos de formulário do domínio: dinheiro, entidade, categoria, conta. */
@@ -63,6 +64,8 @@ export function MoneyInput({
 
 export type EntityOption = { id: string; name: string; document?: string | null };
 
+const PICKER_LIMIT = 8;
+
 /** Busca de entidade (trigram na API) com lista suspensa. */
 export function EntityPicker({
   value,
@@ -88,8 +91,18 @@ export function EntityPicker({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    api
-      .get<EntitySummary[]>('/api/entities', { q: debounced.trim() || undefined, limit: 8 })
+    const q = debounced.trim();
+    // Sem texto: as favoritas primeiro (até 8), completadas com as demais por nome; com texto, a API já põe as favoritas na frente.
+    const load = q
+      ? api.get<EntitySummary[]>('/api/entities', { q, limit: 8 })
+      : Promise.all([
+          api.get<EntitySummary[]>('/api/entities', { favorites: 1, limit: PICKER_LIMIT }),
+          api.get<EntitySummary[]>('/api/entities', { limit: PICKER_LIMIT * 2 }),
+        ]).then(([favorites, all]) => {
+          const ids = new Set(favorites.map((e) => e.id));
+          return [...favorites, ...all.filter((e) => !ids.has(e.id))].slice(0, PICKER_LIMIT);
+        });
+    load
       .then((rows) => {
         if (!cancelled) {
           setOptions(rows);
@@ -163,7 +176,13 @@ export function EntityPicker({
               onMouseEnter={() => setActive(index)}
               onClick={() => pick(entity)}
             >
+              {entity.isFavorite ? (
+                <Star className="fav-inline" aria-label={t.entityTags.favorite} />
+              ) : (
+                <span className="fav-inline" aria-hidden />
+              )}
               <span className="min-w-0 flex-1 truncate text-left">{entity.name}</span>
+              <TagDots tags={entity.tags.filter((tag) => !tag.archived)} />
               {entity.document && <span className="mono text-[11px] text-faint">{formatDocument(entity.document)}</span>}
             </button>
           ))}
