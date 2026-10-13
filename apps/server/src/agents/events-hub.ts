@@ -4,6 +4,7 @@ import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config';
 import { emitAgentEvent } from '../services/message-worker';
+import { SYNC_FLOW_PURPOSES } from './flows';
 import { loadMessages } from './store';
 
 /*
@@ -118,7 +119,7 @@ export class RunEventsHub {
         FROM ai_run_events e JOIN ai_runs r ON r.id = e.run_id JOIN ai_conversations c ON c.id = r.conversation_id
        WHERE e.run_id = ${runId} AND e.seq = ${seq}`);
     const row = result.rows[0];
-    if (!row || row.purpose === 'document_reading') return;
+    if (!row || (row.purpose && SYNC_FLOW_PURPOSES.includes(row.purpose))) return;
     const status = row.payload.status;
     const done = row.event_type === 'done' && (status === 'completed' || status === 'failed');
     const awaiting = row.event_type === 'status' && status === 'awaiting_confirmation';

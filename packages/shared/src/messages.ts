@@ -116,7 +116,23 @@ export const dedupKeys = {
   invoiceClosed: (invoiceId: string) => `invoice_closed:${invoiceId}`,
   cardLimit: (cardId: string, threshold: number, month: string) => `card_limit:${cardId}:${threshold}:${month}`,
   divergence: (importId: string) => `reconciliation_divergence:${importId}`,
+  // Contratos (spec 020): por contrato e ciclo.
+  contractNotice: (cycleId: string, daysBefore: number) => `contract_notice_deadline:${cycleId}:D-${daysBefore}`,
+  contractEnding: (cycleId: string, daysBefore: number) => `contract_ending:${cycleId}:D-${daysBefore}`,
+  contractRenewal: (taskId: string, day: string) => `contract_renewal_pending:${taskId}:${day}`,
+  contractReadjustment: (contractId: string, date: string) => `contract_readjustment:${contractId}:${date}`,
 };
+
+/**
+ * Renovação pendente: avisa no dia em que a tarefa abre e, com repetição, a
+ * cada N dias depois (inclusive vencida). Sem repetição, só no primeiro dia.
+ */
+export function renewalReminderDue(openedOn: string, today: string, repeatEveryDays?: number | null): boolean {
+  const days = diffDays(openedOn, today);
+  if (days < 0) return false;
+  if (!repeatEveryDays) return true;
+  return days % repeatEveryDays === 0;
+}
 
 /* ---------------- montagem das mensagens ---------------- */
 
@@ -129,6 +145,8 @@ export type ReminderTitle = {
   entityName: string | null;
   boletoBarcode?: string | null;
   pixPayload?: string | null;
+  /** Parcela de contrato (spec 020): "Nome (n/N)". */
+  contractLabel?: string | null;
 };
 
 function titleBlock(title: ReminderTitle): string[] {
@@ -136,6 +154,7 @@ function titleBlock(title: ReminderTitle): string[] {
   return [
     `${escapeHtml(title.direction === 'payable' ? T.payable : T.receivable)} · ${escapeHtml(title.caixaName)}`,
     `${b(title.description)}${title.entityName ? ` — ${escapeHtml(title.entityName)}` : ''}`,
+    ...(title.contractLabel ? [`${escapeHtml(T.contract)}: ${escapeHtml(title.contractLabel)}`] : []),
     `${money(title.openCents)} ${escapeHtml(T.open)} · ${escapeHtml(T.due)} ${escapeHtml(formatDate(title.dueDate))}`,
     ...(line ? ['', `${escapeHtml(T.boleto)}:`, code(line)] : []),
     ...(title.pixPayload ? ['', `${escapeHtml(T.pix)}:`, code(title.pixPayload)] : []),
@@ -269,6 +288,61 @@ export function agentMessage(
     escapeHtml(text),
     linkLine(url) && '',
     linkLine(url),
+  ]);
+}
+
+/* ---------------- contratos (spec 020) ---------------- */
+
+export type ContractMessageInfo = {
+  name: string;
+  entityName: string;
+  caixaName: string;
+  direction: 'payable' | 'receivable';
+  url?: string | null;
+};
+
+const contractHeader = (c: ContractMessageInfo) => [
+  `${escapeHtml(c.direction === 'payable' ? T.payable : T.receivable)} · ${escapeHtml(c.caixaName)}`,
+  `${b(c.name)} — ${escapeHtml(c.entityName)}`,
+];
+
+export function contractNoticeMessage(c: ContractMessageInfo, daysBefore: number, deadline: string, cycleEnd: string): MessagePayload {
+  return payload([
+    b(T.contractNotice(daysBefore)),
+    ...contractHeader(c),
+    escapeHtml(T.contractNoticeDetail(formatDate(deadline), formatDate(cycleEnd))),
+    linkLine(c.url) && '',
+    linkLine(c.url),
+  ]);
+}
+
+export function contractEndingMessage(c: ContractMessageInfo, daysBefore: number, cycleEnd: string): MessagePayload {
+  return payload([
+    b(T.contractEnding(daysBefore)),
+    ...contractHeader(c),
+    escapeHtml(T.contractEndingDetail(formatDate(cycleEnd))),
+    linkLine(c.url) && '',
+    linkLine(c.url),
+  ]);
+}
+
+export function contractRenewalMessage(c: ContractMessageInfo, dueOn: string, overdue: boolean): MessagePayload {
+  return payload([
+    b(T.contractRenewalPending),
+    ...contractHeader(c),
+    escapeHtml(T.contractRenewalDetail(formatDate(dueOn), overdue)),
+    linkLine(c.url) && '',
+    linkLine(c.url),
+  ]);
+}
+
+export function contractReadjustmentMessage(c: ContractMessageInfo, indexLabel: string, date: string): MessagePayload {
+  return payload([
+    b(T.contractReadjustment),
+    ...contractHeader(c),
+    escapeHtml(T.contractReadjustmentDetail(indexLabel, formatDate(date))),
+    linkLine(c.url) && '',
+    linkLine(c.url),
   ]);
 }
 

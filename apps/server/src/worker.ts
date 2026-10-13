@@ -1,9 +1,11 @@
 import type { Database } from '@moneyflow/db';
+import { todayIso } from '@moneyflow/shared';
 import type { FastifyBaseLogger } from 'fastify';
 import { startAgentWorker } from './agents/worker';
 import { purgeExpiredSessions } from './auth/session';
 import type { Config } from './config';
 import { cardMaintenance } from './services/cards';
+import { contractMaintenance } from './services/contract-worker';
 import { messageTick } from './services/message-worker';
 import { materializeAll } from './services/recurrence';
 
@@ -31,6 +33,9 @@ export function startWorker(db: Database, config: Config, log: FastifyBaseLogger
       log.info(result, 'worker: séries materializadas');
       const cards = await cardMaintenance(db, { autoClose: config.cardAutoClose });
       log.info(cards, 'worker: faturas de cartão');
+      // Contratos (spec 020): abre as tarefas de renovação e encerra os vencidos; nunca lança parcelas.
+      const contracts = await contractMaintenance(db, todayIso());
+      if (contracts.opened || contracts.ended || contracts.failed) log.info(contracts, 'worker: contratos');
       await purgeExpiredSessions(db);
     } catch (error) {
       log.error(error, 'worker: falha na passada');

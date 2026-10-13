@@ -3,6 +3,7 @@ import {
   addDays,
   agentMessage,
   cardLimitMessage,
+  contractInstallmentLabel,
   dedupKeys,
   divergenceMessage,
   dueReminderMessage,
@@ -29,6 +30,7 @@ import {
 import { eq, sql } from 'drizzle-orm';
 import { type Actor, loadAccess } from '../authz/access';
 import type { Config } from '../config';
+import { contractMessages, contractNotifications } from './contract-worker';
 import { type ClaimedMessage, deliver } from './messages';
 import { createNotifications, type NewNotification } from './notifications';
 import { uuidArray } from './reports';
@@ -119,11 +121,14 @@ async function openTitles(db: Executor, caixaIds: string[], where: ReturnType<ty
   const arr = uuidArray(caixaIds);
   const result = await db.execute<Record<string, unknown>>(sql`
     SELECT t.id, t.caixa_id, t.description, t.direction, t.due_date, b.open_cents, c.name AS caixa_name,
-           coalesce(e.trade_name, e.name) AS entity_name, t.boleto_barcode, t.pix_payload
+           coalesce(e.trade_name, e.name) AS entity_name, t.boleto_barcode, t.pix_payload,
+           ct.name AS contract_name, t.contract_installment, cy.installments_count AS contract_installments_count
       FROM titles t
       JOIN title_balances b ON b.title_id = t.id
       JOIN caixas c ON c.id = t.caixa_id
       JOIN entities e ON e.id = t.entity_id
+      LEFT JOIN contracts ct ON ct.id = t.contract_id
+      LEFT JOIN contract_cycles cy ON cy.id = t.contract_cycle_id
      WHERE t.caixa_id = ANY (${arr}) AND t.archived_at IS NULL AND t.status IN ('open', 'partial') AND b.open_cents > 0
        AND NOT (t.direction = 'receivable' AND coalesce(t.counterparty_caixa_id = ANY (${arr}), false))
        AND ${where}
@@ -140,6 +145,13 @@ async function openTitles(db: Executor, caixaIds: string[], where: ReturnType<ty
     entityName: (r.entity_name as string | null) ?? null,
     boletoBarcode: (r.boleto_barcode as string | null) ?? null,
     pixPayload: (r.pix_payload as string | null) ?? null,
+    contractLabel: r.contract_name
+      ? contractInstallmentLabel(
+          String(r.contract_name),
+          r.contract_installment === null ? null : Number(r.contract_installment),
+          r.contract_installments_count === null ? null : Number(r.contract_installments_count),
+        )
+      : null,
   }));
 }
 
@@ -401,6 +413,12 @@ async function eventsFor(db: Database, config: Config, sub: SubscriptionRow, cai
         }),
       }));
     }
+    case 'contract_notice_deadline':
+    case 'contract_ending':
+    case 'contract_renewal_pending':
+    case 'contract_readjustment':
+      // Contratos (spec 020): aviso prévio, fim, renovação pendente e reajuste, com dedup por contrato e ciclo.
+      return contractMessages(db, kind, params, caixaIds, clock, (path) => linkTo(config, path));
     default:
       // agent_completed / agent_message: disparados pelo agente (F4), ver emitAgentEvent.
       return [];
@@ -592,8 +610,9 @@ export async function produceNotifications(db: Database, config: Config, clock: 
     });
   }
 
-  // Avisos diários por caixa (no horário NOTIFY_AT): vence hoje e atrasados.
+  // Avisos diários por caixa (no horário NOTIFY_AT): vence hoje e atrasados; e os dos contratos (spec 020).
   if (clock.time >= config.notifyAt) {
+    items.push(...(await contractNotifications(db, clock, (ids) => recipientsByCaixa(db, ids))));
     const caixas = await db.execute<{ id: string }>(sql`SELECT id FROM caixas WHERE archived_at IS NULL AND kind = 'general'`);
     const ids = caixas.rows.map((c) => c.id);
     const recipients = await recipientsByCaixa(db, ids);

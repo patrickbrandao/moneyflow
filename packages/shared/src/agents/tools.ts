@@ -7,9 +7,10 @@ import {
   entityUpdateInput,
   id,
   isoDate,
-  LINE_CREATE_MODES,
+  lineCreateInput,
   pixKeyInput,
   settlementCreateInput,
+  settlementReverseInput,
   TITLE_FILTERS,
   titleCreateInput,
   titleUpdateInput,
@@ -57,6 +58,18 @@ const optionalDate = date.optional();
 const limit = (max: number, fallback: number) =>
   z.number().int().min(1).max(max).default(fallback).describe(`Máximo de itens (padrão ${fallback}).`);
 const caixaIds = z.array(id).max(200).optional().describe('Caixas (ids); omitido = todas as que o usuário vê.');
+const lineIds = z.array(id).min(1).max(500);
+/** Alvo do casamento de uma linha: exatamente um dos três. */
+const lineMatchItem = z.object({
+  lineId: id,
+  movementId: id.optional().describe('Movimento já lançado na conta, de mesmo valor.'),
+  titleId: id.optional().describe('Título em aberto da caixa da conta: vira baixa com a data e o valor da linha.'),
+  cardInvoiceItemId: id.optional().describe('Item de fatura (linhas de fatura de cartão).'),
+});
+/** Lançamento a partir de uma linha nova (o mesmo corpo de POST /api/statement-lines/:id/create). */
+const lineCreateItem = lineCreateInput.extend({ lineId: id });
+const LINE_CREATE_HELP =
+  'mode: adjustment = movimento avulso; title = título já baixado na conta (espelho como em create_title: a caixa principal da entidade recebe o lado oposto; mirrorCaixaId null = sem espelho); purchase = compra no cartão (linha de fatura; payerCaixaId omitido = pagadora padrão do cartão). Entidade e categoria omitidas = as da classificação da linha.';
 
 export const AGENT_TOOLS = [
   /* ---------------- leitura ---------------- */
@@ -233,6 +246,14 @@ export const AGENT_TOOLS = [
     input: z.object({ importId: id }),
   }),
   define({
+    name: 'list_line_candidates',
+    title: 'Candidatos da linha do extrato',
+    description:
+      'Candidatos para casar uma linha do extrato (movimentos, títulos em aberto e itens de fatura próximos em data e valor), do mais provável ao menos.',
+    kind: 'read',
+    input: z.object({ lineId: id }),
+  }),
+  define({
     name: 'list_message_destinations',
     title: 'Listar destinos de mensagem',
     description: 'Destinos do Telegram que o usuário pode usar.',
@@ -278,12 +299,42 @@ export const AGENT_TOOLS = [
     input: z.object({ titleId: id, changes: titleUpdateInput }),
   }),
   define({
+    name: 'end_series',
+    title: 'Encerrar série recorrente',
+    description:
+      'Encerra (ou estende) a série recorrente de um título numa data: as ocorrências que vencem até endsOn continuam; as seguintes em aberto são canceladas (com o espelho), sem apagar. endsOn null = sem fim (reabre as canceladas por um encerramento anterior). Falha se houver ocorrência com baixa depois da data.',
+    kind: 'write',
+    destructive: true,
+    input: z.object({
+      titleId: id.describe('Qualquer ocorrência da série.'),
+      endsOn: date.nullable().describe('Último vencimento a manter (AAAA-MM-DD); null = sem fim.'),
+    }),
+  }),
+  define({
     name: 'settle_title',
     title: 'Baixar título',
     description:
       'Registra uma baixa (pagamento ou recebimento, total ou parcial) de um título, numa conta da caixa do título (financialAccountId null = conta a definir).',
     kind: 'write',
     input: z.object({ titleId: id, settlement: settlementCreateInput }),
+  }),
+  define({
+    name: 'reverse_settlement',
+    title: 'Estornar baixa',
+    description:
+      'Estorna uma baixa (get_title lista as baixas do título, com o id): a baixa e a perna do espelho ficam estornadas, cada perna com conta recebe o movimento oposto e o título volta a ter o valor em aberto. Use para corrigir uma baixa errada, inclusive a criada ao casar uma linha do extrato com o título errado (desfaça antes a conciliação com unmatch_statement_line).',
+    kind: 'write',
+    destructive: true,
+    input: z.object({
+      settlementId: id.describe('Baixa a estornar.'),
+      reason: settlementReverseInput.shape.reason.describe('Motivo do estorno (fica na baixa).'),
+      reversedOn: settlementReverseInput.shape.reversedOn.describe(
+        'Data do estorno (AAAA-MM-DD); omitida = hoje. Não pode ser antes da baixa.',
+      ),
+      undoTransfer: settlementReverseInput.shape.undoTransfer.describe(
+        'Baixa paga com conta de outra caixa: true (padrão) desfaz a transferência gerada.',
+      ),
+    }),
   }),
   define({
     name: 'create_transfer',
@@ -302,36 +353,62 @@ export const AGENT_TOOLS = [
   define({
     name: 'match_statement_line',
     title: 'Conciliar linha do extrato',
-    description: 'Casa uma linha do extrato com um movimento, um título em aberto (vira baixa) ou um item de fatura.',
+    description:
+      'Casa uma linha do extrato com um movimento, um título em aberto (vira baixa) ou um item de fatura. Para várias linhas, use match_statement_lines.',
     kind: 'write',
-    input: z.object({
-      lineId: id,
-      movementId: id.optional(),
-      titleId: id.optional(),
-      cardInvoiceItemId: id.optional(),
-    }),
+    input: lineMatchItem,
+  }),
+  define({
+    name: 'match_statement_lines',
+    title: 'Conciliar linhas do extrato em lote',
+    description:
+      'Casa até 500 linhas do extrato, cada uma com um movimento, um título em aberto (vira baixa) ou um item de fatura (use list_line_candidates). Cada linha é independente: as que falham voltam em failed com o motivo.',
+    kind: 'write',
+    input: z.object({ matches: z.array(lineMatchItem).min(1).max(500) }),
   }),
   define({
     name: 'confirm_statement_lines',
     title: 'Confirmar sugestões de conciliação',
     description: 'Confirma em lote as linhas do extrato com casamento sugerido.',
     kind: 'write',
-    input: z.object({ lineIds: z.array(id).min(1).max(500) }),
+    input: z.object({ lineIds }),
+  }),
+  define({
+    name: 'unmatch_statement_line',
+    title: 'Desfazer conciliação da linha',
+    description:
+      'Desfaz a conciliação (ou a sugestão) de uma linha do extrato, que volta a nova. O movimento ou a baixa criados ao conciliar continuam lançados (estorne a baixa errada com reverse_settlement).',
+    kind: 'write',
+    destructive: true,
+    input: z.object({ lineId: id }),
+  }),
+  define({
+    name: 'ignore_statement_lines',
+    title: 'Ignorar linhas do extrato',
+    description: 'Marca linhas do extrato (não conciliadas) como ignoradas: ficam fora da conciliação.',
+    kind: 'write',
+    input: z.object({ lineIds }),
+  }),
+  define({
+    name: 'unignore_statement_lines',
+    title: 'Voltar linhas ignoradas',
+    description: 'Linhas ignoradas do extrato voltam a novas.',
+    kind: 'write',
+    input: z.object({ lineIds }),
   }),
   define({
     name: 'create_from_statement_line',
     title: 'Lançar a partir da linha',
-    description:
-      'Transforma uma linha nova do extrato em lançamento: movimento avulso (adjustment), título já baixado (title) ou compra (purchase).',
+    description: `Transforma uma linha nova do extrato em lançamento conciliado com ela. ${LINE_CREATE_HELP}`,
     kind: 'write',
-    input: z.object({
-      lineId: id,
-      mode: z.enum(LINE_CREATE_MODES),
-      entityId: id.nullish(),
-      categoryId: id.nullish(),
-      description: z.string().trim().max(300).nullish(),
-      learnRule: z.boolean().default(true),
-    }),
+    input: lineCreateItem,
+  }),
+  define({
+    name: 'create_from_statement_lines',
+    title: 'Lançar linhas do extrato em lote',
+    description: `Transforma até 500 linhas novas do extrato em lançamentos conciliados. Cada linha é independente: as que falham voltam em failed com o motivo. ${LINE_CREATE_HELP}`,
+    kind: 'write',
+    input: z.object({ items: z.array(lineCreateItem).min(1).max(500) }),
   }),
   define({
     name: 'classify_statement_lines',
@@ -351,7 +428,7 @@ export const AGENT_TOOLS = [
     title: 'Aprovar sugestões de classificação',
     description: 'Aprova (ou descarta) as sugestões de classificação do agente nas linhas do extrato.',
     kind: 'write',
-    input: z.object({ lineIds: z.array(id).min(1).max(500), decision: z.enum(['approve', 'reject']).default('approve') }),
+    input: z.object({ lineIds, decision: z.enum(['approve', 'reject']).default('approve') }),
   }),
   define({
     name: 'send_telegram_message',

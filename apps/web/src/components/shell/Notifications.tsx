@@ -6,6 +6,7 @@ import {
   CalendarClock,
   CheckCheck,
   CreditCard,
+  FileClock,
   GitCompareArrows,
   Info,
   Repeat2,
@@ -28,6 +29,10 @@ const ICONS: Record<NotificationKind, ReactNode> = {
   reconciliation_divergence: <GitCompareArrows className="ic" />,
   message_failed: <SendHorizontal className="ic" />,
   system: <Info className="ic info" />,
+  contract_notice_deadline: <FileClock className="ic" />,
+  contract_ending: <FileClock className="ic info" />,
+  contract_renewal_pending: <Repeat2 className="ic" />,
+  contract_readjustment: <CalendarClock className="ic info" />,
 };
 
 /**

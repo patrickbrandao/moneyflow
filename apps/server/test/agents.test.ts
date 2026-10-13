@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { SseParser } from '@moneyflow/shared';
+import { formatBRL, SseParser } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
@@ -489,7 +489,349 @@ describe('conversas', () => {
   });
 });
 
+describe('conciliação pelo agente', () => {
+  let autonomous: any;
+  const fixture = (name: string) => readFileSync(join(import.meta.dirname, 'fixtures', name));
+
+  beforeAll(async () => {
+    autonomous = await admin.post('/api/admin/ai/agents', {
+      name: `Conciliador ${uid()}`,
+      systemPrompt: 'Você concilia extratos.',
+      providerId: provider.id,
+      model: 'claude-sonnet-5-5',
+      params: { max_tokens: 2000, max_tool_iterations: 6 },
+      requireWriteConfirmation: false,
+      isActive: true,
+    });
+  });
+
+  /** Uma chamada de tool pelo agente (o provedor falso pede "chamar <tool> <json>"); devolve o resultado. */
+  async function callTool(agentId: string, name: string, input: unknown) {
+    const conversation = await admin.post('/api/conversations', { agentId });
+    const sent = await chat(admin, conversation.id, `chamar ${name} ${JSON.stringify(input)}`);
+    await drain();
+    const detail = await admin.get(`/api/conversations/${conversation.id}`);
+    const result = detail.messages.find((m: any) => m.role === 'tool')?.content[0];
+    return { runId: sent.run.id, status: (await runStatus(sent.run.id)).status, detail, result };
+  }
+
+  async function importStatement(url: string, file: string) {
+    const res = await h.app.inject({
+      method: 'POST',
+      url,
+      payload: fixture(file),
+      headers: { cookie: adminSession.cookie, 'content-type': 'application/octet-stream' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json();
+  }
+
+  async function titleOfLine(lineId: string) {
+    const r = await h.db.execute<{ title_id: string }>(sql`
+      SELECT st.title_id FROM statement_lines l
+        JOIN movements m ON m.id = l.movement_id JOIN settlements st ON st.id = m.settlement_id
+       WHERE l.id = ${lineId}`);
+    return r.rows[0]?.title_id ?? null;
+  }
+
+  it('lote na conta, sem confirmação: título em aberto vira baixa, linha sem título vira título baixado com espelho, falhas por linha', async () => {
+    const s = await scenario(h, admin);
+    const title = (body: Record<string, unknown>) =>
+      admin.post('/api/titles', {
+        caixaId: s.caixaA.id,
+        direction: 'payable',
+        entityId: s.supplier.id,
+        categoryId: s.expense.id,
+        competenceDate: '2026-10-01',
+        ...body,
+      });
+    const market = await title({ description: 'Supermercado do mês', dueDate: '2026-10-07', amountCents: 23_015 });
+    const imp = await importStatement(`/api/statement-imports?accountId=${s.accountA.id}&fileName=extrato.ofx`, 'extrato-ofx2.ofx');
+    const line = (fitid: string) => imp.lines.find((l: any) => l.fitid === fitid);
+
+    const { status, result, detail } = await callTool(autonomous.id, 'create_from_statement_lines', {
+      items: [
+        // PIX recebido de quem é titular da caixa B: título a receber baixado, espelhado (a pagar) na caixa B.
+        { lineId: line('OFX2-0002').id, mode: 'title', entityId: s.holderB.id, categoryId: s.income.id },
+        // Fornecedor sem caixa: título baixado sem espelho.
+        { lineId: line('OFX2-0004').id, mode: 'title', entityId: s.supplier.id, categoryId: s.expense.id, learnRule: false },
+        // Tarifa: movimento avulso.
+        { lineId: line('OFX2-0001').id, mode: 'adjustment', categoryId: s.expense.id, learnRule: false },
+        // Compra só vale em fatura de cartão: falha só esta linha.
+        { lineId: line('OFX2-0005').id, mode: 'purchase' },
+      ],
+    });
+    expect(status).toBe('completed');
+    expect(detail.confirmations).toHaveLength(0);
+    const created = JSON.parse(result.content);
+    expect(created).toEqual({
+      created: 3,
+      failed: [{ lineId: line('OFX2-0005').id, message: 'Só linhas de fatura de cartão viram compra.' }],
+    });
+
+    const receivable = await admin.get(`/api/titles/${await titleOfLine(line('OFX2-0002').id)}`);
+    expect(receivable).toMatchObject({ direction: 'receivable', status: 'paid', entityId: s.holderB.id, amountCents: 150_000 });
+    expect(receivable.mirror).toMatchObject({ caixaId: s.caixaB.id, mirrorStatus: 'accepted', status: 'paid' });
+    const mirrored = await admin.get(`/api/titles/${receivable.mirror.id}`);
+    expect(mirrored).toMatchObject({ direction: 'payable', entityId: s.holderA.id });
+    const internet = await admin.get(`/api/titles/${await titleOfLine(line('OFX2-0004').id)}`);
+    expect(internet).toMatchObject({ status: 'paid', mirror: null });
+
+    // Título em aberto (já sugerido) casado em lote: vira baixa na conta do extrato.
+    const matched = await callTool(autonomous.id, 'match_statement_lines', {
+      matches: [
+        { lineId: line('OFX2-0003').id, titleId: market.id },
+        { lineId: line('OFX2-0002').id, titleId: market.id },
+      ],
+    });
+    expect(JSON.parse(matched.result.content)).toEqual({
+      matched: 1,
+      failed: [{ lineId: line('OFX2-0002').id, message: 'Esta linha já foi conciliada ou ignorada.' }],
+    });
+    expect(await admin.get(`/api/titles/${market.id}`)).toMatchObject({ status: 'paid', openCents: 0 });
+
+    // Ignorar e voltar.
+    const ignored = await callTool(autonomous.id, 'ignore_statement_lines', { lineIds: [line('OFX2-0005').id, line('OFX2-0003').id] });
+    expect(JSON.parse(ignored.result.content)).toMatchObject({ updated: 1, failed: [{ lineId: line('OFX2-0003').id }] });
+    const lines = async () => (await admin.get(`/api/statement-imports/${imp.id}`)).lines;
+    expect((await lines()).find((l: any) => l.id === line('OFX2-0005').id).status).toBe('ignored');
+    await callTool(autonomous.id, 'unignore_statement_lines', { lineIds: [line('OFX2-0005').id] });
+    expect((await lines()).find((l: any) => l.id === line('OFX2-0005').id).status).toBe('new');
+
+    // Escrita do agente sai como ator agent na auditoria.
+    const audit = await h.db.execute<{ actor_kind: string }>(
+      sql`SELECT DISTINCT actor_kind FROM audit_log WHERE table_name = 'titles' AND record_id = ${receivable.mirror.id}`,
+    );
+    expect(audit.rows).toEqual([{ actor_kind: 'agent' }]);
+  });
+
+  it('candidatos da linha, casamento errado desfeito e refeito; prévia do desfazer com o aviso da baixa', async () => {
+    const s = await scenario(h, admin);
+    const base = {
+      caixaId: s.caixaA.id,
+      direction: 'payable',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      competenceDate: '2026-10-01',
+    };
+    const pix = await admin.post('/api/titles', { ...base, description: 'Pagamento José', dueDate: '2026-10-21', amountCents: 40_000 });
+    const wrong = await admin.post('/api/titles', { ...base, description: 'Aluguel', dueDate: '2026-10-25', amountCents: 100_000 });
+    const imp = await importStatement(`/api/statement-imports?accountId=${s.accountA.id}&fileName=extrato.ofx`, 'extrato-ofx2.ofx');
+    const lineId = imp.lines.find((l: any) => l.fitid === 'OFX2-0006').id;
+
+    const candidates = JSON.parse((await callTool(autonomous.id, 'list_line_candidates', { lineId })).result.content);
+    expect(candidates[0]).toMatchObject({ kind: 'title', id: pix.id });
+
+    // Casou com o título errado: vira uma baixa parcial dele.
+    await callTool(autonomous.id, 'match_statement_line', { lineId, titleId: wrong.id });
+    expect((await admin.get(`/api/titles/${wrong.id}`)).openCents).toBe(60_000);
+
+    // Com o agente que pede confirmação: a prévia avisa que a baixa fica.
+    const asked = await callTool(agent.id, 'unmatch_statement_line', { lineId });
+    expect(asked.status).toBe('awaiting_confirmation');
+    const card = asked.detail.confirmations[0];
+    expect(card).toMatchObject({
+      toolName: 'unmatch_statement_line',
+      preview: { title: 'Desfazer conciliação da linha', action: 'delete' },
+    });
+    expect(card.preview.rows[0].before).toContain('Aluguel');
+    expect(card.preview.warnings[0]).toContain('continuam lançados');
+    await admin.post(`/api/runs/${asked.runId}/confirmations`, { decision: 'approved' });
+    await drain();
+    const after = (await admin.get(`/api/statement-imports/${imp.id}`)).lines.find((l: any) => l.id === lineId);
+    expect(after).toMatchObject({ status: 'new', movementId: null });
+
+    // Desfazer de novo: a linha já não está conciliada (o erro volta ao modelo, sem pedir confirmação).
+    const again = await callTool(agent.id, 'unmatch_statement_line', { lineId });
+    expect(again.status).toBe('completed');
+    expect(again.result).toMatchObject({ is_error: true });
+    expect(again.result.content).toContain('não está conciliada');
+
+    await callTool(autonomous.id, 'match_statement_lines', { matches: [{ lineId, titleId: pix.id }] });
+    expect((await admin.get(`/api/titles/${pix.id}`)).status).toBe('paid');
+  });
+
+  it('casamento errado corrigido pelo agente: desfaz, estorna a baixa (com a perna do espelho) e casa com o título certo', async () => {
+    const s = await scenario(h, admin);
+    const base = { caixaId: s.caixaA.id, direction: 'payable', categoryId: s.expense.id, competenceDate: '2026-10-01' };
+    const pix = await admin.post('/api/titles', {
+      ...base,
+      entityId: s.supplier.id,
+      description: 'Pagamento José',
+      dueDate: '2026-10-21',
+      amountCents: 40_000,
+    });
+    // O título errado é de quem é titular da caixa B: espelhado (a receber) lá.
+    const wrong = await admin.post('/api/titles', {
+      ...base,
+      entityId: s.holderB.id,
+      description: 'Aluguel',
+      dueDate: '2026-10-25',
+      amountCents: 100_000,
+    });
+    const imp = await importStatement(`/api/statement-imports?accountId=${s.accountA.id}&fileName=extrato.ofx`, 'extrato-ofx2.ofx');
+    const lineId = imp.lines.find((l: any) => l.fitid === 'OFX2-0006').id;
+
+    await callTool(autonomous.id, 'match_statement_line', { lineId, titleId: wrong.id });
+    const settled = await admin.get(`/api/titles/${wrong.id}`);
+    expect(settled.openCents).toBe(60_000);
+    const leg = settled.settlements[0];
+    expect(leg).toMatchObject({ settledOn: '2026-10-22', cashCents: 40_000, financialAccountId: s.accountA.id });
+    const reversal = { settlementId: leg.id, reason: 'Linha casada com o título errado', reversedOn: '2026-10-23' };
+
+    // Estornar com a linha ainda conciliada: a prévia avisa para desfazer antes (recusado aqui).
+    const early = await callTool(agent.id, 'reverse_settlement', reversal);
+    expect(early.status).toBe('awaiting_confirmation');
+    expect(early.detail.confirmations[0].preview.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('continua conciliada com o movimento desta baixa')]),
+    );
+    await admin.post(`/api/runs/${early.runId}/confirmations`, { decision: 'rejected', reason: 'desfazer antes' });
+    await drain();
+    expect((await admin.get(`/api/titles/${wrong.id}`)).openCents).toBe(60_000);
+
+    await callTool(autonomous.id, 'unmatch_statement_line', { lineId });
+
+    // Com o agente que pede confirmação: prévia com título, valor, data, conta e a perna do espelho.
+    const asked = await callTool(agent.id, 'reverse_settlement', reversal);
+    expect(asked.status).toBe('awaiting_confirmation');
+    const card = asked.detail.confirmations[0];
+    expect(card).toMatchObject({
+      toolName: 'reverse_settlement',
+      preview: { title: 'Estornar pagamento', summary: `Aluguel (${s.holderB.name})`, action: 'delete' },
+    });
+    expect(card.preview.rows).toEqual(
+      expect.arrayContaining([
+        { label: 'Data da baixa', before: '22/10/2026', after: '—' },
+        { label: 'Valor', before: formatBRL(40_000), after: '—' },
+        { label: 'Conta', before: s.accountA.name, after: '—' },
+        { label: 'Perna do espelho', before: `${s.caixaB.name} · conta a definir`, after: 'Estornada' },
+        { label: 'Em aberto', before: formatBRL(60_000), after: formatBRL(100_000) },
+        { label: 'Motivo', after: reversal.reason },
+      ]),
+    );
+    expect(card.preview.warnings).toHaveLength(1);
+    await admin.post(`/api/runs/${asked.runId}/confirmations`, { decision: 'approved' });
+    await drain();
+    expect((await runStatus(asked.runId)).status).toBe('completed');
+
+    // O título (e o espelho) voltam a em aberto; o movimento oposto zera a baixa na conta.
+    const reopened = await admin.get(`/api/titles/${wrong.id}`);
+    expect(reopened).toMatchObject({ status: 'open', openCents: 100_000 });
+    expect(reopened.settlements[0]).toMatchObject({ id: leg.id, reversalReason: reversal.reason });
+    expect(reopened.settlements[0].reversedAt).not.toBeNull();
+    expect(await admin.get(`/api/titles/${reopened.mirror.id}`)).toMatchObject({ status: 'open', openCents: 100_000 });
+    const net = await h.db.execute<{ total: string; count: string }>(
+      sql`SELECT sum(amount_cents)::text AS total, count(*)::text AS count FROM movements WHERE settlement_id = ${leg.id}`,
+    );
+    expect(net.rows[0]).toEqual({ total: '0', count: '2' });
+    const audit = await h.db.execute<{ actor_kind: string }>(
+      sql`SELECT DISTINCT actor_kind FROM audit_log WHERE table_name = 'settlements' AND record_id = ${leg.id} AND action = 'update'`,
+    );
+    expect(audit.rows).toEqual([{ actor_kind: 'agent' }]);
+
+    // Estornar de novo: o erro volta ao modelo sem pedir confirmação.
+    const again = await callTool(agent.id, 'reverse_settlement', reversal);
+    expect(again.status).toBe('completed');
+    expect(again.result).toMatchObject({ is_error: true });
+    expect(again.result.content).toContain('já foi estornada');
+
+    await callTool(autonomous.id, 'match_statement_line', { lineId, titleId: pix.id });
+    expect((await admin.get(`/api/titles/${pix.id}`)).status).toBe('paid');
+    expect((await admin.get(`/api/statement-imports/${imp.id}`)).lines.find((l: any) => l.id === lineId).status).toBe('matched');
+  });
+
+  it('fatura do cartão: linha nova vira compra na caixa pagadora escolhida', async () => {
+    const s = await scenario(h, admin);
+    const issuer = await admin.post('/api/entities', { kind: 'company', name: `Emissor ${s.tag}` });
+    const card = await admin.post('/api/caixas', {
+      name: `Cartão ${s.tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: s.caixaA.id,
+      creditLimitCents: 500_000,
+      closingDay: 25,
+      dueDay: 5,
+      cardLast4: '2222',
+    });
+    const imp = await importStatement(`/api/statement-imports?cardCaixaId=${card.id}&fileName=fatura.ofx`, 'fatura-cartao.ofx');
+    const gym = imp.lines.find((l: any) => l.amountCents === -25_000);
+
+    const asked = await callTool(agent.id, 'create_from_statement_line', {
+      lineId: gym.id,
+      mode: 'purchase',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      payerCaixaId: s.caixaB.id,
+    });
+    expect(asked.detail.confirmations[0].preview.rows).toEqual(expect.arrayContaining([{ label: 'Caixa pagadora', after: s.caixaB.name }]));
+    await admin.post(`/api/runs/${asked.runId}/confirmations`, { decision: 'approved' });
+    await drain();
+    expect((await runStatus(asked.runId)).status).toBe('completed');
+    const purchases = await admin.get(`/api/cards/${card.id}/purchases`);
+    expect(purchases.find((p: any) => p.amountCents === 25_000)).toMatchObject({ payerCaixaId: s.caixaB.id, entityId: s.supplier.id });
+  });
+});
+
 describe('IA nos fluxos', () => {
+  it('contrato: o PDF sugere os campos (nada é gravado) e vira um markdown versão 1 do agente (spec 020)', async () => {
+    const stop = startAgentWorker(h.db, h.config, log, { pollMs: 100, maintenanceMs: 3_600_000 });
+    try {
+      const s = await scenario(h, admin);
+      const pdf = Buffer.from('%PDF-1.4\n% contrato\n');
+      const res = await h.app.inject({
+        method: 'POST',
+        url: `/api/contracts/document?fileName=contrato.pdf&caixaId=${s.caixaA.id}`,
+        payload: pdf,
+        headers: { cookie: adminSession.cookie, 'content-type': 'application/pdf' },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toMatchObject({
+        name: 'Suporte mensal (lido do PDF)',
+        direction: 'receivable',
+        startsOn: '2030-03-01',
+        durationMonths: 12,
+        totalCents: 6000001,
+        periodicity: 'monthly',
+        dueDay: 10,
+        autoRenew: true,
+        readjustmentIndex: 'ipca',
+        terminationPenaltyText: '20% do saldo restante',
+      });
+      expect(await admin.get(`/api/contracts?caixaId=${s.caixaA.id}`)).toEqual([]);
+
+      const contract = await admin.post('/api/contracts', {
+        caixaId: s.caixaA.id,
+        entityId: s.holderB.id,
+        direction: 'receivable',
+        categoryId: s.income.id,
+        name: 'Suporte',
+        startsOn: '2030-03-01',
+        durationMonths: 12,
+        periodicity: 'monthly',
+        totalCents: 120_000,
+        dueDay: 10,
+        dueMonthOffset: 0,
+      });
+      const up = await h.app.inject({
+        method: 'POST',
+        url: `/api/contracts/${contract.id}/documents?fileName=contrato.pdf&kind=contract`,
+        payload: pdf,
+        headers: { cookie: adminSession.cookie, 'content-type': 'application/pdf' },
+      });
+      expect(up.statusCode, up.body).toBe(200);
+      const md = await admin.post(`/api/contract-documents/${up.json().id}/convert`);
+      expect(md).toMatchObject({ format: 'markdown', currentVersion: 1, sourceDocumentId: up.json().id, kind: 'contract' });
+      const v1 = await admin.get(`/api/contract-documents/${md.id}/versions/${md.currentVersionId}`);
+      expect(v1).toMatchObject({
+        authorKind: 'agent',
+        content: '# Contrato de prestação de serviços\n\n## Cláusula 1\nObjeto: suporte mensal.',
+      });
+      expect(v1.aiRunId).toBeTruthy();
+    } finally {
+      await stop();
+    }
+  });
+
   it('leitura de documento pré-preenche o título; conciliação recebe sugestões do agente para aprovar em lote', async () => {
     const stop = startAgentWorker(h.db, h.config, log, { pollMs: 100, maintenanceMs: 3_600_000 });
     try {

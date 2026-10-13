@@ -18,6 +18,7 @@ import { authRoutes } from './routes/auth';
 import { backupRoutes } from './routes/backup';
 import { caixaRoutes } from './routes/caixas';
 import { cardRoutes } from './routes/cards';
+import { contractRoutes } from './routes/contracts';
 import { entityRoutes } from './routes/entities';
 import { mcpRoutes } from './routes/mcp';
 import { operationRoutes } from './routes/operation';
@@ -130,6 +131,7 @@ export async function buildApp({
   await app.register(agentRoutes);
   await app.register(mcpRoutes);
   await app.register(backupRoutes);
+  await app.register(contractRoutes);
 
   // Em produção a API serve o SPA compilado (imagem única).
   const webDist = config.webDist ? resolve(config.webDist) : null;

@@ -16,7 +16,8 @@ import type { AddressInfo } from 'node:net';
  *  - "chamar <tool> <json>"     → chama a tool indicada com a entrada JSON
  *  - "devagar"                  → resposta longa e lenta (para testar o "parar")
  *  - resultado de tool          → "Pronto: <resumo do resultado>"
- *  - prompt de leitura de documento / classificação / título → JSON ou título de teste
+ *  - prompt de leitura de documento / de contrato / classificação / título → JSON ou título de teste
+ *  - conversão de contrato em markdown → um markdown curto
  *  - qualquer outra coisa       → "Olá! Sou o agente de teste."
  * Os testes podem trocar o cérebro (`brain`) ou enfileirar respostas (`queue`).
  */
@@ -57,6 +58,31 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function defaultBrain(view: NeutralView): FakeReply {
   if (/Gere um título curto/.test(view.system)) return { text: 'Conversa de teste' };
+  if (/ler o contrato anexado/.test(view.system)) {
+    return {
+      text: JSON.stringify({
+        counterpartyName: 'Contraparte do PDF',
+        counterpartyDocument: null,
+        direction: 'receivable',
+        name: view.hasDocument ? 'Suporte mensal (lido do PDF)' : 'Sem documento',
+        contractNumber: 'CT-PDF-01',
+        startsOn: '2030-03-01',
+        durationMonths: 12,
+        totalCents: 6000001,
+        installmentCents: null,
+        periodicity: 'monthly',
+        dueDay: 10,
+        autoRenew: true,
+        noticeDays: 30,
+        readjustmentIndex: 'ipca',
+        readjustmentBaseDate: null,
+        terminationPenalty: '20% do saldo restante',
+      }),
+    };
+  }
+  if (/converter o contrato anexado/.test(view.system)) {
+    return { text: '```markdown\n# Contrato de prestação de serviços\n\n## Cláusula 1\nObjeto: suporte mensal.\n```' };
+  }
   if (/ler o documento anexado/.test(view.system)) {
     return {
       text: JSON.stringify({

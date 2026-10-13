@@ -24,6 +24,9 @@ export const titleLink = (title: { id: string; caixaId: string; direction: 'paya
 
 export const entityLink = (id: string) => `/entities/${id}`;
 
+/** Detalhe do contrato (spec 020); `tab` abre uma aba (ex.: renewal). */
+export const contractLink = (id: string, tab?: string) => `/contracts/${id}${tab ? `?tab=${tab}` : ''}`;
+
 /** Detalhe da fatura do cartão; `payer` filtra as compras de uma pagadora (navegação a partir do título dela). */
 export const invoiceLink = (invoiceId: string, payerCaixaId?: string | null) =>
   `/card-invoices/${invoiceId}${payerCaixaId ? `?payer=${payerCaixaId}` : ''}`;

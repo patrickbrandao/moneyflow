@@ -6,6 +6,7 @@ import {
   CalendarDays,
   ChartColumn,
   DatabaseBackup,
+  Handshake,
   History,
   LayoutGrid,
   Send,
@@ -65,6 +66,7 @@ export const NAVIGATION: NavEntry[][] = [
     { kind: 'link', to: '/entities', label: t.nav.entities, icon: <Building2 />, shortcut: 'g e' },
     { kind: 'link', to: '/transfers', label: t.nav.transfers, icon: <ArrowLeftRight />, shortcut: 'g t' },
     { kind: 'link', to: '/calendar', label: t.nav.calendar, icon: <CalendarDays />, shortcut: 'g a' },
+    { kind: 'link', to: '/contracts', label: t.nav.contracts, icon: <Handshake />, shortcut: 'g o' },
   ],
   [
     { kind: 'link', to: '/flow', label: t.nav.flow, icon: <Waypoints />, shortcut: 'g f' },

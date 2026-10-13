@@ -1204,136 +1204,6 @@ END)`,
   ],
 );
 
-export const titles = pgTable(
-  'titles',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    caixaId: uuid('caixa_id').notNull(),
-    direction: text().notNull(),
-    entityId: uuid('entity_id').notNull(),
-    categoryId: uuid('category_id').notNull(),
-    description: text().notNull(),
-    competenceDate: date('competence_date').notNull(),
-    dueDate: date('due_date').notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
-    status: text().default('open').notNull(),
-    origin: text().default('manual').notNull(),
-    recurrenceRuleId: uuid('recurrence_rule_id'),
-    occurrence: smallint(),
-    counterpartyCaixaId: uuid('counterparty_caixa_id'),
-    mirrorTitleId: uuid('mirror_title_id'),
-    mirrorStatus: text('mirror_status'),
-    notes: text(),
-    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    boletoBarcode: text('boleto_barcode'),
-    pixPayload: text('pix_payload'),
-    nfeDocumentId: uuid('nfe_document_id'),
-    cardInvoiceId: uuid('card_invoice_id'),
-  },
-  (table) => [
-    uniqueIndex('titles_caixa_boleto_barcode_key')
-      .using('btree', table.caixaId.asc().nullsLast().op('text_ops'), table.boletoBarcode.asc().nullsLast().op('text_ops'))
-      .where(sql`((boleto_barcode IS NOT NULL) AND (status <> 'canceled'::text))`),
-    index('titles_caixa_id_competence_date_idx').using(
-      'btree',
-      table.caixaId.asc().nullsLast().op('date_ops'),
-      table.competenceDate.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('titles_caixa_id_due_date_idx').using(
-      'btree',
-      table.caixaId.asc().nullsLast().op('uuid_ops'),
-      table.dueDate.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('titles_caixa_id_status_due_date_idx').using(
-      'btree',
-      table.caixaId.asc().nullsLast().op('uuid_ops'),
-      table.status.asc().nullsLast().op('text_ops'),
-      table.dueDate.asc().nullsLast().op('text_ops'),
-    ),
-    index('titles_card_invoice_id_idx').using('btree', table.cardInvoiceId.asc().nullsLast().op('uuid_ops')),
-    index('titles_category_id_idx').using('btree', table.categoryId.asc().nullsLast().op('uuid_ops')),
-    index('titles_counterparty_caixa_id_idx').using('btree', table.counterpartyCaixaId.asc().nullsLast().op('uuid_ops')),
-    index('titles_due_date_idx')
-      .using('btree', table.dueDate.asc().nullsLast().op('date_ops'))
-      .where(sql`(status = ANY (ARRAY['open'::text, 'partial'::text]))`),
-    index('titles_entity_id_idx').using('btree', table.entityId.asc().nullsLast().op('uuid_ops')),
-    uniqueIndex('titles_mirror_title_id_key').using('btree', table.mirrorTitleId.asc().nullsLast().op('uuid_ops')),
-    index('titles_nfe_document_id_idx').using('btree', table.nfeDocumentId.asc().nullsLast().op('uuid_ops')),
-    uniqueIndex('titles_recurrence_occurrence_key').using(
-      'btree',
-      table.recurrenceRuleId.asc().nullsLast().op('uuid_ops'),
-      table.caixaId.asc().nullsLast().op('uuid_ops'),
-      table.occurrence.asc().nullsLast().op('uuid_ops'),
-    ),
-    foreignKey({
-      columns: [table.caixaId],
-      foreignColumns: [caixas.id],
-      name: 'titles_caixa_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.cardInvoiceId],
-      foreignColumns: [cardInvoices.id],
-      name: 'titles_card_invoice_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.categoryId],
-      foreignColumns: [categories.id],
-      name: 'titles_category_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.counterpartyCaixaId],
-      foreignColumns: [caixas.id],
-      name: 'titles_counterparty_caixa_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.entityId],
-      foreignColumns: [entities.id],
-      name: 'titles_entity_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.mirrorTitleId],
-      foreignColumns: [table.id],
-      name: 'titles_mirror_title_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.nfeDocumentId],
-      foreignColumns: [nfeDocuments.id],
-      name: 'titles_nfe_document_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.recurrenceRuleId],
-      foreignColumns: [recurrenceRules.id],
-      name: 'titles_recurrence_rule_id_fkey',
-    }),
-    check('titles_amount_cents_check', sql`amount_cents > 0`),
-    check('titles_boleto_barcode_check', sql`CHECK (is_valid_boleto_barcode(boleto_barcode`),
-    check(
-      'titles_card_invoice_check',
-      sql`((origin = 'card_invoice'::text) = (card_invoice_id IS NOT NULL)) AND ((card_invoice_id IS NULL) OR (counterparty_caixa_id IS NOT NULL))`,
-    ),
-    check('titles_counterparty_caixa_check', sql`counterparty_caixa_id <> caixa_id`),
-    check('titles_description_check', sql`btrim(description) <> ''::text`),
-    check('titles_direction_check', sql`direction = ANY (ARRAY['payable'::text, 'receivable'::text])`),
-    check(
-      'titles_mirror_fields_check',
-      sql`((counterparty_caixa_id IS NULL) = (mirror_title_id IS NULL)) AND ((mirror_status IS NULL) OR (mirror_title_id IS NOT NULL))`,
-    ),
-    check('titles_mirror_self_check', sql`mirror_title_id <> id`),
-    check('titles_mirror_status_check', sql`mirror_status = ANY (ARRAY['pending'::text, 'accepted'::text, 'disputed'::text])`),
-    check('titles_occurrence_check', sql`occurrence >= 1`),
-    check('titles_origin_check', sql`origin = ANY (ARRAY['manual'::text, 'recurrence'::text, 'card_invoice'::text])`),
-    check('titles_pix_payload_check', sql`CHECK (is_valid_brcode(pix_payload`),
-    check(
-      'titles_recurrence_check',
-      sql`((recurrence_rule_id IS NULL) = (occurrence IS NULL)) AND ((origin = 'recurrence'::text) = (recurrence_rule_id IS NOT NULL))`,
-    ),
-    check('titles_status_check', sql`status = ANY (ARRAY['open'::text, 'partial'::text, 'paid'::text, 'canceled'::text])`),
-  ],
-);
-
 export const cardPurchaseAttachments = pgTable(
   'card_purchase_attachments',
   {
@@ -1980,33 +1850,6 @@ export const aiRuns = pgTable(
   ],
 );
 
-export const messageSubscriptions = pgTable(
-  'message_subscriptions',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    destinationId: uuid('destination_id').notNull(),
-    eventKind: text('event_kind').notNull(),
-    params: jsonb().default({}).notNull(),
-    isActive: boolean('is_active').default(true).notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('message_subscriptions_event_kind_idx').using('btree', table.eventKind.asc().nullsLast().op('text_ops')).where(sql`is_active`),
-    foreignKey({
-      columns: [table.destinationId],
-      foreignColumns: [messageDestinations.id],
-      name: 'message_subscriptions_destination_id_fkey',
-    }).onDelete('cascade'),
-    unique('message_subscriptions_destination_event_key').on(table.destinationId, table.eventKind),
-    check(
-      'message_subscriptions_event_kind_check',
-      sql`event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text])`,
-    ),
-    check('message_subscriptions_params_check', sql`CHECK (message_subscription_params_valid(event_kind, params`),
-  ],
-);
-
 export const messageSubscriptionCaixas = pgTable(
   'message_subscription_caixas',
   {
@@ -2032,139 +1875,30 @@ export const messageSubscriptionCaixas = pgTable(
   ],
 );
 
-export const messageOutbox = pgTable(
-  'message_outbox',
+export const messageSubscriptions = pgTable(
+  'message_subscriptions',
   {
     id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
     destinationId: uuid('destination_id').notNull(),
-    subscriptionId: uuid('subscription_id'),
     eventKind: text('event_kind').notNull(),
-    dedupKey: text('dedup_key'),
-    caixaId: uuid('caixa_id'),
-    userId: uuid('user_id'),
-    agentRunId: text('agent_run_id'),
-    payload: jsonb().notNull(),
-    status: text().default('pending').notNull(),
-    attempts: smallint().default(0).notNull(),
-    maxAttempts: smallint('max_attempts').default(5).notNull(),
-    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    lockedAt: timestamp('locked_at', { withTimezone: true, mode: 'string' }),
-    sentAt: timestamp('sent_at', { withTimezone: true, mode: 'string' }),
-    lastError: text('last_error'),
-    providerMessageId: text('provider_message_id'),
+    params: jsonb().default({}).notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
   },
   (table) => [
-    index('message_outbox_caixa_id_idx').using('btree', table.caixaId.asc().nullsLast().op('uuid_ops')),
-    uniqueIndex('message_outbox_dedup_key').using(
-      'btree',
-      table.destinationId.asc().nullsLast().op('text_ops'),
-      table.dedupKey.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('message_outbox_destination_id_idx').using(
-      'btree',
-      table.destinationId.asc().nullsLast().op('timestamptz_ops'),
-      table.createdAt.asc().nullsLast().op('timestamptz_ops'),
-    ),
-    index('message_outbox_ready_idx')
-      .using('btree', table.nextAttemptAt.asc().nullsLast().op('timestamptz_ops'))
-      .where(sql`(status = 'pending'::text)`),
-    index('message_outbox_sending_idx')
-      .using('btree', table.lockedAt.asc().nullsLast().op('timestamptz_ops'))
-      .where(sql`(status = 'sending'::text)`),
-    index('message_outbox_subscription_id_idx').using('btree', table.subscriptionId.asc().nullsLast().op('uuid_ops')),
-    index('message_outbox_user_id_idx').using('btree', table.userId.asc().nullsLast().op('uuid_ops')),
-    foreignKey({
-      columns: [table.caixaId],
-      foreignColumns: [caixas.id],
-      name: 'message_outbox_caixa_id_fkey',
-    }).onDelete('set null'),
+    index('message_subscriptions_event_kind_idx').using('btree', table.eventKind.asc().nullsLast().op('text_ops')).where(sql`is_active`),
     foreignKey({
       columns: [table.destinationId],
       foreignColumns: [messageDestinations.id],
-      name: 'message_outbox_destination_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.subscriptionId],
-      foreignColumns: [messageSubscriptions.id],
-      name: 'message_outbox_subscription_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.userId],
-      foreignColumns: [users.id],
-      name: 'message_outbox_user_id_fkey',
-    }).onDelete('set null'),
-    check(
-      'message_outbox_attempts_check',
-      sql`((max_attempts >= 1) AND (max_attempts <= 20)) AND ((attempts >= 0) AND (attempts <= max_attempts))`,
-    ),
-    check('message_outbox_dedup_key_check', sql`(btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300)`),
-    check(
-      'message_outbox_event_kind_check',
-      sql`event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'test'::text])`,
-    ),
-    check('message_outbox_payload_check', sql`jsonb_typeof(payload) = 'object'::text`),
-    check(
-      'message_outbox_status_check',
-      sql`status = ANY (ARRAY['pending'::text, 'sending'::text, 'sent'::text, 'failed'::text, 'canceled'::text])`,
-    ),
-    check(
-      'message_outbox_status_fields_check',
-      sql`((status = 'sending'::text) = (locked_at IS NOT NULL)) AND ((status = 'sent'::text) = (sent_at IS NOT NULL)) AND ((status <> ALL (ARRAY['failed'::text, 'canceled'::text])) OR (last_error IS NOT NULL))`,
-    ),
-  ],
-);
-
-export const notifications = pgTable(
-  'notifications',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    userId: uuid('user_id').notNull(),
-    kind: text().notNull(),
-    title: text().notNull(),
-    body: text(),
-    link: text(),
-    caixaId: uuid('caixa_id'),
-    data: jsonb().default({}).notNull(),
-    dedupKey: text('dedup_key'),
-    readAt: timestamp('read_at', { withTimezone: true, mode: 'string' }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('notifications_caixa_id_idx').using('btree', table.caixaId.asc().nullsLast().op('uuid_ops')),
-    uniqueIndex('notifications_dedup_key').using(
-      'btree',
-      table.userId.asc().nullsLast().op('uuid_ops'),
-      table.dedupKey.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('notifications_unread_idx')
-      .using('btree', table.userId.asc().nullsLast().op('uuid_ops'), table.createdAt.desc().nullsFirst().op('timestamptz_ops'))
-      .where(sql`(read_at IS NULL)`),
-    index('notifications_user_id_created_at_idx').using(
-      'btree',
-      table.userId.asc().nullsLast().op('timestamptz_ops'),
-      table.createdAt.desc().nullsFirst().op('uuid_ops'),
-    ),
-    foreignKey({
-      columns: [table.caixaId],
-      foreignColumns: [caixas.id],
-      name: 'notifications_caixa_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.userId],
-      foreignColumns: [users.id],
-      name: 'notifications_user_id_fkey',
+      name: 'message_subscriptions_destination_id_fkey',
     }).onDelete('cascade'),
-    check('notifications_data_check', sql`jsonb_typeof(data) = 'object'::text`),
-    check('notifications_dedup_key_check', sql`(btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300)`),
+    unique('message_subscriptions_destination_event_key').on(table.destinationId, table.eventKind),
     check(
-      'notifications_kind_check',
-      sql`kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text])`,
+      'message_subscriptions_event_kind_check',
+      sql`event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text])`,
     ),
-    check('notifications_link_check', sql`(link ~ '^/[^/]'::text) OR (link = '/'::text)`),
-    check('notifications_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
+    check('message_subscriptions_params_check', sql`CHECK (message_subscription_params_valid(event_kind, params`),
   ],
 );
 
@@ -2479,6 +2213,633 @@ export const aiEmbeddings = pgTable(
     check('ai_embeddings_source_text_check', sql`(btrim(source_text) <> ''::text) AND (length(source_text) <= 32000)`),
   ],
 );
+
+export const titles = pgTable(
+  'titles',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    caixaId: uuid('caixa_id').notNull(),
+    direction: text().notNull(),
+    entityId: uuid('entity_id').notNull(),
+    categoryId: uuid('category_id').notNull(),
+    description: text().notNull(),
+    competenceDate: date('competence_date').notNull(),
+    dueDate: date('due_date').notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
+    status: text().default('open').notNull(),
+    origin: text().default('manual').notNull(),
+    recurrenceRuleId: uuid('recurrence_rule_id'),
+    occurrence: smallint(),
+    counterpartyCaixaId: uuid('counterparty_caixa_id'),
+    mirrorTitleId: uuid('mirror_title_id'),
+    mirrorStatus: text('mirror_status'),
+    notes: text(),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    boletoBarcode: text('boleto_barcode'),
+    pixPayload: text('pix_payload'),
+    nfeDocumentId: uuid('nfe_document_id'),
+    cardInvoiceId: uuid('card_invoice_id'),
+    contractId: uuid('contract_id'),
+    contractCycleId: uuid('contract_cycle_id'),
+    contractInstallment: smallint('contract_installment'),
+  },
+  (table) => [
+    uniqueIndex('titles_caixa_boleto_barcode_key')
+      .using('btree', table.caixaId.asc().nullsLast().op('text_ops'), table.boletoBarcode.asc().nullsLast().op('text_ops'))
+      .where(sql`((boleto_barcode IS NOT NULL) AND (status <> 'canceled'::text))`),
+    index('titles_caixa_id_competence_date_idx').using(
+      'btree',
+      table.caixaId.asc().nullsLast().op('date_ops'),
+      table.competenceDate.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('titles_caixa_id_due_date_idx').using(
+      'btree',
+      table.caixaId.asc().nullsLast().op('uuid_ops'),
+      table.dueDate.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('titles_caixa_id_status_due_date_idx').using(
+      'btree',
+      table.caixaId.asc().nullsLast().op('uuid_ops'),
+      table.status.asc().nullsLast().op('text_ops'),
+      table.dueDate.asc().nullsLast().op('text_ops'),
+    ),
+    index('titles_card_invoice_id_idx').using('btree', table.cardInvoiceId.asc().nullsLast().op('uuid_ops')),
+    index('titles_category_id_idx').using('btree', table.categoryId.asc().nullsLast().op('uuid_ops')),
+    index('titles_counterparty_caixa_id_idx').using('btree', table.counterpartyCaixaId.asc().nullsLast().op('uuid_ops')),
+    index('titles_due_date_idx')
+      .using('btree', table.dueDate.asc().nullsLast().op('date_ops'))
+      .where(sql`(status = ANY (ARRAY['open'::text, 'partial'::text]))`),
+    index('titles_entity_id_idx').using('btree', table.entityId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('titles_mirror_title_id_key').using('btree', table.mirrorTitleId.asc().nullsLast().op('uuid_ops')),
+    index('titles_nfe_document_id_idx').using('btree', table.nfeDocumentId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('titles_recurrence_occurrence_key').using(
+      'btree',
+      table.recurrenceRuleId.asc().nullsLast().op('uuid_ops'),
+      table.caixaId.asc().nullsLast().op('uuid_ops'),
+      table.occurrence.asc().nullsLast().op('uuid_ops'),
+    ),
+    foreignKey({
+      columns: [table.caixaId],
+      foreignColumns: [caixas.id],
+      name: 'titles_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.cardInvoiceId],
+      foreignColumns: [cardInvoices.id],
+      name: 'titles_card_invoice_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.categoryId],
+      foreignColumns: [categories.id],
+      name: 'titles_category_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.contractId, table.contractCycleId],
+      foreignColumns: [contractCycles.id, contractCycles.contractId],
+      name: 'titles_contract_cycle_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.contractId],
+      foreignColumns: [contracts.id],
+      name: 'titles_contract_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.counterpartyCaixaId],
+      foreignColumns: [caixas.id],
+      name: 'titles_counterparty_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.entityId],
+      foreignColumns: [entities.id],
+      name: 'titles_entity_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.mirrorTitleId],
+      foreignColumns: [table.id],
+      name: 'titles_mirror_title_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.nfeDocumentId],
+      foreignColumns: [nfeDocuments.id],
+      name: 'titles_nfe_document_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.recurrenceRuleId],
+      foreignColumns: [recurrenceRules.id],
+      name: 'titles_recurrence_rule_id_fkey',
+    }),
+    check('titles_amount_cents_check', sql`amount_cents > 0`),
+    check('titles_boleto_barcode_check', sql`CHECK (is_valid_boleto_barcode(boleto_barcode`),
+    check(
+      'titles_card_invoice_check',
+      sql`((origin = 'card_invoice'::text) = (card_invoice_id IS NOT NULL)) AND ((card_invoice_id IS NULL) OR (counterparty_caixa_id IS NOT NULL))`,
+    ),
+    check(
+      'titles_contract_check',
+      sql`((origin = 'contract'::text) = (contract_id IS NOT NULL)) AND ((contract_cycle_id IS NULL) = (contract_installment IS NULL)) AND ((contract_cycle_id IS NULL) OR (contract_id IS NOT NULL))`,
+    ),
+    check('titles_contract_installment_check', sql`contract_installment >= 1`),
+    check('titles_counterparty_caixa_check', sql`counterparty_caixa_id <> caixa_id`),
+    check('titles_description_check', sql`btrim(description) <> ''::text`),
+    check('titles_direction_check', sql`direction = ANY (ARRAY['payable'::text, 'receivable'::text])`),
+    check(
+      'titles_mirror_fields_check',
+      sql`((counterparty_caixa_id IS NULL) = (mirror_title_id IS NULL)) AND ((mirror_status IS NULL) OR (mirror_title_id IS NOT NULL))`,
+    ),
+    check('titles_mirror_self_check', sql`mirror_title_id <> id`),
+    check('titles_mirror_status_check', sql`mirror_status = ANY (ARRAY['pending'::text, 'accepted'::text, 'disputed'::text])`),
+    check('titles_occurrence_check', sql`occurrence >= 1`),
+    check('titles_origin_check', sql`origin = ANY (ARRAY['manual'::text, 'recurrence'::text, 'card_invoice'::text, 'contract'::text])`),
+    check('titles_pix_payload_check', sql`CHECK (is_valid_brcode(pix_payload`),
+    check(
+      'titles_recurrence_check',
+      sql`((recurrence_rule_id IS NULL) = (occurrence IS NULL)) AND ((origin = 'recurrence'::text) = (recurrence_rule_id IS NOT NULL))`,
+    ),
+    check('titles_status_check', sql`status = ANY (ARRAY['open'::text, 'partial'::text, 'paid'::text, 'canceled'::text])`),
+  ],
+);
+
+export const messageOutbox = pgTable(
+  'message_outbox',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    destinationId: uuid('destination_id').notNull(),
+    subscriptionId: uuid('subscription_id'),
+    eventKind: text('event_kind').notNull(),
+    dedupKey: text('dedup_key'),
+    caixaId: uuid('caixa_id'),
+    userId: uuid('user_id'),
+    agentRunId: text('agent_run_id'),
+    payload: jsonb().notNull(),
+    status: text().default('pending').notNull(),
+    attempts: smallint().default(0).notNull(),
+    maxAttempts: smallint('max_attempts').default(5).notNull(),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    lockedAt: timestamp('locked_at', { withTimezone: true, mode: 'string' }),
+    sentAt: timestamp('sent_at', { withTimezone: true, mode: 'string' }),
+    lastError: text('last_error'),
+    providerMessageId: text('provider_message_id'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('message_outbox_caixa_id_idx').using('btree', table.caixaId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('message_outbox_dedup_key').using(
+      'btree',
+      table.destinationId.asc().nullsLast().op('text_ops'),
+      table.dedupKey.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('message_outbox_destination_id_idx').using(
+      'btree',
+      table.destinationId.asc().nullsLast().op('timestamptz_ops'),
+      table.createdAt.asc().nullsLast().op('timestamptz_ops'),
+    ),
+    index('message_outbox_ready_idx')
+      .using('btree', table.nextAttemptAt.asc().nullsLast().op('timestamptz_ops'))
+      .where(sql`(status = 'pending'::text)`),
+    index('message_outbox_sending_idx')
+      .using('btree', table.lockedAt.asc().nullsLast().op('timestamptz_ops'))
+      .where(sql`(status = 'sending'::text)`),
+    index('message_outbox_subscription_id_idx').using('btree', table.subscriptionId.asc().nullsLast().op('uuid_ops')),
+    index('message_outbox_user_id_idx').using('btree', table.userId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.caixaId],
+      foreignColumns: [caixas.id],
+      name: 'message_outbox_caixa_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.destinationId],
+      foreignColumns: [messageDestinations.id],
+      name: 'message_outbox_destination_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.subscriptionId],
+      foreignColumns: [messageSubscriptions.id],
+      name: 'message_outbox_subscription_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'message_outbox_user_id_fkey',
+    }).onDelete('set null'),
+    check(
+      'message_outbox_attempts_check',
+      sql`((max_attempts >= 1) AND (max_attempts <= 20)) AND ((attempts >= 0) AND (attempts <= max_attempts))`,
+    ),
+    check('message_outbox_dedup_key_check', sql`(btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300)`),
+    check(
+      'message_outbox_event_kind_check',
+      sql`event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'test'::text])`,
+    ),
+    check('message_outbox_payload_check', sql`jsonb_typeof(payload) = 'object'::text`),
+    check(
+      'message_outbox_status_check',
+      sql`status = ANY (ARRAY['pending'::text, 'sending'::text, 'sent'::text, 'failed'::text, 'canceled'::text])`,
+    ),
+    check(
+      'message_outbox_status_fields_check',
+      sql`((status = 'sending'::text) = (locked_at IS NOT NULL)) AND ((status = 'sent'::text) = (sent_at IS NOT NULL)) AND ((status <> ALL (ARRAY['failed'::text, 'canceled'::text])) OR (last_error IS NOT NULL))`,
+    ),
+  ],
+);
+
+export const notifications = pgTable(
+  'notifications',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    userId: uuid('user_id').notNull(),
+    kind: text().notNull(),
+    title: text().notNull(),
+    body: text(),
+    link: text(),
+    caixaId: uuid('caixa_id'),
+    data: jsonb().default({}).notNull(),
+    dedupKey: text('dedup_key'),
+    readAt: timestamp('read_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('notifications_caixa_id_idx').using('btree', table.caixaId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('notifications_dedup_key').using(
+      'btree',
+      table.userId.asc().nullsLast().op('uuid_ops'),
+      table.dedupKey.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('notifications_unread_idx')
+      .using('btree', table.userId.asc().nullsLast().op('uuid_ops'), table.createdAt.desc().nullsFirst().op('timestamptz_ops'))
+      .where(sql`(read_at IS NULL)`),
+    index('notifications_user_id_created_at_idx').using(
+      'btree',
+      table.userId.asc().nullsLast().op('timestamptz_ops'),
+      table.createdAt.desc().nullsFirst().op('uuid_ops'),
+    ),
+    foreignKey({
+      columns: [table.caixaId],
+      foreignColumns: [caixas.id],
+      name: 'notifications_caixa_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'notifications_user_id_fkey',
+    }).onDelete('cascade'),
+    check('notifications_data_check', sql`jsonb_typeof(data) = 'object'::text`),
+    check('notifications_dedup_key_check', sql`(btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300)`),
+    check(
+      'notifications_kind_check',
+      sql`kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text])`,
+    ),
+    check('notifications_link_check', sql`(link ~ '^/[^/]'::text) OR (link = '/'::text)`),
+    check('notifications_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
+  ],
+);
+
+export const contracts = pgTable(
+  'contracts',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    caixaId: uuid('caixa_id').notNull(),
+    entityId: uuid('entity_id').notNull(),
+    direction: text().notNull(),
+    name: text().notNull(),
+    contractNumber: text('contract_number'),
+    categoryId: uuid('category_id').notNull(),
+    counterpartyCaixaId: uuid('counterparty_caixa_id'),
+    status: text().default('draft').notNull(),
+    autoRenew: boolean('auto_renew').default(false).notNull(),
+    noticeDays: smallint('notice_days').default(30).notNull(),
+    renewalLeadDays: smallint('renewal_lead_days').default(60).notNull(),
+    reminderEveryDays: smallint('reminder_every_days').default(7).notNull(),
+    readjustmentIndex: text('readjustment_index').default('none').notNull(),
+    readjustmentBaseDate: date('readjustment_base_date'),
+    terminationPenaltyText: text('termination_penalty_text'),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    terminationPenaltyCents: bigint('termination_penalty_cents', { mode: 'number' }),
+    terminatedOn: date('terminated_on'),
+    terminationNotes: text('termination_notes'),
+    notes: text(),
+    createdBy: uuid('created_by'),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.caixaId],
+      foreignColumns: [caixas.id],
+      name: 'contracts_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.categoryId],
+      foreignColumns: [categories.id],
+      name: 'contracts_category_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.counterpartyCaixaId],
+      foreignColumns: [caixas.id],
+      name: 'contracts_counterparty_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.createdBy],
+      foreignColumns: [users.id],
+      name: 'contracts_created_by_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.entityId],
+      foreignColumns: [entities.id],
+      name: 'contracts_entity_id_fkey',
+    }),
+    check('contracts_contract_number_check', sql`(btrim(contract_number) <> ''::text) AND (length(contract_number) <= 60)`),
+    check('contracts_counterparty_caixa_check', sql`counterparty_caixa_id <> caixa_id`),
+    check('contracts_direction_check', sql`direction = ANY (ARRAY['payable'::text, 'receivable'::text])`),
+    check('contracts_name_check', sql`(btrim(name) <> ''::text) AND (length(name) <= 200)`),
+    check('contracts_notice_days_check', sql`(notice_days >= 0) AND (notice_days <= 365)`),
+    check(
+      'contracts_readjustment_index_check',
+      sql`readjustment_index = ANY (ARRAY['none'::text, 'ipca'::text, 'igpm'::text, 'inpc'::text, 'other'::text])`,
+    ),
+    check('contracts_reminder_every_days_check', sql`(reminder_every_days >= 1) AND (reminder_every_days <= 30)`),
+    check('contracts_renewal_lead_days_check', sql`(renewal_lead_days >= 1) AND (renewal_lead_days <= 365)`),
+    check(
+      'contracts_status_check',
+      sql`status = ANY (ARRAY['draft'::text, 'active'::text, 'renewal_pending'::text, 'ended'::text, 'terminated'::text])`,
+    ),
+    check('contracts_terminated_check', sql`(status = 'terminated'::text) = (terminated_on IS NOT NULL)`),
+    check('contracts_termination_penalty_cents_check', sql`termination_penalty_cents > 0`),
+    check('contracts_termination_penalty_text_check', sql`length(termination_penalty_text) <= 2000`),
+  ],
+);
+
+export const contractCycles = pgTable(
+  'contract_cycles',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    contractId: uuid('contract_id').notNull(),
+    seq: smallint().notNull(),
+    startsOn: date('starts_on').notNull(),
+    durationMonths: smallint('duration_months').notNull(),
+    endsOn: date('ends_on')
+      .notNull()
+      .generatedAlwaysAs(sql`(((starts_on + make_interval(months => (duration_months)::integer)))::date - 1)`),
+    periodicity: text().notNull(),
+    installmentsCount: smallint('installments_count')
+      .notNull()
+      .generatedAlwaysAs(sql`(
+CASE periodicity
+    WHEN 'monthly'::text THEN (duration_months)::integer
+    WHEN 'quarterly'::text THEN (duration_months / 3)
+    WHEN 'semiannual'::text THEN (duration_months / 6)
+    WHEN 'annual'::text THEN (duration_months / 12)
+    ELSE 1
+END)::smallint`),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    totalCents: bigint('total_cents', { mode: 'number' }).notNull(),
+    dueDay: smallint('due_day').notNull(),
+    dueMonthOffset: smallint('due_month_offset').default(0).notNull(),
+    readjustmentPercent: numeric('readjustment_percent', { precision: 7, scale: 4 }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.contractId],
+      foreignColumns: [contracts.id],
+      name: 'contract_cycles_contract_id_fkey',
+    }).onDelete('cascade'),
+    unique('contract_cycles_contract_seq_key').on(table.contractId, table.seq),
+    unique('contract_cycles_id_contract_key').on(table.contractId, table.id),
+    check('contract_cycles_due_day_check', sql`(due_day >= 1) AND (due_day <= 31)`),
+    check('contract_cycles_due_month_offset_check', sql`(due_month_offset >= 0) AND (due_month_offset <= 3)`),
+    check('contract_cycles_duration_months_check', sql`(duration_months >= 1) AND (duration_months <= 120)`),
+    check(
+      'contract_cycles_duration_periodicity_check',
+      sql`((duration_months)::integer %
+CASE periodicity
+    WHEN 'quarterly'::text THEN 3
+    WHEN 'semiannual'::text THEN 6
+    WHEN 'annual'::text THEN 12
+    ELSE 1
+END) = 0`,
+    ),
+    check(
+      'contract_cycles_periodicity_check',
+      sql`periodicity = ANY (ARRAY['monthly'::text, 'quarterly'::text, 'semiannual'::text, 'annual'::text, 'single'::text])`,
+    ),
+    check('contract_cycles_readjustment_percent_check', sql`readjustment_percent > ('-100'::integer)::numeric`),
+    check('contract_cycles_seq_check', sql`seq >= 1`),
+    check('contract_cycles_total_cents_check', sql`(total_cents > 0) AND (total_cents >= installments_count)`),
+  ],
+);
+
+export const contractDocuments = pgTable(
+  'contract_documents',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    contractId: uuid('contract_id').notNull(),
+    kind: text().notNull(),
+    format: text().notNull(),
+    title: text().notNull(),
+    description: text(),
+    documentDate: date('document_date'),
+    attachmentId: uuid('attachment_id'),
+    currentVersionId: uuid('current_version_id'),
+    sourceDocumentId: uuid('source_document_id'),
+    createdBy: uuid('created_by'),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.attachmentId],
+      foreignColumns: [attachments.id],
+      name: 'contract_documents_attachment_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.contractId],
+      foreignColumns: [contracts.id],
+      name: 'contract_documents_contract_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.createdBy],
+      foreignColumns: [users.id],
+      name: 'contract_documents_created_by_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.contractId, table.sourceDocumentId],
+      foreignColumns: [table.id, table.contractId],
+      name: 'contract_documents_source_document_id_fkey',
+    }),
+    unique('contract_documents_id_contract_key').on(table.contractId, table.id),
+    check('contract_documents_format_check', sql`format = ANY (ARRAY['pdf'::text, 'markdown'::text])`),
+    check(
+      'contract_documents_format_fields_check',
+      sql`CHECK (
+CASE format
+    WHEN 'pdf'::text THEN ((attachment_id IS NOT NULL) AND (current_version_id IS NULL) AND (source_document_id IS NULL))
+    WHEN 'markdown'::text THEN (attachment_id IS NULL)
+    ELSE NULL::boolean
+END)`,
+    ),
+    check(
+      'contract_documents_kind_check',
+      sql`kind = ANY (ARRAY['contract'::text, 'amendment'::text, 'renewal'::text, 'termination'::text, 'proposal'::text, 'other'::text])`,
+    ),
+    check('contract_documents_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
+  ],
+);
+
+export const contractDocumentVersions = pgTable(
+  'contract_document_versions',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    documentId: uuid('document_id').notNull(),
+    version: integer().notNull(),
+    content: text().notNull(),
+    note: text(),
+    authorKind: text('author_kind').default('human').notNull(),
+    authorUserId: uuid('author_user_id'),
+    aiRunId: uuid('ai_run_id'),
+    restoredFromVersionId: uuid('restored_from_version_id'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.aiRunId],
+      foreignColumns: [aiRuns.id],
+      name: 'contract_document_versions_ai_run_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.authorUserId],
+      foreignColumns: [users.id],
+      name: 'contract_document_versions_author_user_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.documentId],
+      foreignColumns: [contractDocuments.id],
+      name: 'contract_document_versions_document_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.documentId, table.restoredFromVersionId],
+      foreignColumns: [table.id, table.documentId],
+      name: 'contract_document_versions_restored_from_version_id_fkey',
+    }),
+    unique('contract_document_versions_document_version_key').on(table.documentId, table.version),
+    unique('contract_document_versions_id_document_key').on(table.documentId, table.id),
+    check('contract_document_versions_author_check', sql`(author_kind = 'agent'::text) OR (ai_run_id IS NULL)`),
+    check('contract_document_versions_author_kind_check', sql`author_kind = ANY (ARRAY['human'::text, 'agent'::text])`),
+    check('contract_document_versions_content_check', sql`octet_length(content) <= 1048576`),
+    check('contract_document_versions_note_check', sql`length(note) <= 500`),
+    check('contract_document_versions_restored_self_check', sql`restored_from_version_id <> id`),
+    check('contract_document_versions_version_check', sql`version >= 1`),
+  ],
+);
+
+export const contractAmendments = pgTable(
+  'contract_amendments',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    contractId: uuid('contract_id').notNull(),
+    contractCycleId: uuid('contract_cycle_id').notNull(),
+    documentId: uuid('document_id'),
+    effectiveOn: date('effective_on').notNull(),
+    changes: jsonb().notNull(),
+    affectedTitleIds: uuid('affected_title_ids').array().default(['']).notNull(),
+    skippedTitleIds: uuid('skipped_title_ids').array().default(['']).notNull(),
+    notes: text(),
+    createdBy: uuid('created_by'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.contractId, table.contractCycleId],
+      foreignColumns: [contractCycles.id, contractCycles.contractId],
+      name: 'contract_amendments_contract_cycle_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.contractId],
+      foreignColumns: [contracts.id],
+      name: 'contract_amendments_contract_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.createdBy],
+      foreignColumns: [users.id],
+      name: 'contract_amendments_created_by_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.contractId, table.documentId],
+      foreignColumns: [contractDocuments.id, contractDocuments.contractId],
+      name: 'contract_amendments_document_id_fkey',
+    }),
+    check(
+      'contract_amendments_changes_check',
+      sql`(jsonb_typeof(changes) = 'object'::text) AND COALESCE((jsonb_typeof((changes -> 'before'::text)) = 'object'::text), false) AND COALESCE((jsonb_typeof((changes -> 'after'::text)) = 'object'::text), false)`,
+    ),
+    check(
+      'contract_amendments_title_ids_check',
+      sql`(array_position(affected_title_ids, NULL::uuid) IS NULL) AND (array_position(skipped_title_ids, NULL::uuid) IS NULL)`,
+    ),
+  ],
+);
+
+export const contractRenewalTasks = pgTable(
+  'contract_renewal_tasks',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    contractId: uuid('contract_id').notNull(),
+    contractCycleId: uuid('contract_cycle_id').notNull(),
+    status: text().default('open').notNull(),
+    openedOn: date('opened_on').notNull(),
+    dueOn: date('due_on').notNull(),
+    decidedAt: timestamp('decided_at', { withTimezone: true, mode: 'string' }),
+    decidedBy: uuid('decided_by'),
+    decisionNotes: text('decision_notes'),
+    newCycleId: uuid('new_cycle_id'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.contractId, table.contractCycleId],
+      foreignColumns: [contractCycles.id, contractCycles.contractId],
+      name: 'contract_renewal_tasks_contract_cycle_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.contractId],
+      foreignColumns: [contracts.id],
+      name: 'contract_renewal_tasks_contract_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.decidedBy],
+      foreignColumns: [users.id],
+      name: 'contract_renewal_tasks_decided_by_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.contractId, table.newCycleId],
+      foreignColumns: [contractCycles.id, contractCycles.contractId],
+      name: 'contract_renewal_tasks_new_cycle_id_fkey',
+    }),
+    unique('contract_renewal_tasks_contract_cycle_id_key').on(table.contractCycleId),
+    check(
+      'contract_renewal_tasks_decision_check',
+      sql`CHECK (
+CASE status
+    WHEN 'open'::text THEN ((decided_at IS NULL) AND (new_cycle_id IS NULL))
+    WHEN 'approved'::text THEN ((decided_at IS NOT NULL) AND (new_cycle_id IS NOT NULL))
+    WHEN 'declined'::text THEN ((decided_at IS NOT NULL) AND (new_cycle_id IS NULL))
+    ELSE NULL::boolean
+END)`,
+    ),
+    check('contract_renewal_tasks_new_cycle_self_check', sql`new_cycle_id <> contract_cycle_id`),
+    check('contract_renewal_tasks_status_check', sql`status = ANY (ARRAY['open'::text, 'approved'::text, 'declined'::text])`),
+  ],
+);
 export const titleBalances = pgView('title_balances', {
   titleId: uuid('title_id'),
   caixaId: uuid('caixa_id'),
@@ -2645,16 +3006,6 @@ export const statementImportBalances = pgView('statement_import_balances', {
     sql`SELECT i.id AS statement_import_id, i.financial_account_id, i.card_caixa_id, i.period_start, i.period_end, i.bank_balance_on, i.bank_balance_cents, CASE WHEN i.financial_account_id IS NOT NULL AND i.bank_balance_on IS NOT NULL THEN financial_account_balance_at(i.financial_account_id, i.bank_balance_on) ELSE NULL::bigint END AS app_balance_cents, CASE WHEN i.financial_account_id IS NOT NULL AND i.bank_balance_on IS NOT NULL THEN i.bank_balance_cents - financial_account_balance_at(i.financial_account_id, i.bank_balance_on) ELSE NULL::bigint END AS difference_cents, COALESCE(c.lines, 0::bigint)::integer AS lines, COALESCE(c.matched, 0::bigint)::integer AS matched_lines, COALESCE(c.suggested, 0::bigint)::integer AS suggested_lines, COALESCE(c.new, 0::bigint)::integer AS new_lines, COALESCE(c.ignored, 0::bigint)::integer AS ignored_lines FROM statement_imports i LEFT JOIN LATERAL ( SELECT count(*) AS lines, count(*) FILTER (WHERE l.status = 'matched'::text) AS matched, count(*) FILTER (WHERE l.status = 'suggested'::text) AS suggested, count(*) FILTER (WHERE l.status = 'new'::text) AS new, count(*) FILTER (WHERE l.status = 'ignored'::text) AS ignored FROM statement_lines l WHERE l.statement_import_id = i.id) c ON true`,
   );
 
-export const attachmentLinks = pgView('attachment_links', {
-  attachmentId: uuid('attachment_id'),
-  targetKind: text('target_kind'),
-  targetId: uuid('target_id'),
-})
-  .with({ securityInvoker: true })
-  .as(
-    sql`SELECT title_attachments.attachment_id, 'title'::text AS target_kind, title_attachments.title_id AS target_id FROM title_attachments UNION ALL SELECT settlement_attachments.attachment_id, 'settlement'::text AS target_kind, settlement_attachments.settlement_id AS target_id FROM settlement_attachments UNION ALL SELECT movement_attachments.attachment_id, 'movement'::text AS target_kind, movement_attachments.movement_id AS target_id FROM movement_attachments UNION ALL SELECT entity_attachments.attachment_id, 'entity'::text AS target_kind, entity_attachments.entity_id AS target_id FROM entity_attachments UNION ALL SELECT nfe_documents.xml_attachment_id AS attachment_id, 'nfe_document'::text AS target_kind, nfe_documents.id AS target_id FROM nfe_documents WHERE nfe_documents.xml_attachment_id IS NOT NULL UNION ALL SELECT card_purchase_attachments.attachment_id, 'card_purchase'::text AS target_kind, card_purchase_attachments.card_purchase_id AS target_id FROM card_purchase_attachments UNION ALL SELECT statement_imports.attachment_id, 'statement_import'::text AS target_kind, statement_imports.id AS target_id FROM statement_imports UNION ALL SELECT ai_message_attachments.attachment_id, 'ai_message'::text AS target_kind, ai_message_attachments.message_id AS target_id FROM ai_message_attachments`,
-  );
-
 export const aiMessageUsage = pgView('ai_message_usage', {
   messageId: uuid('message_id'),
   currency: text(),
@@ -2723,4 +3074,14 @@ export const aiUsageMonthlyByAgent = pgView('ai_usage_monthly_by_agent', {
   .with({ securityInvoker: true })
   .as(
     sql`SELECT date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date AS month, agent_id, provider_id, model, currency, count(*)::integer AS calls, count(DISTINCT run_id)::integer AS runs, count(DISTINCT user_id)::integer AS users, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced FROM ai_usage u GROUP BY (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date), agent_id, provider_id, model, currency`,
+  );
+
+export const attachmentLinks = pgView('attachment_links', {
+  attachmentId: uuid('attachment_id'),
+  targetKind: text('target_kind'),
+  targetId: uuid('target_id'),
+})
+  .with({ securityInvoker: true })
+  .as(
+    sql`SELECT title_attachments.attachment_id, 'title'::text AS target_kind, title_attachments.title_id AS target_id FROM title_attachments UNION ALL SELECT settlement_attachments.attachment_id, 'settlement'::text AS target_kind, settlement_attachments.settlement_id AS target_id FROM settlement_attachments UNION ALL SELECT movement_attachments.attachment_id, 'movement'::text AS target_kind, movement_attachments.movement_id AS target_id FROM movement_attachments UNION ALL SELECT entity_attachments.attachment_id, 'entity'::text AS target_kind, entity_attachments.entity_id AS target_id FROM entity_attachments UNION ALL SELECT nfe_documents.xml_attachment_id AS attachment_id, 'nfe_document'::text AS target_kind, nfe_documents.id AS target_id FROM nfe_documents WHERE nfe_documents.xml_attachment_id IS NOT NULL UNION ALL SELECT card_purchase_attachments.attachment_id, 'card_purchase'::text AS target_kind, card_purchase_attachments.card_purchase_id AS target_id FROM card_purchase_attachments UNION ALL SELECT statement_imports.attachment_id, 'statement_import'::text AS target_kind, statement_imports.id AS target_id FROM statement_imports UNION ALL SELECT ai_message_attachments.attachment_id, 'ai_message'::text AS target_kind, ai_message_attachments.message_id AS target_id FROM ai_message_attachments`,
   );

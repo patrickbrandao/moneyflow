@@ -12,6 +12,7 @@ import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
 import { LoadError, Money } from '../domain';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions } from '../forms';
+import { MirrorFields, mirrorPayload, useMirrorChoice } from '../titles/MirrorFields';
 import { Badge, Button, Field, Modal } from '../ui';
 
 const s = t.statements;
@@ -117,6 +118,10 @@ export function CreateModal({
   const entityUnchanged = entity?.id === line.entityId;
   const categoryUnchanged = categoryId === line.categoryId;
   const needsBoth = classifyOnly ? false : mode !== 'adjustment';
+  // Título já baixado: espelho como num título novo (spec 006).
+  const asTitle = !classifyOnly && mode === 'title';
+  const direction = line.amountCents < 0 ? 'payable' : 'receivable';
+  const mirror = useMirrorChoice(entity?.id ?? null, caixaId, asTitle);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -132,6 +137,7 @@ export function CreateModal({
               categoryId,
               description: description.trim() || undefined,
               payerCaixaId: mode === 'purchase' && payer ? payer : undefined,
+              ...(asTitle ? mirrorPayload(mirror) : {}),
               learnRule,
             }),
           s.created,
@@ -177,6 +183,7 @@ export function CreateModal({
               <input className="field" value={description} maxLength={300} onChange={(e) => setDescription(e.target.value)} />
             </Field>
           )}
+          {asTitle && <MirrorFields mirror={mirror} direction={direction} />}
           {!classifyOnly && mode === 'purchase' && (
             <Field label={s.payer}>
               <select className="field" value={payer} onChange={(e) => setPayer(e.target.value)} aria-label={s.payer}>

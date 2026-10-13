@@ -263,7 +263,8 @@ describe('entrada de títulos (spec 010)', () => {
       pixPayload: payload,
     });
     expect(title.pixPayload).toBe(payload);
-    expect((await admin.raw('POST', '/api/title-entry/pix', { payload: `${payload.slice(0, -1)}0` })).statusCode).toBe(422);
+    const badCrc = `${payload.slice(0, -1)}${payload.endsWith('0') ? '1' : '0'}`;
+    expect((await admin.raw('POST', '/api/title-entry/pix', { payload: badCrc })).statusCode).toBe(422);
   });
 
   it('NF-e: o emitente vira entidade, a nota guarda itens e XML; reimportar devolve a mesma', async () => {

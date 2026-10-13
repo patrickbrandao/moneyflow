@@ -49,6 +49,35 @@ if (/\bunknown\(|TODO: failed to parse/.test(src)) {
 }
 writeFileSync(file, src);
 
+// FKs compostas (ex.: (contract_cycle_id, contract_id) → contract_cycles) saem como
+// relações repetidas com a mesma chave no relations.ts (TS1117). As relações não
+// modelam FK composta mesmo; a repetição é descartada (fica a primeira).
+const relFile = join(dir, 'relations.ts');
+const relLines = readFileSync(relFile, 'utf8').split('\n');
+const relOut = [];
+let seen = null;
+let skipping = false;
+for (const line of relLines) {
+  if (/^export const \w+ = relations\(/.test(line)) {
+    seen = new Set();
+    skipping = false;
+  }
+  const entry = /^(?:\t| {2})(\w+): /.exec(line);
+  if (seen && (entry || /^\}\)\);/.test(line))) {
+    skipping = false;
+    if (entry) {
+      if (seen.has(entry[1])) {
+        console.log(`postpull: relação repetida ${entry[1]} omitida`);
+        skipping = true;
+        continue;
+      }
+      seen.add(entry[1]);
+    }
+  }
+  if (!skipping) relOut.push(line);
+}
+writeFileSync(relFile, relOut.join('\n'));
+
 for (const entry of readdirSync(dir)) {
   if (entry.endsWith('.sql') || entry === 'meta') rmSync(join(dir, entry), { recursive: true, force: true });
 }

@@ -6,6 +6,7 @@ import { backupStrings } from './areas/backup';
 import { calendarStrings } from './areas/calendar';
 import { cardStrings } from './areas/card';
 import { closingStrings } from './areas/closing';
+import { contractsStrings } from './areas/contracts';
 import { entryStrings } from './areas/entry';
 import { flowStrings } from './areas/flow';
 import { messagesStrings } from './areas/messages';
@@ -81,6 +82,7 @@ export const ptBR = {
     flow: 'Fluxo',
     reports: 'Relatórios',
     messages: 'Mensagens',
+    contracts: 'Contratos',
   },
 
   palette: {
@@ -96,6 +98,7 @@ export const ptBR = {
     newPayable: 'Novo título a pagar',
     newReceivable: 'Novo título a receber',
     newEntity: 'Nova entidade',
+    newContract: 'Novo contrato',
     newCaixa: 'Nova caixa',
     newTransfer: 'Nova transferência',
     newCategory: 'Nova categoria',
@@ -162,6 +165,10 @@ export const ptBR = {
     reversalBeforeSettlement: 'O estorno não pode ser antes da data da baixa.',
     transferFromSettlement: 'Esta transferência nasceu de uma baixa: estorne a baixa.',
     seriesHasSettlements: 'Há ocorrências seguintes com baixa; estorne-as antes.',
+    seriesEndInstallments: 'Parcelamento não tem data de fim: exclua as parcelas seguintes.',
+    seriesEndBeforeStart: 'A série não pode terminar antes do início.',
+    seriesEndBlocked: (list: string) =>
+      `Há ocorrências com baixa depois dessa data (${list}); estorne-as ou escolha uma data a partir do vencimento delas.`,
     caixaKindF1: 'Caixas de cartão chegam na fase 2.',
     holderArchived: 'O titular está arquivado.',
     inactiveUser: 'Usuário desativado.',
@@ -195,6 +202,7 @@ export const ptBR = {
     lineNotPending: 'Esta linha já foi conciliada ou ignorada.',
     lineNotSuggested: 'Esta linha não tem sugestão a confirmar.',
     lineNotMatched: 'Esta linha não está conciliada.',
+    lineMatchTarget: 'Informe um (e só um) alvo: movimento, título ou item de fatura.',
     lineAmountMismatch: 'O valor não bate com o da linha do extrato.',
     lineDirectionMismatch: 'A direção do título não bate com a da linha (entrada × saída).',
     lineNeedsClassification: 'Informe a entidade e a categoria.',
@@ -320,6 +328,7 @@ export const ptBR = {
     mirrorCaixa: 'Caixa da contraparte (espelho)',
     mirrorNone: 'Sem espelho',
     mirrorCategory: 'Categoria no espelho',
+    mirrorCategoryAuto: 'Automática',
     mirrorPendingHint: 'Você não tem permissão na caixa da contraparte: o espelho nasce aguardando aceite.',
     acceptMirror: 'Aceitar espelho',
     disputeMirror: 'Contestar',
@@ -335,6 +344,20 @@ export const ptBR = {
     endsOn: 'Termina em',
     scopeThis: 'Só este',
     scopeFollowing: 'Este e os próximos',
+    endSeries: 'Encerrar série…',
+    endSeriesTitle: 'Encerrar ou estender a série',
+    endSeriesHint:
+      'As ocorrências que vencem até a data continuam valendo; as seguintes em aberto ficam canceladas (com o espelho), sem sumir do histórico. Para estender, escolha uma data mais adiante ou deixe sem fim.',
+    endSeriesKeepUntil: 'Manter até (último vencimento)',
+    endSeriesNoEnd: 'Sem data de fim',
+    endSeriesApply: 'Aplicar',
+    endSeriesNothing: 'Nenhuma ocorrência muda.',
+    endSeriesCancelCount: (n: number) => (n === 1 ? '1 ocorrência será cancelada' : `${n} ocorrências serão canceladas`),
+    endSeriesReopenCount: (n: number) => (n === 1 ? '1 ocorrência cancelada volta a valer' : `${n} ocorrências canceladas voltam a valer`),
+    endSeriesBlocked: 'Com baixa depois da data (estorne antes ou escolha outra data):',
+    endSeriesDone: (canceled: number, reopened: number) =>
+      [canceled ? `${canceled} cancelada(s)` : '', reopened ? `${reopened} reaberta(s)` : ''].filter(Boolean).join(', ') ||
+      'Série atualizada.',
     occurrenceOf: (n: number, total?: number | null) => (total ? `${n}/${total}` : `#${n}`),
     settle: 'Baixar',
     receive: 'Receber',
@@ -418,6 +441,8 @@ export const ptBR = {
   agentsUi: agentsUiStrings,
   // Backup e restauração (spec 019).
   backup: backupStrings,
+  // Contratos (spec 020).
+  contracts: contractsStrings,
 } as const;
 
 export type Strings = typeof ptBR;

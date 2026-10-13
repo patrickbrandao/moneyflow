@@ -1,7 +1,19 @@
-import { type AgentToolInput, type AgentToolName, diffRows, type PreviewField, type ToolPreview, t, todayIso } from '@moneyflow/shared';
+import {
+  type AgentToolInput,
+  type AgentToolName,
+  diffDays,
+  diffRows,
+  formatBRL,
+  formatDate,
+  type PreviewField,
+  type PreviewRow,
+  type ToolPreview,
+  t,
+  todayIso,
+} from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
-import { forbidden, notFound } from '../errors';
+import { forbidden, notFound, unprocessable } from '../errors';
 import * as caixas from '../services/caixas';
 import { calendarItems } from '../services/calendar';
 import * as cards from '../services/cards';
@@ -13,7 +25,7 @@ import { listDestinations, sendAgentMessage } from '../services/messages';
 import { search } from '../services/overview';
 import * as rec from '../services/reconciliation';
 import * as reports from '../services/reports';
-import { createSettlement } from '../services/settlements';
+import { createSettlement, reverseSettlement } from '../services/settlements';
 import { accountStatement } from '../services/statement';
 import * as statements from '../services/statements';
 import * as titles from '../services/titles';
@@ -114,6 +126,71 @@ async function lineCaixa(ctx: ServiceContext, lineId: string) {
 
 const lineLabel = (l: { description: string; amount_cents: number; posted_on: string }) =>
   `${l.posted_on} · ${l.description} · ${(l.amount_cents / 100).toFixed(2).replace('.', ',')}`;
+
+const brl = (cents: number) => (cents / 100).toFixed(2).replace('.', ',');
+
+/** Prévia de lote: até 50 linhas no cartão, o resto avisado. */
+const PREVIEW_LINES = 50;
+const moreLines = (total: number) => (total > PREVIEW_LINES ? [`E mais ${total - PREVIEW_LINES} linha(s) não mostradas.`] : []);
+
+/** Texto do alvo de um casamento (título, movimento ou item de fatura), para a prévia. */
+async function matchTargetLabel(
+  ctx: ServiceContext,
+  ref: { movementId?: string | null; titleId?: string | null; cardInvoiceItemId?: string | null },
+) {
+  if (ref.titleId) {
+    const r = await ctx.db.execute<{ description: string; amount_cents: number; due_date: string; entity_name: string }>(sql`
+      SELECT t.description, t.amount_cents, t.due_date, e.name AS entity_name
+        FROM titles t JOIN entities e ON e.id = t.entity_id WHERE t.id = ${ref.titleId}`);
+    const row = r.rows[0];
+    return row
+      ? `Título: ${row.description} (${row.entity_name}) · venc. ${row.due_date} · ${brl(row.amount_cents)}`
+      : `Título ${ref.titleId}`;
+  }
+  if (ref.movementId) {
+    const r = await ctx.db.execute<{ description: string | null; amount_cents: number; occurred_on: string }>(
+      sql`SELECT description, amount_cents, occurred_on FROM movements WHERE id = ${ref.movementId}`,
+    );
+    const row = r.rows[0];
+    return row ? `Movimento: ${row.occurred_on} · ${row.description ?? '—'} · ${brl(row.amount_cents)}` : `Movimento ${ref.movementId}`;
+  }
+  if (ref.cardInvoiceItemId) return `Item de fatura ${ref.cardInvoiceItemId}`;
+  return '—';
+}
+
+const LINE_CREATE_MODE: Record<string, string> = {
+  adjustment: 'Movimento avulso',
+  title: 'Título já baixado',
+  purchase: 'Compra no cartão',
+};
+
+type LineCreateItem = AgentToolInput<'create_from_statement_line'>;
+
+/** Resumo de um lançamento a partir da linha: modo, entidade, categoria, espelho ou pagadora. */
+async function lineCreateSummary(ctx: ServiceContext, i: LineCreateItem) {
+  const parts = [LINE_CREATE_MODE[i.mode] ?? i.mode];
+  const entity = await nameOf(ctx, 'entity', i.entityId);
+  const category = await nameOf(ctx, 'category', i.categoryId);
+  if (entity) parts.push(entity);
+  if (category) parts.push(category);
+  if (i.mode === 'title') {
+    if (i.mirrorCaixaId === null) parts.push('sem espelho');
+    else if (i.mirrorCaixaId) parts.push(`espelho em ${await nameOf(ctx, 'caixa', i.mirrorCaixaId)}`);
+  }
+  if (i.mode === 'purchase' && i.payerCaixaId) parts.push(`pagadora ${await nameOf(ctx, 'caixa', i.payerCaixaId)}`);
+  return parts.join(' · ');
+}
+
+const lineCreateInputOf = (i: LineCreateItem) => ({
+  mode: i.mode,
+  entityId: i.entityId,
+  categoryId: i.categoryId,
+  description: i.description,
+  payerCaixaId: i.payerCaixaId,
+  mirrorCaixaId: i.mirrorCaixaId,
+  mirrorCategoryId: i.mirrorCategoryId,
+  learnRule: i.learnRule,
+});
 
 /* ---------------- handlers ---------------- */
 
@@ -242,6 +319,34 @@ export const TOOL_HANDLERS: Handlers = {
     },
     run: (ctx, i) => titles.updateTitle(ctx, i.titleId, i.changes),
   },
+  end_series: {
+    preview: async (ctx, i) => {
+      const title = await titles.getTitle(ctx, i.titleId);
+      const plan = await titles.previewSeriesEnd(ctx, i.titleId, i.endsOn);
+      if (plan.blocked.length > 0) {
+        const list = plan.blocked.map((o) => `#${o.occurrence} ${formatDate(o.dueDate)}`).join(', ');
+        throw unprocessable(t.errors.seriesEndBlocked(list), 'series_end_blocked');
+      }
+      const listed = (items: typeof plan.toCancel) => items.map((o) => `#${o.occurrence} ${formatDate(o.dueDate)}`).join(', ') || null;
+      const rows: PreviewRow[] = [
+        {
+          label: 'Termina em',
+          before: plan.currentEndsOn ? formatDate(plan.currentEndsOn) : 'Sem fim',
+          after: plan.endsOn ? formatDate(plan.endsOn) : 'Sem fim',
+        },
+      ];
+      if (plan.toCancel.length) rows.push({ label: 'Canceladas', after: listed(plan.toCancel) });
+      if (plan.toReopen.length) rows.push({ label: 'Reabertas', after: listed(plan.toReopen) });
+      return {
+        title: 'Encerrar série',
+        summary: `${title.description} (${title.entityName})`,
+        action: plan.toCancel.length ? 'delete' : 'update',
+        rows,
+        warnings: title.mirrorTitleId && plan.toCancel.length ? ['O espelho de cada ocorrência também é cancelado.'] : [],
+      };
+    },
+    run: (ctx, i) => titles.endSeries(ctx, i.titleId, i.endsOn),
+  },
   settle_title: {
     preview: async (ctx, i) => {
       const title = await titles.getTitle(ctx, i.titleId);
@@ -277,6 +382,71 @@ export const TOOL_HANDLERS: Handlers = {
       };
     },
     run: (ctx, i) => createSettlement(ctx, i.titleId, i.settlement),
+  },
+  reverse_settlement: {
+    preview: async (ctx, i) => {
+      const owner = await ctx.db.execute<{ title_id: string }>(sql`SELECT title_id FROM settlements WHERE id = ${i.settlementId}`);
+      if (!owner.rows[0]) throw notFound();
+      const title = await titles.getTitle(ctx, owner.rows[0].title_id);
+      if (!title.canWrite) throw forbidden(t.errors.readOnly);
+      const leg = title.settlements.find((s) => s.id === i.settlementId)!;
+      if (leg.reversedAt) throw unprocessable(t.errors.settlementReversed);
+      const reversedOn = i.reversedOn ?? todayIso();
+      if (diffDays(leg.settledOn, reversedOn) < 0) throw unprocessable(t.errors.reversalBeforeSettlement);
+
+      const rows: PreviewRow[] = [
+        { label: 'Data da baixa', before: formatDate(leg.settledOn), after: '—' },
+        { label: 'Valor', before: formatBRL(leg.cashCents), after: '—' },
+        { label: 'Conta', before: leg.financialAccountName ?? 'Conta a definir', after: '—' },
+      ];
+      if (leg.mirrorSettlementId && title.mirror) {
+        const account = title.mirror.canRead
+          ? await ctx.db.execute<{ financial_account_id: string | null }>(
+              sql`SELECT financial_account_id FROM settlements WHERE id = ${leg.mirrorSettlementId}`,
+            )
+          : null;
+        const accountId = account?.rows[0]?.financial_account_id;
+        const where = !title.mirror.canRead ? null : accountId ? await nameOf(ctx, 'account', accountId) : 'conta a definir';
+        rows.push({
+          label: 'Perna do espelho',
+          before: [title.mirror.caixaName, where].filter(Boolean).join(' · '),
+          after: 'Estornada',
+        });
+      }
+      if (leg.transferId) {
+        rows.push({
+          label: 'Transferência',
+          before: leg.transferOtherAccountName ? `Com ${leg.transferOtherAccountName}` : 'Gerada pela baixa',
+          after: i.undoTransfer ? 'Desfeita' : 'Mantida',
+        });
+      }
+      rows.push(
+        { label: 'Em aberto', before: formatBRL(title.openCents), after: formatBRL(title.openCents + leg.amountCents) },
+        { label: 'Estorno em', after: formatDate(reversedOn) },
+        { label: 'Motivo', after: i.reason },
+      );
+
+      // A linha do extrato ainda conciliada com o movimento da baixa continua conciliada depois do estorno.
+      const matched = await ctx.db.execute<{ description: string; amount_cents: number; posted_on: string }>(sql`
+        SELECT l.description, l.amount_cents, l.posted_on
+          FROM statement_lines l JOIN movements m ON m.id = l.movement_id
+         WHERE m.settlement_id = ${i.settlementId} AND l.status IN ('matched', 'suggested')`);
+      const warnings = [
+        'Cada perna com conta recebe o movimento oposto na data do estorno; o movimento original continua no extrato da conta.',
+      ];
+      for (const line of matched.rows)
+        warnings.push(
+          `A linha do extrato ${lineLabel(line)} continua conciliada com o movimento desta baixa: desfaça antes com unmatch_statement_line.`,
+        );
+      return {
+        title: title.direction === 'payable' ? 'Estornar pagamento' : 'Estornar recebimento',
+        summary: `${title.description} (${title.entityName})`,
+        action: 'delete',
+        rows,
+        warnings,
+      };
+    },
+    run: (ctx, i) => reverseSettlement(ctx, i.settlementId, { reason: i.reason, reversedOn: i.reversedOn, undoTransfer: i.undoTransfer }),
   },
   create_transfer: {
     preview: async (ctx, i) => {
@@ -333,61 +503,173 @@ export const TOOL_HANDLERS: Handlers = {
     },
     run: (ctx, i) => cards.createPurchase(ctx, i.cardId, i.purchase),
   },
+  list_line_candidates: { run: (ctx, i) => rec.lineCandidates(ctx, i.lineId) },
   match_statement_line: {
     preview: async (ctx, i) => {
       const line = await lineCaixa(ctx, i.lineId);
-      const target = i.titleId
-        ? `título ${i.titleId}`
-        : i.movementId
-          ? `movimento ${i.movementId}`
-          : `item de fatura ${i.cardInvoiceItemId}`;
       return {
         title: 'Conciliar linha do extrato',
         summary: lineLabel(line),
         action: 'update',
-        rows: [{ label: 'Casar com', after: target }],
+        rows: [{ label: 'Casar com', after: await matchTargetLabel(ctx, i) }],
+        warnings: i.titleId ? ['O título recebe uma baixa com a data e o valor da linha, na conta do extrato.'] : [],
       };
     },
     run: (ctx, i) => rec.matchLine(ctx, i.lineId, { movementId: i.movementId, titleId: i.titleId, cardInvoiceItemId: i.cardInvoiceItemId }),
   },
+  match_statement_lines: {
+    preview: async (ctx, i) => {
+      const rows = [];
+      for (const [index, m] of i.matches.entries()) {
+        const line = await lineCaixa(ctx, m.lineId);
+        if (index < PREVIEW_LINES) rows.push({ label: lineLabel(line), after: await matchTargetLabel(ctx, m) });
+      }
+      const settles = i.matches.filter((m) => m.titleId).length;
+      return {
+        title: 'Conciliar linhas do extrato',
+        summary: `${i.matches.length} linha(s)`,
+        action: 'update',
+        rows,
+        warnings: [
+          ...(settles > 0 ? [`${settles} título(s) recebem baixa com a data e o valor da linha, na conta do extrato.`] : []),
+          ...moreLines(i.matches.length),
+        ],
+      };
+    },
+    run: (ctx, i) => rec.matchLines(ctx, i.matches),
+  },
   confirm_statement_lines: {
     preview: async (ctx, i) => {
       const rows = [];
-      for (const lineId of i.lineIds.slice(0, 50)) rows.push({ label: 'Linha', after: lineLabel(await lineCaixa(ctx, lineId)) });
-      return { title: 'Confirmar conciliações sugeridas', summary: `${i.lineIds.length} linha(s)`, action: 'update', rows };
+      for (const lineId of i.lineIds.slice(0, PREVIEW_LINES)) rows.push({ label: 'Linha', after: lineLabel(await lineCaixa(ctx, lineId)) });
+      return {
+        title: 'Confirmar conciliações sugeridas',
+        summary: `${i.lineIds.length} linha(s)`,
+        action: 'update',
+        rows,
+        warnings: moreLines(i.lineIds.length),
+      };
     },
     run: (ctx, i) => rec.confirmLines(ctx, i.lineIds),
+  },
+  unmatch_statement_line: {
+    preview: async (ctx, i) => {
+      const line = await lineCaixa(ctx, i.lineId);
+      const r = await ctx.db.execute<{
+        status: string;
+        movement_id: string | null;
+        title_id: string | null;
+        card_invoice_item_id: string | null;
+      }>(sql`SELECT status, movement_id, title_id, card_invoice_item_id FROM statement_lines WHERE id = ${i.lineId}`);
+      const state = r.rows[0]!;
+      if (state.status !== 'matched' && state.status !== 'suggested') throw unprocessable(t.errors.lineNotMatched);
+      const target = await matchTargetLabel(ctx, {
+        movementId: state.movement_id,
+        titleId: state.title_id,
+        cardInvoiceItemId: state.card_invoice_item_id,
+      });
+      return {
+        title: 'Desfazer conciliação da linha',
+        summary: lineLabel(line),
+        action: 'delete',
+        rows: [
+          { label: state.status === 'matched' ? 'Conciliada com' : 'Sugestão', before: target, after: '—' },
+          { label: 'Situação', before: state.status === 'matched' ? 'Conciliada' : 'Sugerida', after: 'Nova' },
+        ],
+        warnings:
+          state.status === 'matched'
+            ? [
+                'O movimento ou a baixa criados ao conciliar continuam lançados; estorne a baixa com reverse_settlement se ela estava errada.',
+              ]
+            : [],
+      };
+    },
+    run: (ctx, i) => rec.unmatchLine(ctx, i.lineId),
+  },
+  ignore_statement_lines: {
+    preview: async (ctx, i) => {
+      const rows = [];
+      for (const lineId of i.lineIds.slice(0, PREVIEW_LINES)) rows.push({ label: 'Linha', after: lineLabel(await lineCaixa(ctx, lineId)) });
+      return {
+        title: 'Ignorar linhas do extrato',
+        summary: `${i.lineIds.length} linha(s)`,
+        action: 'update',
+        rows,
+        warnings: moreLines(i.lineIds.length),
+      };
+    },
+    run: (ctx, i) => rec.setIgnoredLines(ctx, i.lineIds, true),
+  },
+  unignore_statement_lines: {
+    preview: async (ctx, i) => {
+      const rows = [];
+      for (const lineId of i.lineIds.slice(0, PREVIEW_LINES)) rows.push({ label: 'Linha', after: lineLabel(await lineCaixa(ctx, lineId)) });
+      return {
+        title: 'Voltar linhas ignoradas',
+        summary: `${i.lineIds.length} linha(s)`,
+        action: 'update',
+        rows,
+        warnings: moreLines(i.lineIds.length),
+      };
+    },
+    run: (ctx, i) => rec.setIgnoredLines(ctx, i.lineIds, false),
   },
   create_from_statement_line: {
     preview: async (ctx, i) => {
       const line = await lineCaixa(ctx, i.lineId);
-      const values = await withNames(ctx, i as Record<string, unknown>, { entityId: 'entity', categoryId: 'category' });
-      const modes: Record<string, string> = { adjustment: 'Movimento avulso', title: 'Título já baixado', purchase: 'Compra no cartão' };
+      const values = await withNames(ctx, i as Record<string, unknown>, {
+        entityId: 'entity',
+        categoryId: 'category',
+        payerCaixaId: 'caixa',
+        mirrorCaixaId: 'caixa',
+        mirrorCategoryId: 'category',
+      });
+      const rows = diffRows(
+        [
+          { key: 'mode', label: 'Lançamento', format: (v) => LINE_CREATE_MODE[String(v)] ?? String(v) },
+          { key: 'entityId', label: 'Entidade' },
+          { key: 'categoryId', label: 'Categoria' },
+          { key: 'description', label: 'Descrição' },
+          ...(i.mode === 'purchase' ? [{ key: 'payerCaixaId', label: 'Caixa pagadora' }] : []),
+          ...(i.mode === 'title' ? [{ key: 'mirrorCategoryId', label: 'Categoria do espelho' }] : []),
+          { key: 'learnRule', label: 'Aprender regra', format: 'bool' as const },
+        ],
+        values,
+      );
+      const warnings: string[] = [];
+      if (i.mode === 'title') {
+        if (i.mirrorCaixaId === null) rows.push({ label: 'Espelho', after: 'Sem espelho' });
+        else if (i.mirrorCaixaId) rows.push({ label: 'Espelho em', after: String(values.mirrorCaixaId) });
+        else warnings.push('Se a entidade tiver uma caixa principal, o título é espelhado nela.');
+      }
+      if (i.mode === 'purchase' && !i.payerCaixaId) warnings.push('Sem caixa pagadora: vale a pagadora padrão do cartão.');
+      return { title: 'Lançar a partir da linha do extrato', summary: lineLabel(line), action: 'create', rows, warnings };
+    },
+    run: (ctx, i) => rec.createFromLine(ctx, i.lineId, lineCreateInputOf(i)),
+  },
+  create_from_statement_lines: {
+    preview: async (ctx, i) => {
+      const rows = [];
+      for (const [index, item] of i.items.entries()) {
+        const line = await lineCaixa(ctx, item.lineId);
+        if (index < PREVIEW_LINES) rows.push({ label: lineLabel(line), after: await lineCreateSummary(ctx, item) });
+      }
+      const warnings = [];
+      if (i.items.some((item) => item.mode === 'title' && item.mirrorCaixaId === undefined))
+        warnings.push('Títulos sem mirrorCaixaId são espelhados na caixa principal da entidade, se houver.');
       return {
-        title: 'Lançar a partir da linha do extrato',
-        summary: lineLabel(line),
+        title: 'Lançar linhas do extrato',
+        summary: `${i.items.length} linha(s)`,
         action: 'create',
-        rows: diffRows(
-          [
-            { key: 'mode', label: 'Lançamento', format: (v) => modes[String(v)] ?? String(v) },
-            { key: 'entityId', label: 'Entidade' },
-            { key: 'categoryId', label: 'Categoria' },
-            { key: 'description', label: 'Descrição' },
-            { key: 'learnRule', label: 'Aprender regra', format: 'bool' },
-          ],
-          values,
-        ),
+        rows,
+        warnings: [...warnings, ...moreLines(i.items.length)],
       };
     },
     run: (ctx, i) =>
-      rec.createFromLine(ctx, i.lineId, {
-        mode: i.mode,
-        entityId: i.entityId ?? null,
-        categoryId: i.categoryId ?? null,
-        description: i.description ?? null,
-        payerCaixaId: null,
-        learnRule: i.learnRule,
-      }),
+      rec.createFromLines(
+        ctx,
+        i.items.map((item) => ({ lineId: item.lineId, ...lineCreateInputOf(item) })),
+      ),
   },
   classify_statement_lines: {
     preview: async (ctx, i) => {
@@ -409,7 +691,7 @@ export const TOOL_HANDLERS: Handlers = {
   apply_classification_suggestions: {
     preview: async (ctx, i) => {
       const rows = [];
-      for (const lineId of i.lineIds.slice(0, 50)) rows.push({ label: 'Linha', after: lineLabel(await lineCaixa(ctx, lineId)) });
+      for (const lineId of i.lineIds.slice(0, PREVIEW_LINES)) rows.push({ label: 'Linha', after: lineLabel(await lineCaixa(ctx, lineId)) });
       return {
         title: i.decision === 'approve' ? 'Aprovar sugestões de classificação' : 'Descartar sugestões de classificação',
         summary: `${i.lineIds.length} linha(s)`,

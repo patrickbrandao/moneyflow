@@ -13,8 +13,9 @@ SELECT columns_are('titles', ARRAY['id', 'caixa_id', 'direction', 'entity_id', '
                                    'competence_date', 'due_date', 'amount_cents', 'status', 'origin',
                                    'recurrence_rule_id', 'occurrence', 'counterparty_caixa_id', 'mirror_title_id',
                                    'mirror_status', 'notes', 'archived_at', 'created_at', 'updated_at',
-                                   -- 0012 (entrada de títulos) e 0013 (cartão)
-                                   'boleto_barcode', 'pix_payload', 'nfe_document_id', 'card_invoice_id']);
+                                   -- 0012 (entrada de títulos), 0013 (cartão) e 0032 (contratos)
+                                   'boleto_barcode', 'pix_payload', 'nfe_document_id', 'card_invoice_id',
+                                   'contract_id', 'contract_cycle_id', 'contract_installment']);
 SELECT col_type_is('titles', 'amount_cents', 'bigint');
 SELECT col_type_is('titles', 'due_date', 'date');
 SELECT col_type_is('titles', 'competence_date', 'date');

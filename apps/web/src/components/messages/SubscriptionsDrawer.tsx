@@ -154,7 +154,13 @@ function SubscriptionEditor({
       case 'due_reminder':
         return { days_before: parseList(daysBefore), send_at: sendAt };
       case 'overdue':
+      case 'contract_renewal_pending':
         return repeat === '' ? { send_at: sendAt } : { send_at: sendAt, repeat_every_days: repeat };
+      case 'contract_notice_deadline':
+      case 'contract_ending':
+        return { days_before: parseList(daysBefore), send_at: sendAt };
+      case 'contract_readjustment':
+        return { send_at: sendAt };
       case 'daily_summary':
         return { send_at: sendAt };
       case 'weekly_summary':
@@ -185,7 +191,9 @@ function SubscriptionEditor({
     }
   }
 
-  const hasTime = kind === 'due_reminder' || kind === 'overdue' || kind === 'daily_summary' || kind === 'weekly_summary';
+  const hasDays = kind === 'due_reminder' || kind === 'contract_notice_deadline' || kind === 'contract_ending';
+  const hasRepeat = kind === 'overdue' || kind === 'contract_renewal_pending';
+  const hasTime = hasDays || hasRepeat || kind === 'daily_summary' || kind === 'weekly_summary' || kind === 'contract_readjustment';
   const scoped = kind !== 'agent_completed' && kind !== 'agent_message';
 
   return (
@@ -206,7 +214,7 @@ function SubscriptionEditor({
       <p className="hint">{t.messages.eventHints[kind]}</p>
       {enabled && (
         <div className="sub-params">
-          {kind === 'due_reminder' && (
+          {hasDays && (
             <label>
               <span className="label">{t.messages.params.days_before}</span>
               <input
@@ -232,7 +240,7 @@ function SubscriptionEditor({
               />
             </label>
           )}
-          {kind === 'overdue' && (
+          {hasRepeat && (
             <label>
               <span className="label">{t.messages.params.repeat_every_days}</span>
               <input

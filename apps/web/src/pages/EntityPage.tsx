@@ -1,9 +1,10 @@
-import { type EntityDetail, formatCep, formatDate, formatDocument, formatPixKey, t } from '@moneyflow/shared';
+import { type ContractRow, type EntityDetail, formatCep, formatDate, formatDocument, formatPixKey, t } from '@moneyflow/shared';
 import {
   Archive,
   ArchiveRestore,
   Building2,
   Contact,
+  Handshake,
   History,
   Landmark,
   Link2,
@@ -23,6 +24,7 @@ import { useAgentScreenContext } from '../agents/AgentsProvider';
 import { AttachmentsPanel } from '../components/attachments/AttachmentsPanel';
 import { AuditHistory } from '../components/audit/AuditHistory';
 import { CaixaFormModal } from '../components/CaixaFormModal';
+import { ContractsTable } from '../components/contracts/ContractsTable';
 import { LoadError, PageHead } from '../components/domain';
 import { AddressModal, BankAccountModal, ContactModal, LinkModal, PixKeyModal } from '../components/entity/ChildModals';
 import { EntityFormModal } from '../components/entity/EntityFormModal';
@@ -49,6 +51,8 @@ export function EntityPage() {
   const user = useUser();
   const navigate = useNavigate();
   const { data: entity, error, reload } = useApi<EntityDetail>(`/api/entities/${id}`);
+  // Contratos com esta contraparte, nas caixas que o usuário lê (spec 020).
+  const contracts = useApi<ContractRow[]>(`/api/contracts?entityId=${id}&limit=100`);
   const [editing, setEditing] = useState<Editing | null>(null);
   const confirm = useConfirm();
   const { run } = useAction();
@@ -335,6 +339,20 @@ export function EntityPage() {
 
         <Panel title={t.attachments.title} icon={<Paperclip />}>
           <AttachmentsPanel target="entity" targetId={entity.id} canWrite={canEdit} />
+        </Panel>
+      </div>
+
+      <div className="mt-6">
+        <Panel
+          title={t.contracts.entityTab}
+          icon={<Handshake />}
+          actions={
+            <Link className="btn btn-quiet btn-sm" to={`/contracts?entity=${entity.id}`}>
+              {t.contracts.title}
+            </Link>
+          }
+        >
+          <ContractsTable rows={contracts.data} empty={t.contracts.entityTabEmpty} showEntity={false} />
         </Panel>
       </div>
 

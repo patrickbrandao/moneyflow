@@ -118,6 +118,12 @@ export const DEFERRED_CLUSTER = new Set([
   'card_invoices',
   'card_invoice_items',
   'card_purchases',
+  // Contratos (spec 020): status ⇄ tarefa aberta, ciclos contíguos, documento ⇄ versão atual e parcelas.
+  'contracts',
+  'contract_cycles',
+  'contract_renewal_tasks',
+  'contract_documents',
+  'contract_document_versions',
 ]);
 
 /** Tabelas importadas por último (o fechamento de mês bloquearia os lançamentos do próprio arquivo). */
