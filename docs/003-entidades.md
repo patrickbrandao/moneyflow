@@ -56,7 +56,7 @@ Decisões de 2026-10-13.
 - A exportação CSV/PDF da listagem leva as colunas **Favorita** (Sim/Não) e **Tags** (nomes separados por vírgula).
 - API: `GET /api/entities` ganha `favorites=1` (só favoritas), `tagIds=<id>,<id>` e `tagMode=any|all` (padrão `any`). Com `q`, a ordenação põe as favoritas primeiro e depois a similaridade.
 - **Seletor de entidade** (`EntityPicker`, nos títulos, contratos, espelho etc.):
-  - Com a busca vazia, lista primeiro as favoritas (até 8) e completa com as demais por nome.
+  - Com a busca vazia, lista primeiro as favoritas (até 8) e completa com as demais por nome, até 8 opções.
   - Com texto, as favoritas vêm primeiro entre os resultados.
   - Cada opção mostra a estrela e as bolinhas de cor das tags.
 
