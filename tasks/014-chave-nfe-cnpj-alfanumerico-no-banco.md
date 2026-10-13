@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: dba
 prioridade: alta
 criada: 2026-10-13
-commit:
+commit: F6 (banco), branch feat/f6-tags-favoritas
 ---
 
 # Chave de acesso da NF-e com CNPJ alfanumérico no banco (NT 2025.001)
@@ -30,3 +30,10 @@ Hoje dá false para qualquer DV, porque a regex recusa a letra.
 ## Análise (triagem)
 
 ## Resolução (executor)
+Feito em 2026-10-13 (dba), na migration `database/migrations/0036_nfe_access_key_alphanumeric.sql` (parte do banco da F6).
+
+- `is_valid_nfe_access_key` agora exige `^[0-9]{6}[0-9A-Z]{12}[0-9]{26}$` (só maiúsculas; letra só nos 12 primeiros caracteres do CNPJ do emitente, posições 7 a 18) e calcula o DV com `ascii(c) - 48`, pesos 2..9 da direita, resto 0 ou 1 → 0. Sem `::int` sobre a chave. Chaves numéricas dão o mesmo resultado de antes.
+- O CHECK `nfe_documents_access_key_check` continua o mesmo (usa a função); `COMMENT ON` da função e de `nfe_documents.access_key` atualizados.
+- pgTAP em `database/tests/0012_title_entry.sql`: a chave da reprodução com DV `1` (`35261012ABC34501DE35550010000000011000000011`) é válida e entra em `nfe_documents`; DV errado, minúsculas, letra na UF, no DV do CNPJ ou no DV da chave e 43 caracteres são recusados; as chaves numéricas antigas continuam válidas.
+
+Verificação: `make -C database test` verde. Próximo: tarefa 015 (app).

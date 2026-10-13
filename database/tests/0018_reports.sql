@@ -7,9 +7,11 @@ CREATE FUNCTION pg_temp.commit_check() RETURNS void
 LANGUAGE plpgsql AS $$ BEGIN SET CONSTRAINTS ALL IMMEDIATE; SET CONSTRAINTS ALL DEFERRED; END $$;
 
 -- Estrutura
-SELECT has_function('report_category_totals', ARRAY['uuid[]', 'date', 'date', 'text']);
-SELECT has_function('report_entity_totals', ARRAY['uuid[]', 'date', 'date', 'text']);
-SELECT has_function('report_cash_projection', ARRAY['uuid[]', 'date', 'integer[]']);
+SELECT has_function('report_category_totals', ARRAY['uuid[]', 'date', 'date', 'text', 'uuid[]']);
+SELECT has_function('report_entity_totals', ARRAY['uuid[]', 'date', 'date', 'text', 'uuid[]']);
+SELECT has_function('report_cash_projection', ARRAY['uuid[]', 'date', 'integer[]', 'uuid[]']);
+SELECT hasnt_function('report_category_totals', ARRAY['uuid[]', 'date', 'date', 'text']);
+SELECT hasnt_function('report_cash_projection', ARRAY['uuid[]', 'date', 'integer[]']);
 
 -- Dados base ---------------------------------------------------------------------------------------------
 -- Casa (Patrick) e Empresa; cartão Nubank (Nu Pagamentos) pago pela Empresa por padrão.
@@ -262,13 +264,78 @@ SELECT is((SELECT count(*)::int FROM report_cash_projection((SELECT all_ids FROM
 SELECT throws_ok($$SELECT * FROM report_cash_projection(ARRAY[]::uuid[], '2026-10-31', '{0}')$$, '22023', NULL, 'horizonte zero');
 SELECT throws_ok($$SELECT * FROM report_cash_projection(ARRAY[]::uuid[], '2026-10-31', '{}')$$, '22023', NULL, 'sem horizontes');
 
+-- Filtro por entidade (p_entity_ids, F6) ------------------------------------------------------------------------
+-- Energia SA (e005): títulos da Casa, compra no cartão da Casa e a tarifa (ajuste com entidade).
+SELECT results_eq($$
+  SELECT caixa_id, card_caixa_id, category_id, source, amount_cents, entries
+    FROM report_category_totals((SELECT all_ids FROM ids), '2026-10-01', '2026-10-31', 'competence',
+                                ARRAY['00000000-0000-7000-8000-00000000e005'::uuid])
+   ORDER BY category_id, source$$,
+  $$VALUES
+    ('00000000-0000-7000-8000-0000000c0001'::uuid, NULL::uuid, '00000000-0000-7000-8000-00000000ca01'::uuid, 'title', 4000::bigint, 1),
+    ('00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000c0010', '00000000-0000-7000-8000-00000000ca02',
+     'card_purchase', 5000, 1),
+    ('00000000-0000-7000-8000-0000000c0001', NULL, '00000000-0000-7000-8000-00000000ca02', 'title', 30000, 1)$$,
+  'filtro, competência: títulos da entidade e compras pelo recebedor final');
+SELECT results_eq($$
+  SELECT category_id, source, amount_cents, entries
+    FROM report_category_totals((SELECT all_ids FROM ids), '2026-10-01', '2026-10-31', 'cash',
+                                ARRAY['00000000-0000-7000-8000-00000000e005'::uuid])
+   ORDER BY category_id NULLS FIRST, source$$,
+  $$VALUES (NULL::uuid, 'adjustment', 1500::bigint, 1),
+           ('00000000-0000-7000-8000-00000000ca01', 'settlement', 0, 2),
+           ('00000000-0000-7000-8000-00000000ca02', 'settlement', 30500, 1)$$,
+  'filtro, caixa: baixas dos títulos e ajustes da entidade; ajuste sem entidade sai');
+SELECT is((SELECT count(*)::int FROM report_category_totals((SELECT all_ids FROM ids), '2026-10-01', '2026-10-31', 'cash',
+                                                            ARRAY['00000000-0000-7000-8000-00000000e010'::uuid])),
+          0, 'filtro: o pagamento de fatura (card_invoice_payment) sai mesmo com o emissor na lista');
+SELECT is((SELECT count(*)::int FROM report_category_totals((SELECT all_ids FROM ids), '2026-10-01', '2026-10-31', 'competence',
+                                                            ARRAY[]::uuid[])), 0, 'filtro com lista vazia: nada');
+SELECT is((SELECT count(*)::int FROM report_category_totals((SELECT all_ids FROM ids), '2026-10-01', '2026-10-31', 'cash', NULL)),
+          8, 'p_entity_ids NULL: sem filtro');
+SELECT results_eq($$
+  SELECT entity_id, source, outflow_cents, entries
+    FROM report_entity_totals((SELECT all_ids FROM ids), '2026-10-01', '2026-10-31', 'competence',
+                              ARRAY['00000000-0000-7000-8000-00000000e007'::uuid])$$,
+  $$VALUES ('00000000-0000-7000-8000-00000000e007'::uuid, 'card_purchase', 8000::bigint, 2)$$,
+  'filtro por entidade: rastreio do cartão pelo recebedor final');
+SELECT results_eq($$
+  SELECT entity_id, source, inflow_cents
+    FROM report_entity_totals((SELECT all_ids FROM ids), '2026-10-01', '2026-10-31', 'cash',
+                              ARRAY['00000000-0000-7000-8000-00000000e008', '00000000-0000-7000-8000-00000000e010']::uuid[])$$,
+  $$VALUES ('00000000-0000-7000-8000-00000000e008'::uuid, 'settlement', 30000::bigint)$$,
+  'filtro por entidade, caixa: só as da lista, sem o pagamento de fatura');
+-- Projeção: saldo de hoje inteiro; títulos só da entidade; faturas abertas e o "Agendado" sem entidade saem.
+SELECT results_eq($$
+  SELECT caixa_id, financial_account_id, balance_today_cents, scheduled_movements_cents, overdue_receivable_cents,
+         overdue_payable_cents, receivable_cents, payable_cents, projected_cents
+    FROM report_cash_projection((SELECT all_ids FROM ids), '2026-10-31', '{30}', ARRAY['00000000-0000-7000-8000-00000000e005'::uuid])$$,
+  $$VALUES
+    ('00000000-0000-7000-8000-0000000c0001'::uuid, NULL::uuid, 113000::bigint, 0::bigint, 0::bigint, 4000::bigint, 0::bigint,
+     24000::bigint, 89000::bigint),
+    ('00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000a0001', 113000, 0, 0, 0, 0, 0, 113000),
+    ('00000000-0000-7000-8000-0000000c0002', NULL, 177000, 0, 0, 0, 0, 0, 177000),
+    ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-0000000a0003', 177000, 0, 0, 0, 0, 0, 177000)$$,
+  'projeção filtrada: saldo de hoje inteiro, títulos da entidade, sem faturas abertas nem lançado sem entidade');
+INSERT INTO movements (financial_account_id, occurred_on, amount_cents, kind, entity_id, description) VALUES
+  ('00000000-0000-7000-8000-0000000a0003', '2026-11-12', -2000, 'adjustment', '00000000-0000-7000-8000-00000000e008', 'Desconto');
+SELECT results_eq($$
+  SELECT scheduled_movements_cents, overdue_receivable_cents, receivable_cents, payable_cents, projected_cents
+    FROM report_cash_projection((SELECT all_ids FROM ids), '2026-10-31', '{30}', ARRAY['00000000-0000-7000-8000-00000000e008'::uuid])
+   WHERE caixa_id = '00000000-0000-7000-8000-0000000c0002' AND financial_account_id IS NULL$$,
+  $$VALUES (-2000::bigint, 50000::bigint, 50000::bigint, 0::bigint, 225000::bigint)$$,
+  'projeção filtrada: lançado futuro com a entidade conta');
+SELECT is((SELECT count(*)::int FROM report_cash_projection((SELECT all_ids FROM ids), '2026-10-31', '{30}', ARRAY[]::uuid[])
+            WHERE receivable_cents + payable_cents + scheduled_movements_cents <> 0), 0, 'projeção com lista vazia: só saldos');
+SELECT is(movement_counterparty('transfer', NULL, NULL), NULL::uuid, 'transferência não tem contraparte');
+
 -- Privilégios
 SELECT ok(has_function_privilege('moneyflow_app', f, 'EXECUTE'), 'app executa ' || f)
-  FROM unnest(ARRAY['report_category_totals(uuid[], date, date, text)', 'report_entity_totals(uuid[], date, date, text)',
-                    'report_cash_projection(uuid[], date, integer[])']) f;
+  FROM unnest(ARRAY['report_category_totals(uuid[], date, date, text, uuid[])', 'report_entity_totals(uuid[], date, date, text, uuid[])',
+                    'report_cash_projection(uuid[], date, integer[], uuid[])']) f;
 SELECT ok(NOT has_function_privilege('public', f, 'EXECUTE'), 'PUBLIC não executa ' || f)
-  FROM unnest(ARRAY['report_category_totals(uuid[], date, date, text)', 'report_entity_totals(uuid[], date, date, text)',
-                    'report_cash_projection(uuid[], date, integer[])', 'report_check_period(text, date, date, text)']) f;
+  FROM unnest(ARRAY['report_category_totals(uuid[], date, date, text, uuid[])', 'report_entity_totals(uuid[], date, date, text, uuid[])',
+                    'report_cash_projection(uuid[], date, integer[], uuid[])', 'report_check_period(text, date, date, text)']) f;
 GRANT SELECT ON ids TO moneyflow_app;
 SET LOCAL ROLE moneyflow_app;
 SELECT lives_ok($$SELECT * FROM report_category_totals((SELECT all_ids FROM ids), '2026-10-01', '2026-10-31', 'cash')$$, 'app: categorias');

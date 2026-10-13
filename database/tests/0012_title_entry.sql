@@ -52,6 +52,14 @@ SELECT ok(NOT is_valid_brcode('0002012658001400000000000000000000000000000000000
 SELECT ok(is_valid_nfe_access_key('35261001234567000190550010000001231000001232'), 'chave válida');
 SELECT ok(NOT is_valid_nfe_access_key('35261001234567000190550010000001231000001233'), 'DV errado');
 SELECT ok(NOT is_valid_nfe_access_key('3526 1001 2345 6700 0190 5500 1000 0001 2310 0000 1232'), 'chave formatada');
+-- NT 2025.001: CNPJ do emitente alfanumérico nas posições 7–20; DV com ASCII − 48.
+SELECT ok(is_valid_nfe_access_key('35261012ABC34501DE35550010000000011000000011'), 'chave com CNPJ alfanumérico');
+SELECT ok(NOT is_valid_nfe_access_key('35261012ABC34501DE35550010000000011000000012'), 'alfanumérica com DV errado');
+SELECT ok(NOT is_valid_nfe_access_key('35261012abc34501de35550010000000011000000011'), 'minúsculas recusadas');
+SELECT ok(NOT is_valid_nfe_access_key('3A261012ABC34501DE35550010000000011000000011'), 'letra fora do CNPJ (UF)');
+SELECT ok(NOT is_valid_nfe_access_key('35261012ABC34501DEA5550010000000011000000011'), 'letra no DV do CNPJ');
+SELECT ok(NOT is_valid_nfe_access_key('35261012ABC34501DE3555001000000001100000001A'), 'letra no DV da chave');
+SELECT ok(NOT is_valid_nfe_access_key('35261012ABC34501DE3555001000000001100000001'), '43 caracteres');
 
 -- Dados base
 INSERT INTO entities (id, kind, name) VALUES
@@ -113,6 +121,9 @@ SELECT throws_ok($$INSERT INTO nfe_documents (access_key, issuer_entity_id, reci
                    VALUES ('35261001234567000190550010000001241000001248', '00000000-0000-7000-8000-00000000e005',
                            '00000000-0000-7000-8000-00000000e005', 124, 1, '2026-10-05', 1)$$,
                  '23514', NULL, 'emitente ≠ destinatário');
+SELECT lives_ok($$INSERT INTO nfe_documents (access_key, issuer_entity_id, number, series, issued_at, total_cents)
+                  VALUES ('35261012ABC34501DE35550010000000011000000011', '00000000-0000-7000-8000-00000000e005', 1, 1,
+                          '2026-10-05', 1000)$$, 'NF-e com chave alfanumérica');
 SELECT lives_ok($$INSERT INTO nfe_items (nfe_document_id, item_number, product_code, description, ncm, cfop, unit, quantity,
                                          unit_price_cents, total_cents)
                   VALUES ('00000000-0000-7000-8000-0000000fe001', 1, 'P1', 'Papel A4', '48025610', '5102', 'CX', 10, 6000.5, 60005),

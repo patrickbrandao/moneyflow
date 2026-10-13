@@ -10,7 +10,7 @@ SELECT columns_are('audit_log', ARRAY['id', 'table_name', 'record_id', 'action',
 SELECT has_index('audit_log', i) FROM unnest(ARRAY['audit_log_record_idx', 'audit_log_user_id_idx', 'audit_log_created_at_idx',
                                                    'audit_log_transaction_id_idx']) i;
 SELECT has_function('audit_row');
-SELECT has_function('audit_write', ARRAY['text', 'text', 'jsonb', 'jsonb', 'text[]']);
+SELECT has_function('audit_write', ARRAY['text', 'text', 'jsonb', 'jsonb', 'text[]', 'uuid']);
 
 -- Toda tabela de negócio é auditada (exceto sessions e o próprio log).
 SELECT is_empty($$
@@ -108,9 +108,9 @@ SELECT set_config('app.actor_kind', '', true);
 
 -- Privilégios: a aplicação só lê ---------------------------------------------------------------------------
 SELECT table_privs_are('audit_log', 'moneyflow_app', ARRAY['SELECT']);
-SELECT ok(NOT has_function_privilege('moneyflow_app', 'audit_write(text, text, jsonb, jsonb, text[])', 'EXECUTE'),
+SELECT ok(NOT has_function_privilege('moneyflow_app', 'audit_write(text, text, jsonb, jsonb, text[], uuid)', 'EXECUTE'),
           'app não chama audit_write');
-SELECT ok(NOT has_function_privilege('public', 'audit_write(text, text, jsonb, jsonb, text[])', 'EXECUTE'),
+SELECT ok(NOT has_function_privilege('public', 'audit_write(text, text, jsonb, jsonb, text[], uuid)', 'EXECUTE'),
           'PUBLIC não chama audit_write');
 SET LOCAL ROLE moneyflow_app;
 SELECT lives_ok($$INSERT INTO entities (id, kind, name) VALUES ('00000000-0000-7000-8000-00000000e002', 'company', 'Via app')$$,

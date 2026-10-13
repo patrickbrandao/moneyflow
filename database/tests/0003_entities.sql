@@ -7,7 +7,7 @@ SELECT * FROM no_plan();
 SELECT has_table(t) FROM unnest(ARRAY['entities', 'entity_contacts', 'entity_addresses', 'entity_bank_accounts',
                                       'entity_pix_keys', 'entity_links']) t;
 SELECT columns_are('entities', ARRAY['id', 'kind', 'name', 'trade_name', 'document', 'birth_date', 'notes',
-                                     'archived_at', 'created_at', 'updated_at']);
+                                     'archived_at', 'created_at', 'updated_at', 'is_favorite']);
 SELECT fk_ok(t, 'entity_id', 'entities', 'id')
   FROM unnest(ARRAY['entity_contacts', 'entity_addresses', 'entity_bank_accounts', 'entity_pix_keys', 'entity_links']) t;
 SELECT fk_ok('entity_links', 'related_entity_id', 'entities', 'id');
