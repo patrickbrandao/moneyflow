@@ -67,6 +67,8 @@ export const auditStrings = {
     entity_contacts: 'Contatos de entidade',
     entity_bank_accounts: 'Dados bancários',
     entity_links: 'Vínculos de entidade',
+    entity_tags: 'Tags de entidade',
+    entity_tag_links: 'Tags da entidade',
     caixa_hidden_categories: 'Categorias ocultas',
     title_attachments: 'Anexos de título',
     settlement_attachments: 'Anexos de baixa',
@@ -134,6 +136,9 @@ export const auditStrings = {
     installments_total: 'Parcelas',
     payer_caixa_id: 'Pagadora',
     reference_month: 'Mês de referência',
+    is_favorite: 'Favorita',
+    tag_id: 'Tag',
+    color_slot: 'Cor',
   } as Record<string, string>,
   /** Valores de enum mais comuns nas colunas status/kind/direction. */
   values: {

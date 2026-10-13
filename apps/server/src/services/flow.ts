@@ -35,9 +35,13 @@ export async function flowGraph(ctx: ServiceContext, q: { from: string; to: stri
       SELECT n.node_kind AS kind, n.node_id AS id, n.name, n.caixa_kind, n.entity_kind, n.holder_entity_id, n.balance_cents,
              n.card_used_cents, c.credit_limit_cents AS card_limit_cents, n.main_category_id, n.main_group_category_id,
              g.name AS main_group_name, g.color_slot AS main_group_color_slot,
-             n.realized_in_cents, n.realized_out_cents, n.forecast_in_cents, n.forecast_out_cents
+             n.realized_in_cents, n.realized_out_cents, n.forecast_in_cents, n.forecast_out_cents,
+             -- Tags e favorita dos nós de entidade (o filtro do canvas é do navegador, spec 014).
+             coalesce(e.is_favorite, false) AS is_favorite,
+             coalesce((SELECT array_agg(l.tag_id::text ORDER BY l.tag_id) FROM entity_tag_links l WHERE l.entity_id = e.id), '{}'::text[]) AS tag_ids
         FROM flow_graph_nodes(${arr}, ${q.from}::date, ${q.to}::date) n
         LEFT JOIN caixas c ON n.node_kind = 'caixa' AND c.id = n.node_id
+        LEFT JOIN entities e ON n.node_kind = 'entity' AND e.id = n.node_id
         LEFT JOIN categories g ON g.id = n.main_group_category_id`),
     ctx.db.execute(sql`SELECT * FROM flow_graph_edges(${arr}, ${q.from}::date, ${q.to}::date)`),
   ]);

@@ -207,4 +207,10 @@ VALUES ('Assistente geral',
         '{"temperature": 0.3, "max_tool_iterations": 20}', NULL, true, 1, 'bot', false)
 ON CONFLICT ((lower(name))) DO NOTHING;
 
+
+-- Tags de entidade de exemplo (spec 003): catálogo global, cor = slot 1–12.
+INSERT INTO entity_tags (name, color_slot) VALUES
+  ('Cliente', 1), ('Fornecedor', 2), ('Família', 3), ('Governo', 4)
+ON CONFLICT (name) DO NOTHING;
+
 COMMIT;

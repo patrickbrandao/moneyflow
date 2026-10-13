@@ -169,7 +169,20 @@ export function FlowDrawer({
       header = head(<Layers size={18} />, t.flow.groupOf(node.data.name || t.flow.otherGroup));
       body = (
         <div className="sec">
-          <p className="text-[13px] text-dim">{node.data.entityNames.join(', ')}</p>
+          <p className="text-[13px] text-dim">
+            {node.data.entityNames.map((name, index) => {
+              const hit = node.data.matchedNames?.includes(name);
+              return (
+                <span key={name}>
+                  {index > 0 && ', '}
+                  <span className={hit ? 'font-medium text-ink' : undefined} title={hit ? t.entityTags.matchesFilter : undefined}>
+                    {hit && '● '}
+                    {name}
+                  </span>
+                </span>
+              );
+            })}
+          </p>
           <div className="mt-3 flex flex-wrap gap-2">
             <Button size="sm" onClick={() => onExpand(node.data.groupId)}>
               <Ungroup /> {t.flow.expand}

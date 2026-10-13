@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ptBR } from '../i18n/pt-BR';
-import { id, isoDate, optionalText, queryBool, requiredText } from './common';
+import { entityFilterFields, id, isoDate, optionalText, queryBool, requiredText } from './common';
 
 /*
  * Entradas da fase 3 (visão): relatórios e canvas de fluxo (spec 014),
@@ -29,11 +29,12 @@ const checkPeriod = (q: { from: string; to: string }) => q.to >= q.from;
 export const REPORT_BASES = ['competence', 'cash'] as const;
 
 export const reportQuery = z
-  .object({ ...period, basis: z.enum(REPORT_BASES).default('competence') })
+  .object({ ...period, basis: z.enum(REPORT_BASES).default('competence'), ...entityFilterFields })
   .refine(checkPeriod, { message: E.invalidPeriod, path: ['to'] });
 
 export const projectionQuery = z.object({
   caixaIds: caixaIdList,
+  ...entityFilterFields,
   horizons: z
     .string()
     .optional()

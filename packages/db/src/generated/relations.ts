@@ -60,6 +60,8 @@ import {
   contractDocumentVersions,
   contractAmendments,
   contractRenewalTasks,
+  entityTagLinks,
+  entityTags,
 } from './schema';
 
 export const sessionsRelations = relations(sessions, ({ one }) => ({
@@ -132,6 +134,7 @@ export const entitiesRelations = relations(entities, ({ many }) => ({
   statementLines: many(statementLines),
   titles: many(titles),
   contracts: many(contracts),
+  entityTagLinks: many(entityTagLinks),
 }));
 
 export const entityAddressesRelations = relations(entityAddresses, ({ one }) => ({
@@ -1091,4 +1094,19 @@ export const contractRenewalTasksRelations = relations(contractRenewalTasks, ({ 
     fields: [contractRenewalTasks.decidedBy],
     references: [users.id],
   }),
+}));
+
+export const entityTagLinksRelations = relations(entityTagLinks, ({ one }) => ({
+  entity: one(entities, {
+    fields: [entityTagLinks.entityId],
+    references: [entities.id],
+  }),
+  entityTag: one(entityTags, {
+    fields: [entityTagLinks.tagId],
+    references: [entityTags.id],
+  }),
+}));
+
+export const entityTagsRelations = relations(entityTags, ({ many }) => ({
+  entityTagLinks: many(entityTagLinks),
 }));

@@ -22,9 +22,10 @@ export const backupStrings = {
     },
     entities: {
       title: 'Entidades',
-      exportHint: 'Pessoas e empresas com contatos, endereços, dados bancários, chaves PIX e vínculos.',
+      exportHint:
+        'Pessoas e empresas (com a marca de favorita) com contatos, endereços, dados bancários, chaves PIX, vínculos e as tags (o catálogo, arquivadas inclusive, e as ligações).',
       importHint:
-        'Entidades com o mesmo documento (CPF/CNPJ) ou o mesmo identificador são mantidas como estão, inclusive contatos, endereços e chaves.',
+        'Entidades com o mesmo documento (CPF/CNPJ) ou o mesmo identificador são mantidas como estão, inclusive contatos, endereços, chaves e tags. Tags com o mesmo nome são a mesma tag.',
     },
     caixas: {
       title: 'Caixas',

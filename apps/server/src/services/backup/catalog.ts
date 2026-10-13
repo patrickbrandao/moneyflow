@@ -45,7 +45,16 @@ export const EXCLUDED_TABLES = new Set([
 /** Tabelas de cada recurso exportável (a primeira é a principal). */
 export const RESOURCE_TABLES: Record<BackupResource, string[]> = {
   categories: ['categories'],
-  entities: ['entities', 'entity_contacts', 'entity_addresses', 'entity_bank_accounts', 'entity_pix_keys', 'entity_links'],
+  entities: [
+    'entities',
+    'entity_contacts',
+    'entity_addresses',
+    'entity_bank_accounts',
+    'entity_pix_keys',
+    'entity_links',
+    'entity_tags',
+    'entity_tag_links',
+  ],
   caixas: ['caixas', 'financial_accounts', 'caixa_members', 'caixa_hidden_categories'],
   'ai-providers': ['ai_providers', 'ai_model_prices'],
   users: ['users', 'caixa_members', 'user_api_tokens'],
@@ -73,6 +82,7 @@ export const NATURAL_KEYS: Record<string, string[][]> = {
   users: [['username'], ['email']],
   categories: [['kind', 'parent_id', 'lower:name']],
   entities: [['?document']],
+  entity_tags: [['lower:name']],
   ai_providers: [['lower:name']],
   ai_agents: [['lower:name']],
   mcp_servers: [['lower:name']],
@@ -95,6 +105,7 @@ export const OWNED_BY: Record<string, string[]> = {
   entity_bank_accounts: ['entity_id'],
   entity_pix_keys: ['entity_id'],
   entity_links: ['entity_id', 'related_entity_id'],
+  entity_tag_links: ['entity_id'],
   ai_model_prices: ['provider_id'],
   agent_mcp_servers: ['agent_id', 'mcp_server_id'],
   message_subscriptions: ['destination_id'],
@@ -125,6 +136,18 @@ export const DEFERRED_CLUSTER = new Set([
   'contract_documents',
   'contract_document_versions',
 ]);
+
+/**
+ * Tabelas sem coluna `id` (chave primária composta): a linha é identificada
+ * pelas colunas da chave (no relatório, `a|b`), e "já cadastrado" = mesma chave
+ * depois de traduzir as FKs.
+ */
+export const COMPOSITE_KEYS: Record<string, string[]> = {
+  entity_tag_links: ['entity_id', 'tag_id'],
+};
+
+/** Colunas que identificam a linha (id ou a chave composta). */
+export const keyColumns = (table: string) => COMPOSITE_KEYS[table] ?? ['id'];
 
 /** Tabelas importadas por último (o fechamento de mês bloquearia os lançamentos do próprio arquivo). */
 export const LAST_TABLES = new Set(['period_closings']);
@@ -200,8 +223,10 @@ export async function loadCatalog(db: Executor): Promise<Catalog> {
       nullableColumns: row.columns.filter((name) => !table.columns.find((c) => c.name === name)?.notNull),
     });
   }
-  // Só tabelas com `id` entram no backup (todas as de negócio têm).
-  for (const [name, table] of catalog) if (!table.columns.some((c) => c.name === 'id')) catalog.delete(name);
+  // Só tabelas com `id` (ou com a chave composta declarada) entram no backup.
+  for (const [name, table] of catalog) {
+    if (!table.columns.some((c) => c.name === 'id') && !COMPOSITE_KEYS[name]) catalog.delete(name);
+  }
   cached = catalog;
   return catalog;
 }
@@ -248,5 +273,8 @@ export function rowLabel(row: Record<string, unknown>): string {
     if (typeof value === 'string' && value.trim()) return value.length > 80 ? `${value.slice(0, 77)}…` : value;
     if (typeof value === 'number') return String(value);
   }
-  return typeof row.id === 'string' ? row.id.slice(0, 8) : '?';
+  if (typeof row.id === 'string') return row.id.slice(0, 8);
+  // Ligação sem id (entity_tag_links): os inícios das chaves.
+  const keys = Object.entries(row).filter(([column, value]) => column.endsWith('_id') && typeof value === 'string');
+  return keys.length > 0 ? keys.map(([, value]) => String(value).slice(0, 8)).join(' · ') : '?';
 }

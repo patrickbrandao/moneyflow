@@ -45,7 +45,7 @@ export async function downloadPdf(table: ExportTable) {
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
   doc.setTextColor(...PDF_MUTED);
-  const sub = [...(table.subtitle ?? []), t.reports.generatedAt(formatDateTime(new Date()))];
+  const sub = [...(table.subtitle ?? []), ...(table.preamble ?? []), t.reports.generatedAt(formatDateTime(new Date()))];
   sub.forEach((line, i) => {
     doc.text(pdfText(line), margin, margin + 22 + i * 12);
   });

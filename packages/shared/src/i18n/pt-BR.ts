@@ -7,6 +7,7 @@ import { calendarStrings } from './areas/calendar';
 import { cardStrings } from './areas/card';
 import { closingStrings } from './areas/closing';
 import { contractsStrings } from './areas/contracts';
+import { entityTagsStrings } from './areas/entity-tags';
 import { entryStrings } from './areas/entry';
 import { flowStrings } from './areas/flow';
 import { messagesStrings } from './areas/messages';
@@ -139,6 +140,7 @@ export const ptBR = {
     invalidDocument: 'CPF ou CNPJ inválido.',
     invalidCpf: 'CPF inválido.',
     invalidCnpj: 'CNPJ inválido.',
+    entityTagUnavailable: 'Tag inexistente ou arquivada: escolha uma das tags ativas.',
     invalidPix: 'Chave PIX inválida para o tipo escolhido.',
     invalidCep: 'CEP inválido.',
     invalidUf: 'UF inválida.',
@@ -443,6 +445,8 @@ export const ptBR = {
   backup: backupStrings,
   // Contratos (spec 020).
   contracts: contractsStrings,
+  // Tags e favoritas de entidade (F6, spec 003).
+  entityTags: entityTagsStrings,
 } as const;
 
 export type Strings = typeof ptBR;

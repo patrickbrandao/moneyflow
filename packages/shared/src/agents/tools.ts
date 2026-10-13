@@ -59,6 +59,12 @@ const limit = (max: number, fallback: number) =>
   z.number().int().min(1).max(max).default(fallback).describe(`Máximo de itens (padrão ${fallback}).`);
 const caixaIds = z.array(id).max(200).optional().describe('Caixas (ids); omitido = todas as que o usuário vê.');
 const lineIds = z.array(id).min(1).max(500);
+/** Filtro de entidades por tags e favoritas (spec 003/014): o mesmo da listagem e dos relatórios. */
+const entityFilter = {
+  tagIds: z.array(id).max(50).optional().describe('Tags (ids, de list_entity_tags); só as ativas contam.'),
+  tagMode: z.enum(['any', 'all']).default('any').describe('any = tem qualquer uma das tags; all = tem todas.'),
+  favoritesOnly: z.boolean().default(false).describe('true = só as entidades favoritas.'),
+};
 /** Alvo do casamento de uma linha: exatamente um dos três. */
 const lineMatchItem = z.object({
   lineId: id,
@@ -127,9 +133,22 @@ export const AGENT_TOOLS = [
   define({
     name: 'list_entities',
     title: 'Listar entidades',
-    description: 'Pessoas e empresas cadastradas (busca por nome ou documento).',
+    description:
+      'Pessoas e empresas cadastradas (busca por nome ou documento), com tags e favorita; filtra por tags (any/all) e só favoritas.',
     kind: 'read',
-    input: z.object({ q: z.string().trim().max(200).optional(), kind: z.enum(ENTITY_KINDS).optional(), limit: limit(200, 50) }),
+    input: z.object({
+      q: z.string().trim().max(200).optional(),
+      kind: z.enum(ENTITY_KINDS).optional(),
+      ...entityFilter,
+      limit: limit(200, 50),
+    }),
+  }),
+  define({
+    name: 'list_entity_tags',
+    title: 'Listar tags de entidade',
+    description: 'Tags ativas do catálogo global de entidades (id, nome, cor e quantas entidades usam cada uma).',
+    kind: 'read',
+    input: z.object({}),
   }),
   define({
     name: 'get_entity',
@@ -206,28 +225,31 @@ export const AGENT_TOOLS = [
   define({
     name: 'report_categories',
     title: 'Relatório por categoria',
-    description: 'Totais por categoria e mês no período (competência ou caixa).',
+    description:
+      'Totais por categoria e mês no período (competência ou caixa). Com filtro de entidades, só as linhas cuja contraparte casa (sem pagamento de fatura nem linhas sem entidade).',
     kind: 'read',
-    input: z.object({ from: date, to: date, caixaIds, basis: z.enum(['competence', 'cash']).default('competence') }),
+    input: z.object({ from: date, to: date, caixaIds, basis: z.enum(['competence', 'cash']).default('competence'), ...entityFilter }),
   }),
   define({
     name: 'report_entities',
     title: 'Relatório por entidade',
-    description: 'Totais pagos e recebidos por entidade no período.',
+    description: 'Totais pagos e recebidos por entidade no período (filtro opcional por tags e favoritas).',
     kind: 'read',
-    input: z.object({ from: date, to: date, caixaIds, basis: z.enum(['competence', 'cash']).default('competence') }),
+    input: z.object({ from: date, to: date, caixaIds, basis: z.enum(['competence', 'cash']).default('competence'), ...entityFilter }),
   }),
   define({
     name: 'report_projection',
     title: 'Saldo projetado',
-    description: 'Saldo projetado das caixas em horizontes de dias (padrão 30, 60 e 90).',
+    description:
+      'Saldo projetado das caixas em horizontes de dias (padrão 30, 60 e 90). Com filtro de entidades, o saldo de hoje é o da caixa inteira e os lançamentos contam só as entidades filtradas (sem faturas abertas).',
     kind: 'read',
-    input: z.object({ caixaIds, horizons: z.array(z.number().int().min(1).max(1100)).min(1).max(6).optional() }),
+    input: z.object({ caixaIds, horizons: z.array(z.number().int().min(1).max(1100)).min(1).max(6).optional(), ...entityFilter }),
   }),
   define({
     name: 'flow_graph',
     title: 'Fluxo de dinheiro',
-    description: 'Grafo do fluxo de dinheiro entre caixas e entidades no período (nós e arestas com valores).',
+    description:
+      'Grafo do fluxo de dinheiro entre caixas e entidades no período (nós e arestas com valores). Os nós de entidade trazem tagIds e isFavorite.',
     kind: 'read',
     input: z.object({ from: date, to: date, caixaIds }),
   }),
@@ -265,16 +287,33 @@ export const AGENT_TOOLS = [
   define({
     name: 'create_entity',
     title: 'Criar entidade',
-    description: 'Cadastra uma pessoa (CPF) ou empresa (CNPJ). Verifique antes com search_records se já existe.',
+    description:
+      'Cadastra uma pessoa (CPF) ou empresa (CNPJ), com tags (tagIds) e favorita opcionais. Verifique antes com search_records se já existe.',
     kind: 'write',
     input: entityCreateInput,
   }),
   define({
     name: 'update_entity',
     title: 'Editar entidade',
-    description: 'Altera nome, nome fantasia, documento, nascimento ou observações de uma entidade.',
+    description:
+      'Altera nome, nome fantasia, documento, nascimento, observações, tags (tagIds substitui o conjunto) ou favorita de uma entidade.',
     kind: 'write',
     input: z.object({ entityId: id, changes: entityUpdateInput }),
+  }),
+  define({
+    name: 'set_entity_tags',
+    title: 'Definir tags da entidade',
+    description:
+      'Substitui o conjunto de tags de uma entidade (tagIds de list_entity_tags; só tags ativas; lista vazia remove todas). Criar ou arquivar tags não é feito por agentes.',
+    kind: 'write',
+    input: z.object({ entityId: id, tagIds: z.array(id).max(200) }),
+  }),
+  define({
+    name: 'set_entity_favorite',
+    title: 'Marcar entidade como favorita',
+    description: 'Marca (favorite true) ou desmarca (false) uma entidade como favorita. A marca é global, igual para todos.',
+    kind: 'write',
+    input: z.object({ entityId: id, favorite: z.boolean() }),
   }),
   define({
     name: 'add_pix_key',

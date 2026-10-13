@@ -12,8 +12,8 @@ import {
   inet,
   unique,
   boolean,
-  date,
   uniqueIndex,
+  date,
   numeric,
   bigint,
   smallint,
@@ -21,6 +21,7 @@ import {
   integer,
   doublePrecision,
   vector,
+  primaryKey,
   pgView,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
@@ -75,35 +76,6 @@ export const users = pgTable(
   ],
 );
 
-export const entities = pgTable(
-  'entities',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    kind: text().notNull(),
-    name: text().notNull(),
-    tradeName: text('trade_name'),
-    document: text(),
-    birthDate: date('birth_date'),
-    notes: text(),
-    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('entities_name_trgm_idx').using('gin', table.name.asc().nullsLast().op('gin_trgm_ops')),
-    index('entities_trade_name_trgm_idx').using('gin', table.tradeName.asc().nullsLast().op('gin_trgm_ops')),
-    unique('entities_document_key').on(table.document),
-    check('entities_birth_date_check', sql`(birth_date IS NULL) OR (kind = 'person'::text)`),
-    check(
-      'entities_document_check',
-      sql`(document IS NULL) OR ((kind = 'person'::text) AND is_valid_cpf(document)) OR ((kind = 'company'::text) AND is_valid_cnpj(document))`,
-    ),
-    check('entities_kind_check', sql`kind = ANY (ARRAY['person'::text, 'company'::text])`),
-    check('entities_name_check', sql`btrim(name) <> ''::text`),
-    check('entities_trade_name_check', sql`(trade_name IS NULL) OR ((kind = 'company'::text) AND (btrim(trade_name) <> ''::text))`),
-  ],
-);
-
 export const entityContacts = pgTable(
   'entity_contacts',
   {
@@ -131,6 +103,40 @@ export const entityContacts = pgTable(
       'entity_contacts_value_check',
       sql`(btrim(value) <> ''::text) AND ((kind <> 'email'::text) OR (value ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'::text))`,
     ),
+  ],
+);
+
+export const entities = pgTable(
+  'entities',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    kind: text().notNull(),
+    name: text().notNull(),
+    tradeName: text('trade_name'),
+    document: text(),
+    birthDate: date('birth_date'),
+    notes: text(),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    isFavorite: boolean('is_favorite').default(false).notNull(),
+  },
+  (table) => [
+    index('entities_document_prefix_idx').using('btree', table.document.asc().nullsLast().op('text_pattern_ops')),
+    index('entities_is_favorite_idx')
+      .using('btree', table.name.asc().nullsLast().op('text_ops'))
+      .where(sql`(is_favorite AND (archived_at IS NULL))`),
+    index('entities_name_trgm_idx').using('gin', table.name.asc().nullsLast().op('gin_trgm_ops')),
+    index('entities_trade_name_trgm_idx').using('gin', table.tradeName.asc().nullsLast().op('gin_trgm_ops')),
+    unique('entities_document_key').on(table.document),
+    check('entities_birth_date_check', sql`(birth_date IS NULL) OR (kind = 'person'::text)`),
+    check(
+      'entities_document_check',
+      sql`(document IS NULL) OR ((kind = 'person'::text) AND is_valid_cpf(document)) OR ((kind = 'company'::text) AND is_valid_cnpj(document))`,
+    ),
+    check('entities_kind_check', sql`kind = ANY (ARRAY['person'::text, 'company'::text])`),
+    check('entities_name_check', sql`btrim(name) <> ''::text`),
+    check('entities_trade_name_check', sql`(trade_name IS NULL) OR ((kind = 'company'::text) AND (btrim(trade_name) <> ''::text))`),
   ],
 );
 
@@ -1203,6 +1209,26 @@ CASE kind
     WHEN 'carryover'::text THEN ((carried_from_invoice_id IS NOT NULL) AND (card_purchase_id IS NULL) AND (installment_number IS NULL))
     ELSE NULL::boolean
 END)`,
+    ),
+  ],
+);
+
+export const entityTags = pgTable(
+  'entity_tags',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    name: citext('name').notNull(),
+    colorSlot: smallint('color_slot').notNull(),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique('entity_tags_name_key').on(table.name),
+    check('entity_tags_color_slot_check', sql`(color_slot >= 1) AND (color_slot <= 12)`),
+    check(
+      'entity_tags_name_check',
+      sql`((char_length((name)::text) >= 1) AND (char_length((name)::text) <= 40)) AND ((name)::text !~ '^[[:space:]]'::text) AND ((name)::text !~ '[[:space:]]$'::text)`,
     ),
   ],
 );
@@ -2903,6 +2929,30 @@ END)`,
     ),
     check('contract_renewal_tasks_new_cycle_self_check', sql`new_cycle_id <> contract_cycle_id`),
     check('contract_renewal_tasks_status_check', sql`status = ANY (ARRAY['open'::text, 'approved'::text, 'declined'::text])`),
+  ],
+);
+
+export const entityTagLinks = pgTable(
+  'entity_tag_links',
+  {
+    entityId: uuid('entity_id').notNull(),
+    tagId: uuid('tag_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('entity_tag_links_tag_id_idx').using('btree', table.tagId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.entityId],
+      foreignColumns: [entities.id],
+      name: 'entity_tag_links_entity_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.tagId],
+      foreignColumns: [entityTags.id],
+      name: 'entity_tag_links_tag_id_fkey',
+    }),
+    primaryKey({ columns: [table.entityId, table.tagId], name: 'entity_tag_links_pkey' }),
   ],
 );
 export const aiUsageMonthlyByPurpose = pgView('ai_usage_monthly_by_purpose', {

@@ -179,6 +179,15 @@ describe('exportação CSV', () => {
     expect(CSV_BOM).toBe('\uFEFF');
   });
 
+  it('preâmbulo (filtro de entidades) antes do cabeçalho', () => {
+    const csv = toCsv({
+      preamble: ['Filtro de entidades: tags Clientes; VIP (todas) · só favoritas'],
+      columns: [{ key: 'name', label: 'Nome' }],
+      rows: [{ name: 'Ana' }],
+    });
+    expect(csv.split('\r\n')).toEqual(['"Filtro de entidades: tags Clientes; VIP (todas) · só favoritas"', 'Nome', 'Ana', '']);
+  });
+
   it('formatos de célula e nome de arquivo', () => {
     expect(centsToCsv(-123_456)).toBe('-1234,56');
     expect(formatCell(123_456_789, 'money', 'display')).toBe('R$ 1.234.567,89');

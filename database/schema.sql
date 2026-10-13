@@ -1649,10 +1649,10 @@ COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de
 
 
 --
--- Name: audit_write(text, text, jsonb, jsonb, text[]); Type: FUNCTION; Schema: public; Owner: -
+-- Name: audit_write(text, text, jsonb, jsonb, text[], uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[]) RETURNS void
+CREATE FUNCTION public.audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[], p_record_id uuid DEFAULT NULL::uuid) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public', 'pg_temp'
     AS $_$
@@ -1689,17 +1689,17 @@ BEGIN
 
   INSERT INTO public.audit_log (table_name, record_id, action, old_data, new_data, changed_columns,
                                 user_id, actor_kind, agent_run_id, transaction_id)
-  VALUES (p_table, coalesce(p_new ->> 'id', p_old ->> 'id')::uuid, p_action, p_old, p_new, p_changed,
-          uid, kind, run_text, pg_current_xact_id()::text::bigint);
+  VALUES (p_table, coalesce(p_record_id, (p_new ->> 'id')::uuid, (p_old ->> 'id')::uuid), p_action, p_old, p_new,
+          p_changed, uid, kind, run_text, pg_current_xact_id()::text::bigint);
 END
 $_$;
 
 
 --
--- Name: FUNCTION audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[]); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[], p_record_id uuid); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[]) IS 'Interna: grava em audit_log com o ator de app.user_id / app.actor_kind / app.agent_run_id. Erro 23514 (audit_log_actor_check) se app.user_id não é uuid, se actor_kind é inválido, se human/agent vem sem usuário, ou se app.agent_run_id vem sem actor_kind = agent ou não é uma execução (ai_runs) do mesmo usuário.';
+COMMENT ON FUNCTION public.audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[], p_record_id uuid) IS 'Interna: grava em audit_log com o ator de app.user_id / app.actor_kind / app.agent_run_id. record_id = p_record_id (tabelas sem coluna id, como entity_tag_links) ou o id da linha. Erro 23514 (audit_log_actor_check) se app.user_id não é uuid, se actor_kind é inválido, se human/agent vem sem usuário, ou se app.agent_run_id vem sem actor_kind = agent ou não é uma execução (ai_runs) do mesmo usuário.';
 
 
 --
@@ -2814,6 +2814,72 @@ $$;
 
 
 --
+-- Name: entity_tag_links_audit_row(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.entity_tag_links_audit_row() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed, coalesce(n ->> 'entity_id', o ->> 'entity_id')::uuid);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION entity_tag_links_audit_row(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.entity_tag_links_audit_row() IS 'Trigger de auditoria de entity_tag_links: grava com record_id = entity_id (a ligação não tem id), para atribuir e remover tags aparecerem no histórico da entidade.';
+
+
+--
+-- Name: entity_tag_links_tag_active(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.entity_tag_links_tag_active() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  archived timestamptz;
+BEGIN
+  -- FOR SHARE: um arquivamento concorrente espera esta transação (e vice-versa).
+  SELECT t.archived_at INTO archived FROM entity_tags t WHERE t.id = NEW.tag_id FOR SHARE;
+  IF FOUND AND archived IS NOT NULL THEN
+    RAISE EXCEPTION 'entity_tag_links: tag % is archived and cannot be assigned', NEW.tag_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'entity_tag_links_tag_active_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION entity_tag_links_tag_active(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.entity_tag_links_tag_active() IS 'Trigger de entity_tag_links: recusa ligar uma tag arquivada (23514 entity_tag_links_tag_active_check).';
+
+
+--
 -- Name: financial_account_balance_at(uuid, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3304,15 +3370,15 @@ DECLARE
   w  int := 2;
   r  int;
 BEGIN
-  IF access_key !~ '^[0-9]{44}$' THEN
+  IF access_key !~ '^[0-9]{6}[0-9A-Z]{12}[0-9]{26}$' THEN
     RETURN false;
   END IF;
   FOR i IN REVERSE 43..1 LOOP
-    s := s + substr(access_key, i, 1)::int * w;
+    s := s + (ascii(substr(access_key, i, 1)) - 48) * w;
     w := CASE WHEN w = 9 THEN 2 ELSE w + 1 END;
   END LOOP;
   r := s % 11;
-  RETURN (CASE WHEN r IN (0, 1) THEN 0 ELSE 11 - r END) = substr(access_key, 44, 1)::int;
+  RETURN (CASE WHEN r IN (0, 1) THEN 0 ELSE 11 - r END) = ascii(substr(access_key, 44, 1)) - 48;
 END
 $_$;
 
@@ -3321,7 +3387,7 @@ $_$;
 -- Name: FUNCTION is_valid_nfe_access_key(access_key text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.is_valid_nfe_access_key(access_key text) IS 'Valida a chave de acesso de NF-e/NFC-e: 44 dígitos (JÁ NORMALIZADA) e DV módulo 11 (pesos 2..9; resto 0 ou 1 => 0). NULL => NULL.';
+COMMENT ON FUNCTION public.is_valid_nfe_access_key(access_key text) IS 'Valida a chave de acesso de NF-e/NFC-e (NT 2025.001), JÁ NORMALIZADA: 44 caracteres ^[0-9]{6}[0-9A-Z]{12}[0-9]{26}$ (o CNPJ do emitente, posições 7–20, pode ser alfanumérico; só maiúsculas) e DV módulo 11 sobre os 43 primeiros, cada caractere = ASCII − 48, pesos 2..9 da direita, resto 0 ou 1 => 0. NULL => NULL.';
 
 
 --
@@ -3823,6 +3889,28 @@ COMMENT ON FUNCTION public.message_subscription_params_valid(p_event_kind text, 
 
 
 --
+-- Name: movement_counterparty(text, uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.movement_counterparty(p_kind text, p_settlement_id uuid, p_entity_id uuid) RETURNS uuid
+    LANGUAGE sql STABLE PARALLEL SAFE
+    AS $$
+  SELECT CASE p_kind
+           WHEN 'adjustment' THEN p_entity_id
+           WHEN 'settlement' THEN (SELECT t.entity_id FROM settlements s JOIN titles t ON t.id = s.title_id
+                                    WHERE s.id = p_settlement_id AND t.origin <> 'card_invoice')
+         END
+$$;
+
+
+--
+-- Name: FUNCTION movement_counterparty(p_kind text, p_settlement_id uuid, p_entity_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.movement_counterparty(p_kind text, p_settlement_id uuid, p_entity_id uuid) IS 'Interna dos relatórios (filtro por entidade): contraparte de um movimento = entidade do título da baixa (nula se card_invoice) ou do ajuste; transferência = nula.';
+
+
+--
 -- Name: movements_integrity_check(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4018,10 +4106,10 @@ $$;
 
 
 --
--- Name: report_cash_projection(uuid[], date, integer[]); Type: FUNCTION; Schema: public; Owner: -
+-- Name: report_cash_projection(uuid[], date, integer[], uuid[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.report_cash_projection(p_caixa_ids uuid[], p_today date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date, p_horizons integer[] DEFAULT '{30,60,90}'::integer[]) RETURNS TABLE(caixa_id uuid, financial_account_id uuid, horizon_days integer, until date, balance_today_cents bigint, scheduled_movements_cents bigint, overdue_receivable_cents bigint, overdue_payable_cents bigint, receivable_cents bigint, payable_cents bigint, projected_cents bigint)
+CREATE FUNCTION public.report_cash_projection(p_caixa_ids uuid[], p_today date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date, p_horizons integer[] DEFAULT '{30,60,90}'::integer[], p_entity_ids uuid[] DEFAULT NULL::uuid[]) RETURNS TABLE(caixa_id uuid, financial_account_id uuid, horizon_days integer, until date, balance_today_cents bigint, scheduled_movements_cents bigint, overdue_receivable_cents bigint, overdue_payable_cents bigint, receivable_cents bigint, payable_cents bigint, projected_cents bigint)
     LANGUAGE plpgsql STABLE
     AS $$
 BEGIN
@@ -4047,10 +4135,13 @@ BEGIN
            (CASE WHEN accs.opening_date <= p_today THEN accs.opening_balance_cents ELSE 0 END
             + coalesce((SELECT sum(m.amount_cents) FROM movements m
                          WHERE m.financial_account_id = accs.id AND m.occurred_on <= p_today), 0))::bigint AS today_cents,
-           (CASE WHEN accs.opening_date > p_today AND accs.opening_date <= hz.until THEN accs.opening_balance_cents ELSE 0 END
+           (CASE WHEN p_entity_ids IS NULL AND accs.opening_date > p_today AND accs.opening_date <= hz.until
+                 THEN accs.opening_balance_cents ELSE 0 END
             + coalesce((SELECT sum(m.amount_cents) FROM movements m
                          WHERE m.financial_account_id = accs.id
-                           AND m.occurred_on > p_today AND m.occurred_on <= hz.until), 0))::bigint AS future_cents
+                           AND m.occurred_on > p_today AND m.occurred_on <= hz.until
+                           AND (p_entity_ids IS NULL OR movement_counterparty(m.kind, m.settlement_id, m.entity_id)
+                                                         = ANY (p_entity_ids))), 0))::bigint AS future_cents
       FROM accs CROSS JOIN hz
   ),
   -- Previsto da caixa: saldo aberto dos títulos (não arquivados) até o horizonte, vencidos à parte,
@@ -4062,11 +4153,13 @@ BEGIN
       LEFT JOIN card_invoices v ON v.id = t.card_invoice_id
      WHERE b.caixa_id = ANY (p_caixa_ids) AND b.open_cents > 0 AND b.archived_at IS NULL
        AND (v.id IS NULL OR v.closed_at IS NOT NULL)
+       AND (p_entity_ids IS NULL OR (t.origin <> 'card_invoice' AND t.entity_id = ANY (p_entity_ids)))
     UNION ALL
     SELECT x.payer_caixa_id, 'payable', x.due_date, (x.items_cents - x.settled_cents)::bigint
       FROM card_invoice_payer_totals x
       JOIN card_invoices v ON v.id = x.card_invoice_id AND v.closed_at IS NULL
      WHERE x.payer_caixa_id = ANY (p_caixa_ids) AND x.items_cents - x.settled_cents > 0
+       AND p_entity_ids IS NULL
   ),
   caixa_rows AS (
     SELECT c.id AS caixa_id, hz.days, hz.until,
@@ -4095,17 +4188,17 @@ $$;
 
 
 --
--- Name: FUNCTION report_cash_projection(p_caixa_ids uuid[], p_today date, p_horizons integer[]); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION report_cash_projection(p_caixa_ids uuid[], p_today date, p_horizons integer[], p_entity_ids uuid[]); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.report_cash_projection(p_caixa_ids uuid[], p_today date, p_horizons integer[]) IS 'Fluxo de caixa projetado (spec 014) das caixas general pedidas, por horizonte (padrão 30/60/90 dias a partir de p_today, padrão = hoje em America/Sao_Paulo). Linha da caixa (financial_account_id nulo): balance_today_cents = saldo das contas no fim de hoje; scheduled_movements_cents = movimentos já lançados com data em (hoje, until] (e saldo inicial de conta aberta nesse intervalo); receivable_cents/payable_cents = saldo aberto dos títulos não arquivados com vencimento até until, INCLUSIVE os vencidos (que também saem em overdue_*), e as faturas abertas em que a caixa é pagadora (itens − antecipações); projected_cents = saldo + lançados + a receber − a pagar. Linha da conta: só realizado (títulos não têm conta), previstos = 0. Caixas de cartão não entram. Erro 22023: horizonte fora de 1..1100 ou lista vazia.';
+COMMENT ON FUNCTION public.report_cash_projection(p_caixa_ids uuid[], p_today date, p_horizons integer[], p_entity_ids uuid[]) IS 'Fluxo de caixa projetado (spec 014) das caixas general pedidas, por horizonte (padrão 30/60/90 dias a partir de p_today, padrão = hoje em America/Sao_Paulo). Linha da caixa (financial_account_id nulo): balance_today_cents = saldo das contas no fim de hoje; scheduled_movements_cents = movimentos já lançados com data em (hoje, until] (e saldo inicial de conta aberta nesse intervalo); receivable_cents/payable_cents = saldo aberto dos títulos não arquivados com vencimento até until, INCLUSIVE os vencidos (que também saem em overdue_*), e as faturas abertas em que a caixa é pagadora (itens − antecipações); projected_cents = saldo + lançados + a receber − a pagar. Linha da conta: só realizado (títulos não têm conta), previstos = 0. Caixas de cartão não entram. Erro 22023: horizonte fora de 1..1100 ou lista vazia. p_entity_ids (padrão NULL = sem filtro): com lista (vazia inclusive), o saldo de hoje não muda; lançados futuros e títulos contam só os da lista (contraparte de movement_counterparty / entidade do título; sem saldo inicial futuro, transferências, títulos e pagamentos de fatura) e as faturas abertas saem.';
 
 
 --
--- Name: report_category_totals(uuid[], date, date, text); Type: FUNCTION; Schema: public; Owner: -
+-- Name: report_category_totals(uuid[], date, date, text, uuid[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.report_category_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text DEFAULT 'competence'::text) RETURNS TABLE(month date, caixa_id uuid, card_caixa_id uuid, kind text, group_category_id uuid, category_id uuid, source text, is_internal boolean, amount_cents bigint, entries integer)
+CREATE FUNCTION public.report_category_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text DEFAULT 'competence'::text, p_entity_ids uuid[] DEFAULT NULL::uuid[]) RETURNS TABLE(month date, caixa_id uuid, card_caixa_id uuid, kind text, group_category_id uuid, category_id uuid, source text, is_internal boolean, amount_cents bigint, entries integer)
     LANGUAGE plpgsql STABLE
     AS $$
 BEGIN
@@ -4129,6 +4222,7 @@ BEGIN
          AND t.competence_date BETWEEN p_from AND p_to
          AND t.status <> 'canceled'
          AND t.origin <> 'card_invoice'
+         AND (p_entity_ids IS NULL OR t.entity_id = ANY (p_entity_ids))
       UNION ALL
       SELECT date_trunc('month', p.purchased_on)::date,
              p.payer_caixa_id,
@@ -4143,6 +4237,7 @@ BEGIN
         JOIN categories c ON c.id = p.category_id
        WHERE (p.payer_caixa_id = ANY (p_caixa_ids) OR p.card_caixa_id = ANY (p_caixa_ids))
          AND p.purchased_on BETWEEN p_from AND p_to
+         AND (p_entity_ids IS NULL OR p.entity_id = ANY (p_entity_ids))
     )
     SELECT l.month, l.caixa_id, l.card_caixa_id, l.kind, l.group_category_id, l.category_id, l.source,
            l.is_internal, sum(l.amount_cents)::bigint, count(*)::int
@@ -4169,6 +4264,7 @@ BEGIN
        WHERE m.kind = 'settlement'
          AND a.caixa_id = ANY (p_caixa_ids)
          AND m.occurred_on BETWEEN p_from AND p_to
+         AND (p_entity_ids IS NULL OR (t.origin <> 'card_invoice' AND t.entity_id = ANY (p_entity_ids)))
       UNION ALL
       SELECT date_trunc('month', m.occurred_on)::date,
              a.caixa_id,
@@ -4188,6 +4284,7 @@ BEGIN
        WHERE m.kind = 'adjustment'
          AND a.caixa_id = ANY (p_caixa_ids)
          AND m.occurred_on BETWEEN p_from AND p_to
+         AND (p_entity_ids IS NULL OR m.entity_id = ANY (p_entity_ids))
     )
     SELECT l.month, l.caixa_id, l.card_caixa_id, l.kind, l.group_category_id, l.category_id, l.source,
            l.is_internal, sum(l.amount_cents)::bigint, count(*)::int
@@ -4200,10 +4297,10 @@ $$;
 
 
 --
--- Name: FUNCTION report_category_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION report_category_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text, p_entity_ids uuid[]); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.report_category_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text) IS 'Despesa/receita por mês, caixa e categoria (spec 014). p_basis: competence (padrão) ou cash. Uma linha por (month, caixa_id, card_caixa_id, kind, group_category_id, category_id, source, is_internal) com amount_cents (positivo = despesa em expense, receita em income; estornos subtraem) e entries. competence: source title (títulos não cancelados pela competência, sem os card_invoice) e card_purchase (compras/encargos/estornos do cartão pela data da compra, caixa_id = pagadora, card_caixa_id = cartão; entram se a pagadora OU o cartão está em p_caixa_ids). cash: source settlement (movimentos de baixa pela data, categoria do título), card_invoice_payment (pagamento da fatura pela pagadora, categoria do título da fatura, card_caixa_id = cartão; não rateado pelas compras) e adjustment (ajustes; sem categoria = category_id nulo, kind pelo sinal). Transferências nunca contam. is_internal: espelho cuja outra caixa também está na lista. Erro 22023: período inválido (até 3660 dias) ou regime desconhecido.';
+COMMENT ON FUNCTION public.report_category_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text, p_entity_ids uuid[]) IS 'Despesa/receita por mês, caixa e categoria (spec 014). p_basis: competence (padrão) ou cash. Uma linha por (month, caixa_id, card_caixa_id, kind, group_category_id, category_id, source, is_internal) com amount_cents (positivo = despesa em expense, receita em income; estornos subtraem) e entries. competence: source title (títulos não cancelados pela competência, sem os card_invoice) e card_purchase (compras/encargos/estornos do cartão pela data da compra, caixa_id = pagadora, card_caixa_id = cartão; entram se a pagadora OU o cartão está em p_caixa_ids). cash: source settlement (movimentos de baixa pela data, categoria do título), card_invoice_payment (pagamento da fatura pela pagadora, categoria do título da fatura, card_caixa_id = cartão; não rateado pelas compras) e adjustment (ajustes; sem categoria = category_id nulo, kind pelo sinal). Transferências nunca contam. is_internal: espelho cuja outra caixa também está na lista. Erro 22023: período inválido (até 3660 dias) ou regime desconhecido. p_entity_ids (padrão NULL = sem filtro): com lista (vazia inclusive), só as linhas cuja contraparte está nela (entidade do título, recebedor final da compra, entidade do ajuste); saem as linhas sem entidade e o card_invoice_payment.';
 
 
 --
@@ -4234,10 +4331,10 @@ COMMENT ON FUNCTION public.report_check_period(p_fn text, p_from date, p_to date
 
 
 --
--- Name: report_entity_totals(uuid[], date, date, text); Type: FUNCTION; Schema: public; Owner: -
+-- Name: report_entity_totals(uuid[], date, date, text, uuid[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.report_entity_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text DEFAULT 'competence'::text) RETURNS TABLE(entity_id uuid, caixa_id uuid, card_caixa_id uuid, source text, is_internal boolean, outflow_cents bigint, inflow_cents bigint, entries integer)
+CREATE FUNCTION public.report_entity_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text DEFAULT 'competence'::text, p_entity_ids uuid[] DEFAULT NULL::uuid[]) RETURNS TABLE(entity_id uuid, caixa_id uuid, card_caixa_id uuid, source text, is_internal boolean, outflow_cents bigint, inflow_cents bigint, entries integer)
     LANGUAGE plpgsql STABLE
     AS $$
 BEGIN
@@ -4258,6 +4355,7 @@ BEGIN
          AND t.competence_date BETWEEN p_from AND p_to
          AND t.status <> 'canceled'
          AND t.origin <> 'card_invoice'
+         AND (p_entity_ids IS NULL OR t.entity_id = ANY (p_entity_ids))
       UNION ALL
       SELECT p.entity_id,
              p.payer_caixa_id,
@@ -4269,6 +4367,7 @@ BEGIN
         FROM card_purchases p
        WHERE (p.payer_caixa_id = ANY (p_caixa_ids) OR p.card_caixa_id = ANY (p_caixa_ids))
          AND p.purchased_on BETWEEN p_from AND p_to
+         AND (p_entity_ids IS NULL OR p.entity_id = ANY (p_entity_ids))
     )
     SELECT l.entity_id, l.caixa_id, l.card_caixa_id, l.source, l.is_internal,
            sum(l.outflow)::bigint, sum(l.inflow)::bigint, count(*)::int
@@ -4292,6 +4391,7 @@ BEGIN
        WHERE m.kind = 'settlement'
          AND a.caixa_id = ANY (p_caixa_ids)
          AND m.occurred_on BETWEEN p_from AND p_to
+         AND (p_entity_ids IS NULL OR (t.origin <> 'card_invoice' AND t.entity_id = ANY (p_entity_ids)))
       UNION ALL
       SELECT m.entity_id,
              a.caixa_id,
@@ -4304,6 +4404,7 @@ BEGIN
         JOIN financial_accounts a ON a.id = m.financial_account_id
        WHERE m.kind = 'adjustment'
          AND m.entity_id IS NOT NULL
+         AND (p_entity_ids IS NULL OR m.entity_id = ANY (p_entity_ids))
          AND a.caixa_id = ANY (p_caixa_ids)
          AND m.occurred_on BETWEEN p_from AND p_to
     )
@@ -4318,10 +4419,10 @@ $$;
 
 
 --
--- Name: FUNCTION report_entity_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION report_entity_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text, p_entity_ids uuid[]); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.report_entity_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text) IS 'Pago (outflow_cents) e recebido (inflow_cents) por entidade e caixa no período (spec 014). competence (padrão): títulos não cancelados pela competência, sem os card_invoice (source title), e compras do cartão pela data com o RECEBEDOR FINAL como entidade (source card_purchase; caixa_id = pagadora, card_caixa_id = cartão: rastreio pagadora → cartão → lojista; estorno subtrai). cash: movimentos de baixa pela data (source settlement; estorno subtrai), pagamento de fatura ao emissor (source card_invoice_payment, card_caixa_id = cartão; os lojistas ficam no regime de competência) e ajustes com entidade (source adjustment, pelo sinal). Transferências nunca contam. is_internal como em report_category_totals. Erro 22023: período ou regime inválido.';
+COMMENT ON FUNCTION public.report_entity_totals(p_caixa_ids uuid[], p_from date, p_to date, p_basis text, p_entity_ids uuid[]) IS 'Pago (outflow_cents) e recebido (inflow_cents) por entidade e caixa no período (spec 014). competence (padrão): títulos não cancelados pela competência, sem os card_invoice (source title), e compras do cartão pela data com o RECEBEDOR FINAL como entidade (source card_purchase; caixa_id = pagadora, card_caixa_id = cartão: rastreio pagadora → cartão → lojista; estorno subtrai). cash: movimentos de baixa pela data (source settlement; estorno subtrai), pagamento de fatura ao emissor (source card_invoice_payment, card_caixa_id = cartão; os lojistas ficam no regime de competência) e ajustes com entidade (source adjustment, pelo sinal). Transferências nunca contam. is_internal como em report_category_totals. Erro 22023: período ou regime inválido. p_entity_ids (padrão NULL = sem filtro): com lista (vazia inclusive), só as entidades da lista (compra do cartão pelo recebedor final); o card_invoice_payment sai.';
 
 
 --
@@ -6108,7 +6209,7 @@ COMMENT ON TABLE public.nfe_documents IS 'NF-e importada (XML, spec 010). Uma po
 -- Name: COLUMN nfe_documents.access_key; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.nfe_documents.access_key IS 'Chave de acesso de 44 dígitos, normalizada, com DV válido. Única.';
+COMMENT ON COLUMN public.nfe_documents.access_key IS 'Chave de acesso de 44 caracteres (NT 2025.001: CNPJ do emitente alfanumérico nas posições 7–20), normalizada (maiúsculas, sem espaços), com DV válido. Única.';
 
 
 --
@@ -8023,6 +8124,7 @@ CREATE TABLE public.entities (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    is_favorite boolean DEFAULT false NOT NULL,
     CONSTRAINT entities_birth_date_check CHECK (((birth_date IS NULL) OR (kind = 'person'::text))),
     CONSTRAINT entities_document_check CHECK (((document IS NULL) OR ((kind = 'person'::text) AND public.is_valid_cpf(document)) OR ((kind = 'company'::text) AND public.is_valid_cnpj(document)))),
     CONSTRAINT entities_kind_check CHECK ((kind = ANY (ARRAY['person'::text, 'company'::text]))),
@@ -8064,6 +8166,13 @@ COMMENT ON COLUMN public.entities.document IS 'CPF (person) ou CNPJ (company) NO
 --
 
 COMMENT ON COLUMN public.entities.birth_date IS 'Data de nascimento (só pessoa).';
+
+
+--
+-- Name: COLUMN entities.is_favorite; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.entities.is_favorite IS 'Favorita (marca GLOBAL, igual para todos os usuários; spec 003). Entidade arquivada mantém a marca, mas a aba Favoritas lista só as ativas (índice parcial entities_is_favorite_idx).';
 
 
 --
@@ -8289,6 +8398,69 @@ COMMENT ON COLUMN public.entity_pix_keys.bank_code IS 'Banco (COMPE) onde a chav
 --
 
 COMMENT ON COLUMN public.entity_pix_keys.label IS 'Apelido opcional.';
+
+
+--
+-- Name: entity_tag_links; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.entity_tag_links (
+    entity_id uuid NOT NULL,
+    tag_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE entity_tag_links; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.entity_tag_links IS 'Tags de cada entidade (sem limite, sem repetição: chave primária no par). Some com a entidade (CASCADE); a tag em uso não é apagada (RESTRICT). Auditada com record_id = entity_id.';
+
+
+--
+-- Name: entity_tags; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.entity_tags (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    name public.citext NOT NULL,
+    color_slot smallint NOT NULL,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT entity_tags_color_slot_check CHECK (((color_slot >= 1) AND (color_slot <= 12))),
+    CONSTRAINT entity_tags_name_check CHECK ((((char_length((name)::text) >= 1) AND (char_length((name)::text) <= 40)) AND ((name)::text !~ '^[[:space:]]'::text) AND ((name)::text !~ '[[:space:]]$'::text)))
+);
+
+
+--
+-- Name: TABLE entity_tags; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.entity_tags IS 'Catálogo global de tags de entidade (spec 003). Tag em uso não é apagada (entity_tag_links RESTRICT): é arquivada; arquivada não pode ser ligada de novo (entity_tag_links_tag_active_check), mas as ligações existentes ficam.';
+
+
+--
+-- Name: COLUMN entity_tags.name; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.entity_tags.name IS 'Nome: 1 a 40 caracteres, sem espaço nas pontas; único sem distinção de maiúsculas, arquivadas inclusive (entity_tags_name_key).';
+
+
+--
+-- Name: COLUMN entity_tags.color_slot; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.entity_tags.color_slot IS 'Cor obrigatória: slot 1–12 do design system (token --port-N).';
+
+
+--
+-- Name: COLUMN entity_tags.archived_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.entity_tags.archived_at IS 'Arquivada (nulo = ativa): sai do seletor e do filtro.';
 
 
 --
@@ -9765,6 +9937,30 @@ ALTER TABLE ONLY public.entity_pix_keys
 
 
 --
+-- Name: entity_tag_links entity_tag_links_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entity_tag_links
+    ADD CONSTRAINT entity_tag_links_pkey PRIMARY KEY (entity_id, tag_id);
+
+
+--
+-- Name: entity_tags entity_tags_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entity_tags
+    ADD CONSTRAINT entity_tags_name_key UNIQUE (name);
+
+
+--
+-- Name: entity_tags entity_tags_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entity_tags
+    ADD CONSTRAINT entity_tags_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: financial_accounts financial_accounts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10720,6 +10916,27 @@ CREATE INDEX contracts_status_idx ON public.contracts USING btree (status);
 
 
 --
+-- Name: entities_document_prefix_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX entities_document_prefix_idx ON public.entities USING btree (document text_pattern_ops);
+
+
+--
+-- Name: INDEX entities_document_prefix_idx; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON INDEX public.entities_document_prefix_idx IS 'Busca pelo prefixo do documento normalizado (document LIKE ''12ABC%''), CPF ou CNPJ numérico/alfanumérico.';
+
+
+--
+-- Name: entities_is_favorite_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX entities_is_favorite_idx ON public.entities USING btree (name) WHERE (is_favorite AND (archived_at IS NULL));
+
+
+--
 -- Name: entities_name_trgm_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10787,6 +11004,13 @@ CREATE INDEX entity_pix_keys_entity_id_idx ON public.entity_pix_keys USING btree
 --
 
 CREATE UNIQUE INDEX entity_pix_keys_primary_key ON public.entity_pix_keys USING btree (entity_id) WHERE is_primary;
+
+
+--
+-- Name: entity_tag_links_tag_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX entity_tag_links_tag_id_idx ON public.entity_tag_links USING btree (tag_id);
 
 
 --
@@ -11994,6 +12218,41 @@ CREATE TRIGGER entity_pix_keys_set_updated_at BEFORE UPDATE ON public.entity_pix
 
 
 --
+-- Name: entity_tag_links entity_tag_links_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER entity_tag_links_audit AFTER INSERT OR DELETE OR UPDATE ON public.entity_tag_links FOR EACH ROW EXECUTE FUNCTION public.entity_tag_links_audit_row();
+
+
+--
+-- Name: entity_tag_links entity_tag_links_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER entity_tag_links_set_updated_at BEFORE UPDATE ON public.entity_tag_links FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: entity_tag_links entity_tag_links_tag_active_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER entity_tag_links_tag_active_check BEFORE INSERT OR UPDATE OF tag_id ON public.entity_tag_links FOR EACH ROW EXECUTE FUNCTION public.entity_tag_links_tag_active();
+
+
+--
+-- Name: entity_tags entity_tags_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER entity_tags_audit AFTER INSERT OR DELETE OR UPDATE ON public.entity_tags FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: entity_tags entity_tags_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER entity_tags_set_updated_at BEFORE UPDATE ON public.entity_tags FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
 -- Name: financial_accounts financial_accounts_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -13197,6 +13456,22 @@ ALTER TABLE ONLY public.entity_links
 
 ALTER TABLE ONLY public.entity_pix_keys
     ADD CONSTRAINT entity_pix_keys_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(id) ON DELETE CASCADE;
+
+
+--
+-- Name: entity_tag_links entity_tag_links_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entity_tag_links
+    ADD CONSTRAINT entity_tag_links_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(id) ON DELETE CASCADE;
+
+
+--
+-- Name: entity_tag_links entity_tag_links_tag_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entity_tag_links
+    ADD CONSTRAINT entity_tag_links_tag_id_fkey FOREIGN KEY (tag_id) REFERENCES public.entity_tags(id);
 
 
 --

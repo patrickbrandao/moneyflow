@@ -297,6 +297,44 @@ describe('backup: recursos num sistema novo', () => {
     const kept = await client(b, adminB.cookie).get(`/api/entities/${withDoc.id}`);
     expect(kept.name).toBe(`Com CNPJ ${s.tag}`);
   });
+
+  it('entidades levam favorita, tags (arquivada inclusive, arquivada depois das ligações) e casam a tag pelo nome', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const a = client(h, adminA.cookie);
+    const tag = uid();
+    const active = await a.post('/api/entity-tags', { name: `Ativa ${tag}`, colorSlot: 2 });
+    const old = await a.post('/api/entity-tags', { name: `Velha ${tag}`, colorSlot: 5 });
+    const entity = await a.post('/api/entities', {
+      kind: 'person',
+      name: `Com tags ${tag}`,
+      tagIds: [active.id, old.id],
+      isFavorite: true,
+    });
+    await a.del(`/api/entity-tags/${old.id}`);
+    // No destino já existe uma tag com o mesmo nome (outro id e outra caixa de letras): é a mesma.
+    const local = await client(b, adminB.cookie).post('/api/entity-tags', { name: `ATIVA ${tag}`, colorSlot: 9 });
+
+    const file = await exportJson(h, adminA.cookie, 'entities');
+    expect(file.tables.entity_tags.some((r: any) => r.id === old.id && r.archived_at)).toBe(true);
+    expect(file.tables.entity_tag_links.filter((r: any) => r.entity_id === entity.id)).toHaveLength(2);
+
+    const simulated = await importFile(b, adminB.cookie, 'entities', file, { dryRun: true });
+    expect(failures(simulated)).toEqual([]);
+    const report = await importFile(b, adminB.cookie, 'entities', file);
+    expect(failures(report)).toEqual([]);
+    expect(issuesOf(report, 'entity_tags').find((i) => i.id === active.id)?.reason).toMatch(/nome/);
+    const imported = await client(b, adminB.cookie).get(`/api/entities/${entity.id}`);
+    expect(imported.isFavorite).toBe(true);
+    expect(imported.tags).toEqual([
+      { id: local.id, name: `ATIVA ${tag}`, colorSlot: 9, archived: false },
+      { id: old.id, name: `Velha ${tag}`, colorSlot: 5, archived: true },
+    ]);
+    // Reimportar não muda nada: a ligação (sem id) já existe.
+    const again = await importFile(b, adminB.cookie, 'entities', file);
+    expect(failures(again)).toEqual([]);
+    expect(sum(again, 'entity_tag_links').imported).toBe(0);
+  });
 });
 
 describe('backup: JSON completo num sistema novo', () => {

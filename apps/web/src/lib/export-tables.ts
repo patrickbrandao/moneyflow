@@ -127,9 +127,13 @@ export function entitiesTable(rows: EntitySummary[]): ExportTable {
       { key: 'document', label: 'CPF/CNPJ' },
       { key: 'pix', label: 'PIX principal' },
       { key: 'caixas', label: t.nav.caixas, type: 'int' },
+      { key: 'favorite', label: t.entityTags.favorite },
+      { key: 'tags', label: t.entityTags.tags },
       { key: 'archived', label: t.common.archived },
     ],
     rows: rows.map((r) => ({
+      favorite: r.isFavorite ? t.entityTags.yes : t.entityTags.no,
+      tags: r.tags.map((tag) => tag.name).join(', '),
       name: r.name,
       tradeName: r.tradeName ?? '',
       kind: r.kind === 'company' ? 'Empresa' : 'Pessoa',

@@ -4,6 +4,9 @@ import {
   contactInput,
   entityCreateInput,
   entityListQuery,
+  entityTagCreateInput,
+  entityTagListQuery,
+  entityTagUpdateInput,
   entityUpdateInput,
   linkInput,
   pixKeyInput,
@@ -12,6 +15,7 @@ import type { FastifyInstance } from 'fastify';
 import { param, parse, type Req } from '../http';
 import { lookupCep, lookupCnpj } from '../integrations/lookup';
 import * as entities from '../services/entities';
+import * as tags from '../services/entity-tags';
 
 export async function entityRoutes(app: FastifyInstance) {
   app.get('/api/entities', (request: Req) => entities.listEntities(request.ctx, parse(entityListQuery, request.query)));
@@ -24,6 +28,13 @@ export async function entityRoutes(app: FastifyInstance) {
   app.post('/api/entities/:id/restore', (request: Req) => entities.restoreEntity(request.ctx, param(request, 'id')));
 
   const id = (r: Req) => param(r, 'id');
+
+  // Tags de entidade (spec 003): leitura para todos; escrita só do admin.
+  app.get('/api/entity-tags', (r: Req) => tags.listTags(r.ctx, parse(entityTagListQuery, r.query)));
+  app.post('/api/entity-tags', (r: Req) => tags.createTag(r.ctx, parse(entityTagCreateInput, r.body)));
+  app.patch('/api/entity-tags/:id', (r: Req) => tags.updateTag(r.ctx, id(r), parse(entityTagUpdateInput, r.body)));
+  app.delete('/api/entity-tags/:id', (r: Req) => tags.deleteTag(r.ctx, id(r)));
+  app.post('/api/entity-tags/:id/restore', (r: Req) => tags.restoreTag(r.ctx, id(r)));
   const child = (r: Req) => param(r, 'childId');
 
   app.post('/api/entities/:id/contacts', (r: Req) => entities.addContact(r.ctx, id(r), parse(contactInput, r.body)));

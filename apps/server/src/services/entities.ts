@@ -14,6 +14,7 @@ import {
   type contactInput,
   type DeleteResult,
   type EntityDetail,
+  type EntityFilter,
   type EntityKind,
   type EntityLink,
   type EntitySummary,
@@ -30,6 +31,7 @@ import { and, asc, desc, eq, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { AppError, notFound } from '../errors';
+import { entityFilterCondition, replaceEntityTags } from './entity-tags';
 import { deleteOrArchive, withTx } from './tx';
 import { camel } from './util';
 
@@ -39,7 +41,11 @@ const summarySelect = sql`
   e.id, e.kind, e.name, e.trade_name, e.document, e.archived_at,
   (SELECT json_build_object('keyType', p.key_type, 'keyValue', p.key_value)
      FROM entity_pix_keys p WHERE p.entity_id = e.id AND p.is_primary) AS primary_pix,
-  (SELECT count(*)::int FROM caixas c WHERE c.holder_entity_id = e.id AND c.archived_at IS NULL) AS caixa_count`;
+  (SELECT count(*)::int FROM caixas c WHERE c.holder_entity_id = e.id AND c.archived_at IS NULL) AS caixa_count,
+  e.is_favorite,
+  coalesce((SELECT json_agg(json_build_object('id', t.id, 'name', t.name::text, 'colorSlot', t.color_slot, 'archived', t.archived_at IS NOT NULL)
+                            ORDER BY t.archived_at IS NOT NULL, lower(t.name::text))
+              FROM entity_tag_links l JOIN entity_tags t ON t.id = l.tag_id WHERE l.entity_id = e.id), '[]'::json) AS tags`;
 
 type SummaryRow = Omit<EntitySummary, 'archivedAt'> & { archivedAt: Date | string | null };
 
@@ -48,11 +54,16 @@ const toSummary = (row: Record<string, unknown>): EntitySummary => {
   return { ...r, archivedAt: r.archivedAt ? new Date(r.archivedAt).toISOString() : null };
 };
 
-export async function listEntities(ctx: ServiceContext, query: z.output<typeof entityListQuery>): Promise<EntitySummary[]> {
+export async function listEntities(
+  ctx: ServiceContext,
+  query: Omit<z.output<typeof entityListQuery>, keyof EntityFilter> & Partial<EntityFilter>,
+): Promise<EntitySummary[]> {
   const q = query.q?.trim();
   const doc = q ? normalizeDocument(q) : '';
   const conditions = [query.archived ? sql`e.archived_at IS NOT NULL` : sql`e.archived_at IS NULL`];
   if (query.kind) conditions.push(sql`e.kind = ${query.kind}`);
+  const filter = await entityFilterCondition(ctx, query);
+  if (filter) conditions.push(filter);
   if (q) {
     conditions.push(sql`(
       e.name % ${q} OR e.trade_name % ${q}
@@ -60,7 +71,10 @@ export async function listEntities(ctx: ServiceContext, query: z.output<typeof e
       ${doc.length >= 3 ? sql`OR e.document LIKE ${`${doc}%`}` : sql``}
     )`);
   }
-  const order = q ? sql`greatest(similarity(e.name, ${q}), similarity(coalesce(e.trade_name, ''), ${q})) DESC, e.name` : sql`e.name`;
+  // Com busca, as favoritas vêm primeiro e depois a semelhança (spec 003).
+  const order = q
+    ? sql`e.is_favorite DESC, greatest(similarity(e.name, ${q}), similarity(coalesce(e.trade_name, ''), ${q})) DESC, e.name`
+    : sql`e.name`;
   const result = await ctx.db.execute(sql`
     SELECT ${summarySelect} FROM entities e
      WHERE ${sql.join(conditions, sql` AND `)}
@@ -145,8 +159,8 @@ export async function getEntity(ctx: ServiceContext, id: string): Promise<Entity
 
 export async function createEntity(ctx: ServiceContext, input: z.output<typeof entityCreateInput>): Promise<EntityDetail> {
   ctx.access.assertRegistryWrite();
-  const [row] = await withTx(ctx, (tx) =>
-    tx
+  const id = await withTx(ctx, async (tx) => {
+    const [row] = await tx
       .insert(entities)
       .values({
         kind: input.kind,
@@ -155,10 +169,13 @@ export async function createEntity(ctx: ServiceContext, input: z.output<typeof e
         document: input.document,
         birthDate: input.kind === 'person' ? input.birthDate : null,
         notes: input.notes,
+        isFavorite: input.isFavorite ?? false,
       })
-      .returning({ id: entities.id }),
-  );
-  return getEntity(ctx, row!.id);
+      .returning({ id: entities.id });
+    if (input.tagIds?.length) await replaceEntityTags(tx, row!.id, input.tagIds);
+    return row!.id;
+  });
+  return getEntity(ctx, id);
 }
 
 async function entityKind(db: Executor, id: string): Promise<EntityKind> {
@@ -179,8 +196,24 @@ export async function updateEntity(ctx: ServiceContext, id: string, input: z.out
   if (input.document !== undefined) patch.document = input.document;
   if (input.birthDate !== undefined) patch.birthDate = kind === 'person' ? input.birthDate : null;
   if (input.notes !== undefined) patch.notes = input.notes;
-  if (Object.keys(patch).length > 0) await withTx(ctx, (tx) => tx.update(entities).set(patch).where(eq(entities.id, id)));
+  if (input.isFavorite !== undefined) patch.isFavorite = input.isFavorite;
+  if (Object.keys(patch).length > 0 || input.tagIds !== undefined) {
+    await withTx(ctx, async (tx) => {
+      if (Object.keys(patch).length > 0) await tx.update(entities).set(patch).where(eq(entities.id, id));
+      if (input.tagIds !== undefined) await replaceEntityTags(tx, id, input.tagIds);
+    });
+  }
   return getEntity(ctx, id);
+}
+
+/** Substitui as tags da entidade (quem edita o cadastro; só tags ativas entram). */
+export async function setEntityTags(ctx: ServiceContext, id: string, tagIds: string[]): Promise<EntityDetail> {
+  return updateEntity(ctx, id, { tagIds: [...new Set(tagIds.map((v) => v.toLowerCase()))] });
+}
+
+/** Marca ou desmarca a favorita (global). */
+export async function setEntityFavorite(ctx: ServiceContext, id: string, favorite: boolean): Promise<EntityDetail> {
+  return updateEntity(ctx, id, { isFavorite: favorite });
 }
 
 export async function deleteEntity(ctx: ServiceContext, id: string): Promise<DeleteResult> {
