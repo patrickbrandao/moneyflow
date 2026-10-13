@@ -338,10 +338,10 @@ BEGIN
   SELECT m.seq INTO upto FROM ai_messages m WHERE m.id = p_message_id;
 
   INSERT INTO ai_conversations (user_id, agent_id, title, title_source, forked_from_conversation_id,
-                                forked_from_message_id, screen_context)
+                                forked_from_message_id, screen_context, purpose)
   VALUES (p_user_id, src.agent_id, coalesce(nullif(btrim(p_title), ''), src.title),
           CASE WHEN nullif(btrim(p_title), '') IS NOT NULL THEN 'user' ELSE src.title_source END,
-          src.id, p_message_id, src.screen_context)
+          src.id, p_message_id, src.screen_context - 'purpose', 'chat')
   RETURNING id INTO new_id;
 
   INSERT INTO ai_messages (conversation_id, seq, role, content)
@@ -358,7 +358,7 @@ $$;
 -- Name: FUNCTION ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text) IS 'Bifurca: cria uma conversa de p_user_id com o mesmo agente, copia as mensagens da origem até p_message_id (inclusive, mesmos seq, sem run_id; anexos religados) e devolve o id. Título = p_title ou o da origem. Corte a bifurcação numa mensagem que não deixe tool_use sem tool_result (a aplicação escolhe). P0002 se a mensagem não existe.';
+COMMENT ON FUNCTION public.ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text) IS 'Bifurca: cria uma conversa de p_user_id com o mesmo agente, copia as mensagens da origem até p_message_id (inclusive, mesmos seq, sem run_id; anexos religados) e devolve o id. Título = p_title ou o da origem. A cópia é sempre purpose chat (sem a chave purpose no screen_context), mesmo vinda de uma conversa de fluxo. Corte a bifurcação numa mensagem que não deixe tool_use sem tool_result (a aplicação escolhe). P0002 se a mensagem não existe.';
 
 
 --
@@ -413,6 +413,20 @@ $$;
 --
 
 COMMENT ON FUNCTION public.ai_conversation_search(p_query text, p_user_id uuid, p_include_archived boolean, p_limit integer) IS 'Busca conversas pelo título (trigram: contém ou parecido) e pelo texto das mensagens (full-text em português, sintaxe de websearch: "frase", -excluir, OR). p_user_id nulo = de todos (só para admin; a aplicação aplica). Devolve a melhor mensagem e um trecho com o termo entre « ». Erro 22023 se a busca é vazia/longa ou o limite inválido.';
+
+
+--
+-- Name: ai_conversations_purpose_immutable(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_conversations_purpose_immutable() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RAISE EXCEPTION 'ai_conversations: purpose of conversation % is immutable', OLD.id
+    USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_conversations_purpose_immutable_check';
+END
+$$;
 
 
 --
@@ -1407,6 +1421,7 @@ CREATE FUNCTION public.ai_usage_before_insert() RETURNS trigger
 DECLARE
   r  ai_runs;
   mc uuid;
+  cp text;
   p  ai_model_prices;
 BEGIN
   IF NEW.run_id IS NOT NULL THEN
@@ -1434,6 +1449,11 @@ BEGIN
     END IF;
   END IF;
 
+  IF NEW.purpose = 'chat' AND NEW.conversation_id IS NOT NULL THEN
+    SELECT c.purpose INTO cp FROM ai_conversations c WHERE c.id = NEW.conversation_id;
+    NEW.purpose := coalesce(cp, NEW.purpose);
+  END IF;
+
   IF NEW.price_id IS NULL AND NEW.provider_id IS NOT NULL AND NEW.model IS NOT NULL THEN
     p := ai_model_price_at(NEW.provider_id, NEW.model, NEW.created_at);
     NEW.price_id := p.id;
@@ -1457,6 +1477,13 @@ BEGIN
   RETURN NEW;
 END
 $$;
+
+
+--
+-- Name: FUNCTION ai_usage_before_insert(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_usage_before_insert() IS 'Completa conversa/usuário/agente/provedor/modelo da execução, confere as ligações (ai_usage_links_check), troca purpose chat pela finalidade da conversa quando ela é de fluxo e calcula o custo pelo preço vigente.';
 
 
 --
@@ -5161,6 +5188,7 @@ CREATE TABLE public.ai_agents (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    use_for_flows boolean DEFAULT false NOT NULL,
     CONSTRAINT ai_agents_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
     CONSTRAINT ai_agents_color_slot_check CHECK (((color_slot >= 1) AND (color_slot <= 12))),
     CONSTRAINT ai_agents_description_check CHECK ((length(description) <= 2000)),
@@ -5170,7 +5198,8 @@ CREATE TABLE public.ai_agents (
     CONSTRAINT ai_agents_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
     CONSTRAINT ai_agents_params_check CHECK (public.ai_agent_params_valid(params)),
     CONSTRAINT ai_agents_ready_check CHECK (((NOT is_active) OR ((provider_id IS NOT NULL) AND (model IS NOT NULL)))),
-    CONSTRAINT ai_agents_system_prompt_check CHECK ((length(system_prompt) <= 200000))
+    CONSTRAINT ai_agents_system_prompt_check CHECK ((length(system_prompt) <= 200000)),
+    CONSTRAINT ai_agents_use_for_flows_check CHECK (((NOT use_for_flows) OR (is_active AND (archived_at IS NULL))))
 );
 
 
@@ -5245,6 +5274,13 @@ COMMENT ON COLUMN public.ai_agents.is_active IS 'false = não aparece para novas
 
 
 --
+-- Name: COLUMN ai_agents.use_for_flows; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agents.use_for_flows IS 'true = agente que atende os fluxos automáticos (leitura de documento, sugestões da conciliação, leitura do PDF do contrato e PDF → markdown). No máximo um (ai_agents_use_for_flows_key, 23505) e só ativo e não arquivado (ai_agents_use_for_flows_check, 23514: desmarque antes de desativar ou arquivar). Nenhum marcado = a aplicação escolhe (primeiro agente ativo).';
+
+
+--
 -- Name: ai_conversations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5262,7 +5298,9 @@ CREATE TABLE public.ai_conversations (
     last_message_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    purpose text DEFAULT 'chat'::text NOT NULL,
     CONSTRAINT ai_conversations_fork_check CHECK ((forked_from_conversation_id <> id)),
+    CONSTRAINT ai_conversations_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text]))),
     CONSTRAINT ai_conversations_screen_context_check CHECK ((jsonb_typeof(screen_context) = 'object'::text)),
     CONSTRAINT ai_conversations_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 200))),
     CONSTRAINT ai_conversations_title_source_check CHECK ((title_source = ANY (ARRAY['auto'::text, 'user'::text])))
@@ -5330,6 +5368,13 @@ COMMENT ON COLUMN public.ai_conversations.screen_context IS 'Contexto da tela ma
 --
 
 COMMENT ON COLUMN public.ai_conversations.last_message_at IS 'Instante da última mensagem (mantido por trigger de ai_messages).';
+
+
+--
+-- Name: COLUMN ai_conversations.purpose; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_conversations.purpose IS 'Finalidade, definida no INSERT e imutável: chat (conversa do usuário, padrão) ou o fluxo automático que a criou (document_reading, classify_lines, contract_reading, contract_markdown; mesmo vocabulário de ai_usage.purpose). Conversas de fluxo não entram na lista nem na busca e rodam sem tools. A bifurcação é sempre chat.';
 
 
 --
@@ -5467,7 +5512,7 @@ CREATE TABLE public.ai_usage (
     CONSTRAINT ai_usage_cost_check CHECK (((cost_micros >= 0) AND ((cost_micros IS NULL) = (currency IS NULL)) AND ((price_id IS NULL) OR (cost_micros IS NOT NULL)))),
     CONSTRAINT ai_usage_currency_check CHECK ((currency = ANY (ARRAY['USD'::text, 'BRL'::text]))),
     CONSTRAINT ai_usage_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
-    CONSTRAINT ai_usage_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text]))),
+    CONSTRAINT ai_usage_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text]))),
     CONSTRAINT ai_usage_tokens_check CHECK (((input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)))
 );
 
@@ -5490,7 +5535,7 @@ COMMENT ON COLUMN public.ai_usage.message_id IS 'Mensagem do assistente que a ch
 -- Name: COLUMN ai_usage.purpose; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_usage.purpose IS 'chat (loop do agente), title (título automático) ou embedding (indexação/busca semântica, sem agente).';
+COMMENT ON COLUMN public.ai_usage.purpose IS 'chat (loop do agente), title (título automático), embedding (indexação/busca semântica, sem agente) ou a finalidade de um fluxo automático: document_reading (leitura de documento), classify_lines (sugestões da conciliação), contract_reading (leitura do PDF do contrato) e contract_markdown (PDF do contrato → markdown). Mesmo vocabulário de ai_conversations.purpose; chat numa conversa de fluxo vira a finalidade da conversa.';
 
 
 --
@@ -5838,6 +5883,34 @@ CREATE VIEW public.ai_usage_monthly_by_agent WITH (security_invoker='true') AS
 --
 
 COMMENT ON VIEW public.ai_usage_monthly_by_agent IS 'Uso por mês (America/Sao_Paulo), agente, provedor, modelo e moeda. agent_id nulo = embeddings (sem agente).';
+
+
+--
+-- Name: ai_usage_monthly_by_purpose; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.ai_usage_monthly_by_purpose WITH (security_invoker='true') AS
+ SELECT (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text)))::date AS month,
+    purpose,
+    currency,
+    (count(*))::integer AS calls,
+    (count(DISTINCT run_id))::integer AS runs,
+    (count(DISTINCT user_id))::integer AS users,
+    (sum(input_tokens))::bigint AS input_tokens,
+    (sum(output_tokens))::bigint AS output_tokens,
+    (sum(cache_write_tokens))::bigint AS cache_write_tokens,
+    (sum(cache_read_tokens))::bigint AS cache_read_tokens,
+    (sum(cost_micros))::bigint AS cost_micros,
+    bool_or((cost_micros IS NULL)) AS has_unpriced
+   FROM public.ai_usage u
+  GROUP BY ((date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text)))::date), purpose, currency;
+
+
+--
+-- Name: VIEW ai_usage_monthly_by_purpose; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.ai_usage_monthly_by_purpose IS 'Uso por mês (America/Sao_Paulo), finalidade (ai_usage.purpose) e moeda; currency nula = chamadas sem preço.';
 
 
 --
@@ -10024,6 +10097,13 @@ CREATE INDEX ai_agents_provider_id_idx ON public.ai_agents USING btree (provider
 
 
 --
+-- Name: ai_agents_use_for_flows_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ai_agents_use_for_flows_key ON public.ai_agents USING btree ((true)) WHERE use_for_flows;
+
+
+--
 -- Name: ai_conversations_agent_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10031,10 +10111,24 @@ CREATE INDEX ai_conversations_agent_id_idx ON public.ai_conversations USING btre
 
 
 --
+-- Name: ai_conversations_chat_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_conversations_chat_user_idx ON public.ai_conversations USING btree (user_id, last_message_at DESC NULLS LAST) WHERE (purpose = 'chat'::text);
+
+
+--
 -- Name: ai_conversations_forked_from_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX ai_conversations_forked_from_idx ON public.ai_conversations USING btree (forked_from_conversation_id, forked_from_message_id);
+
+
+--
+-- Name: ai_conversations_purpose_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_conversations_purpose_idx ON public.ai_conversations USING btree (purpose, created_at) WHERE (purpose <> 'chat'::text);
 
 
 --
@@ -11274,6 +11368,13 @@ CREATE TRIGGER ai_agents_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_age
 --
 
 CREATE TRIGGER ai_agents_set_updated_at BEFORE UPDATE ON public.ai_agents FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_conversations ai_conversations_purpose_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_conversations_purpose_immutable BEFORE UPDATE OF purpose ON public.ai_conversations FOR EACH ROW WHEN ((new.purpose IS DISTINCT FROM old.purpose)) EXECUTE FUNCTION public.ai_conversations_purpose_immutable();
 
 
 --

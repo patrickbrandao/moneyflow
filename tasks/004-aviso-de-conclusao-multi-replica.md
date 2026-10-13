@@ -6,7 +6,7 @@ autor: app
 responsavel: app
 prioridade: baixa
 criada: 2026-10-11
-commit:
+commit: 5140e59
 ---
 
 # Aviso de conclusão do agente com várias réplicas da API
