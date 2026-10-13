@@ -5,7 +5,8 @@
   - vencimentos (D-N configurável, D-0, atrasados), com PIX/linha digitável para copiar;
   - resumo diário/semanal (vencimentos, saldos por caixa, entradas e saídas);
   - fatura fechada (valor por pagadora), limite acima de X%, divergência de conciliação;
-  - agente concluiu tarefa e mensagens enviadas pelo agente.
+  - agente concluiu tarefa e mensagens enviadas pelo agente;
+  - contratos: aviso prévio, fim da vigência, renovação pendente e data-base de reajuste ([020](020-contratos.md)).
 - Destinos podem ser pessoais (do usuário) ou de uma caixa (ex.: grupo da casa).
 - O canal é abstrato (email/WhatsApp no futuro). Envio por fila no worker, com retry e histórico.
 
@@ -28,6 +29,7 @@
   - **Limite do cartão**: uma vez por mês por percentual atingido (o maior atingido).
   - **Divergência de conciliação**: extrato com saldo do banco ≠ saldo do app acima do mínimo, depois de 1 dia do import (tempo de conciliar) e até 8 dias.
   - **Agente** (`agent_completed`, `agent_message`): ponto de extensão pronto (`emitAgentEvent`) para a F4; vai aos destinos pessoais do usuário do agente e aos de caixa que ele lê.
+  - **Contratos** (F5, [020](020-contratos.md)): `contract_notice_deadline` e `contract_ending` com `days_before` (0–180, padrão 15/7/1/0 e 30/7/0) e `send_at`; `contract_renewal_pending` com `send_at` e `repeat_every_days` opcional (padrão 7); `contract_readjustment` com `send_at`. Chaves `contract_notice_deadline:<ciclo>:D-<n>`, `contract_ending:<ciclo>:D-<n>`, `contract_renewal_pending:<tarefa>:<dia>` e `contract_readjustment:<contrato>:<data>`. Os avisos de vencimento e atraso mostram o contrato e a parcela (n/N).
 - Corpo em HTML do Telegram (`parse_mode: HTML`), com escape de tudo o que vem do usuário, limite de 4096 caracteres (corta linhas inteiras) e link para o console quando `APP_URL` está definido.
 
 ### Fila e envio (worker)

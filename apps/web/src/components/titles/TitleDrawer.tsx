@@ -1,10 +1,11 @@
-import { formatBRL, formatDate, formatDateTime, type TitleDetail, t } from '@moneyflow/shared';
+import { contractLink, formatBRL, formatDate, formatDateTime, type TitleDetail, t } from '@moneyflow/shared';
 import {
   Ban,
   CalendarDays,
   Check,
   CircleDollarSign,
   CreditCard,
+  Handshake,
   History,
   Paperclip,
   Pencil,
@@ -213,6 +214,9 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
               <TitleStatusBadge title={title} />
               <MirrorBadge status={title.pairMirrorStatus} />
               {title.occurrence && <Badge mono>{t.title.occurrenceOf(title.occurrence, title.installmentsTotal)}</Badge>}
+              {title.contractInstallment && (
+                <Badge mono>{t.title.occurrenceOf(title.contractInstallment, title.contractInstallmentsCount)}</Badge>
+              )}
               {title.archivedAt && <Badge tone="outline">{t.common.archived}</Badge>}
             </div>
             <div className="mt-3 text-[22px] font-semibold text-ink">
@@ -250,6 +254,11 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
               <Button size="sm" variant="quiet" onClick={() => setModal({ kind: 'history', table: 'titles', id: title.id })}>
                 <History /> {t.audit.history}
               </Button>
+              {title.contractId && (
+                <Link className="btn btn-quiet btn-sm" to={contractLink(title.contractId)} title={t.contracts.fromContract}>
+                  <Handshake /> {t.contracts.titleBadge(title.contractName ?? t.contracts.contract, null, null)}
+                </Link>
+              )}
               {title.cardInvoiceId && (
                 <Link className="btn btn-quiet btn-sm" to={invoiceLink(title.cardInvoiceId, title.caixaId)}>
                   <CreditCard /> {t.entry.cardInvoice}

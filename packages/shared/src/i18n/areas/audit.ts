@@ -35,6 +35,12 @@ export const auditStrings = {
   collapse: 'Ocultar antes e depois',
   hidden: '(oculto)',
   tables: {
+    contracts: 'Contratos',
+    contract_cycles: 'Ciclos de contrato',
+    contract_documents: 'Documentos de contrato',
+    contract_document_versions: 'Versões de documento de contrato',
+    contract_amendments: 'Aditivos de contrato',
+    contract_renewal_tasks: 'Tarefas de renovação',
     entities: 'Entidades',
     caixas: 'Caixas',
     caixa_members: 'Membros de caixa',

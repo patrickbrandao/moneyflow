@@ -4,3 +4,4 @@
 2. **F2, Operação**: cartão ([007](007-cartao-de-credito.md)); OFX/CSV e conciliação ([009](009-extratos-e-conciliacao.md)); calendário ([012](012-calendario.md)); anexos; auditoria e fechamento de mês ([008](008-categorias-auditoria-e-exclusao.md)); boleto, PIX copia-e-cola e NF-e ([010](010-entrada-de-titulos.md)).
 3. **F3, Visão**: canvas, relatórios e exportações ([014](014-visualizacao-e-relatorios.md)); Telegram ([013](013-mensagens-telegram.md)).
 4. **F4, IA**: agentes, janelas, tools, MCP client/server, sugestões e leitura de documentos ([011](011-agentes-de-ia.md)).
+5. **F5, Contratos**: contratos, documentos, renovação e avisos ([020](020-contratos.md)).

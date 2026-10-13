@@ -340,6 +340,38 @@ describe('backup: JSON completo num sistema novo', () => {
       charges: [{ chargeKind: 'interest', amountCents: 700, categoryId: s.expense.id }],
     });
 
+    // Contratos (spec 020): renovação pendente com aditivo e documentos (markdown com 2 versões e PDF); um rescindido com multa.
+    const contractBase = {
+      caixaId: s.caixaA.id,
+      entityId: s.holderB.id,
+      direction: 'receivable',
+      categoryId: s.income.id,
+      durationMonths: 12,
+      periodicity: 'monthly',
+      totalCents: 120_001,
+      dueDay: 10,
+      dueMonthOffset: 1,
+      activate: true,
+    };
+    const pending = await admin.post('/api/contracts', { ...contractBase, name: 'Suporte', startsOn: '2025-11-01', autoRenew: true });
+    expect(pending.status).toBe('renewal_pending');
+    await admin.post(`/api/contracts/${pending.id}/amendments`, { effectiveOn: '2026-08-01', installmentCents: 11_000 });
+    const upload = (name: string, body: Buffer, mime: string) =>
+      h.app.inject({
+        method: 'POST',
+        url: `/api/contracts/${pending.id}/documents?fileName=${name}&kind=contract`,
+        payload: body,
+        headers: { cookie: session.cookie, 'content-type': mime },
+      });
+    const md = (await upload('contrato.md', Buffer.from('# Contrato\nv1\n'), 'text/markdown')).json();
+    await admin.post(`/api/contract-documents/${md.id}/versions`, { content: '# Contrato\nv2\n' });
+    expect((await upload('contrato.pdf', Buffer.from('%PDF-1.4 contrato'), 'application/pdf')).statusCode).toBe(200);
+    const terminated = await admin.post('/api/contracts', { ...contractBase, name: 'Consultoria', startsOn: '2027-01-01' });
+    await admin.post(`/api/contracts/${terminated.id}/terminate`, {
+      terminatedOn: '2027-03-15',
+      penalty: { direction: 'receivable', amountCents: 5_000, dueDate: '2027-04-10', categoryId: s.income.id },
+    });
+
     // Extrato importado e um mês fechado.
     const ofx = readFileSync(join(import.meta.dirname, 'fixtures/extrato-ofx1.ofx'));
     const imp = await h.app.inject({
@@ -392,6 +424,24 @@ describe('backup: JSON completo num sistema novo', () => {
       const invoiceA = await admin.get(`/api/card-invoices/${oct.id}`);
       expect(invoiceB.status).toBe(invoiceA.status);
       expect(invoiceB.totalCents).toBe(invoiceA.totalCents);
+
+      // Contratos: mesma situação, ciclos, parcelas, aditivos, tarefas e documentos (com as versões).
+      for (const id of [pending.id, terminated.id]) {
+        const [ca, cb] = await Promise.all([admin.get(`/api/contracts/${id}`), client(b, adminB.cookie).get(`/api/contracts/${id}`)]);
+        const shape = (c: any) => ({
+          status: c.status,
+          cycles: c.cycles.map((y: any) => ({
+            seq: y.seq,
+            total: y.totalCents,
+            rows: y.installments.map((i: any) => [i.amountCents, i.status]),
+          })),
+          extra: c.extraTitles.length,
+          amendments: c.amendments.length,
+          tasks: c.renewalTasks.map((k: any) => k.status),
+          documents: c.documents.map((d: any) => [d.format, d.currentVersion, d.versionCount]),
+        });
+        expect(shape(cb)).toEqual(shape(ca));
+      }
 
       // O usuário do sistema de origem entra com a mesma senha.
       await login(b, session.username, session.password);

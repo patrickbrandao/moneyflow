@@ -18,6 +18,8 @@ import { CaixaPage } from './pages/CaixaPage';
 import { CaixasPage } from './pages/CaixasPage';
 import { CalendarPage } from './pages/CalendarPage';
 import { CategoriesPage } from './pages/CategoriesPage';
+import { ContractPage } from './pages/ContractPage';
+import { ContractsPage } from './pages/ContractsPage';
 import { EntitiesPage } from './pages/EntitiesPage';
 import { EntityPage } from './pages/EntityPage';
 import { FlowPage } from './pages/FlowPage';
@@ -68,6 +70,8 @@ function Console() {
             <Route path="entities" element={<EntitiesPage />} />
             <Route path="entities/:id" element={<EntityPage />} />
             <Route path="transfers" element={<TransfersPage />} />
+            <Route path="contracts" element={<ContractsPage />} />
+            <Route path="contracts/:id" element={<ContractPage />} />
             <Route path="calendar" element={<CalendarPage />} />
             <Route path="card-invoices/:id" element={<InvoicePage />} />
             <Route path="reports" element={<ReportsPage />} />

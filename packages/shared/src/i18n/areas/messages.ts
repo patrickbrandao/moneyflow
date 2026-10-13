@@ -53,6 +53,10 @@ export const messagesStrings = {
     reconciliation_divergence: 'Divergência de conciliação',
     agent_completed: 'Agente concluiu tarefa',
     agent_message: 'Mensagens do agente',
+    contract_notice_deadline: 'Contrato: aviso prévio',
+    contract_ending: 'Contrato: fim da vigência',
+    contract_renewal_pending: 'Contrato: renovação pendente',
+    contract_readjustment: 'Contrato: data-base de reajuste',
     test: 'Teste',
   } as Record<string, string>,
   eventHints: {
@@ -65,6 +69,11 @@ export const messagesStrings = {
     reconciliation_divergence: 'Saldo do banco diferente do saldo do app num extrato importado há mais de um dia.',
     agent_completed: 'Quando um agente de IA concluir uma tarefa (fase 4).',
     agent_message: 'Mensagens enviadas por um agente de IA (fase 4).',
+    contract_notice_deadline: 'Dias antes do último dia para pedir a não renovação ou a rescisão (fim do ciclo − aviso prévio).',
+    contract_ending: 'Dias antes do fim da vigência de cada contrato.',
+    contract_renewal_pending:
+      'Quando a tarefa de renovação abre e, se quiser, a cada N dias enquanto ela estiver aberta (inclusive vencida).',
+    contract_readjustment: 'Na data-base do reajuste dos contratos com índice.',
   } as Record<string, string>,
   params: {
     days_before: 'Dias antes',
@@ -138,5 +147,17 @@ export const messagesStrings = {
     testDetail: (name: string, at: string) => `Destino "${name}" configurado corretamente (${at}).`,
     agentCompleted: 'Agente concluiu a tarefa',
     agentMessage: 'Mensagem do agente',
+    contract: 'Contrato',
+    contractNotice: (days: number) =>
+      days === 0 ? 'Hoje é o último dia do aviso prévio' : `Aviso prévio termina em ${days} dia${days === 1 ? '' : 's'}`,
+    contractNoticeDetail: (deadline: string, end: string) => `Peça a não renovação ou a rescisão até ${deadline}. Fim do ciclo: ${end}.`,
+    contractEnding: (days: number) => (days === 0 ? 'Contrato termina hoje' : `Contrato termina em ${days} dia${days === 1 ? '' : 's'}`),
+    contractEndingDetail: (end: string) => `Fim da vigência: ${end}.`,
+    contractRenewalPending: 'Renovação de contrato pendente',
+    contractRenewalDetail: (due: string, overdue: boolean) =>
+      overdue ? `Vencida desde ${due}: nenhuma parcela nova é lançada até a aprovação.` : `Aprove ou recuse até ${due}.`,
+    contractReadjustment: 'Data-base de reajuste',
+    contractReadjustmentDetail: (index: string, date: string) =>
+      `Índice ${index}, data-base ${date}. Informe o percentual na renovação ou num aditivo.`,
   },
 };

@@ -32,7 +32,6 @@ import {
   agentMcpServers,
   cardPurchases,
   cardInvoiceItems,
-  recurrenceRules,
   cardPurchaseAttachments,
   statementCsvMappings,
   statementImports,
@@ -44,16 +43,23 @@ import {
   canvasNodePositions,
   messageDestinations,
   aiRuns,
-  messageSubscriptions,
   messageSubscriptionCaixas,
-  messageOutbox,
-  notifications,
+  messageSubscriptions,
   aiMessageAttachments,
   aiRunEvents,
   aiToolConfirmations,
   aiUsage,
   userApiTokens,
   aiEmbeddings,
+  contractCycles,
+  contracts,
+  recurrenceRules,
+  messageOutbox,
+  notifications,
+  contractDocuments,
+  contractDocumentVersions,
+  contractAmendments,
+  contractRenewalTasks,
 } from './schema';
 
 export const sessionsRelations = relations(sessions, ({ one }) => ({
@@ -82,11 +88,16 @@ export const usersRelations = relations(users, ({ many }) => ({
     relationName: 'messageDestinations_ownerUserId_users_id',
   }),
   aiRuns: many(aiRuns),
-  messageOutboxes: many(messageOutbox),
-  notifications: many(notifications),
   aiToolConfirmations: many(aiToolConfirmations),
   aiUsages: many(aiUsage),
   userApiTokens: many(userApiTokens),
+  messageOutboxes: many(messageOutbox),
+  notifications: many(notifications),
+  contracts: many(contracts),
+  contractDocuments: many(contractDocuments),
+  contractDocumentVersions: many(contractDocumentVersions),
+  contractAmendments: many(contractAmendments),
+  contractRenewalTasks: many(contractRenewalTasks),
 }));
 
 export const entityContactsRelations = relations(entityContacts, ({ one }) => ({
@@ -117,9 +128,10 @@ export const entitiesRelations = relations(entities, ({ many }) => ({
     relationName: 'nfeDocuments_recipientEntityId_entities_id',
   }),
   cardPurchases: many(cardPurchases),
-  titles: many(titles),
   classificationRules: many(classificationRules),
   statementLines: many(statementLines),
+  titles: many(titles),
+  contracts: many(contracts),
 }));
 
 export const entityAddressesRelations = relations(entityAddresses, ({ one }) => ({
@@ -199,12 +211,6 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
     relationName: 'cardPurchases_payerCaixaId_caixas_id',
   }),
   cardInvoiceItems: many(cardInvoiceItems),
-  titles_caixaId: many(titles, {
-    relationName: 'titles_caixaId_caixas_id',
-  }),
-  titles_counterpartyCaixaId: many(titles, {
-    relationName: 'titles_counterpartyCaixaId_caixas_id',
-  }),
   statementCsvMappings: many(statementCsvMappings),
   statementImports: many(statementImports),
   classificationRules: many(classificationRules),
@@ -212,9 +218,21 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
   periodClosings: many(periodClosings),
   messageDestinations: many(messageDestinations),
   messageSubscriptionCaixas: many(messageSubscriptionCaixas),
+  aiEmbeddings: many(aiEmbeddings),
+  titles_caixaId: many(titles, {
+    relationName: 'titles_caixaId_caixas_id',
+  }),
+  titles_counterpartyCaixaId: many(titles, {
+    relationName: 'titles_counterpartyCaixaId_caixas_id',
+  }),
   messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
-  aiEmbeddings: many(aiEmbeddings),
+  contracts_caixaId: many(contracts, {
+    relationName: 'contracts_caixaId_caixas_id',
+  }),
+  contracts_counterpartyCaixaId: many(contracts, {
+    relationName: 'contracts_counterpartyCaixaId_caixas_id',
+  }),
 }));
 
 export const caixaMembersRelations = relations(caixaMembers, ({ one }) => ({
@@ -284,9 +302,10 @@ export const categoriesRelations = relations(categories, ({ one, many }) => ({
   }),
   movements: many(movements),
   cardPurchases: many(cardPurchases),
-  titles: many(titles),
   classificationRules: many(classificationRules),
   statementLines: many(statementLines),
+  titles: many(titles),
+  contracts: many(contracts),
 }));
 
 export const settlementsRelations = relations(settlements, ({ one, many }) => ({
@@ -314,6 +333,7 @@ export const settlementsRelations = relations(settlements, ({ one, many }) => ({
 export const titlesRelations = relations(titles, ({ one, many }) => ({
   settlements: many(settlements),
   titleAttachments: many(titleAttachments),
+  statementLines: many(statementLines),
   caixa_caixaId: one(caixas, {
     fields: [titles.caixaId],
     references: [caixas.id],
@@ -326,6 +346,14 @@ export const titlesRelations = relations(titles, ({ one, many }) => ({
   category: one(categories, {
     fields: [titles.categoryId],
     references: [categories.id],
+  }),
+  contractCycle: one(contractCycles, {
+    fields: [titles.contractId],
+    references: [contractCycles.id],
+  }),
+  contract: one(contracts, {
+    fields: [titles.contractId],
+    references: [contracts.id],
   }),
   caixa_counterpartyCaixaId: one(caixas, {
     fields: [titles.counterpartyCaixaId],
@@ -352,7 +380,6 @@ export const titlesRelations = relations(titles, ({ one, many }) => ({
     fields: [titles.recurrenceRuleId],
     references: [recurrenceRules.id],
   }),
-  statementLines: many(statementLines),
 }));
 
 export const transfersRelations = relations(transfers, ({ one, many }) => ({
@@ -397,6 +424,7 @@ export const attachmentsRelations = relations(attachments, ({ one, many }) => ({
   cardPurchaseAttachments: many(cardPurchaseAttachments),
   statementImports: many(statementImports),
   aiMessageAttachments: many(aiMessageAttachments),
+  contractDocuments: many(contractDocuments),
 }));
 
 export const movementsRelations = relations(movements, ({ one, many }) => ({
@@ -502,8 +530,8 @@ export const cardInvoicesRelations = relations(cardInvoices, ({ one, many }) => 
   cardInvoiceItems_carriedFromInvoiceId: many(cardInvoiceItems, {
     relationName: 'cardInvoiceItems_carriedFromInvoiceId_cardInvoices_id',
   }),
-  titles: many(titles),
   statementImports: many(statementImports),
+  titles: many(titles),
 }));
 
 export const agentMcpServersRelations = relations(agentMcpServers, ({ one }) => ({
@@ -568,10 +596,6 @@ export const cardInvoiceItemsRelations = relations(cardInvoiceItems, ({ one, man
     references: [caixas.id],
   }),
   statementLines: many(statementLines),
-}));
-
-export const recurrenceRulesRelations = relations(recurrenceRules, ({ many }) => ({
-  titles: many(titles),
 }));
 
 export const cardPurchaseAttachmentsRelations = relations(cardPurchaseAttachments, ({ one }) => ({
@@ -802,15 +826,7 @@ export const aiRunsRelations = relations(aiRuns, ({ one, many }) => ({
   aiRunEvents: many(aiRunEvents),
   aiToolConfirmations: many(aiToolConfirmations),
   aiUsages: many(aiUsage),
-}));
-
-export const messageSubscriptionsRelations = relations(messageSubscriptions, ({ one, many }) => ({
-  messageDestination: one(messageDestinations, {
-    fields: [messageSubscriptions.destinationId],
-    references: [messageDestinations.id],
-  }),
-  messageSubscriptionCaixas: many(messageSubscriptionCaixas),
-  messageOutboxes: many(messageOutbox),
+  contractDocumentVersions: many(contractDocumentVersions),
 }));
 
 export const messageSubscriptionCaixasRelations = relations(messageSubscriptionCaixas, ({ one }) => ({
@@ -824,34 +840,13 @@ export const messageSubscriptionCaixasRelations = relations(messageSubscriptionC
   }),
 }));
 
-export const messageOutboxRelations = relations(messageOutbox, ({ one }) => ({
-  caixa: one(caixas, {
-    fields: [messageOutbox.caixaId],
-    references: [caixas.id],
-  }),
+export const messageSubscriptionsRelations = relations(messageSubscriptions, ({ one, many }) => ({
+  messageSubscriptionCaixas: many(messageSubscriptionCaixas),
   messageDestination: one(messageDestinations, {
-    fields: [messageOutbox.destinationId],
+    fields: [messageSubscriptions.destinationId],
     references: [messageDestinations.id],
   }),
-  messageSubscription: one(messageSubscriptions, {
-    fields: [messageOutbox.subscriptionId],
-    references: [messageSubscriptions.id],
-  }),
-  user: one(users, {
-    fields: [messageOutbox.userId],
-    references: [users.id],
-  }),
-}));
-
-export const notificationsRelations = relations(notifications, ({ one }) => ({
-  caixa: one(caixas, {
-    fields: [notifications.caixaId],
-    references: [caixas.id],
-  }),
-  user: one(users, {
-    fields: [notifications.userId],
-    references: [users.id],
-  }),
+  messageOutboxes: many(messageOutbox),
 }));
 
 export const aiMessageAttachmentsRelations = relations(aiMessageAttachments, ({ one }) => ({
@@ -925,5 +920,175 @@ export const aiEmbeddingsRelations = relations(aiEmbeddings, ({ one }) => ({
   caixa: one(caixas, {
     fields: [aiEmbeddings.caixaId],
     references: [caixas.id],
+  }),
+}));
+
+export const contractCyclesRelations = relations(contractCycles, ({ one, many }) => ({
+  titles: many(titles),
+  contract: one(contracts, {
+    fields: [contractCycles.contractId],
+    references: [contracts.id],
+  }),
+  contractAmendments: many(contractAmendments),
+  contractRenewalTasks_contractId: many(contractRenewalTasks, {
+    relationName: 'contractRenewalTasks_contractId_contractCycles_id',
+  }),
+}));
+
+export const contractsRelations = relations(contracts, ({ one, many }) => ({
+  titles: many(titles),
+  caixa_caixaId: one(caixas, {
+    fields: [contracts.caixaId],
+    references: [caixas.id],
+    relationName: 'contracts_caixaId_caixas_id',
+  }),
+  category: one(categories, {
+    fields: [contracts.categoryId],
+    references: [categories.id],
+  }),
+  caixa_counterpartyCaixaId: one(caixas, {
+    fields: [contracts.counterpartyCaixaId],
+    references: [caixas.id],
+    relationName: 'contracts_counterpartyCaixaId_caixas_id',
+  }),
+  user: one(users, {
+    fields: [contracts.createdBy],
+    references: [users.id],
+  }),
+  entity: one(entities, {
+    fields: [contracts.entityId],
+    references: [entities.id],
+  }),
+  contractCycles: many(contractCycles),
+  contractDocuments: many(contractDocuments),
+  contractAmendments: many(contractAmendments),
+  contractRenewalTasks: many(contractRenewalTasks),
+}));
+
+export const recurrenceRulesRelations = relations(recurrenceRules, ({ many }) => ({
+  titles: many(titles),
+}));
+
+export const messageOutboxRelations = relations(messageOutbox, ({ one }) => ({
+  caixa: one(caixas, {
+    fields: [messageOutbox.caixaId],
+    references: [caixas.id],
+  }),
+  messageDestination: one(messageDestinations, {
+    fields: [messageOutbox.destinationId],
+    references: [messageDestinations.id],
+  }),
+  messageSubscription: one(messageSubscriptions, {
+    fields: [messageOutbox.subscriptionId],
+    references: [messageSubscriptions.id],
+  }),
+  user: one(users, {
+    fields: [messageOutbox.userId],
+    references: [users.id],
+  }),
+}));
+
+export const notificationsRelations = relations(notifications, ({ one }) => ({
+  caixa: one(caixas, {
+    fields: [notifications.caixaId],
+    references: [caixas.id],
+  }),
+  user: one(users, {
+    fields: [notifications.userId],
+    references: [users.id],
+  }),
+}));
+
+export const contractDocumentsRelations = relations(contractDocuments, ({ one, many }) => ({
+  attachment: one(attachments, {
+    fields: [contractDocuments.attachmentId],
+    references: [attachments.id],
+  }),
+  contract: one(contracts, {
+    fields: [contractDocuments.contractId],
+    references: [contracts.id],
+  }),
+  user: one(users, {
+    fields: [contractDocuments.createdBy],
+    references: [users.id],
+  }),
+  contractDocumentVersion: one(contractDocumentVersions, {
+    fields: [contractDocuments.id],
+    references: [contractDocumentVersions.id],
+    relationName: 'contractDocuments_id_contractDocumentVersions_id',
+  }),
+  contractDocument: one(contractDocuments, {
+    fields: [contractDocuments.contractId],
+    references: [contractDocuments.id],
+    relationName: 'contractDocuments_contractId_contractDocuments_id',
+  }),
+  contractDocuments: many(contractDocuments, {
+    relationName: 'contractDocuments_contractId_contractDocuments_id',
+  }),
+  contractDocumentVersions: many(contractDocumentVersions, {
+    relationName: 'contractDocumentVersions_documentId_contractDocuments_id',
+  }),
+  contractAmendments: many(contractAmendments),
+}));
+
+export const contractDocumentVersionsRelations = relations(contractDocumentVersions, ({ one, many }) => ({
+  contractDocuments: many(contractDocuments, {
+    relationName: 'contractDocuments_id_contractDocumentVersions_id',
+  }),
+  aiRun: one(aiRuns, {
+    fields: [contractDocumentVersions.aiRunId],
+    references: [aiRuns.id],
+  }),
+  user: one(users, {
+    fields: [contractDocumentVersions.authorUserId],
+    references: [users.id],
+  }),
+  contractDocument: one(contractDocuments, {
+    fields: [contractDocumentVersions.documentId],
+    references: [contractDocuments.id],
+    relationName: 'contractDocumentVersions_documentId_contractDocuments_id',
+  }),
+  contractDocumentVersion: one(contractDocumentVersions, {
+    fields: [contractDocumentVersions.documentId],
+    references: [contractDocumentVersions.id],
+    relationName: 'contractDocumentVersions_documentId_contractDocumentVersions_id',
+  }),
+  contractDocumentVersions: many(contractDocumentVersions, {
+    relationName: 'contractDocumentVersions_documentId_contractDocumentVersions_id',
+  }),
+}));
+
+export const contractAmendmentsRelations = relations(contractAmendments, ({ one }) => ({
+  contractCycle: one(contractCycles, {
+    fields: [contractAmendments.contractId],
+    references: [contractCycles.id],
+  }),
+  contract: one(contracts, {
+    fields: [contractAmendments.contractId],
+    references: [contracts.id],
+  }),
+  user: one(users, {
+    fields: [contractAmendments.createdBy],
+    references: [users.id],
+  }),
+  contractDocument: one(contractDocuments, {
+    fields: [contractAmendments.contractId],
+    references: [contractDocuments.id],
+  }),
+}));
+
+export const contractRenewalTasksRelations = relations(contractRenewalTasks, ({ one }) => ({
+  contractCycle_contractId: one(contractCycles, {
+    fields: [contractRenewalTasks.contractId],
+    references: [contractCycles.id],
+    relationName: 'contractRenewalTasks_contractId_contractCycles_id',
+  }),
+  contract: one(contracts, {
+    fields: [contractRenewalTasks.contractId],
+    references: [contracts.id],
+  }),
+  user: one(users, {
+    fields: [contractRenewalTasks.decidedBy],
+    references: [users.id],
   }),
 }));

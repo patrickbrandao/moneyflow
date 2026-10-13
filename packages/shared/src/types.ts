@@ -199,10 +199,15 @@ export type TitleRow = {
   amountCents: number;
   settledCents: number;
   openCents: number;
-  origin: 'manual' | 'recurrence' | 'card_invoice';
+  origin: 'manual' | 'recurrence' | 'card_invoice' | 'contract';
   recurrenceRuleId: string | null;
   occurrence: number | null;
   installmentsTotal: number | null;
+  /** origin = contract (spec 020): o contrato e a parcela n/N (n nulo = título extra, como a multa). */
+  contractId: string | null;
+  contractName: string | null;
+  contractInstallment: number | null;
+  contractInstallmentsCount: number | null;
   counterpartyCaixaId: string | null;
   counterpartyCaixaName: string | null;
   mirrorTitleId: string | null;
@@ -886,7 +891,11 @@ export type MessageEventKind =
   | 'card_limit'
   | 'reconciliation_divergence'
   | 'agent_completed'
-  | 'agent_message';
+  | 'agent_message'
+  | 'contract_notice_deadline'
+  | 'contract_ending'
+  | 'contract_renewal_pending'
+  | 'contract_readjustment';
 
 export type DestinationOwnerKind = 'user' | 'caixa' | 'global';
 
@@ -945,6 +954,10 @@ export type TestSendResult = { messageId: string; status: OutboxStatus; error: s
 /* ---------------- notificações (sino) ---------------- */
 
 export type NotificationKind =
+  | 'contract_notice_deadline'
+  | 'contract_ending'
+  | 'contract_renewal_pending'
+  | 'contract_readjustment'
   | 'agent_completed'
   | 'agent_message'
   | 'mirror_pending'
@@ -969,3 +982,222 @@ export type NotificationDto = {
 };
 
 export type NotificationList = { unread: number; items: NotificationDto[] };
+
+/* ---------------- contratos (spec 020) ---------------- */
+
+export type ContractDirection = 'receivable' | 'payable';
+
+export type ContractCycleBrief = {
+  id: string;
+  seq: number;
+  startsOn: string;
+  endsOn: string;
+  durationMonths: number;
+  periodicity: import('./contracts').ContractPeriodicity;
+  installmentsCount: number;
+  totalCents: number;
+  dueDay: number;
+  dueMonthOffset: number;
+  readjustmentPercent: number | null;
+};
+
+export type ContractRow = {
+  id: string;
+  caixaId: string;
+  caixaName: string;
+  entityId: string;
+  entityName: string;
+  direction: ContractDirection;
+  name: string;
+  contractNumber: string | null;
+  categoryId: string;
+  categoryName: string;
+  categoryColorSlot: number | null;
+  status: import('./contracts').ContractStatus;
+  autoRenew: boolean;
+  currentCycle: ContractCycleBrief | null;
+  nextInstallment: { titleId: string; dueDate: string; amountCents: number; installment: number; total: number } | null;
+  openTask: { id: string; dueOn: string; overdue: boolean } | null;
+  terminatedOn: string | null;
+  archivedAt: string | null;
+  canWrite: boolean;
+};
+
+export type ContractInstallmentDto = {
+  titleId: string;
+  caixaId: string;
+  direction: ContractDirection;
+  installment: number | null;
+  description: string;
+  competenceDate: string;
+  dueDate: string;
+  amountCents: number;
+  settledCents: number;
+  openCents: number;
+  status: TitleStatus;
+  overdue: boolean;
+  archived: boolean;
+};
+
+export type ContractTotals = {
+  contractedCents: number;
+  settledCents: number;
+  openCents: number;
+  overdueCents: number;
+  canceledCents: number;
+};
+
+export type ContractCycleDto = ContractCycleBrief & { installments: ContractInstallmentDto[]; totals: ContractTotals };
+
+export type ContractDocumentDto = {
+  id: string;
+  kind: import('./contracts').ContractDocumentKind;
+  format: import('./contracts').ContractDocumentFormat;
+  title: string;
+  description: string | null;
+  documentDate: string | null;
+  attachmentId: string | null;
+  fileName: string | null;
+  sizeBytes: number | null;
+  currentVersionId: string | null;
+  currentVersion: number | null;
+  versionCount: number;
+  lastEditedAt: string | null;
+  sourceDocumentId: string | null;
+  archivedAt: string | null;
+  createdAt: string;
+};
+
+export type ContractDocumentVersionDto = {
+  id: string;
+  documentId: string;
+  version: number;
+  note: string | null;
+  authorKind: 'human' | 'agent';
+  authorName: string | null;
+  aiRunId: string | null;
+  restoredFromVersion: number | null;
+  sizeBytes: number;
+  createdAt: string;
+};
+
+export type ContractDocumentVersionContent = ContractDocumentVersionDto & { content: string };
+
+export type ContractAmendmentDto = {
+  id: string;
+  cycleSeq: number;
+  effectiveOn: string;
+  documentId: string | null;
+  documentTitle: string | null;
+  changes: { before: Record<string, unknown>; after: Record<string, unknown> };
+  affectedCount: number;
+  skippedCount: number;
+  notes: string | null;
+  createdAt: string;
+  createdByName: string | null;
+};
+
+export type RenewalTaskDto = {
+  id: string;
+  cycleId: string;
+  cycleSeq: number;
+  status: 'open' | 'approved' | 'declined';
+  openedOn: string;
+  dueOn: string;
+  overdue: boolean;
+  decidedAt: string | null;
+  decidedByName: string | null;
+  decisionNotes: string | null;
+  newCycleId: string | null;
+};
+
+export type ContractDetail = ContractRow & {
+  counterpartyCaixaId: string | null;
+  counterpartyCaixaName: string | null;
+  notes: string | null;
+  noticeDays: number;
+  renewalLeadDays: number;
+  reminderEveryDays: number;
+  readjustmentIndex: import('./contracts').ReadjustmentIndex;
+  readjustmentBaseDate: string | null;
+  terminationPenaltyText: string | null;
+  terminationPenaltyCents: number | null;
+  terminationNotes: string | null;
+  createdAt: string;
+  /** Último dia do aviso prévio do ciclo atual. */
+  noticeDeadline: string | null;
+  /** Próxima data-base de reajuste (índice ≠ nenhum). */
+  nextReadjustment: string | null;
+  /** Leitura pela parcela espelhada (somente leitura). */
+  viaMirror: boolean;
+  cycles: ContractCycleDto[];
+  extraTitles: ContractInstallmentDto[];
+  documents: ContractDocumentDto[];
+  amendments: ContractAmendmentDto[];
+  renewalTasks: RenewalTaskDto[];
+};
+
+export type AmendmentPreview = {
+  cycleId: string;
+  affected: {
+    titleId: string;
+    installment: number;
+    competenceDate: string;
+    before: { amountCents: number; dueDate: string };
+    after: { amountCents: number; dueDate: string };
+  }[];
+  skipped: { titleId: string; installment: number; competenceDate: string; reason: 'settled' | 'closed_month' | 'canceled' }[];
+  changes: { before: Record<string, unknown>; after: Record<string, unknown> };
+};
+
+export type TerminationPreview = {
+  terminatedOn: string;
+  canceled: { titleId: string; installment: number; competenceDate: string; amountCents: number }[];
+  current: {
+    titleId: string;
+    installment: number;
+    competenceDate: string;
+    periodEnd: string;
+    amountCents: number;
+    proratedCents: number;
+    settled: boolean;
+  } | null;
+  blockedClosed: { titleId: string; installment: number; competenceDate: string }[];
+  keptSettled: number;
+};
+
+export type RenewalPreview = {
+  startsOn: string;
+  endsOn: string;
+  installments: import('./contracts').ScheduledInstallment[];
+  closedMonths: string[];
+};
+
+export type ContractActionResult<P> = { preview: P; contract: ContractDetail | null };
+
+export type RecurringPanelDto = {
+  months: { month: string; receivableCents: number; payableCents: number; netCents: number }[];
+  renewSoon: ContractRow[];
+  pendingRenewals: ContractRow[];
+};
+
+export type ContractReadingDto = {
+  entityId: string | null;
+  entityName: string | null;
+  document: string | null;
+  direction: ContractDirection | null;
+  name: string | null;
+  contractNumber: string | null;
+  startsOn: string | null;
+  durationMonths: number | null;
+  totalCents: number | null;
+  installmentCents: number | null;
+  periodicity: import('./contracts').ContractPeriodicity | null;
+  dueDay: number | null;
+  autoRenew: boolean | null;
+  noticeDays: number | null;
+  readjustmentIndex: import('./contracts').ReadjustmentIndex | null;
+  readjustmentBaseDate: string | null;
+  terminationPenaltyText: string | null;
+  conversationId: string | null;
+};

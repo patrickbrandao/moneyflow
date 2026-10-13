@@ -6,6 +6,7 @@ import { backupStrings } from './areas/backup';
 import { calendarStrings } from './areas/calendar';
 import { cardStrings } from './areas/card';
 import { closingStrings } from './areas/closing';
+import { contractsStrings } from './areas/contracts';
 import { entryStrings } from './areas/entry';
 import { flowStrings } from './areas/flow';
 import { messagesStrings } from './areas/messages';
@@ -81,6 +82,7 @@ export const ptBR = {
     flow: 'Fluxo',
     reports: 'Relatórios',
     messages: 'Mensagens',
+    contracts: 'Contratos',
   },
 
   palette: {
@@ -96,6 +98,7 @@ export const ptBR = {
     newPayable: 'Novo título a pagar',
     newReceivable: 'Novo título a receber',
     newEntity: 'Nova entidade',
+    newContract: 'Novo contrato',
     newCaixa: 'Nova caixa',
     newTransfer: 'Nova transferência',
     newCategory: 'Nova categoria',
@@ -418,6 +421,8 @@ export const ptBR = {
   agentsUi: agentsUiStrings,
   // Backup e restauração (spec 019).
   backup: backupStrings,
+  // Contratos (spec 020).
+  contracts: contractsStrings,
 } as const;
 
 export type Strings = typeof ptBR;

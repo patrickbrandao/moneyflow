@@ -19,6 +19,10 @@ export const notificationsStrings = {
     card_limit: 'Limite do cartão',
     reconciliation_divergence: 'Divergência de conciliação',
     message_failed: 'Mensagem não enviada',
+    contract_notice_deadline: 'Contrato: aviso prévio',
+    contract_ending: 'Contrato: fim da vigência',
+    contract_renewal_pending: 'Contrato: renovação pendente',
+    contract_readjustment: 'Contrato: reajuste',
     system: 'Sistema',
   } as Record<string, string>,
   // Títulos e corpos criados pelo worker.

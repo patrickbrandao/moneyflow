@@ -490,6 +490,65 @@ describe('conversas', () => {
 });
 
 describe('IA nos fluxos', () => {
+  it('contrato: o PDF sugere os campos (nada é gravado) e vira um markdown versão 1 do agente (spec 020)', async () => {
+    const stop = startAgentWorker(h.db, h.config, log, { pollMs: 100, maintenanceMs: 3_600_000 });
+    try {
+      const s = await scenario(h, admin);
+      const pdf = Buffer.from('%PDF-1.4\n% contrato\n');
+      const res = await h.app.inject({
+        method: 'POST',
+        url: `/api/contracts/document?fileName=contrato.pdf&caixaId=${s.caixaA.id}`,
+        payload: pdf,
+        headers: { cookie: adminSession.cookie, 'content-type': 'application/pdf' },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toMatchObject({
+        name: 'Suporte mensal (lido do PDF)',
+        direction: 'receivable',
+        startsOn: '2030-03-01',
+        durationMonths: 12,
+        totalCents: 6000001,
+        periodicity: 'monthly',
+        dueDay: 10,
+        autoRenew: true,
+        readjustmentIndex: 'ipca',
+        terminationPenaltyText: '20% do saldo restante',
+      });
+      expect(await admin.get(`/api/contracts?caixaId=${s.caixaA.id}`)).toEqual([]);
+
+      const contract = await admin.post('/api/contracts', {
+        caixaId: s.caixaA.id,
+        entityId: s.holderB.id,
+        direction: 'receivable',
+        categoryId: s.income.id,
+        name: 'Suporte',
+        startsOn: '2030-03-01',
+        durationMonths: 12,
+        periodicity: 'monthly',
+        totalCents: 120_000,
+        dueDay: 10,
+        dueMonthOffset: 0,
+      });
+      const up = await h.app.inject({
+        method: 'POST',
+        url: `/api/contracts/${contract.id}/documents?fileName=contrato.pdf&kind=contract`,
+        payload: pdf,
+        headers: { cookie: adminSession.cookie, 'content-type': 'application/pdf' },
+      });
+      expect(up.statusCode, up.body).toBe(200);
+      const md = await admin.post(`/api/contract-documents/${up.json().id}/convert`);
+      expect(md).toMatchObject({ format: 'markdown', currentVersion: 1, sourceDocumentId: up.json().id, kind: 'contract' });
+      const v1 = await admin.get(`/api/contract-documents/${md.id}/versions/${md.currentVersionId}`);
+      expect(v1).toMatchObject({
+        authorKind: 'agent',
+        content: '# Contrato de prestação de serviços\n\n## Cláusula 1\nObjeto: suporte mensal.',
+      });
+      expect(v1.aiRunId).toBeTruthy();
+    } finally {
+      await stop();
+    }
+  });
+
   it('leitura de documento pré-preenche o título; conciliação recebe sugestões do agente para aprovar em lote', async () => {
     const stop = startAgentWorker(h.db, h.config, log, { pollMs: 100, maintenanceMs: 3_600_000 });
     try {

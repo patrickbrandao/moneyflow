@@ -10,10 +10,33 @@ import { suggestClassifications } from '../services/reconciliation';
  * marcada em screen_context.purpose; o agente responde JSON e não usa tools.
  */
 
-export const FLOW_PURPOSES = ['document_reading', 'classify_lines'] as const;
+export const FLOW_PURPOSES = ['document_reading', 'classify_lines', 'contract_reading', 'contract_markdown'] as const;
+/** Fluxos que a API espera terminar (a resposta volta na requisição): não avisam no sino. */
+export const SYNC_FLOW_PURPOSES: readonly string[] = ['document_reading', 'contract_reading', 'contract_markdown'];
 export type FlowPurpose = (typeof FLOW_PURPOSES)[number];
 
 export function flowSystemPrompt(purpose: FlowPurpose): string {
+  if (purpose === 'contract_reading') {
+    return [
+      'Tarefa: ler o contrato anexado (PDF) e extrair os dados para cadastrá-lo. O titular da caixa está no contexto da mensagem.',
+      'Responda SOMENTE com um objeto JSON, sem texto em volta, com as chaves:',
+      '{"counterpartyName": string|null, "counterpartyDocument": string|null (CPF/CNPJ da outra parte, só dígitos e letras),',
+      '"direction": "receivable"|"payable"|null (receivable se o titular presta o serviço e recebe; payable se o titular contrata e paga),',
+      '"name": string|null (objeto do contrato, curto), "contractNumber": string|null, "startsOn": "AAAA-MM-DD"|null,',
+      '"durationMonths": inteiro|null, "totalCents": inteiro|null (valor total do período, em centavos), "installmentCents": inteiro|null (valor de cada parcela),',
+      '"periodicity": "monthly"|"quarterly"|"semiannual"|"annual"|"single"|null, "dueDay": inteiro 1–31|null, "autoRenew": boolean|null,',
+      '"noticeDays": inteiro|null (aviso prévio em dias), "readjustmentIndex": "ipca"|"igpm"|"inpc"|"other"|"none"|null,',
+      '"readjustmentBaseDate": "AAAA-MM-DD"|null, "terminationPenalty": string|null (multa rescisória, resumida)}.',
+      'Use null para o que não estiver no documento. Não invente dados.',
+    ].join('\n');
+  }
+  if (purpose === 'contract_markdown') {
+    return [
+      'Tarefa: converter o contrato anexado (PDF) em markdown fiel ao texto original.',
+      'Preserve títulos, cláusulas, numeração, listas e tabelas (tabelas em markdown). Não resuma, não comente e não invente texto.',
+      'Responda SOMENTE com o markdown do documento, sem cercas de código em volta.',
+    ].join('\n');
+  }
   if (purpose === 'document_reading') {
     return [
       'Tarefa: ler o documento anexado (boleto, nota fiscal, recibo ou comprovante) e extrair os dados de um título a pagar.',

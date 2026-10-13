@@ -42,6 +42,7 @@ const rowSelect = (today: string) => sql`
   t.category_id, cat.name AS category_name, coalesce(cat.color_slot, pc.color_slot) AS category_color_slot,
   t.description, t.competence_date, t.due_date, t.amount_cents, tb.settled_cents, tb.open_cents,
   t.origin, t.recurrence_rule_id, t.occurrence, r.installments_total,
+  t.contract_id, ct.name AS contract_name, t.contract_installment, cy.installments_count AS contract_installments_count,
   t.counterparty_caixa_id, cc.name AS counterparty_caixa_name, t.mirror_title_id, t.mirror_status,
   coalesce(t.mirror_status, m.mirror_status) AS pair_mirror_status,
   t.notes, t.archived_at,
@@ -61,6 +62,8 @@ const fromSql = sql`
   JOIN categories cat ON cat.id = t.category_id
   LEFT JOIN categories pc ON pc.id = cat.parent_id
   LEFT JOIN recurrence_rules r ON r.id = t.recurrence_rule_id
+  LEFT JOIN contracts ct ON ct.id = t.contract_id
+  LEFT JOIN contract_cycles cy ON cy.id = t.contract_cycle_id
   LEFT JOIN caixas cc ON cc.id = t.counterparty_caixa_id
   LEFT JOIN titles m ON m.id = t.mirror_title_id`;
 

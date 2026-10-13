@@ -12,6 +12,7 @@ import { type AttachmentRow, type AttachmentTarget, t } from '@moneyflow/shared'
 import { and, eq, sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
 import { notFound, unprocessable } from '../errors';
+import { canReadContractDocument } from './contract-documents';
 import { withTx } from './tx';
 import { camel } from './util';
 
@@ -159,6 +160,11 @@ async function assertReadable(ctx: ServiceContext, attachmentId: string) {
     sql`SELECT target_kind, target_id FROM attachment_links WHERE attachment_id = ${attachmentId}`,
   );
   for (const link of links.rows) {
+    if (link.target_kind === 'contract_document') {
+      // PDF de contrato: quem lê o contrato (caixa dona ou, pelo espelho, a da contraparte).
+      if (await canReadContractDocument(ctx, link.target_id)) return;
+      continue;
+    }
     if (link.target_kind === 'ai_message') {
       // Anexo de mensagem de agente: o dono da conversa (e o admin, que lê todas).
       if (ctx.access.isAdmin) return;

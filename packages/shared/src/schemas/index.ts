@@ -7,6 +7,7 @@ import { FREQUENCIES } from '../recurrence';
 import { cents, id, isoDate, nonNegativeCents, optionalText, positiveCents, queryBool, requiredText } from './common';
 
 export * from './common';
+export * from './contracts';
 export * from './operation';
 export * from './vision';
 

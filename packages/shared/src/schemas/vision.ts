@@ -95,6 +95,10 @@ export const MESSAGE_EVENT_KINDS = [
   'reconciliation_divergence',
   'agent_completed',
   'agent_message',
+  'contract_notice_deadline',
+  'contract_ending',
+  'contract_renewal_pending',
+  'contract_readjustment',
 ] as const;
 
 const hhmm = z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9]$/, E.invalidTime);
@@ -116,6 +120,10 @@ export const messageParamsSchemas = {
   reconciliation_divergence: z.strictObject({ min_difference_cents: z.number().int().min(0).max(999_999_999_999_999).optional() }),
   agent_completed: z.strictObject({}),
   agent_message: z.strictObject({}),
+  contract_notice_deadline: z.strictObject({ days_before: intList(0, 180), send_at: hhmm }),
+  contract_ending: z.strictObject({ days_before: intList(0, 180), send_at: hhmm }),
+  contract_renewal_pending: z.strictObject({ send_at: hhmm, repeat_every_days: z.number().int().min(1).max(30).optional() }),
+  contract_readjustment: z.strictObject({ send_at: hhmm }),
 } satisfies Record<(typeof MESSAGE_EVENT_KINDS)[number], z.ZodType>;
 
 /** Parâmetros padrão de cada evento ao assinar. */
@@ -129,6 +137,10 @@ export const DEFAULT_MESSAGE_PARAMS: Record<(typeof MESSAGE_EVENT_KINDS)[number]
   reconciliation_divergence: { min_difference_cents: 0 },
   agent_completed: {},
   agent_message: {},
+  contract_notice_deadline: { days_before: [15, 7, 1, 0], send_at: '08:00' },
+  contract_ending: { days_before: [30, 7, 0], send_at: '08:00' },
+  contract_renewal_pending: { send_at: '08:00', repeat_every_days: 7 },
+  contract_readjustment: { send_at: '08:00' },
 };
 
 /** Token do bot: <id numérico>:<chave>. */

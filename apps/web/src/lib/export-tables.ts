@@ -1,5 +1,6 @@
 import {
   type CardPurchaseRow,
+  type ContractRow,
   type EntitySummary,
   type ExportTable,
   exportFileName,
@@ -136,6 +137,42 @@ export function entitiesTable(rows: EntitySummary[]): ExportTable {
       pix: r.primaryPix?.keyValue ?? '',
       caixas: r.caixaCount,
       archived: r.archivedAt ? t.common.yes : '',
+    })),
+  };
+}
+
+/** Contratos (spec 020): a lista com os filtros da tela. */
+export function contractsTable(rows: ContractRow[], filter: string): ExportTable {
+  const C = t.contracts.columns;
+  return {
+    fileName: exportFileName('Contratos', todayIso()),
+    title: t.contracts.title,
+    subtitle: filter ? [filter] : [],
+    columns: [
+      { key: 'name', label: C.name },
+      { key: 'number', label: t.contracts.fields.contractNumber },
+      { key: 'entity', label: C.entity },
+      { key: 'caixa', label: C.caixa },
+      { key: 'direction', label: C.direction },
+      { key: 'starts', label: t.contracts.fields.startsOn, type: 'date' },
+      { key: 'ends', label: t.contracts.fields.endsOn, type: 'date' },
+      { key: 'value', label: C.value, type: 'money' },
+      { key: 'nextDue', label: C.next, type: 'date' },
+      { key: 'nextAmount', label: t.contracts.fields.installmentCents, type: 'money' },
+      { key: 'status', label: C.status },
+    ],
+    rows: rows.map((r) => ({
+      name: r.name,
+      number: r.contractNumber,
+      entity: r.entityName,
+      caixa: r.caixaName,
+      direction: t.contracts.directionsShort[r.direction],
+      starts: r.currentCycle?.startsOn ?? null,
+      ends: r.currentCycle?.endsOn ?? null,
+      value: r.currentCycle?.totalCents ?? null,
+      nextDue: r.nextInstallment?.dueDate ?? null,
+      nextAmount: r.nextInstallment?.amountCents ?? null,
+      status: t.contracts.statuses[r.status],
     })),
   };
 }

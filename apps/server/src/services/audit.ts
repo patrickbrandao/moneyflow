@@ -41,6 +41,14 @@ const OWNER_SQL: Record<string, (id: string) => ReturnType<typeof sql>> = {
     SELECT coalesce(a.caixa_id, l.card_caixa_id) AS caixa_id
       FROM statement_lines l LEFT JOIN financial_accounts a ON a.id = l.financial_account_id WHERE l.id = ${id}`,
   period_closings: (id) => sql`SELECT caixa_id FROM period_closings WHERE id = ${id}`,
+  // Contratos (spec 020): a caixa dona do contrato.
+  contracts: (id) => sql`SELECT caixa_id FROM contracts WHERE id = ${id}`,
+  contract_cycles: (id) => sql`SELECT c.caixa_id FROM contract_cycles y JOIN contracts c ON c.id = y.contract_id WHERE y.id = ${id}`,
+  contract_documents: (id) => sql`SELECT c.caixa_id FROM contract_documents d JOIN contracts c ON c.id = d.contract_id WHERE d.id = ${id}`,
+  contract_amendments: (id) =>
+    sql`SELECT c.caixa_id FROM contract_amendments a JOIN contracts c ON c.id = a.contract_id WHERE a.id = ${id}`,
+  contract_renewal_tasks: (id) =>
+    sql`SELECT c.caixa_id FROM contract_renewal_tasks k JOIN contracts c ON c.id = k.contract_id WHERE k.id = ${id}`,
 };
 
 /** Cadastros globais: o histórico é visível a todos os usuários. */

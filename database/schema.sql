@@ -2369,6 +2369,424 @@ $$;
 
 
 --
+-- Name: contract_amendments_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_amendments_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF (to_jsonb(NEW) - '{document_id,notes,created_by,updated_at}'::text[])
+     IS DISTINCT FROM (to_jsonb(OLD) - '{document_id,notes,created_by,updated_at}'::text[])
+     OR (NEW.created_by IS DISTINCT FROM OLD.created_by AND NEW.created_by IS NOT NULL) THEN
+    RAISE EXCEPTION 'contract_amendments: amendment % is immutable (only document_id and notes change)', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_amendments_immutable_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: contract_assert(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_assert(p_contract_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  st text;
+BEGIN
+  SELECT k.status INTO st FROM contracts k WHERE k.id = p_contract_id;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+  IF (st = 'renewal_pending')
+     <> EXISTS (SELECT 1 FROM contract_renewal_tasks r WHERE r.contract_id = p_contract_id AND r.status = 'open') THEN
+    RAISE EXCEPTION 'contracts: contract % is % but % an open renewal task', p_contract_id, st,
+      CASE WHEN st = 'renewal_pending' THEN 'has no' ELSE 'has' END
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_renewal_pending_check';
+  END IF;
+  IF st = 'draft' AND EXISTS (SELECT 1 FROM titles t WHERE t.contract_id = p_contract_id) THEN
+    RAISE EXCEPTION 'contracts: draft contract % cannot have titles', p_contract_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_draft_titles_check';
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION contract_assert(p_contract_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.contract_assert(p_contract_id uuid) IS 'Interna (constraint triggers no COMMIT): contrato renewal_pending ⇔ tarefa de renovação open (contracts_renewal_pending_check) e rascunho sem títulos (contracts_draft_titles_check).';
+
+
+--
+-- Name: contract_cycles_assert(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_cycles_assert(p_contract_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  r        record;
+  prev_seq int := 0;
+  prev_end date;
+BEGIN
+  FOR r IN SELECT y.seq, y.starts_on, y.ends_on FROM contract_cycles y WHERE y.contract_id = p_contract_id ORDER BY y.seq LOOP
+    IF r.seq <> prev_seq + 1 OR (prev_end IS NOT NULL AND r.starts_on <> prev_end + 1) THEN
+      RAISE EXCEPTION 'contract_cycles: cycle % of contract % must start on the day after cycle % ends (%)',
+        r.seq, p_contract_id, prev_seq, prev_end
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_cycles_contiguous_check';
+    END IF;
+    prev_seq := r.seq;
+    prev_end := r.ends_on;
+  END LOOP;
+END
+$$;
+
+
+--
+-- Name: contract_cycles_contiguous_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_cycles_contiguous_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM contract_cycles_assert(CASE TG_OP WHEN 'DELETE' THEN OLD.contract_id ELSE NEW.contract_id END);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: contract_cycles_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_cycles_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.contract_id <> OLD.contract_id OR NEW.seq <> OLD.seq THEN
+    RAISE EXCEPTION 'contract_cycles: contract and seq cannot change (cycle %)', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_cycles_immutable_check';
+  END IF;
+  IF (NEW.starts_on <> OLD.starts_on OR NEW.duration_months <> OLD.duration_months
+      OR NEW.periodicity <> OLD.periodicity)
+     AND EXISTS (SELECT 1 FROM titles t WHERE t.contract_cycle_id = OLD.id) THEN
+    RAISE EXCEPTION 'contract_cycles: cycle % has titles; start, duration and periodicity cannot change', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_cycles_locked_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: contract_document_versions_audit_row(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_document_versions_audit_row() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+  IF o IS NOT NULL THEN
+    o := (o - 'content') || jsonb_build_object('content_bytes', octet_length(OLD.content));
+  END IF;
+  IF n IS NOT NULL THEN
+    n := (n - 'content') || jsonb_build_object('content_bytes', octet_length(NEW.content));
+  END IF;
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION contract_document_versions_audit_row(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.contract_document_versions_audit_row() IS 'Trigger de auditoria de contract_document_versions: grava a linha sem content (só content_bytes); uma mudança de content apareceria só em changed_columns.';
+
+
+--
+-- Name: contract_document_versions_before_insert(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_document_versions_before_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  doc_format text;
+  next_version integer;
+BEGIN
+  SELECT d.format INTO doc_format FROM contract_documents d WHERE d.id = NEW.document_id FOR NO KEY UPDATE;
+  IF NOT FOUND THEN
+    RETURN NEW;  -- a FK reporta o erro.
+  END IF;
+  IF doc_format <> 'markdown' THEN
+    RAISE EXCEPTION 'contract_document_versions: document % is not markdown', NEW.document_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_document_versions_document_check';
+  END IF;
+  SELECT coalesce(max(v.version), 0) + 1 INTO next_version
+    FROM contract_document_versions v WHERE v.document_id = NEW.document_id;
+  IF NEW.version IS NULL THEN
+    NEW.version := next_version;
+  ELSIF NEW.version <> next_version THEN
+    RAISE EXCEPTION 'contract_document_versions: next version of document % is %, got %', NEW.document_id,
+      next_version, NEW.version
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_document_versions_version_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: contract_document_versions_guard(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_document_versions_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM contract_documents d WHERE d.id = OLD.document_id) THEN
+      RAISE EXCEPTION 'contract_document_versions: version % is immutable (archive the document instead)', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_document_versions_immutable_check';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF NEW.document_id <> OLD.document_id OR NEW.version <> OLD.version OR NEW.content <> OLD.content
+     OR NEW.note IS DISTINCT FROM OLD.note OR NEW.author_kind <> OLD.author_kind
+     OR NEW.restored_from_version_id IS DISTINCT FROM OLD.restored_from_version_id
+     OR NEW.created_at <> OLD.created_at
+     OR (NEW.author_user_id IS DISTINCT FROM OLD.author_user_id AND NEW.author_user_id IS NOT NULL)
+     OR (NEW.ai_run_id IS DISTINCT FROM OLD.ai_run_id AND NEW.ai_run_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'contract_document_versions: version % is immutable', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_document_versions_immutable_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: contract_documents_current_version_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_documents_current_version_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM contract_documents d
+              WHERE d.id = NEW.id AND d.format = 'markdown' AND d.current_version_id IS NULL) THEN
+    RAISE EXCEPTION 'contract_documents: markdown document % needs a current version', NEW.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_documents_current_version_check';
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: contract_documents_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_documents_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  src_format text;
+BEGIN
+  IF TG_OP = 'UPDATE' AND (NEW.contract_id <> OLD.contract_id OR NEW.format <> OLD.format
+                           OR NEW.attachment_id IS DISTINCT FROM OLD.attachment_id) THEN
+    RAISE EXCEPTION 'contract_documents: contract, format and attachment cannot change (document %)', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_documents_immutable_check';
+  END IF;
+  IF NEW.source_document_id IS NOT NULL THEN
+    SELECT d.format INTO src_format FROM contract_documents d WHERE d.id = NEW.source_document_id;
+    IF FOUND AND src_format <> 'pdf' THEN
+      RAISE EXCEPTION 'contract_documents: source document % must be a pdf', NEW.source_document_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_documents_source_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: contract_refs_integrity_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_refs_integrity_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('UPDATE', 'DELETE') AND OLD.contract_id IS NOT NULL THEN
+    PERFORM contract_assert(OLD.contract_id);
+  END IF;
+  IF TG_OP IN ('INSERT', 'UPDATE') AND NEW.contract_id IS NOT NULL
+     AND NEW.contract_id IS DISTINCT FROM (CASE TG_OP WHEN 'UPDATE' THEN OLD.contract_id END) THEN
+    PERFORM contract_assert(NEW.contract_id);
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: contract_renewal_tasks_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_renewal_tasks_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  cyc contract_cycles;
+  new_seq smallint;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.contract_id <> OLD.contract_id OR NEW.contract_cycle_id <> OLD.contract_cycle_id THEN
+      RAISE EXCEPTION 'contract_renewal_tasks: contract and cycle cannot change (task %)', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_renewal_tasks_immutable_check';
+    END IF;
+    IF OLD.status <> 'open'
+       AND (NEW.status <> OLD.status OR NEW.decided_at IS DISTINCT FROM OLD.decided_at
+            OR NEW.new_cycle_id IS DISTINCT FROM OLD.new_cycle_id
+            OR NEW.opened_on <> OLD.opened_on OR NEW.due_on <> OLD.due_on
+            OR (NEW.decided_by IS DISTINCT FROM OLD.decided_by AND NEW.decided_by IS NOT NULL)) THEN
+      RAISE EXCEPTION 'contract_renewal_tasks: task % was already decided (%)', OLD.id, OLD.status
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_renewal_tasks_final_check';
+    END IF;
+  END IF;
+
+  SELECT * INTO cyc FROM contract_cycles y WHERE y.id = NEW.contract_cycle_id;
+  IF NOT FOUND THEN
+    RETURN NEW;  -- a FK reporta o erro.
+  END IF;
+  IF NEW.due_on <> cyc.ends_on THEN
+    RAISE EXCEPTION 'contract_renewal_tasks: due_on % must be the end of cycle % (%)', NEW.due_on, cyc.id, cyc.ends_on
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_renewal_tasks_due_on_check';
+  END IF;
+  IF NEW.new_cycle_id IS NOT NULL THEN
+    SELECT y.seq INTO new_seq FROM contract_cycles y WHERE y.id = NEW.new_cycle_id;
+    IF FOUND AND new_seq <> cyc.seq + 1 THEN
+      RAISE EXCEPTION 'contract_renewal_tasks: new cycle % must follow cycle % (seq %)', NEW.new_cycle_id, cyc.id, cyc.seq + 1
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_renewal_tasks_new_cycle_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: contracts_status_integrity_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contracts_status_integrity_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM contract_assert(NEW.id);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: contracts_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contracts_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  cx       caixas;
+  cp       caixas;
+  cat_kind text;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.status <> 'draft' THEN
+      RAISE EXCEPTION 'contracts: only draft contracts can be deleted (contract %, status %)', OLD.id, OLD.status
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_delete_check';
+    END IF;
+    RETURN OLD;
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.direction IS DISTINCT FROM OLD.direction THEN
+      RAISE EXCEPTION 'contracts: direction cannot change (contract %)', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_direction_immutable_check';
+    END IF;
+    IF OLD.status <> 'draft' AND (NEW.caixa_id <> OLD.caixa_id OR NEW.entity_id <> OLD.entity_id) THEN
+      RAISE EXCEPTION 'contracts: caixa and entity only change in draft (contract %)', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_party_immutable_check';
+    END IF;
+    IF NEW.status <> OLD.status AND NOT (
+         (OLD.status = 'draft' AND NEW.status = 'active')
+      OR (OLD.status = 'active' AND NEW.status IN ('renewal_pending', 'ended', 'terminated'))
+      OR (OLD.status = 'renewal_pending' AND NEW.status IN ('active', 'ended', 'terminated'))
+      OR (OLD.status = 'ended' AND NEW.status IN ('active', 'renewal_pending'))) THEN
+      RAISE EXCEPTION 'contracts: status cannot go from % to % (contract %)', OLD.status, NEW.status, OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_status_transition_check';
+    END IF;
+  END IF;
+
+  SELECT * INTO cx FROM caixas c WHERE c.id = NEW.caixa_id;
+  IF FOUND THEN
+    IF cx.kind <> 'general' THEN
+      RAISE EXCEPTION 'contracts: caixa % must be general', NEW.caixa_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_caixa_kind_check';
+    END IF;
+    IF cx.holder_entity_id = NEW.entity_id THEN
+      RAISE EXCEPTION 'contracts: counterparty % is the holder of caixa %', NEW.entity_id, NEW.caixa_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_entity_check';
+    END IF;
+  END IF;
+
+  SELECT c.kind INTO cat_kind FROM categories c WHERE c.id = NEW.category_id;
+  IF cat_kind IS NOT NULL
+     AND cat_kind <> (CASE NEW.direction WHEN 'payable' THEN 'expense' ELSE 'income' END) THEN
+    RAISE EXCEPTION 'contracts: % contract requires % category, got %', NEW.direction,
+      CASE NEW.direction WHEN 'payable' THEN 'expense' ELSE 'income' END, cat_kind
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_category_kind_check';
+  END IF;
+
+  IF NEW.counterparty_caixa_id IS NOT NULL THEN
+    SELECT * INTO cp FROM caixas c WHERE c.id = NEW.counterparty_caixa_id;
+    IF FOUND AND (cp.kind <> 'general' OR cp.holder_entity_id <> NEW.entity_id) THEN
+      RAISE EXCEPTION 'contracts: counterparty caixa % must be general and held by entity %',
+        NEW.counterparty_caixa_id, NEW.entity_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_counterparty_caixa_check';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: financial_account_balance_at(uuid, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3048,7 +3466,7 @@ CREATE TABLE public.message_outbox (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT message_outbox_attempts_check CHECK ((((max_attempts >= 1) AND (max_attempts <= 20)) AND ((attempts >= 0) AND (attempts <= max_attempts)))),
     CONSTRAINT message_outbox_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
-    CONSTRAINT message_outbox_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'test'::text]))),
+    CONSTRAINT message_outbox_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'test'::text]))),
     CONSTRAINT message_outbox_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
     CONSTRAINT message_outbox_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'sending'::text, 'sent'::text, 'failed'::text, 'canceled'::text]))),
     CONSTRAINT message_outbox_status_fields_check CHECK ((((status = 'sending'::text) = (locked_at IS NOT NULL)) AND ((status = 'sent'::text) = (sent_at IS NOT NULL)) AND ((status <> ALL (ARRAY['failed'::text, 'canceled'::text])) OR (last_error IS NOT NULL))))
@@ -3302,6 +3720,7 @@ DECLARE
   required text[];
   hhmm constant text := '^([01][0-9]|2[0-3]):[0-5][0-9]$';
   arr jsonb;
+  max_days int := 60;
 BEGIN
   IF p_params IS NULL OR jsonb_typeof(p_params) <> 'object' THEN
     RETURN false;
@@ -3315,6 +3734,10 @@ BEGIN
     WHEN 'card_limit' THEN allowed := '{thresholds_percent}'; required := '{thresholds_percent}';
     WHEN 'reconciliation_divergence' THEN allowed := '{min_difference_cents}'; required := '{}';
     WHEN 'invoice_closed', 'agent_completed', 'agent_message' THEN allowed := '{}'; required := '{}';
+    WHEN 'contract_notice_deadline', 'contract_ending' THEN
+      allowed := '{days_before,send_at}'; required := '{days_before,send_at}'; max_days := 180;
+    WHEN 'contract_renewal_pending' THEN allowed := '{send_at,repeat_every_days}'; required := '{send_at}';
+    WHEN 'contract_readjustment' THEN allowed := '{send_at}'; required := '{send_at}';
     ELSE RETURN false;
   END CASE;
 
@@ -3351,7 +3774,7 @@ BEGIN
     END IF;
   END LOOP;
   IF p_params ? 'days_before'
-     AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_params -> 'days_before') e WHERE e::int > 60) THEN
+     AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(p_params -> 'days_before') e WHERE e::int > max_days) THEN
     RETURN false;
   END IF;
   IF p_params ? 'thresholds_percent'
@@ -3369,7 +3792,7 @@ $_$;
 -- Name: FUNCTION message_subscription_params_valid(p_event_kind text, p_params jsonb); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.message_subscription_params_valid(p_event_kind text, p_params jsonb) IS 'true se params é válido para o evento (chaves permitidas e obrigatórias, HH:MM, dia ISO, listas de 1–10 inteiros distintos: days_before 0–60, thresholds_percent 1–200). Usada no CHECK de message_subscriptions.';
+COMMENT ON FUNCTION public.message_subscription_params_valid(p_event_kind text, p_params jsonb) IS 'true se params é válido para o evento (chaves permitidas e obrigatórias, HH:MM, dia ISO, listas de 1–10 inteiros distintos: days_before 0–60 no due_reminder e 0–180 em contract_notice_deadline/contract_ending, thresholds_percent 1–200; repeat_every_days 1–30). Usada no CHECK de message_subscriptions.';
 
 
 --
@@ -4356,8 +4779,12 @@ BEGIN
   IF m.origin <> t.origin
      OR m.recurrence_rule_id IS DISTINCT FROM t.recurrence_rule_id
      OR m.occurrence IS DISTINCT FROM t.occurrence
-     OR m.card_invoice_id IS DISTINCT FROM t.card_invoice_id THEN
-    RAISE EXCEPTION 'titles: mirror pair % / % must share origin, recurrence occurrence and card invoice', t.id, m.id
+     OR m.card_invoice_id IS DISTINCT FROM t.card_invoice_id
+     OR m.contract_id IS DISTINCT FROM t.contract_id
+     OR m.contract_cycle_id IS DISTINCT FROM t.contract_cycle_id
+     OR m.contract_installment IS DISTINCT FROM t.contract_installment THEN
+    RAISE EXCEPTION 'titles: mirror pair % / % must share origin, recurrence occurrence, card invoice and contract installment',
+      t.id, m.id
       USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_match_check';
   END IF;
 
@@ -4474,6 +4901,55 @@ BEGIN
     RAISE EXCEPTION 'titles: invoice title must be receivable in the card caixa % and payable in a general payer caixa', card
       USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_card_invoice_caixa_check';
   END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: titles_validate_contract(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.titles_validate_contract() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  c     contracts;
+  total smallint;
+BEGIN
+  IF NEW.contract_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  SELECT * INTO c FROM contracts k WHERE k.id = NEW.contract_id;
+  IF NOT FOUND THEN
+    RETURN NEW;  -- a FK reporta o erro.
+  END IF;
+
+  IF NEW.mirror_status IS NULL THEN
+    -- Lado original: na caixa do contrato; a parcela segue direção e contraparte do contrato.
+    IF NEW.caixa_id <> c.caixa_id THEN
+      RAISE EXCEPTION 'titles: contract % title must be in the contract caixa %', c.id, c.caixa_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_contract_caixa_check';
+    END IF;
+    IF NEW.contract_cycle_id IS NOT NULL AND (NEW.direction <> c.direction OR NEW.entity_id <> c.entity_id) THEN
+      RAISE EXCEPTION 'titles: contract % installment must be % with entity %', c.id, c.direction, c.entity_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_contract_match_check';
+    END IF;
+  ELSIF NEW.counterparty_caixa_id IS DISTINCT FROM c.caixa_id THEN
+    -- Lado espelho: o outro lado está na caixa do contrato.
+    RAISE EXCEPTION 'titles: mirror of contract % title must point to the contract caixa %', c.id, c.caixa_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_contract_caixa_check';
+  END IF;
+
+  IF NEW.contract_cycle_id IS NOT NULL THEN
+    SELECT y.installments_count INTO total FROM contract_cycles y WHERE y.id = NEW.contract_cycle_id;
+    IF NEW.contract_installment > total THEN
+      RAISE EXCEPTION 'titles: installment % exceeds the % installments of cycle %', NEW.contract_installment, total,
+        NEW.contract_cycle_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_contract_installment_total_check';
+    END IF;
+  END IF;
+
   RETURN NEW;
 END
 $$;
@@ -5412,6 +5888,79 @@ COMMENT ON TABLE public.card_purchase_attachments IS 'Anexos de uma compra no ca
 
 
 --
+-- Name: contract_documents; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.contract_documents (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    contract_id uuid NOT NULL,
+    kind text NOT NULL,
+    format text NOT NULL,
+    title text NOT NULL,
+    description text,
+    document_date date,
+    attachment_id uuid,
+    current_version_id uuid,
+    source_document_id uuid,
+    created_by uuid,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT contract_documents_format_check CHECK ((format = ANY (ARRAY['pdf'::text, 'markdown'::text]))),
+    CONSTRAINT contract_documents_format_fields_check CHECK (
+CASE format
+    WHEN 'pdf'::text THEN ((attachment_id IS NOT NULL) AND (current_version_id IS NULL) AND (source_document_id IS NULL))
+    WHEN 'markdown'::text THEN (attachment_id IS NULL)
+    ELSE NULL::boolean
+END),
+    CONSTRAINT contract_documents_kind_check CHECK ((kind = ANY (ARRAY['contract'::text, 'amendment'::text, 'renewal'::text, 'termination'::text, 'proposal'::text, 'other'::text]))),
+    CONSTRAINT contract_documents_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 200)))
+);
+
+
+--
+-- Name: TABLE contract_documents; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.contract_documents IS 'Documentos de um contrato: PDF (anexo imutável, somente leitura) ou markdown versionado (contract_document_versions; current_version_id obrigatório no COMMIT). Excluir = arquivar.';
+
+
+--
+-- Name: COLUMN contract_documents.kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_documents.kind IS 'contract, amendment (aditivo), renewal, termination (distrato), proposal ou other.';
+
+
+--
+-- Name: COLUMN contract_documents.format; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_documents.format IS 'pdf (attachment_id) ou markdown (versões). Imutável.';
+
+
+--
+-- Name: COLUMN contract_documents.attachment_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_documents.attachment_id IS 'Arquivo do PDF (só em pdf; imutável). Aparece em attachment_links como contract_document.';
+
+
+--
+-- Name: COLUMN contract_documents.current_version_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_documents.current_version_id IS 'Versão atual do markdown (uma versão deste documento). Nulo em pdf.';
+
+
+--
+-- Name: COLUMN contract_documents.source_document_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_documents.source_document_id IS 'PDF de origem de um markdown gerado por IA (mesmo contrato, formato pdf).';
+
+
+--
 -- Name: entity_attachments; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5664,7 +6213,13 @@ UNION ALL
  SELECT ai_message_attachments.attachment_id,
     'ai_message'::text AS target_kind,
     ai_message_attachments.message_id AS target_id
-   FROM public.ai_message_attachments;
+   FROM public.ai_message_attachments
+UNION ALL
+ SELECT contract_documents.attachment_id,
+    'contract_document'::text AS target_kind,
+    contract_documents.id AS target_id
+   FROM public.contract_documents
+  WHERE (contract_documents.attachment_id IS NOT NULL);
 
 
 --
@@ -6362,9 +6917,14 @@ CREATE TABLE public.titles (
     pix_payload text,
     nfe_document_id uuid,
     card_invoice_id uuid,
+    contract_id uuid,
+    contract_cycle_id uuid,
+    contract_installment smallint,
     CONSTRAINT titles_amount_cents_check CHECK ((amount_cents > 0)),
     CONSTRAINT titles_boleto_barcode_check CHECK (public.is_valid_boleto_barcode(boleto_barcode)),
     CONSTRAINT titles_card_invoice_check CHECK ((((origin = 'card_invoice'::text) = (card_invoice_id IS NOT NULL)) AND ((card_invoice_id IS NULL) OR (counterparty_caixa_id IS NOT NULL)))),
+    CONSTRAINT titles_contract_check CHECK ((((origin = 'contract'::text) = (contract_id IS NOT NULL)) AND ((contract_cycle_id IS NULL) = (contract_installment IS NULL)) AND ((contract_cycle_id IS NULL) OR (contract_id IS NOT NULL)))),
+    CONSTRAINT titles_contract_installment_check CHECK ((contract_installment >= 1)),
     CONSTRAINT titles_counterparty_caixa_check CHECK ((counterparty_caixa_id <> caixa_id)),
     CONSTRAINT titles_description_check CHECK ((btrim(description) <> ''::text)),
     CONSTRAINT titles_direction_check CHECK ((direction = ANY (ARRAY['payable'::text, 'receivable'::text]))),
@@ -6372,7 +6932,7 @@ CREATE TABLE public.titles (
     CONSTRAINT titles_mirror_self_check CHECK ((mirror_title_id <> id)),
     CONSTRAINT titles_mirror_status_check CHECK ((mirror_status = ANY (ARRAY['pending'::text, 'accepted'::text, 'disputed'::text]))),
     CONSTRAINT titles_occurrence_check CHECK ((occurrence >= 1)),
-    CONSTRAINT titles_origin_check CHECK ((origin = ANY (ARRAY['manual'::text, 'recurrence'::text, 'card_invoice'::text]))),
+    CONSTRAINT titles_origin_check CHECK ((origin = ANY (ARRAY['manual'::text, 'recurrence'::text, 'card_invoice'::text, 'contract'::text]))),
     CONSTRAINT titles_pix_payload_check CHECK (public.is_valid_brcode(pix_payload)),
     CONSTRAINT titles_recurrence_check CHECK ((((recurrence_rule_id IS NULL) = (occurrence IS NULL)) AND ((origin = 'recurrence'::text) = (recurrence_rule_id IS NOT NULL)))),
     CONSTRAINT titles_status_check CHECK ((status = ANY (ARRAY['open'::text, 'partial'::text, 'paid'::text, 'canceled'::text])))
@@ -6411,7 +6971,7 @@ COMMENT ON COLUMN public.titles.status IS 'open | partial | paid: derivado da so
 -- Name: COLUMN titles.origin; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.titles.origin IS 'manual, recurrence (gerado por recurrence_rules) ou card_invoice (fatura de cartão, F2). O espelho herda a origem do original.';
+COMMENT ON COLUMN public.titles.origin IS 'manual, recurrence (gerado por recurrence_rules), card_invoice (fatura de cartão, F2) ou contract (parcela ou título extra de um contrato, F5). O espelho herda a origem do original.';
 
 
 --
@@ -6468,6 +7028,27 @@ COMMENT ON COLUMN public.titles.nfe_document_id IS 'NF-e de origem (import de XM
 --
 
 COMMENT ON COLUMN public.titles.card_invoice_id IS 'origin = card_invoice: a fatura. O par espelhado é "a receber" na caixa do cartão e "a pagar" na caixa pagadora (general); os dois lados apontam para a mesma fatura.';
+
+
+--
+-- Name: COLUMN titles.contract_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.contract_id IS 'Contrato (origin = contract). O lado original fica na caixa do contrato; o espelho aponta para ela em counterparty_caixa_id.';
+
+
+--
+-- Name: COLUMN titles.contract_cycle_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.contract_cycle_id IS 'Ciclo da parcela. Nulo num título de contrato = título extra ligado a ele (multa, valor rescisório; qualquer direção).';
+
+
+--
+-- Name: COLUMN titles.contract_installment; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.contract_installment IS 'Número da parcela n no ciclo (N = contract_cycles.installments_count).';
 
 
 --
@@ -6752,6 +7333,488 @@ COMMENT ON COLUMN public.classification_rules.created_from_line_id IS 'Linha de 
 --
 
 COMMENT ON COLUMN public.classification_rules.usage_count IS 'Quantas vezes a regra classificou uma linha (a aplicação incrementa).';
+
+
+--
+-- Name: contract_amendments; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.contract_amendments (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    contract_id uuid NOT NULL,
+    contract_cycle_id uuid NOT NULL,
+    document_id uuid,
+    effective_on date NOT NULL,
+    changes jsonb NOT NULL,
+    affected_title_ids uuid[] DEFAULT '{}'::uuid[] NOT NULL,
+    skipped_title_ids uuid[] DEFAULT '{}'::uuid[] NOT NULL,
+    notes text,
+    created_by uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT contract_amendments_changes_check CHECK (((jsonb_typeof(changes) = 'object'::text) AND COALESCE((jsonb_typeof((changes -> 'before'::text)) = 'object'::text), false) AND COALESCE((jsonb_typeof((changes -> 'after'::text)) = 'object'::text), false))),
+    CONSTRAINT contract_amendments_title_ids_check CHECK (((array_position(affected_title_ids, NULL::uuid) IS NULL) AND (array_position(skipped_title_ids, NULL::uuid) IS NULL)))
+);
+
+
+--
+-- Name: TABLE contract_amendments; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.contract_amendments IS 'Histórico de aditivos de um contrato (antes → depois). Imutável, exceto document_id e notes.';
+
+
+--
+-- Name: COLUMN contract_amendments.contract_cycle_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_amendments.contract_cycle_id IS 'Ciclo aditado (do mesmo contrato).';
+
+
+--
+-- Name: COLUMN contract_amendments.document_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_amendments.document_id IS 'Documento do aditivo (do mesmo contrato), opcional.';
+
+
+--
+-- Name: COLUMN contract_amendments.effective_on; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_amendments.effective_on IS 'Data de efeito: parcelas em aberto e sem baixa com competência nela ou depois são recalculadas.';
+
+
+--
+-- Name: COLUMN contract_amendments.changes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_amendments.changes IS 'O que mudou: {"before": {...}, "after": {...}} (valor, vencimento, deslocamento, categoria…).';
+
+
+--
+-- Name: COLUMN contract_amendments.affected_title_ids; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_amendments.affected_title_ids IS 'Títulos recalculados pelo aditivo (os dois lados do espelho).';
+
+
+--
+-- Name: COLUMN contract_amendments.skipped_title_ids; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_amendments.skipped_title_ids IS 'Títulos que ficaram como estavam (com baixa ou em mês fechado), mostrados como aviso.';
+
+
+--
+-- Name: contract_cycles; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.contract_cycles (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    contract_id uuid NOT NULL,
+    seq smallint NOT NULL,
+    starts_on date NOT NULL,
+    duration_months smallint NOT NULL,
+    ends_on date GENERATED ALWAYS AS (
+CASE
+    WHEN (EXTRACT(day FROM (starts_on + make_interval(months => (duration_months)::integer))) < EXTRACT(day FROM starts_on)) THEN ((starts_on + make_interval(months => (duration_months)::integer)))::date
+    ELSE (((starts_on + make_interval(months => (duration_months)::integer)))::date - 1)
+END) STORED NOT NULL,
+    periodicity text NOT NULL,
+    installments_count smallint GENERATED ALWAYS AS ((
+CASE periodicity
+    WHEN 'monthly'::text THEN (duration_months)::integer
+    WHEN 'quarterly'::text THEN (duration_months / 3)
+    WHEN 'semiannual'::text THEN (duration_months / 6)
+    WHEN 'annual'::text THEN (duration_months / 12)
+    ELSE 1
+END)::smallint) STORED NOT NULL,
+    total_cents bigint NOT NULL,
+    due_day smallint NOT NULL,
+    due_month_offset smallint DEFAULT 0 NOT NULL,
+    readjustment_percent numeric(7,4),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT contract_cycles_due_day_check CHECK (((due_day >= 1) AND (due_day <= 31))),
+    CONSTRAINT contract_cycles_due_month_offset_check CHECK (((due_month_offset >= 0) AND (due_month_offset <= 3))),
+    CONSTRAINT contract_cycles_duration_months_check CHECK (((duration_months >= 1) AND (duration_months <= 120))),
+    CONSTRAINT contract_cycles_duration_periodicity_check CHECK ((((duration_months)::integer %
+CASE periodicity
+    WHEN 'quarterly'::text THEN 3
+    WHEN 'semiannual'::text THEN 6
+    WHEN 'annual'::text THEN 12
+    ELSE 1
+END) = 0)),
+    CONSTRAINT contract_cycles_periodicity_check CHECK ((periodicity = ANY (ARRAY['monthly'::text, 'quarterly'::text, 'semiannual'::text, 'annual'::text, 'single'::text]))),
+    CONSTRAINT contract_cycles_readjustment_percent_check CHECK ((readjustment_percent > ('-100'::integer)::numeric)),
+    CONSTRAINT contract_cycles_seq_check CHECK ((seq >= 1)),
+    CONSTRAINT contract_cycles_total_cents_check CHECK (((total_cents > 0) AND (total_cents >= installments_count)))
+);
+
+
+--
+-- Name: TABLE contract_cycles; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.contract_cycles IS 'Ciclos (vigências) de um contrato, seq 1, 2, 3… contíguos (o seguinte começa no dia seguinte ao fim do anterior; checado no COMMIT). Com títulos ligados, starts_on, duration_months e periodicity ficam imutáveis.';
+
+
+--
+-- Name: COLUMN contract_cycles.duration_months; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_cycles.duration_months IS 'Duração em meses (1–120), múltipla dos meses do período (single aceita qualquer).';
+
+
+--
+-- Name: COLUMN contract_cycles.ends_on; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_cycles.ends_on IS 'Gerada: x = starts_on + duration_months meses; x se o dia não existe no mês final (31/01 + 1 → 28/02, o seguinte começa em 01/03), senão x − 1 dia (01/03/2025 + 12 → 28/02/2026; 29/01/2024 + 1 → 28/02/2024).';
+
+
+--
+-- Name: COLUMN contract_cycles.periodicity; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_cycles.periodicity IS 'monthly (1 mês), quarterly (3), semiannual (6), annual (12) ou single (parcela única no ciclo).';
+
+
+--
+-- Name: COLUMN contract_cycles.installments_count; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_cycles.installments_count IS 'Gerada: número de parcelas = duração ÷ meses do período (single = 1).';
+
+
+--
+-- Name: COLUMN contract_cycles.total_cents; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_cycles.total_cents IS 'Valor total do ciclo (≥ 1 centavo por parcela). Divisão em parcelas iguais com o resto na primeira (aplicação).';
+
+
+--
+-- Name: COLUMN contract_cycles.due_day; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_cycles.due_day IS 'Dia de vencimento (1–31; meses curtos usam o último dia).';
+
+
+--
+-- Name: COLUMN contract_cycles.due_month_offset; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_cycles.due_month_offset IS 'Meses entre a competência e o vencimento (0–3; ex.: serviço de março vence em abril = 1).';
+
+
+--
+-- Name: COLUMN contract_cycles.readjustment_percent; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_cycles.readjustment_percent IS 'Reajuste aplicado na renovação ou no aditivo, em % (informativo).';
+
+
+--
+-- Name: contract_document_versions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.contract_document_versions (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    document_id uuid NOT NULL,
+    version integer NOT NULL,
+    content text NOT NULL,
+    note text,
+    author_kind text DEFAULT 'human'::text NOT NULL,
+    author_user_id uuid,
+    ai_run_id uuid,
+    restored_from_version_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT contract_document_versions_author_check CHECK (((author_kind = 'agent'::text) OR (ai_run_id IS NULL))),
+    CONSTRAINT contract_document_versions_author_kind_check CHECK ((author_kind = ANY (ARRAY['human'::text, 'agent'::text]))),
+    CONSTRAINT contract_document_versions_content_check CHECK ((octet_length(content) <= 1048576)),
+    CONSTRAINT contract_document_versions_note_check CHECK ((length(note) <= 500)),
+    CONSTRAINT contract_document_versions_restored_self_check CHECK ((restored_from_version_id <> id)),
+    CONSTRAINT contract_document_versions_version_check CHECK ((version >= 1))
+);
+
+
+--
+-- Name: TABLE contract_document_versions; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.contract_document_versions IS 'Versões de um documento markdown de contrato: cada salvamento cria uma (version 1, 2, 3…; omita version no INSERT e o banco atribui a próxima, travando o documento). Imutáveis; somem só com o documento. A auditoria grava a linha sem o content (com content_bytes).';
+
+
+--
+-- Name: COLUMN contract_document_versions.version; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_document_versions.version IS 'Número da versão no documento, atribuído pelo banco quando omitido; se informado, tem de ser o próximo (max + 1).';
+
+
+--
+-- Name: COLUMN contract_document_versions.content; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_document_versions.content IS 'Markdown (UTF-8, até 1 MB; pode ser vazio).';
+
+
+--
+-- Name: COLUMN contract_document_versions.note; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_document_versions.note IS 'Nota opcional do salvamento (até 500).';
+
+
+--
+-- Name: COLUMN contract_document_versions.author_kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_document_versions.author_kind IS 'human (editor, upload, restauração) ou agent (gerado por IA a partir do PDF).';
+
+
+--
+-- Name: COLUMN contract_document_versions.ai_run_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_document_versions.ai_run_id IS 'Execução do agente que gerou a versão (só author_kind = agent; opcional).';
+
+
+--
+-- Name: COLUMN contract_document_versions.restored_from_version_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_document_versions.restored_from_version_id IS 'Versão (do mesmo documento) cujo conteúdo foi restaurado nesta.';
+
+
+--
+-- Name: contract_renewal_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.contract_renewal_tasks (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    contract_id uuid NOT NULL,
+    contract_cycle_id uuid NOT NULL,
+    status text DEFAULT 'open'::text NOT NULL,
+    opened_on date NOT NULL,
+    due_on date NOT NULL,
+    decided_at timestamp with time zone,
+    decided_by uuid,
+    decision_notes text,
+    new_cycle_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT contract_renewal_tasks_decision_check CHECK (
+CASE status
+    WHEN 'open'::text THEN ((decided_at IS NULL) AND (new_cycle_id IS NULL))
+    WHEN 'approved'::text THEN ((decided_at IS NOT NULL) AND (new_cycle_id IS NOT NULL))
+    WHEN 'declined'::text THEN ((decided_at IS NOT NULL) AND (new_cycle_id IS NULL))
+    ELSE NULL::boolean
+END),
+    CONSTRAINT contract_renewal_tasks_new_cycle_self_check CHECK ((new_cycle_id <> contract_cycle_id)),
+    CONSTRAINT contract_renewal_tasks_status_check CHECK ((status = ANY (ARRAY['open'::text, 'approved'::text, 'declined'::text])))
+);
+
+
+--
+-- Name: TABLE contract_renewal_tasks; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.contract_renewal_tasks IS 'Tarefa de renovação de um ciclo (uma por ciclo; no máximo uma open por contrato). Aprovada pelo usuário (cria o ciclo seguinte, new_cycle_id) ou recusada; decidida é final. Contrato renewal_pending ⇔ tarefa open (no COMMIT).';
+
+
+--
+-- Name: COLUMN contract_renewal_tasks.contract_cycle_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_renewal_tasks.contract_cycle_id IS 'Ciclo que termina (a renovar).';
+
+
+--
+-- Name: COLUMN contract_renewal_tasks.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_renewal_tasks.status IS 'open → approved (decided_at e new_cycle_id) | declined (decided_at). Decidida é final.';
+
+
+--
+-- Name: COLUMN contract_renewal_tasks.opened_on; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_renewal_tasks.opened_on IS 'Quando a tarefa foi aberta (fim do ciclo − renewal_lead_days, ou à mão).';
+
+
+--
+-- Name: COLUMN contract_renewal_tasks.due_on; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_renewal_tasks.due_on IS 'Fim do ciclo a renovar (= contract_cycles.ends_on); depois disso a tarefa está vencida.';
+
+
+--
+-- Name: COLUMN contract_renewal_tasks.new_cycle_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_renewal_tasks.new_cycle_id IS 'Ciclo criado pela aprovação (o seguinte, seq + 1).';
+
+
+--
+-- Name: contracts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.contracts (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    caixa_id uuid NOT NULL,
+    entity_id uuid NOT NULL,
+    direction text NOT NULL,
+    name text NOT NULL,
+    contract_number text,
+    category_id uuid NOT NULL,
+    counterparty_caixa_id uuid,
+    status text DEFAULT 'draft'::text NOT NULL,
+    auto_renew boolean DEFAULT false NOT NULL,
+    notice_days smallint DEFAULT 30 NOT NULL,
+    renewal_lead_days smallint DEFAULT 60 NOT NULL,
+    reminder_every_days smallint DEFAULT 7 NOT NULL,
+    readjustment_index text DEFAULT 'none'::text NOT NULL,
+    readjustment_base_date date,
+    termination_penalty_text text,
+    termination_penalty_cents bigint,
+    terminated_on date,
+    termination_notes text,
+    notes text,
+    created_by uuid,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT contracts_contract_number_check CHECK (((btrim(contract_number) <> ''::text) AND (length(contract_number) <= 60))),
+    CONSTRAINT contracts_counterparty_caixa_check CHECK ((counterparty_caixa_id <> caixa_id)),
+    CONSTRAINT contracts_direction_check CHECK ((direction = ANY (ARRAY['payable'::text, 'receivable'::text]))),
+    CONSTRAINT contracts_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 200))),
+    CONSTRAINT contracts_notice_days_check CHECK (((notice_days >= 0) AND (notice_days <= 365))),
+    CONSTRAINT contracts_readjustment_index_check CHECK ((readjustment_index = ANY (ARRAY['none'::text, 'ipca'::text, 'igpm'::text, 'inpc'::text, 'other'::text]))),
+    CONSTRAINT contracts_reminder_every_days_check CHECK (((reminder_every_days >= 1) AND (reminder_every_days <= 30))),
+    CONSTRAINT contracts_renewal_lead_days_check CHECK (((renewal_lead_days >= 1) AND (renewal_lead_days <= 365))),
+    CONSTRAINT contracts_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'active'::text, 'renewal_pending'::text, 'ended'::text, 'terminated'::text]))),
+    CONSTRAINT contracts_terminated_check CHECK (((status = 'terminated'::text) = (terminated_on IS NOT NULL))),
+    CONSTRAINT contracts_termination_penalty_cents_check CHECK ((termination_penalty_cents > 0)),
+    CONSTRAINT contracts_termination_penalty_text_check CHECK ((length(termination_penalty_text) <= 2000))
+);
+
+
+--
+-- Name: TABLE contracts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.contracts IS 'Contratos (spec 020): acordo com uma entidade dentro de uma caixa general. Gera os títulos das parcelas por ciclo (contract_cycles); documentos, aditivos e tarefas de renovação ficam nas tabelas contract_*. Só rascunho é excluído.';
+
+
+--
+-- Name: COLUMN contracts.caixa_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.caixa_id IS 'Caixa dona do contrato (sempre general). Imutável fora do rascunho.';
+
+
+--
+-- Name: COLUMN contracts.entity_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.entity_id IS 'Contraparte (diferente do titular da caixa). Imutável fora do rascunho.';
+
+
+--
+-- Name: COLUMN contracts.direction; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.direction IS 'receivable (eu recebo; categoria income) ou payable (eu pago; categoria expense). Imutável; as parcelas seguem.';
+
+
+--
+-- Name: COLUMN contracts.contract_number; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.contract_number IS 'Número do contrato (opcional, até 60), único por caixa sem distinção de maiúsculas entre os não arquivados.';
+
+
+--
+-- Name: COLUMN contracts.category_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.category_id IS 'Categoria aplicada às parcelas, compatível com a direção.';
+
+
+--
+-- Name: COLUMN contracts.counterparty_caixa_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.counterparty_caixa_id IS 'Caixa onde as parcelas espelham (general, titular = entity_id). Nulo = sem espelho.';
+
+
+--
+-- Name: COLUMN contracts.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.status IS 'draft (sem títulos) → active; active → renewal_pending | ended | terminated; renewal_pending → active | ended | terminated; ended → active | renewal_pending; terminated é final; nada volta para draft. renewal_pending ⇔ existe tarefa de renovação open (checado no COMMIT).';
+
+
+--
+-- Name: COLUMN contracts.notice_days; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.notice_days IS 'Aviso prévio em dias (0–365): prazo para pedir a não renovação ou a rescisão.';
+
+
+--
+-- Name: COLUMN contracts.renewal_lead_days; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.renewal_lead_days IS 'Antecedência, em dias antes do fim do ciclo, para abrir a tarefa de renovação (1–365).';
+
+
+--
+-- Name: COLUMN contracts.reminder_every_days; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.reminder_every_days IS 'Intervalo do lembrete no sino enquanto a renovação estiver pendente (1–30).';
+
+
+--
+-- Name: COLUMN contracts.readjustment_index; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.readjustment_index IS 'Índice de reajuste informativo: none, ipca, igpm, inpc ou other (o sistema não busca índices).';
+
+
+--
+-- Name: COLUMN contracts.readjustment_base_date; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.readjustment_base_date IS 'Data-base do reajuste (lembrete). Nula = aniversário do contrato.';
+
+
+--
+-- Name: COLUMN contracts.termination_penalty_text; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.termination_penalty_text IS 'Multa rescisória descrita (até 2000), para consulta no encerramento.';
+
+
+--
+-- Name: COLUMN contracts.termination_penalty_cents; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.termination_penalty_cents IS 'Multa rescisória em valor (> 0), para consulta no encerramento.';
+
+
+--
+-- Name: COLUMN contracts.terminated_on; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.terminated_on IS 'Data de encerramento da rescisão; preenchida se e somente se status = terminated.';
 
 
 --
@@ -7412,7 +8475,7 @@ CREATE TABLE public.message_subscriptions (
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT message_subscriptions_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text]))),
+    CONSTRAINT message_subscriptions_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text]))),
     CONSTRAINT message_subscriptions_params_check CHECK (public.message_subscription_params_valid(event_kind, params))
 );
 
@@ -7428,7 +8491,7 @@ COMMENT ON TABLE public.message_subscriptions IS 'Eventos que um destino recebe 
 -- Name: COLUMN message_subscriptions.event_kind; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.message_subscriptions.event_kind IS 'due_reminder (D-N), overdue (atrasados), daily_summary, weekly_summary, invoice_closed (fatura fechada, valor por pagadora), card_limit (limite acima de X%), reconciliation_divergence, agent_completed, agent_message.';
+COMMENT ON COLUMN public.message_subscriptions.event_kind IS 'due_reminder (D-N), overdue (atrasados), daily_summary, weekly_summary, invoice_closed (fatura fechada, valor por pagadora), card_limit (limite acima de X%), reconciliation_divergence, agent_completed, agent_message; contratos (spec 020): contract_notice_deadline (D-N do fim do aviso prévio), contract_ending (D-N do fim do ciclo), contract_renewal_pending (ao abrir a tarefa e a cada N dias) e contract_readjustment (na data-base).';
 
 
 --
@@ -7505,7 +8568,7 @@ CREATE TABLE public.notifications (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT notifications_data_check CHECK ((jsonb_typeof(data) = 'object'::text)),
     CONSTRAINT notifications_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
-    CONSTRAINT notifications_kind_check CHECK ((kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text]))),
+    CONSTRAINT notifications_kind_check CHECK ((kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text]))),
     CONSTRAINT notifications_link_check CHECK (((link ~ '^/[^/]'::text) OR (link = '/'::text))),
     CONSTRAINT notifications_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 200)))
 );
@@ -7522,7 +8585,7 @@ COMMENT ON TABLE public.notifications IS 'Notificações do sino, por usuário. 
 -- Name: COLUMN notifications.kind; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.notifications.kind IS 'agent_completed, agent_message, mirror_pending, mirror_disputed, invoice_closed, due_reminder, overdue, card_limit, reconciliation_divergence, message_failed ou system.';
+COMMENT ON COLUMN public.notifications.kind IS 'agent_completed, agent_message, mirror_pending, mirror_disputed, invoice_closed, due_reminder, overdue, card_limit, reconciliation_divergence, message_failed, system, contract_notice_deadline, contract_ending, contract_renewal_pending ou contract_readjustment.';
 
 
 --
@@ -8437,6 +9500,102 @@ ALTER TABLE ONLY public.classification_rules
 
 
 --
+-- Name: contract_amendments contract_amendments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_amendments
+    ADD CONSTRAINT contract_amendments_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: contract_cycles contract_cycles_contract_seq_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_cycles
+    ADD CONSTRAINT contract_cycles_contract_seq_key UNIQUE (contract_id, seq);
+
+
+--
+-- Name: contract_cycles contract_cycles_id_contract_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_cycles
+    ADD CONSTRAINT contract_cycles_id_contract_key UNIQUE (id, contract_id);
+
+
+--
+-- Name: contract_cycles contract_cycles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_cycles
+    ADD CONSTRAINT contract_cycles_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: contract_document_versions contract_document_versions_document_version_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_document_versions
+    ADD CONSTRAINT contract_document_versions_document_version_key UNIQUE (document_id, version);
+
+
+--
+-- Name: contract_document_versions contract_document_versions_id_document_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_document_versions
+    ADD CONSTRAINT contract_document_versions_id_document_key UNIQUE (id, document_id);
+
+
+--
+-- Name: contract_document_versions contract_document_versions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_document_versions
+    ADD CONSTRAINT contract_document_versions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: contract_documents contract_documents_id_contract_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_documents
+    ADD CONSTRAINT contract_documents_id_contract_key UNIQUE (id, contract_id);
+
+
+--
+-- Name: contract_documents contract_documents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_documents
+    ADD CONSTRAINT contract_documents_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: contract_renewal_tasks contract_renewal_tasks_contract_cycle_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_renewal_tasks
+    ADD CONSTRAINT contract_renewal_tasks_contract_cycle_id_key UNIQUE (contract_cycle_id);
+
+
+--
+-- Name: contract_renewal_tasks contract_renewal_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_renewal_tasks
+    ADD CONSTRAINT contract_renewal_tasks_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: contracts contracts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contracts
+    ADD CONSTRAINT contracts_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: entities entities_document_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -9299,6 +10458,174 @@ CREATE UNIQUE INDEX classification_rules_pattern_key ON public.classification_ru
 
 
 --
+-- Name: contract_amendments_contract_cycle_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_amendments_contract_cycle_id_idx ON public.contract_amendments USING btree (contract_cycle_id);
+
+
+--
+-- Name: contract_amendments_contract_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_amendments_contract_id_idx ON public.contract_amendments USING btree (contract_id, effective_on);
+
+
+--
+-- Name: contract_amendments_created_by_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_amendments_created_by_idx ON public.contract_amendments USING btree (created_by);
+
+
+--
+-- Name: contract_amendments_document_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_amendments_document_id_idx ON public.contract_amendments USING btree (document_id);
+
+
+--
+-- Name: contract_document_versions_ai_run_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_document_versions_ai_run_id_idx ON public.contract_document_versions USING btree (ai_run_id);
+
+
+--
+-- Name: contract_document_versions_author_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_document_versions_author_user_id_idx ON public.contract_document_versions USING btree (author_user_id);
+
+
+--
+-- Name: contract_document_versions_restored_from_version_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_document_versions_restored_from_version_id_idx ON public.contract_document_versions USING btree (restored_from_version_id);
+
+
+--
+-- Name: contract_documents_attachment_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_documents_attachment_id_idx ON public.contract_documents USING btree (attachment_id);
+
+
+--
+-- Name: contract_documents_contract_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_documents_contract_id_idx ON public.contract_documents USING btree (contract_id);
+
+
+--
+-- Name: contract_documents_created_by_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_documents_created_by_idx ON public.contract_documents USING btree (created_by);
+
+
+--
+-- Name: contract_documents_current_version_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_documents_current_version_id_idx ON public.contract_documents USING btree (current_version_id);
+
+
+--
+-- Name: contract_documents_source_document_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_documents_source_document_id_idx ON public.contract_documents USING btree (source_document_id);
+
+
+--
+-- Name: contract_renewal_tasks_contract_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_renewal_tasks_contract_id_idx ON public.contract_renewal_tasks USING btree (contract_id);
+
+
+--
+-- Name: contract_renewal_tasks_decided_by_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_renewal_tasks_decided_by_idx ON public.contract_renewal_tasks USING btree (decided_by);
+
+
+--
+-- Name: contract_renewal_tasks_due_on_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_renewal_tasks_due_on_idx ON public.contract_renewal_tasks USING btree (due_on) WHERE (status = 'open'::text);
+
+
+--
+-- Name: contract_renewal_tasks_new_cycle_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contract_renewal_tasks_new_cycle_id_idx ON public.contract_renewal_tasks USING btree (new_cycle_id);
+
+
+--
+-- Name: contract_renewal_tasks_open_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX contract_renewal_tasks_open_key ON public.contract_renewal_tasks USING btree (contract_id) WHERE (status = 'open'::text);
+
+
+--
+-- Name: contracts_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contracts_caixa_id_idx ON public.contracts USING btree (caixa_id);
+
+
+--
+-- Name: contracts_category_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contracts_category_id_idx ON public.contracts USING btree (category_id);
+
+
+--
+-- Name: contracts_contract_number_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX contracts_contract_number_key ON public.contracts USING btree (caixa_id, lower(contract_number)) WHERE ((archived_at IS NULL) AND (contract_number IS NOT NULL));
+
+
+--
+-- Name: contracts_counterparty_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contracts_counterparty_caixa_id_idx ON public.contracts USING btree (counterparty_caixa_id);
+
+
+--
+-- Name: contracts_created_by_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contracts_created_by_idx ON public.contracts USING btree (created_by);
+
+
+--
+-- Name: contracts_entity_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contracts_entity_id_idx ON public.contracts USING btree (entity_id);
+
+
+--
+-- Name: contracts_status_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contracts_status_idx ON public.contracts USING btree (status);
+
+
+--
 -- Name: entities_name_trgm_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9838,6 +11165,20 @@ CREATE INDEX titles_category_id_idx ON public.titles USING btree (category_id);
 
 
 --
+-- Name: titles_contract_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_contract_id_idx ON public.titles USING btree (contract_id);
+
+
+--
+-- Name: titles_contract_installment_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX titles_contract_installment_key ON public.titles USING btree (contract_cycle_id, caixa_id, contract_installment);
+
+
+--
 -- Name: titles_counterparty_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10290,6 +11631,167 @@ CREATE TRIGGER classification_rules_set_updated_at BEFORE UPDATE ON public.class
 --
 
 CREATE TRIGGER classification_rules_validate BEFORE INSERT OR UPDATE OF match_kind, pattern, direction, category_id ON public.classification_rules FOR EACH ROW EXECUTE FUNCTION public.classification_rules_validate();
+
+
+--
+-- Name: contract_amendments contract_amendments_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_amendments_audit AFTER INSERT OR DELETE OR UPDATE ON public.contract_amendments FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: contract_amendments contract_amendments_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_amendments_set_updated_at BEFORE UPDATE ON public.contract_amendments FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: contract_amendments contract_amendments_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_amendments_validate BEFORE UPDATE ON public.contract_amendments FOR EACH ROW EXECUTE FUNCTION public.contract_amendments_validate();
+
+
+--
+-- Name: contract_cycles contract_cycles_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_cycles_audit AFTER INSERT OR DELETE OR UPDATE ON public.contract_cycles FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: contract_cycles contract_cycles_contiguous_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER contract_cycles_contiguous_check AFTER INSERT OR DELETE OR UPDATE OF seq, starts_on, duration_months ON public.contract_cycles DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.contract_cycles_contiguous_check();
+
+
+--
+-- Name: contract_cycles contract_cycles_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_cycles_set_updated_at BEFORE UPDATE ON public.contract_cycles FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: contract_cycles contract_cycles_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_cycles_validate BEFORE UPDATE ON public.contract_cycles FOR EACH ROW EXECUTE FUNCTION public.contract_cycles_validate();
+
+
+--
+-- Name: contract_document_versions contract_document_versions_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_document_versions_audit AFTER INSERT OR DELETE OR UPDATE ON public.contract_document_versions FOR EACH ROW EXECUTE FUNCTION public.contract_document_versions_audit_row();
+
+
+--
+-- Name: contract_document_versions contract_document_versions_before_insert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_document_versions_before_insert BEFORE INSERT ON public.contract_document_versions FOR EACH ROW EXECUTE FUNCTION public.contract_document_versions_before_insert();
+
+
+--
+-- Name: contract_document_versions contract_document_versions_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_document_versions_guard BEFORE DELETE OR UPDATE ON public.contract_document_versions FOR EACH ROW EXECUTE FUNCTION public.contract_document_versions_guard();
+
+
+--
+-- Name: contract_document_versions contract_document_versions_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_document_versions_set_updated_at BEFORE UPDATE ON public.contract_document_versions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: contract_documents contract_documents_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_documents_audit AFTER INSERT OR DELETE OR UPDATE ON public.contract_documents FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: contract_documents contract_documents_current_version_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER contract_documents_current_version_check AFTER INSERT OR UPDATE OF current_version_id ON public.contract_documents DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.contract_documents_current_version_check();
+
+
+--
+-- Name: contract_documents contract_documents_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_documents_set_updated_at BEFORE UPDATE ON public.contract_documents FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: contract_documents contract_documents_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_documents_validate BEFORE INSERT OR UPDATE ON public.contract_documents FOR EACH ROW EXECUTE FUNCTION public.contract_documents_validate();
+
+
+--
+-- Name: contract_renewal_tasks contract_renewal_tasks_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_renewal_tasks_audit AFTER INSERT OR DELETE OR UPDATE ON public.contract_renewal_tasks FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: contract_renewal_tasks contract_renewal_tasks_integrity_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER contract_renewal_tasks_integrity_check AFTER INSERT OR DELETE OR UPDATE OF status, contract_id ON public.contract_renewal_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.contract_refs_integrity_check();
+
+
+--
+-- Name: contract_renewal_tasks contract_renewal_tasks_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_renewal_tasks_set_updated_at BEFORE UPDATE ON public.contract_renewal_tasks FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: contract_renewal_tasks contract_renewal_tasks_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_renewal_tasks_validate BEFORE INSERT OR UPDATE ON public.contract_renewal_tasks FOR EACH ROW EXECUTE FUNCTION public.contract_renewal_tasks_validate();
+
+
+--
+-- Name: contracts contracts_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contracts_audit AFTER INSERT OR DELETE OR UPDATE ON public.contracts FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: contracts contracts_renewal_pending_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER contracts_renewal_pending_check AFTER INSERT OR UPDATE OF status ON public.contracts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.contracts_status_integrity_check();
+
+
+--
+-- Name: contracts contracts_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contracts_set_updated_at BEFORE UPDATE ON public.contracts FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: contracts contracts_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contracts_validate BEFORE INSERT OR DELETE OR UPDATE ON public.contracts FOR EACH ROW EXECUTE FUNCTION public.contracts_validate();
 
 
 --
@@ -10790,10 +12292,17 @@ CREATE CONSTRAINT TRIGGER titles_card_invoice_integrity_check AFTER INSERT OR DE
 
 
 --
+-- Name: titles titles_contract_integrity_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER titles_contract_integrity_check AFTER INSERT OR UPDATE OF contract_id ON public.titles DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.contract_refs_integrity_check();
+
+
+--
 -- Name: titles titles_mirror_check; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE CONSTRAINT TRIGGER titles_mirror_check AFTER INSERT OR UPDATE OF caixa_id, direction, entity_id, amount_cents, due_date, origin, recurrence_rule_id, occurrence, counterparty_caixa_id, mirror_title_id, mirror_status, card_invoice_id ON public.titles DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.titles_mirror_check();
+CREATE CONSTRAINT TRIGGER titles_mirror_check AFTER INSERT OR UPDATE OF caixa_id, direction, entity_id, amount_cents, due_date, origin, recurrence_rule_id, occurrence, counterparty_caixa_id, mirror_title_id, mirror_status, card_invoice_id, contract_id, contract_cycle_id, contract_installment ON public.titles DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.titles_mirror_check();
 
 
 --
@@ -10822,6 +12331,13 @@ CREATE TRIGGER titles_validate BEFORE INSERT OR UPDATE ON public.titles FOR EACH
 --
 
 CREATE TRIGGER titles_validate_card_invoice BEFORE INSERT OR UPDATE OF card_invoice_id, caixa_id, direction, counterparty_caixa_id ON public.titles FOR EACH ROW EXECUTE FUNCTION public.titles_validate_card_invoice();
+
+
+--
+-- Name: titles titles_validate_contract; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER titles_validate_contract BEFORE INSERT OR UPDATE OF contract_id, contract_cycle_id, contract_installment, caixa_id, direction, entity_id, counterparty_caixa_id, mirror_status ON public.titles FOR EACH ROW EXECUTE FUNCTION public.titles_validate_contract();
 
 
 --
@@ -11335,6 +12851,190 @@ ALTER TABLE ONLY public.classification_rules
 
 
 --
+-- Name: contract_amendments contract_amendments_contract_cycle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_amendments
+    ADD CONSTRAINT contract_amendments_contract_cycle_id_fkey FOREIGN KEY (contract_cycle_id, contract_id) REFERENCES public.contract_cycles(id, contract_id);
+
+
+--
+-- Name: contract_amendments contract_amendments_contract_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_amendments
+    ADD CONSTRAINT contract_amendments_contract_id_fkey FOREIGN KEY (contract_id) REFERENCES public.contracts(id);
+
+
+--
+-- Name: contract_amendments contract_amendments_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_amendments
+    ADD CONSTRAINT contract_amendments_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: contract_amendments contract_amendments_document_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_amendments
+    ADD CONSTRAINT contract_amendments_document_id_fkey FOREIGN KEY (document_id, contract_id) REFERENCES public.contract_documents(id, contract_id);
+
+
+--
+-- Name: contract_cycles contract_cycles_contract_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_cycles
+    ADD CONSTRAINT contract_cycles_contract_id_fkey FOREIGN KEY (contract_id) REFERENCES public.contracts(id) ON DELETE CASCADE;
+
+
+--
+-- Name: contract_document_versions contract_document_versions_ai_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_document_versions
+    ADD CONSTRAINT contract_document_versions_ai_run_id_fkey FOREIGN KEY (ai_run_id) REFERENCES public.ai_runs(id) ON DELETE SET NULL;
+
+
+--
+-- Name: contract_document_versions contract_document_versions_author_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_document_versions
+    ADD CONSTRAINT contract_document_versions_author_user_id_fkey FOREIGN KEY (author_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: contract_document_versions contract_document_versions_document_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_document_versions
+    ADD CONSTRAINT contract_document_versions_document_id_fkey FOREIGN KEY (document_id) REFERENCES public.contract_documents(id) ON DELETE CASCADE;
+
+
+--
+-- Name: contract_document_versions contract_document_versions_restored_from_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_document_versions
+    ADD CONSTRAINT contract_document_versions_restored_from_version_id_fkey FOREIGN KEY (restored_from_version_id, document_id) REFERENCES public.contract_document_versions(id, document_id);
+
+
+--
+-- Name: contract_documents contract_documents_attachment_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_documents
+    ADD CONSTRAINT contract_documents_attachment_id_fkey FOREIGN KEY (attachment_id) REFERENCES public.attachments(id);
+
+
+--
+-- Name: contract_documents contract_documents_contract_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_documents
+    ADD CONSTRAINT contract_documents_contract_id_fkey FOREIGN KEY (contract_id) REFERENCES public.contracts(id);
+
+
+--
+-- Name: contract_documents contract_documents_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_documents
+    ADD CONSTRAINT contract_documents_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: contract_documents contract_documents_current_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_documents
+    ADD CONSTRAINT contract_documents_current_version_id_fkey FOREIGN KEY (current_version_id, id) REFERENCES public.contract_document_versions(id, document_id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: contract_documents contract_documents_source_document_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_documents
+    ADD CONSTRAINT contract_documents_source_document_id_fkey FOREIGN KEY (source_document_id, contract_id) REFERENCES public.contract_documents(id, contract_id);
+
+
+--
+-- Name: contract_renewal_tasks contract_renewal_tasks_contract_cycle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_renewal_tasks
+    ADD CONSTRAINT contract_renewal_tasks_contract_cycle_id_fkey FOREIGN KEY (contract_cycle_id, contract_id) REFERENCES public.contract_cycles(id, contract_id);
+
+
+--
+-- Name: contract_renewal_tasks contract_renewal_tasks_contract_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_renewal_tasks
+    ADD CONSTRAINT contract_renewal_tasks_contract_id_fkey FOREIGN KEY (contract_id) REFERENCES public.contracts(id);
+
+
+--
+-- Name: contract_renewal_tasks contract_renewal_tasks_decided_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_renewal_tasks
+    ADD CONSTRAINT contract_renewal_tasks_decided_by_fkey FOREIGN KEY (decided_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: contract_renewal_tasks contract_renewal_tasks_new_cycle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contract_renewal_tasks
+    ADD CONSTRAINT contract_renewal_tasks_new_cycle_id_fkey FOREIGN KEY (new_cycle_id, contract_id) REFERENCES public.contract_cycles(id, contract_id);
+
+
+--
+-- Name: contracts contracts_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contracts
+    ADD CONSTRAINT contracts_caixa_id_fkey FOREIGN KEY (caixa_id) REFERENCES public.caixas(id);
+
+
+--
+-- Name: contracts contracts_category_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contracts
+    ADD CONSTRAINT contracts_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.categories(id);
+
+
+--
+-- Name: contracts contracts_counterparty_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contracts
+    ADD CONSTRAINT contracts_counterparty_caixa_id_fkey FOREIGN KEY (counterparty_caixa_id) REFERENCES public.caixas(id);
+
+
+--
+-- Name: contracts contracts_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contracts
+    ADD CONSTRAINT contracts_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: contracts contracts_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contracts
+    ADD CONSTRAINT contracts_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(id);
+
+
+--
 -- Name: entity_addresses entity_addresses_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11836,6 +13536,22 @@ ALTER TABLE ONLY public.titles
 
 ALTER TABLE ONLY public.titles
     ADD CONSTRAINT titles_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.categories(id);
+
+
+--
+-- Name: titles titles_contract_cycle_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.titles
+    ADD CONSTRAINT titles_contract_cycle_id_fkey FOREIGN KEY (contract_cycle_id, contract_id) REFERENCES public.contract_cycles(id, contract_id);
+
+
+--
+-- Name: titles titles_contract_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.titles
+    ADD CONSTRAINT titles_contract_id_fkey FOREIGN KEY (contract_id) REFERENCES public.contracts(id);
 
 
 --

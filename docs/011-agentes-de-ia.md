@@ -61,7 +61,7 @@
 - O admin lê as conversas de qualquer usuário (filtro "Todos os usuários"), sem enviar, decidir, parar, renomear ou excluir.
 
 ### IA nos fluxos
-- Um "agente dos fluxos" faz a leitura de documentos e as sugestões da conciliação: o de `AI_FLOW_AGENT` (nome) ou o primeiro agente ativo. Cada uso é uma execução normal numa conversa arquivada, fora da lista (`screen_context.purpose`), sem tools, respondendo JSON.
+- Um "agente dos fluxos" faz a leitura de documentos, as sugestões da conciliação e, na F5, a leitura do PDF do contrato e a conversão PDF → markdown ([020](020-contratos.md)): o de `AI_FLOW_AGENT` (nome) ou o primeiro agente ativo. Cada uso é uma execução normal numa conversa arquivada, fora da lista (`screen_context.purpose`), sem tools, respondendo JSON.
 - `POST /api/title-entry/document`: lê PDF/imagem de boleto, nota ou comprovante e devolve tipo, beneficiário, documento, valor, vencimento, linha digitável, PIX e descrição. A linha digitável válida manda no valor e no vencimento; com documento cadastrado, devolve a entidade. Espera até `AI_DOCUMENT_TIMEOUT_MS`; sem agente, 501.
 - Conciliação: ao importar um extrato (e no botão "Sugerir com IA"), as linhas novas sem classificação vão ao agente com as entidades candidatas por semelhança e as categorias. As sugestões ficam como "sugerido pelo agente", gravadas como ator `agent`, e o usuário aprova (vira classificação do usuário) ou descarta em lote.
 

@@ -37,7 +37,7 @@ export async function flowAgentId(ctx: ServiceContext): Promise<string | null> {
   return result.rows[0]?.id ?? null;
 }
 
-async function waitRun(db: Executor, runId: string, timeoutMs: number) {
+export async function waitRun(db: Executor, runId: string, timeoutMs: number) {
   const until = Date.now() + timeoutMs;
   for (;;) {
     const run = await loadRun(db, runId);
