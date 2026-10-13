@@ -35,6 +35,20 @@ export type { EntityKind } from './documents';
 
 import type { EntityKind } from './documents';
 
+/** Tag de entidade como aparece na entidade (chip): `archived` = tag arquivada (esmaecida). */
+export type EntityTagRef = { id: string; name: string; colorSlot: number; archived: boolean };
+
+/** Tag do catálogo global (spec 003), com quantas entidades a usam. */
+export type EntityTag = {
+  id: string;
+  name: string;
+  colorSlot: number;
+  archivedAt: string | null;
+  usageCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type EntitySummary = {
   id: string;
   kind: EntityKind;
@@ -44,6 +58,10 @@ export type EntitySummary = {
   archivedAt: string | null;
   primaryPix: { keyType: string; keyValue: string } | null;
   caixaCount: number;
+  /** Favorita global (spec 003). */
+  isFavorite: boolean;
+  /** Tags (as ativas primeiro, por nome). */
+  tags: EntityTagRef[];
 };
 
 export type EntityContact = { id: string; kind: 'phone' | 'email' | 'other'; value: string; label: string | null; isPrimary: boolean };
@@ -784,7 +802,12 @@ export type CategoryReportData = {
   months: string[];
   caixas: ReportCaixa[];
   lines: CategoryTotalLine[];
+  /** Filtro por entidade aplicado (null = sem filtro): quantas entidades casaram. */
+  entityFilter: ReportEntityFilter | null;
 };
+
+/** Resultado do filtro por entidade (tags e favoritas) num relatório. */
+export type ReportEntityFilter = { entityCount: number };
 
 /** Uma linha de report_entity_totals com os nomes resolvidos. */
 export type EntityTotalLine = {
@@ -807,6 +830,7 @@ export type EntityReportData = {
   to: string;
   caixas: ReportCaixa[];
   lines: EntityTotalLine[];
+  entityFilter: ReportEntityFilter | null;
 };
 
 /** Uma linha de report_cash_projection (caixa, ou conta quando financialAccountId não é nulo). */
@@ -826,7 +850,12 @@ export type ProjectionLine = {
   projectedCents: number;
 };
 
-export type ProjectionReportData = { today: string; horizons: number[]; lines: ProjectionLine[] };
+export type ProjectionReportData = {
+  today: string;
+  horizons: number[];
+  lines: ProjectionLine[];
+  entityFilter: ReportEntityFilter | null;
+};
 
 /* ---------------- canvas de fluxo (spec 014) ---------------- */
 
@@ -851,6 +880,9 @@ export type FlowNodeDto = {
   realizedOutCents: number;
   forecastInCents: number;
   forecastOutCents: number;
+  /** Nós de entidade: tags e favorita (o filtro do canvas é do navegador). Caixas: [] e false. */
+  tagIds: string[];
+  isFavorite: boolean;
 };
 
 export type FlowEdgeDto = {

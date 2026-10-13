@@ -35,6 +35,14 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   entity_links_key: 'Esse vínculo já existe.',
   entity_links_spouse_key: 'Esse vínculo de cônjuge já existe.',
   entity_links_self_check: 'Uma entidade não pode ter vínculo com ela mesma.',
+  // tags de entidade (F6)
+  entity_tags_name_key: 'Já existe uma tag com esse nome (inclusive entre as arquivadas).',
+  entity_tags_name_check: 'O nome da tag precisa ter de 1 a 40 caracteres, sem espaços nas pontas.',
+  entity_tags_color_slot_check: 'Cor da tag inválida: escolha uma das 12 cores.',
+  entity_tag_links_tag_active_check: 'Essa tag está arquivada e não pode ser atribuída.',
+  entity_tag_links_pkey: 'A entidade já tem essa tag.',
+  entity_tag_links_tag_id_fkey: 'Tag não encontrada.',
+  entity_tag_links_entity_id_fkey: 'Entidade não encontrada.',
   // caixas e contas
   caixas_name_check: 'Informe o nome da caixa.',
   caixas_holder_primary_key: 'O titular já tem uma caixa principal.',

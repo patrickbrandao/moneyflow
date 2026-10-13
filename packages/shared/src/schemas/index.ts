@@ -4,7 +4,17 @@ import { isValidDocument, normalizeDocument } from '../documents';
 import { ptBR } from '../i18n/pt-BR';
 import { isValidPixKey, normalizePixKey, PIX_KEY_TYPES } from '../pix';
 import { FREQUENCIES } from '../recurrence';
-import { cents, id, isoDate, nonNegativeCents, optionalText, positiveCents, queryBool, requiredText } from './common';
+import {
+  cents,
+  entityFilterFields,
+  id,
+  isoDate,
+  nonNegativeCents,
+  optionalText,
+  positiveCents,
+  queryBool,
+  requiredText,
+} from './common';
 
 export * from './common';
 export * from './contracts';
@@ -60,6 +70,11 @@ export const memberUpdateInput = z.object({ role: z.enum(CAIXA_ROLES) });
 
 export const ENTITY_KINDS = ['person', 'company'] as const;
 
+const entityTagIds = z
+  .array(id)
+  .max(200)
+  .transform((ids) => [...new Set(ids.map((v) => v.toLowerCase()))]);
+
 const documentField = z
   .string()
   .nullish()
@@ -73,6 +88,9 @@ export const entityCreateInput = z
     document: documentField,
     birthDate: isoDate.nullish().transform((v) => v ?? null),
     notes: optionalText(),
+    /** Tags ativas da entidade (spec 003). */
+    tagIds: entityTagIds.default([]),
+    isFavorite: z.boolean().default(false),
   })
   .superRefine((value, ctx) => {
     if (value.document && !isValidDocument(value.kind, value.document)) {
@@ -88,14 +106,33 @@ export const entityUpdateInput = z.object({
   document: documentField.optional(),
   birthDate: isoDate.nullish(),
   notes: optionalText().optional(),
+  /** Substitui o conjunto inteiro de tags. */
+  tagIds: entityTagIds.optional(),
+  isFavorite: z.boolean().optional(),
 });
 
 export const entityListQuery = z.object({
   q: z.string().trim().max(200).optional(),
   kind: z.enum(ENTITY_KINDS).optional(),
   archived: queryBool,
+  ...entityFilterFields,
   limit: z.coerce.number().int().min(1).max(500).default(100),
 });
+
+/* ---------------- tags de entidade (spec 003) ---------------- */
+
+export const entityTagCreateInput = z.object({
+  name: requiredText(40),
+  colorSlot: z.number().int().min(1).max(12),
+});
+
+export const entityTagUpdateInput = z.object({
+  name: requiredText(40).optional(),
+  colorSlot: z.number().int().min(1).max(12).optional(),
+});
+
+export const entityTagListQuery = z.object({ archived: queryBool });
+
 
 export const CONTACT_KINDS = ['phone', 'email', 'other'] as const;
 export const contactInput = z.object({
@@ -441,6 +478,9 @@ export type UserCreateInput = z.input<typeof userCreateInput>;
 export type UserUpdateInput = z.input<typeof userUpdateInput>;
 export type EntityCreateInput = z.input<typeof entityCreateInput>;
 export type EntityUpdateInput = z.input<typeof entityUpdateInput>;
+export type EntityListQuery = z.input<typeof entityListQuery>;
+export type EntityTagCreateInput = z.input<typeof entityTagCreateInput>;
+export type EntityTagUpdateInput = z.input<typeof entityTagUpdateInput>;
 export type ContactInput = z.input<typeof contactInput>;
 export type AddressInput = z.input<typeof addressInput>;
 export type BankAccountInput = z.input<typeof bankAccountInput>;
