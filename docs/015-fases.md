@@ -5,3 +5,4 @@
 3. **F3, Visão**: canvas, relatórios e exportações ([014](014-visualizacao-e-relatorios.md)); Telegram ([013](013-mensagens-telegram.md)).
 4. **F4, IA**: agentes, janelas, tools, MCP client/server, sugestões e leitura de documentos ([011](011-agentes-de-ia.md)).
 5. **F5, Contratos**: contratos, documentos, renovação e avisos ([020](020-contratos.md)).
+6. **F6, Cadastro organizado**: tags e favoritas de entidade, filtro por entidade em relatórios e canvas, e o CNPJ alfanumérico em todo o sistema ([003](003-entidades.md), [014](014-visualizacao-e-relatorios.md)).
