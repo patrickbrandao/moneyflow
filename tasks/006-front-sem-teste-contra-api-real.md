@@ -6,7 +6,7 @@ autor: app
 responsavel: app
 prioridade: media
 criada: 2026-10-11
-commit:
+commit: 9b29f08
 ---
 
 # Cobrir no e2e os fluxos do agente ainda sem teste contra a API real
