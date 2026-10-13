@@ -12,3 +12,4 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 | 006 | [Cobrir no e2e os fluxos do agente ainda sem teste contra a API real](006-front-sem-teste-contra-api-real.md) | aberta | debito-tecnico | — | agente |
 | 007 | [Trocar as cores de tom roxo para tom azul em todo o frontend](007-acento-roxo-para-azul.md) | concluida | melhoria | app | usuario |
 | 008 | [Agente concilia um lote inteiro do extrato (espelho, pagadora, desfazer, ignorar, candidatos e lote)](008-agente-conciliacao-completa.md) | concluida | melhoria | app | usuario |
+| 009 | [Agente estorna a baixa de um casamento errado (`reverse_settlement`)](009-agente-estorna-baixa.md) | concluida | melhoria | app | agente |

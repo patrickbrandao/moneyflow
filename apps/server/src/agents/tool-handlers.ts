@@ -1,4 +1,16 @@
-import { type AgentToolInput, type AgentToolName, diffRows, type PreviewField, type ToolPreview, t, todayIso } from '@moneyflow/shared';
+import {
+  type AgentToolInput,
+  type AgentToolName,
+  diffDays,
+  diffRows,
+  formatBRL,
+  formatDate,
+  type PreviewField,
+  type PreviewRow,
+  type ToolPreview,
+  t,
+  todayIso,
+} from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
 import { forbidden, notFound, unprocessable } from '../errors';
@@ -13,7 +25,7 @@ import { listDestinations, sendAgentMessage } from '../services/messages';
 import { search } from '../services/overview';
 import * as rec from '../services/reconciliation';
 import * as reports from '../services/reports';
-import { createSettlement } from '../services/settlements';
+import { createSettlement, reverseSettlement } from '../services/settlements';
 import { accountStatement } from '../services/statement';
 import * as statements from '../services/statements';
 import * as titles from '../services/titles';
@@ -343,6 +355,71 @@ export const TOOL_HANDLERS: Handlers = {
     },
     run: (ctx, i) => createSettlement(ctx, i.titleId, i.settlement),
   },
+  reverse_settlement: {
+    preview: async (ctx, i) => {
+      const owner = await ctx.db.execute<{ title_id: string }>(sql`SELECT title_id FROM settlements WHERE id = ${i.settlementId}`);
+      if (!owner.rows[0]) throw notFound();
+      const title = await titles.getTitle(ctx, owner.rows[0].title_id);
+      if (!title.canWrite) throw forbidden(t.errors.readOnly);
+      const leg = title.settlements.find((s) => s.id === i.settlementId)!;
+      if (leg.reversedAt) throw unprocessable(t.errors.settlementReversed);
+      const reversedOn = i.reversedOn ?? todayIso();
+      if (diffDays(leg.settledOn, reversedOn) < 0) throw unprocessable(t.errors.reversalBeforeSettlement);
+
+      const rows: PreviewRow[] = [
+        { label: 'Data da baixa', before: formatDate(leg.settledOn), after: '—' },
+        { label: 'Valor', before: formatBRL(leg.cashCents), after: '—' },
+        { label: 'Conta', before: leg.financialAccountName ?? 'Conta a definir', after: '—' },
+      ];
+      if (leg.mirrorSettlementId && title.mirror) {
+        const account = title.mirror.canRead
+          ? await ctx.db.execute<{ financial_account_id: string | null }>(
+              sql`SELECT financial_account_id FROM settlements WHERE id = ${leg.mirrorSettlementId}`,
+            )
+          : null;
+        const accountId = account?.rows[0]?.financial_account_id;
+        const where = !title.mirror.canRead ? null : accountId ? await nameOf(ctx, 'account', accountId) : 'conta a definir';
+        rows.push({
+          label: 'Perna do espelho',
+          before: [title.mirror.caixaName, where].filter(Boolean).join(' · '),
+          after: 'Estornada',
+        });
+      }
+      if (leg.transferId) {
+        rows.push({
+          label: 'Transferência',
+          before: leg.transferOtherAccountName ? `Com ${leg.transferOtherAccountName}` : 'Gerada pela baixa',
+          after: i.undoTransfer ? 'Desfeita' : 'Mantida',
+        });
+      }
+      rows.push(
+        { label: 'Em aberto', before: formatBRL(title.openCents), after: formatBRL(title.openCents + leg.amountCents) },
+        { label: 'Estorno em', after: formatDate(reversedOn) },
+        { label: 'Motivo', after: i.reason },
+      );
+
+      // A linha do extrato ainda conciliada com o movimento da baixa continua conciliada depois do estorno.
+      const matched = await ctx.db.execute<{ description: string; amount_cents: number; posted_on: string }>(sql`
+        SELECT l.description, l.amount_cents, l.posted_on
+          FROM statement_lines l JOIN movements m ON m.id = l.movement_id
+         WHERE m.settlement_id = ${i.settlementId} AND l.status IN ('matched', 'suggested')`);
+      const warnings = [
+        'Cada perna com conta recebe o movimento oposto na data do estorno; o movimento original continua no extrato da conta.',
+      ];
+      for (const line of matched.rows)
+        warnings.push(
+          `A linha do extrato ${lineLabel(line)} continua conciliada com o movimento desta baixa: desfaça antes com unmatch_statement_line.`,
+        );
+      return {
+        title: title.direction === 'payable' ? 'Estornar pagamento' : 'Estornar recebimento',
+        summary: `${title.description} (${title.entityName})`,
+        action: 'delete',
+        rows,
+        warnings,
+      };
+    },
+    run: (ctx, i) => reverseSettlement(ctx, i.settlementId, { reason: i.reason, reversedOn: i.reversedOn, undoTransfer: i.undoTransfer }),
+  },
   create_transfer: {
     preview: async (ctx, i) => {
       const from = await caixas.getAccount(ctx, i.fromAccountId);
@@ -473,7 +550,9 @@ export const TOOL_HANDLERS: Handlers = {
         ],
         warnings:
           state.status === 'matched'
-            ? ['O movimento ou a baixa criados ao conciliar continuam lançados; estorne a baixa se ela estava errada.']
+            ? [
+                'O movimento ou a baixa criados ao conciliar continuam lançados; estorne a baixa com reverse_settlement se ela estava errada.',
+              ]
             : [],
       };
     },

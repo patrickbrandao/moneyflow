@@ -10,6 +10,7 @@ import {
   lineCreateInput,
   pixKeyInput,
   settlementCreateInput,
+  settlementReverseInput,
   TITLE_FILTERS,
   titleCreateInput,
   titleUpdateInput,
@@ -306,6 +307,24 @@ export const AGENT_TOOLS = [
     input: z.object({ titleId: id, settlement: settlementCreateInput }),
   }),
   define({
+    name: 'reverse_settlement',
+    title: 'Estornar baixa',
+    description:
+      'Estorna uma baixa (get_title lista as baixas do título, com o id): a baixa e a perna do espelho ficam estornadas, cada perna com conta recebe o movimento oposto e o título volta a ter o valor em aberto. Use para corrigir uma baixa errada, inclusive a criada ao casar uma linha do extrato com o título errado (desfaça antes a conciliação com unmatch_statement_line).',
+    kind: 'write',
+    destructive: true,
+    input: z.object({
+      settlementId: id.describe('Baixa a estornar.'),
+      reason: settlementReverseInput.shape.reason.describe('Motivo do estorno (fica na baixa).'),
+      reversedOn: settlementReverseInput.shape.reversedOn.describe(
+        'Data do estorno (AAAA-MM-DD); omitida = hoje. Não pode ser antes da baixa.',
+      ),
+      undoTransfer: settlementReverseInput.shape.undoTransfer.describe(
+        'Baixa paga com conta de outra caixa: true (padrão) desfaz a transferência gerada.',
+      ),
+    }),
+  }),
+  define({
     name: 'create_transfer',
     title: 'Criar transferência',
     description: 'Transfere dinheiro entre duas contas financeiras (inclusive de caixas diferentes).',
@@ -346,7 +365,7 @@ export const AGENT_TOOLS = [
     name: 'unmatch_statement_line',
     title: 'Desfazer conciliação da linha',
     description:
-      'Desfaz a conciliação (ou a sugestão) de uma linha do extrato, que volta a nova. O movimento ou a baixa criados ao conciliar continuam lançados.',
+      'Desfaz a conciliação (ou a sugestão) de uma linha do extrato, que volta a nova. O movimento ou a baixa criados ao conciliar continuam lançados (estorne a baixa errada com reverse_settlement).',
     kind: 'write',
     destructive: true,
     input: z.object({ lineId: id }),

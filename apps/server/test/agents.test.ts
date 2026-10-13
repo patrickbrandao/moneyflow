@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { SseParser } from '@moneyflow/shared';
+import { formatBRL, SseParser } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
@@ -649,6 +649,95 @@ describe('conciliação pelo agente', () => {
 
     await callTool(autonomous.id, 'match_statement_lines', { matches: [{ lineId, titleId: pix.id }] });
     expect((await admin.get(`/api/titles/${pix.id}`)).status).toBe('paid');
+  });
+
+  it('casamento errado corrigido pelo agente: desfaz, estorna a baixa (com a perna do espelho) e casa com o título certo', async () => {
+    const s = await scenario(h, admin);
+    const base = { caixaId: s.caixaA.id, direction: 'payable', categoryId: s.expense.id, competenceDate: '2026-10-01' };
+    const pix = await admin.post('/api/titles', {
+      ...base,
+      entityId: s.supplier.id,
+      description: 'Pagamento José',
+      dueDate: '2026-10-21',
+      amountCents: 40_000,
+    });
+    // O título errado é de quem é titular da caixa B: espelhado (a receber) lá.
+    const wrong = await admin.post('/api/titles', {
+      ...base,
+      entityId: s.holderB.id,
+      description: 'Aluguel',
+      dueDate: '2026-10-25',
+      amountCents: 100_000,
+    });
+    const imp = await importStatement(`/api/statement-imports?accountId=${s.accountA.id}&fileName=extrato.ofx`, 'extrato-ofx2.ofx');
+    const lineId = imp.lines.find((l: any) => l.fitid === 'OFX2-0006').id;
+
+    await callTool(autonomous.id, 'match_statement_line', { lineId, titleId: wrong.id });
+    const settled = await admin.get(`/api/titles/${wrong.id}`);
+    expect(settled.openCents).toBe(60_000);
+    const leg = settled.settlements[0];
+    expect(leg).toMatchObject({ settledOn: '2026-10-22', cashCents: 40_000, financialAccountId: s.accountA.id });
+    const reversal = { settlementId: leg.id, reason: 'Linha casada com o título errado', reversedOn: '2026-10-23' };
+
+    // Estornar com a linha ainda conciliada: a prévia avisa para desfazer antes (recusado aqui).
+    const early = await callTool(agent.id, 'reverse_settlement', reversal);
+    expect(early.status).toBe('awaiting_confirmation');
+    expect(early.detail.confirmations[0].preview.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('continua conciliada com o movimento desta baixa')]),
+    );
+    await admin.post(`/api/runs/${early.runId}/confirmations`, { decision: 'rejected', reason: 'desfazer antes' });
+    await drain();
+    expect((await admin.get(`/api/titles/${wrong.id}`)).openCents).toBe(60_000);
+
+    await callTool(autonomous.id, 'unmatch_statement_line', { lineId });
+
+    // Com o agente que pede confirmação: prévia com título, valor, data, conta e a perna do espelho.
+    const asked = await callTool(agent.id, 'reverse_settlement', reversal);
+    expect(asked.status).toBe('awaiting_confirmation');
+    const card = asked.detail.confirmations[0];
+    expect(card).toMatchObject({
+      toolName: 'reverse_settlement',
+      preview: { title: 'Estornar pagamento', summary: `Aluguel (${s.holderB.name})`, action: 'delete' },
+    });
+    expect(card.preview.rows).toEqual(
+      expect.arrayContaining([
+        { label: 'Data da baixa', before: '22/10/2026', after: '—' },
+        { label: 'Valor', before: formatBRL(40_000), after: '—' },
+        { label: 'Conta', before: s.accountA.name, after: '—' },
+        { label: 'Perna do espelho', before: `${s.caixaB.name} · conta a definir`, after: 'Estornada' },
+        { label: 'Em aberto', before: formatBRL(60_000), after: formatBRL(100_000) },
+        { label: 'Motivo', after: reversal.reason },
+      ]),
+    );
+    expect(card.preview.warnings).toHaveLength(1);
+    await admin.post(`/api/runs/${asked.runId}/confirmations`, { decision: 'approved' });
+    await drain();
+    expect((await runStatus(asked.runId)).status).toBe('completed');
+
+    // O título (e o espelho) voltam a em aberto; o movimento oposto zera a baixa na conta.
+    const reopened = await admin.get(`/api/titles/${wrong.id}`);
+    expect(reopened).toMatchObject({ status: 'open', openCents: 100_000 });
+    expect(reopened.settlements[0]).toMatchObject({ id: leg.id, reversalReason: reversal.reason });
+    expect(reopened.settlements[0].reversedAt).not.toBeNull();
+    expect(await admin.get(`/api/titles/${reopened.mirror.id}`)).toMatchObject({ status: 'open', openCents: 100_000 });
+    const net = await h.db.execute<{ total: string; count: string }>(
+      sql`SELECT sum(amount_cents)::text AS total, count(*)::text AS count FROM movements WHERE settlement_id = ${leg.id}`,
+    );
+    expect(net.rows[0]).toEqual({ total: '0', count: '2' });
+    const audit = await h.db.execute<{ actor_kind: string }>(
+      sql`SELECT DISTINCT actor_kind FROM audit_log WHERE table_name = 'settlements' AND record_id = ${leg.id} AND action = 'update'`,
+    );
+    expect(audit.rows).toEqual([{ actor_kind: 'agent' }]);
+
+    // Estornar de novo: o erro volta ao modelo sem pedir confirmação.
+    const again = await callTool(agent.id, 'reverse_settlement', reversal);
+    expect(again.status).toBe('completed');
+    expect(again.result).toMatchObject({ is_error: true });
+    expect(again.result.content).toContain('já foi estornada');
+
+    await callTool(autonomous.id, 'match_statement_line', { lineId, titleId: pix.id });
+    expect((await admin.get(`/api/titles/${pix.id}`)).status).toBe('paid');
+    expect((await admin.get(`/api/statement-imports/${imp.id}`)).lines.find((l: any) => l.id === lineId).status).toBe('matched');
   });
 
   it('fatura do cartão: linha nova vira compra na caixa pagadora escolhida', async () => {
