@@ -717,6 +717,7 @@ export const TOOL_HANDLERS: Handlers = {
         kind: 'agent_message',
         userId: ctx.access.actor.id,
         agentRunId: meta.runId ?? `mcp-${meta.toolUseId}`,
+        eventKey: meta.runId ? `run:${meta.runId}:tool:${meta.toolUseId}` : `mcp:tool:${meta.toolUseId}`,
         title: i.title,
         text: i.text,
         link,
