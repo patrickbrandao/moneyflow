@@ -1,4 +1,4 @@
-import { type CepLookup, type CnpjLookup, normalizeCep, normalizeDocument, normalizeUf, t } from '@moneyflow/shared';
+import { type CepLookup, type CnpjLookup, isValidCnpj, normalizeCep, normalizeDocument, normalizeUf, t } from '@moneyflow/shared';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config';
 import { AppError } from '../errors';
@@ -8,6 +8,7 @@ import { AppError } from '../errors';
  * chave) ou na BrasilAPI, e CEP no ViaCEP, com timeout e falha graciosa —
  * indisponível vira 503 com mensagem para preencher à mão; inexistente vira 404.
  * Se o CNPJ Aberto falhar (rede, chave recusada, limite, 5xx), cai na BrasilAPI.
+ * CNPJ inválido (numérico ou alfanumérico) é 400 sem chamar provedor nenhum.
  */
 
 type FetchResult = { status: number; body: unknown };
@@ -77,7 +78,7 @@ async function fromCnpjAberto(cnpj: string, base: string, apiKey: string, timeou
   const data = notFoundOrDown(result);
   const branches = Array.isArray(data.estabelecimentos) ? (data.estabelecimentos as Record<string, unknown>[]) : [];
   // O estabelecimento devolvido é o do CNPJ pedido (matriz ou filial); confere pelo número.
-  const branch = branches.find((b) => digits(b.cnpj) === cnpj) ?? branches[0] ?? {};
+  const branch = branches.find((b) => normalizeDocument(String(b.cnpj ?? '')) === cnpj) ?? branches[0] ?? {};
   return {
     document: cnpj,
     name: str(data.razao_social) ?? '',
@@ -132,6 +133,7 @@ type CnpjLookupConfig = Pick<Config, 'lookupTimeoutMs' | 'cnpjAberto' | 'brasilA
 
 export async function lookupCnpj(raw: string, config: CnpjLookupConfig, log?: FastifyBaseLogger): Promise<CnpjLookup> {
   const cnpj = normalizeDocument(raw);
+  if (!isValidCnpj(cnpj)) throw new AppError(400, 'validation', t.errors.invalidCnpj);
   // O CNPJ Aberto só aceita os 14 dígitos; o alfanumérico vai direto à BrasilAPI.
   if (config.cnpjAberto && /^\d{14}$/.test(cnpj)) {
     try {

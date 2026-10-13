@@ -75,6 +75,10 @@ function useSave(entityId: string, segment: string, itemId: string | undefined, 
   return { save, busy };
 }
 
+/** Chave CPF/CNPJ sendo digitada: só caracteres de documento e algum dígito (não pega o começo de um email). */
+const isDocumentKey = (type: PixKeyType, value: string) =>
+  (type === 'cpf' || type === 'cnpj') && /^[\s0-9A-Za-z./-]*$/.test(value) && /[0-9]/.test(value);
+
 export function PixKeyModal({ entityId, item, onClose, onSaved }: Props<EntityPixKey>) {
   const [keyType, setKeyType] = useState<PixKeyType>(item?.keyType ?? 'cpf');
   const [keyValue, setKeyValue] = useState(item?.keyValue ?? '');
@@ -104,10 +108,13 @@ export function PixKeyModal({ entityId, item, onClose, onSaved }: Props<EntityPi
           value={keyValue}
           required
           autoFocus
+          placeholder={keyType === 'cnpj' ? t.entity.cnpjPlaceholder : keyType === 'cpf' ? t.entity.cpfPlaceholder : undefined}
           onChange={(e) => {
-            setKeyValue(e.target.value);
             const guess = guessPixKeyType(e.target.value);
-            if (guess && !item) setKeyType(guess);
+            const nextType = guess && !item ? guess : keyType;
+            if (nextType !== keyType) setKeyType(nextType);
+            // CPF/CNPJ (inclusive o alfanumérico) em maiúsculas ao digitar; email e EVP ficam como digitados.
+            setKeyValue(isDocumentKey(nextType, e.target.value) ? e.target.value.toUpperCase() : e.target.value);
           }}
         />
       </Field>

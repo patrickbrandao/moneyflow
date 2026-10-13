@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- NF-e fictícia para testes (NT 2025.001): emitente e destinatário com CNPJ alfanumérico; CNPJs e chave gerados (DV por nfeAccessKeyDv), sem valor fiscal. -->
+<nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
+  <NFe xmlns="http://www.portalfiscal.inf.br/nfe">
+    <infNFe Id="NFe35261012ABC34501DE35550010000123461876543224" versao="4.00">
+      <ide>
+        <cUF>35</cUF>
+        <cNF>87654322</cNF>
+        <natOp>Venda de mercadoria</natOp>
+        <mod>55</mod>
+        <serie>1</serie>
+        <nNF>12346</nNF>
+        <dhEmi>2026-10-06T10:00:00-03:00</dhEmi>
+        <tpNF>1</tpNF>
+        <tpEmis>1</tpEmis>
+        <cDV>4</cDV>
+      </ide>
+      <emit>
+        <CNPJ>12ABC34501DE35</CNPJ>
+        <xNome>Alfa Exemplo Comércio Ltda</xNome>
+        <xFant>Alfa Exemplo</xFant>
+        <enderEmit>
+          <xLgr>Avenida Fictícia</xLgr>
+          <nro>200</nro>
+          <xBairro>Centro</xBairro>
+          <cMun>3550308</cMun>
+          <xMun>São Paulo</xMun>
+          <UF>SP</UF>
+          <CEP>01002000</CEP>
+        </enderEmit>
+        <IE>123456789119</IE>
+        <CRT>3</CRT>
+      </emit>
+      <dest>
+        <CNPJ>A1B2C3D4000193</CNPJ>
+        <xNome>Destinatário Alfa Exemplo S.A.</xNome>
+      </dest>
+      <det nItem="1">
+        <prod>
+          <cProd>A001</cProd>
+          <xProd>Serviço de montagem</xProd>
+          <NCM>00000000</NCM>
+          <CFOP>5102</CFOP>
+          <uCom>UN</uCom>
+          <qCom>1.0000</qCom>
+          <vUnCom>250.0000000000</vUnCom>
+          <vProd>250.00</vProd>
+        </prod>
+      </det>
+      <total>
+        <ICMSTot>
+          <vProd>250.00</vProd>
+          <vFrete>0.00</vFrete>
+          <vDesc>0.00</vDesc>
+          <vNF>250.00</vNF>
+        </ICMSTot>
+      </total>
+      <cobr>
+        <dup>
+          <nDup>001</nDup>
+          <dVenc>2026-11-06</dVenc>
+          <vDup>250.00</vDup>
+        </dup>
+      </cobr>
+    </infNFe>
+  </NFe>
+  <protNFe versao="4.00">
+    <infProt>
+      <tpAmb>2</tpAmb>
+      <chNFe>35261012ABC34501DE35550010000123461876543224</chNFe>
+      <dhRecbto>2026-10-06T10:01:00-03:00</dhRecbto>
+      <nProt>135260000012346</nProt>
+      <cStat>100</cStat>
+      <xMotivo>Autorizado o uso da NF-e</xMotivo>
+    </infProt>
+  </protNFe>
+</nfeProc>

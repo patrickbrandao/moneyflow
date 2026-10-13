@@ -109,17 +109,15 @@ export function EntityFormModal({
                 ))}
               </div>
             )}
-            <Field
-              label={kind === 'person' ? t.entity.cpf : t.entity.cnpj}
-              hint={kind === 'company' ? 'Aceita o CNPJ alfanumérico.' : undefined}
-            >
+            <Field label={kind === 'person' ? t.entity.cpf : t.entity.cnpj} hint={kind === 'company' ? t.entity.cnpjHint : undefined}>
               <div className="flex gap-2">
                 <input
                   className="field field-mono"
                   value={document}
-                  onChange={(e) => setDocument(e.target.value)}
+                  // CNPJ alfanumérico: as letras ficam maiúsculas já ao digitar (spec 003).
+                  onChange={(e) => setDocument(e.target.value.toUpperCase())}
                   onBlur={() => normalized && !docInvalid && setDocument(formatDocument(normalized))}
-                  placeholder={kind === 'person' ? '000.000.000-00' : '00.000.000/0000-00'}
+                  placeholder={kind === 'person' ? t.entity.cpfPlaceholder : t.entity.cnpjPlaceholder}
                   aria-label={kind === 'person' ? t.entity.cpf : t.entity.cnpj}
                   aria-invalid={docInvalid || undefined}
                 />

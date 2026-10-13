@@ -77,10 +77,10 @@ O CNPJ alfanumérico (IN RFB 2.229/2024, emitido desde julho de 2026) vale em **
   - A máscara aplica `00.000.000/0000-00` a qualquer caractere alfanumérico.
   - O placeholder mostra os dois formatos (`00.000.000/0000-00 ou 12.ABC.345/01DE-35`).
   - A chave PIX do tipo CNPJ aparece formatada como o documento.
-- **Busca**: a busca da listagem, do `EntityPicker` e do `search_records` dos agentes ([011](011-agentes-de-ia.md)) normaliza o texto e procura pelo prefixo do documento (com ou sem pontuação, maiúsculas ou minúsculas). Isso vale também no fallback sem embeddings.
+- **Busca**: a busca da listagem, do `EntityPicker` e do `search_records` dos agentes ([011](011-agentes-de-ia.md)) normaliza o texto e procura pelo prefixo do documento (com ou sem pontuação, maiúsculas ou minúsculas). Isso vale também no fallback sem embeddings do `semantic_search`, onde o acerto pelo documento (prefixo de 3+ caracteres com algum dígito) vale pontuação 1 e vem antes dos trigramas.
 - **Chave de acesso da NF-e**: segue a NT 2025.001 ([010](010-entrada-de-titulos.md)). As posições 7 a 20, o CNPJ do emitente, aceitam `[0-9A-Z]`, e o DV usa ASCII − 48.
 - **BR Code e chave PIX**: a chave CNPJ alfanumérica é reconhecida (`guessPixKeyType`), normalizada e casada com a entidade como a numérica.
-- **Extrato e conciliação**: a normalização da descrição (`normalizeDescription`) descarta o CNPJ alfanumérico (token de 14 caracteres com DV válido) como já descarta o numérico, para que as regras de classificação e o casamento tratem os dois formatos igual.
+- **Extrato e conciliação**: a normalização da descrição (`normalizeDescription`) descarta o CNPJ, numérico ou alfanumérico, com ou sem pontuação, quando o token normalizado em maiúsculas tem DV válido, para que as regras de classificação e o casamento tratem os dois formatos igual. O `dedup_hash` das linhas sem FITID usa outra função, congelada (`normalizeDescriptionForDedup`, [009](009-extratos-e-conciliacao.md)): o hash das linhas já importadas não muda.
 - **Consulta de CNPJ**: a API valida o CNPJ (`isValidCnpj`) antes de chamar qualquer provedor; inválido vira 400 "CNPJ inválido", sem gastar requisição. O roteamento está abaixo.
 - **Testes obrigatórios com CNPJ alfanumérico (inclusive digitado em minúsculas e com pontuação)**:
   - Criar, editar e detectar duplicata de entidade pela API.

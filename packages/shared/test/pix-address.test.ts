@@ -26,6 +26,17 @@ describe('PIX', () => {
     expect(guessPixKeyType('11222333000181')).toBe('cnpj');
     expect(formatPixKey('phone', '+5511987654321')).toBe('+55 (11) 98765-4321');
   });
+  it('CNPJ alfanumérico: adivinha, normaliza e formata como o documento', () => {
+    expect(guessPixKeyType('12.abc.345/01de-35')).toBe('cnpj');
+    expect(guessPixKeyType('12ABC34501DE35')).toBe('cnpj');
+    expect(guessPixKeyType('12ABC34501DE36')).toBeNull();
+    expect(isValidPixKey('cnpj', normalizePixKey('cnpj', '12.abc.345/01de-35'))).toBe(true);
+    expect(formatPixKey('cnpj', '12ABC34501DE35')).toBe('12.ABC.345/01DE-35');
+    expect(formatPixKey('cnpj', '11222333000181')).toBe('11.222.333/0001-81');
+    expect(formatPixKey('cpf', '52998224725')).toBe('529.982.247-25');
+    // Valor fora do formato aparece cru.
+    expect(formatPixKey('cnpj', 'XYZ')).toBe('XYZ');
+  });
 });
 
 describe('CEP e UF', () => {

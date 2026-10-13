@@ -1,5 +1,6 @@
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { t } from '@moneyflow/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config';
 import { client, type Harness, startApp, userSession } from './helpers';
@@ -137,6 +138,18 @@ describe('consulta de CNPJ', () => {
 
   it('CNPJ alfanumérico vai direto à BrasilAPI', async () => {
     await client(h, cookie).get('/api/lookup/cnpj/12ABC34501DE35', 404);
+    expect(seen.map((s) => s.url)).toEqual(['/ba/api/cnpj/v1/12ABC34501DE35']);
+  });
+
+  it.each(['abc', '41278833000105', '12ABC34501DE36', '00000000000000'])('CNPJ inválido (%s) é 400 sem chamar provedor', async (cnpj) => {
+    const res = await h.app.inject({ method: 'GET', url: `/api/lookup/cnpj/${cnpj}`, headers: { cookie } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toBe(t.errors.invalidCnpj);
+    expect(seen).toEqual([]);
+  });
+
+  it('CNPJ alfanumérico em minúsculas e com pontuação é normalizado', async () => {
+    await client(h, cookie).get(`/api/lookup/cnpj/${encodeURIComponent('12.abc.345/01de-35')}`, 404);
     expect(seen.map((s) => s.url)).toEqual(['/ba/api/cnpj/v1/12ABC34501DE35']);
   });
 

@@ -47,7 +47,7 @@
   - Criar, editar e arquivar tags fica **fora** dos agentes (só o admin, na tela).
   - As tools de relatório (`report_categories`, `report_entities`, `report_projection`) aceitam o mesmo filtro (`tagIds`, `tagMode`, `favoritesOnly`). Em `flow_graph`, os nós de entidade trazem `tagIds` e `isFavorite`.
   - O servidor `/mcp` expõe as mesmas tools.
-- **Documentos**: as entradas de documento e de chave PIX das tools passam pela normalização do CNPJ alfanumérico ([003](003-entidades.md)). `search_records` acha a entidade pelo documento (prefixo normalizado) também no fallback sem embeddings.
+- **Documentos**: as entradas de documento e de chave PIX das tools passam pela normalização do CNPJ alfanumérico ([003](003-entidades.md)). `search_records` acha a entidade pelo documento (prefixo normalizado), e o `semantic_search` também no fallback sem embeddings (acerto pelo documento com pontuação 1, antes dos trigramas).
 - Resultados das tools vão ao modelo como JSON (truncado em 60 mil caracteres). Erros de negócio e do banco chegam traduzidos em pt-BR.
 
 ### MCP

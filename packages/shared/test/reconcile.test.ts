@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { descriptionSimilarity, type MatchCandidate, normalizeDescription, pickMatch, scoreCandidate } from '../src/reconcile';
+import {
+  descriptionSimilarity,
+  type MatchCandidate,
+  normalizeDescription,
+  normalizeDescriptionForDedup,
+  pickMatch,
+  scoreCandidate,
+} from '../src/reconcile';
 
 const line = { postedOn: '2026-10-10', amountCents: -15237, description: 'PAGTO BOLETO ENEL Energia 12345678 05/10' };
 const movement = (over: Partial<MatchCandidate> = {}): MatchCandidate => ({
@@ -15,6 +22,22 @@ const movement = (over: Partial<MatchCandidate> = {}): MatchCandidate => ({
 describe('normalizeDescription', () => {
   it('limpa acentos, pontuação, números longos e datas', () => {
     expect(normalizeDescription('  PIX Enviado - João  da Silva 05/10 123456789 nº 12 ')).toBe('pix enviado joao da silva n 12');
+  });
+  it('descarta o CNPJ numérico ou alfanumérico (com DV válido), com ou sem pontuação', () => {
+    expect(normalizeDescription('PIX ENVIADO 12.ABC.345/01DE-35 FORNECEDOR')).toBe('pix enviado fornecedor');
+    expect(normalizeDescription('PIX ENVIADO 12abc34501de35 FORNECEDOR')).toBe('pix enviado fornecedor');
+    expect(normalizeDescription('TED 12.345.678/0001-95 Móveis')).toBe('ted moveis');
+    // DV errado: não é CNPJ, fica (sem a pontuação).
+    expect(normalizeDescription('PIX 12abc34501de36 X')).toBe('pix 12abc34501de36 x');
+    // O casamento passa a ignorar o CNPJ: a linha com e sem ele casa igual.
+    expect(descriptionSimilarity('PIX ENVIADO 12ABC34501DE35 FORNECEDOR ALFA', 'fornecedor alfa pix enviado')).toBe(1);
+  });
+  it('a normalização do dedup é congelada (spec 009): não descarta o CNPJ alfanumérico', () => {
+    expect(normalizeDescriptionForDedup('PIX ENVIADO 12.ABC.345/01DE-35 FORNECEDOR ALFA')).toBe(
+      'pix enviado 12 abc 345 01de 35 fornecedor alfa',
+    );
+    expect(normalizeDescriptionForDedup('PIX RECEBIDO 12abc34501de35 Cliente Ação')).toBe('pix recebido 12abc34501de35 cliente acao');
+    expect(normalizeDescriptionForDedup('  PIX Enviado - João  da Silva 05/10 123456789 nº 12 ')).toBe('pix enviado joao da silva n 12');
   });
   it('similaridade por tokens da linha', () => {
     expect(descriptionSimilarity('PAGTO ENEL ENERGIA', 'energia enel')).toBeCloseTo(2 / 3);

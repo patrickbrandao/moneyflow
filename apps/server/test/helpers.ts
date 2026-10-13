@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { createDb, createPool, type Database, pg } from '@moneyflow/db';
+import { cnpjCheckDigits } from '@moneyflow/shared';
 import type { FastifyInstance } from 'fastify';
 import { inject } from 'vitest';
 import { buildApp } from '../src/app';
@@ -27,6 +28,15 @@ export async function startApp(env: Record<string, string> = {}, databaseUrl = i
 }
 
 export const uid = () => randomUUID().slice(0, 8);
+
+/** CNPJ alfanumérico fictício e válido (base aleatória [0-9A-Z]{12} + DV), já normalizado. */
+export function alphaCnpj(): string {
+  const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const bytes = randomBytes(12);
+  // Começa com letra e dígito: é de fato alfanumérico e qualquer prefixo de 2+ caracteres tem os dois.
+  const base = `${chars[10 + (bytes[0]! % 26)]}${bytes[1]! % 10}${Array.from(bytes.subarray(2), (b) => chars[b % 36]).join('')}`;
+  return `${base}${cnpjCheckDigits(base)}`;
+}
 
 /**
  * Um banco novo e vazio no mesmo servidor, migrado do zero (testes de backup:

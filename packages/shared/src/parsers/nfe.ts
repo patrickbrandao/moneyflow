@@ -1,7 +1,8 @@
 /*
  * Import de NF-e (spec 010): XML <nfeProc> (com <NFe> e <protNFe>) ou só
  * <NFe>, com ou sem namespace/prefixo. A chave de acesso segue a mesma regra
- * de is_valid_nfe_access_key do banco (database/migrations/0012_title_entry.sql).
+ * de is_valid_nfe_access_key do banco (database/migrations/0036_nfe_access_key_alphanumeric.sql,
+ * NT 2025.001: o CNPJ do emitente, posições 7–20, pode ser alfanumérico).
  */
 import { find, findAll, findFirst, parseXml, textOf, type XmlNode } from './xml';
 
@@ -51,18 +52,29 @@ export type NfeData = {
   paymentDueDate: string | null;
 };
 
-/** Chave de acesso: 44 dígitos e DV módulo 11 (pesos 2..9 da direita; resto 0 ou 1 → 0). */
+/** Formato da chave JÁ normalizada (NT 2025.001): CNPJ do emitente alfanumérico nas posições 7–20. */
+const NFE_ACCESS_KEY = /^[0-9]{6}[0-9A-Z]{12}[0-9]{26}$/;
+
+/** Normaliza a chave de acesso: maiúsculas, sem espaços. */
+export function normalizeNfeAccessKey(key: string): string {
+  return key.replace(/\s/g, '').toUpperCase();
+}
+
+/**
+ * Chave de acesso JÁ normalizada: 44 caracteres no formato da NT 2025.001 e DV
+ * módulo 11 (cada caractere = ASCII − 48, pesos 2..9 da direita; resto 0 ou 1 → 0).
+ */
 export function isValidNfeAccessKey(key: string): boolean {
-  if (!/^[0-9]{44}$/.test(key)) return false;
+  if (!NFE_ACCESS_KEY.test(key)) return false;
   return nfeAccessKeyDv(key.slice(0, 43)) === Number(key[43]);
 }
 
-/** DV da chave a partir dos 43 primeiros dígitos (útil em geradores e testes). */
+/** DV da chave a partir dos 43 primeiros caracteres (útil em geradores e testes). */
 export function nfeAccessKeyDv(base43: string): number {
   let sum = 0;
   let weight = 2;
   for (let i = base43.length - 1; i >= 0; i -= 1) {
-    sum += Number(base43[i]) * weight;
+    sum += (base43.charCodeAt(i) - 48) * weight;
     weight = weight === 9 ? 2 : weight + 1;
   }
   const r = sum % 11;
@@ -101,9 +113,10 @@ export function parseNfeXml(xml: string): NfeData {
   const infNFe = findFirst(root, 'infNFe');
   if (!infNFe || !find(infNFe, ['ide'])) throw new Error('O XML não é uma NF-e (falta infNFe/ide).');
 
-  const idKey = (infNFe.attrs.Id ?? '').replace(/^NFe/i, '');
-  const protKey = textOf(findFirst(root, 'infProt'), 'chNFe');
-  const accessKey = /^[0-9]{44}$/.test(idKey) ? idKey : (protKey ?? idKey);
+  const idKey = normalizeNfeAccessKey((infNFe.attrs.Id ?? '').replace(/^NFe/i, ''));
+  const protRaw = textOf(findFirst(root, 'infProt'), 'chNFe');
+  const protKey = protRaw === null ? null : normalizeNfeAccessKey(protRaw);
+  const accessKey = NFE_ACCESS_KEY.test(idKey) ? idKey : (protKey ?? idKey);
   if (!isValidNfeAccessKey(accessKey)) throw new Error('Chave de acesso da NF-e inválida.');
 
   const ide = find(infNFe, ['ide'])!;
