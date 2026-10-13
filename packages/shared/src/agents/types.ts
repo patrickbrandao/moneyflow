@@ -121,6 +121,16 @@ export type UsageTotals = {
   hasUnpriced: boolean;
 };
 
+/** Finalidade de uma chamada medida em ai_usage (as quatro últimas são os fluxos automáticos). */
+export type AiUsagePurpose =
+  | 'chat'
+  | 'title'
+  | 'embedding'
+  | 'document_reading'
+  | 'classify_lines'
+  | 'contract_reading'
+  | 'contract_markdown';
+
 export type AiUsageReport = {
   byUser: (UsageTotals & { month: string; userId: string | null; username: string | null; runs: number })[];
   byAgent: (UsageTotals & {
@@ -131,6 +141,7 @@ export type AiUsageReport = {
     runs: number;
     users: number;
   })[];
+  byPurpose: (UsageTotals & { month: string; purpose: AiUsagePurpose; runs: number; users: number })[];
 };
 
 export type ScreenContext = {

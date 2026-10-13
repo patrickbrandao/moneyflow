@@ -7,6 +7,7 @@ import {
   type AiPriceDto,
   type AiProviderDto,
   type AiProviderTestResult,
+  type AiUsagePurpose,
   type AiUsageReport,
   type aiAgentCreateInput,
   type aiAgentUpdateInput,
@@ -481,6 +482,8 @@ export async function usageReport(ctx: ServiceContext, q: z.output<typeof aiUsag
   const byAgent = await ctx.db.execute<Record<string, unknown>>(sql`
     SELECT u.*, a.name AS agent_name FROM ai_usage_monthly_by_agent u LEFT JOIN ai_agents a ON a.id = u.agent_id
      WHERE ${period} ORDER BY u.month DESC, a.name NULLS LAST, u.model, u.currency NULLS LAST`);
+  const byPurpose = await ctx.db.execute<Record<string, unknown>>(sql`
+    SELECT u.* FROM ai_usage_monthly_by_purpose u WHERE ${period} ORDER BY u.month DESC, u.purpose, u.currency NULLS LAST`);
   const month = (v: unknown) => String(v).slice(0, 7);
   return {
     byUser: byUser.rows.map((r) => ({
@@ -496,6 +499,13 @@ export async function usageReport(ctx: ServiceContext, q: z.output<typeof aiUsag
       agentId: (r.agent_id as string) ?? null,
       agentName: (r.agent_name as string) ?? null,
       model: r.model as string,
+      runs: Number(r.runs),
+      users: Number(r.users),
+    })),
+    byPurpose: byPurpose.rows.map((r) => ({
+      ...usageDto(r as never),
+      month: month(r.month),
+      purpose: r.purpose as AiUsagePurpose,
       runs: Number(r.runs),
       users: Number(r.users),
     })),

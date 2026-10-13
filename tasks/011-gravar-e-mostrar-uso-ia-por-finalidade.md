@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: melhoria
 origem: agente
 autor: triage
@@ -28,3 +28,10 @@ Usar a leitura de documento com um agente ativo e ver em `ai_usage` a linha com 
 Ordem: 001 + 003 (dba) → 013 → 011. Esforço: pequeno a médio (~2 h).
 
 ## Resolução (executor)
+Feito em 2026-10-13, depois da 013.
+
+- Gravação: o INSERT em `ai_usage` do loop (`apps/server/src/agents/runner.ts`) grava a finalidade da execução, lida de `ai_conversations.purpose` (`document_reading`, `classify_lines`, `contract_reading`, `contract_markdown`), e `chat` nas conversas do usuário. O trigger do dba que troca `chat` pela finalidade da conversa fica só como rede de segurança. `title` e `embedding` seguem como antes.
+- Relatório: `usageReport` (`services/ai-admin.ts`) devolve `byPurpose`, lido da view `ai_usage_monthly_by_purpose`; tipos `AiUsagePurpose` e `AiUsageReport.byPurpose` em `packages/shared/src/agents/types.ts`; rótulos em `t.agentsUi.admin.usage.purposes`.
+- Tela: /admin/ai → Uso ganhou a tabela "Por finalidade" (mês, finalidade, execuções, usuários, chamadas, tokens e custo), entre "Por usuário" e "Por agente e modelo" (`apps/web/src/components/admin-ai/UsageTab.tsx`).
+
+Testes: `apps/server/test/agents.test.ts` → "IA nos fluxos": o contrato confere `contract_reading` e `contract_markdown` em `ai_usage`; a leitura de documento e a conciliação conferem `document_reading` e `classify_lines` por conversa e o `byPurpose` do relatório (todas as finalidades usadas no arquivo, com chamadas, execuções, tokens e custo em USD). Spec 011 (uso e custo) atualizada.

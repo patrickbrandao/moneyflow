@@ -827,6 +827,14 @@ describe('IA nos fluxos', () => {
         content: '# Contrato de prestação de serviços\n\n## Cláusula 1\nObjeto: suporte mensal.',
       });
       expect(v1.aiRunId).toBeTruthy();
+      // Uso gravado com a finalidade do fluxo (tarefa 011).
+      const md1 = await h.db.execute<{ purpose: string }>(sql`SELECT purpose FROM ai_usage WHERE run_id = ${v1.aiRunId}`);
+      expect(md1.rows.map((r) => r.purpose)).toEqual(['contract_markdown']);
+      const reading = await h.db.execute<{ purpose: string }>(sql`
+        SELECT u.purpose FROM ai_usage u JOIN ai_conversations c ON c.id = u.conversation_id
+         WHERE c.purpose = 'contract_reading'`);
+      expect(reading.rows.length).toBeGreaterThan(0);
+      expect(new Set(reading.rows.map((r) => r.purpose))).toEqual(new Set(['contract_reading']));
     } finally {
       await stop();
     }
@@ -873,6 +881,27 @@ describe('IA nos fluxos', () => {
       expect(decided.updated).toBe(1);
       const after = (await admin.get(`/api/statement-imports/${importId}`)).lines.find((l: any) => l.id === lines[0].id);
       expect(after.classificationSource).toBe('user');
+
+      // Uso por finalidade (tarefa 011): cada fluxo grava a sua, e o painel separa os custos.
+      const usage = async (conversationId: string) =>
+        (await h.db.execute<{ purpose: string }>(sql`SELECT purpose FROM ai_usage WHERE conversation_id = ${conversationId}`)).rows.map(
+          (r) => r.purpose,
+        );
+      expect(await usage(res.json().conversationId)).toEqual(['document_reading']);
+      const classify = await h.db.execute<{ id: string }>(
+        sql`SELECT id FROM ai_conversations WHERE purpose = 'classify_lines' AND screen_context ->> 'importId' = ${importId}`,
+      );
+      expect(await usage(classify.rows[0]!.id)).toEqual(['classify_lines']);
+      const report = await admin.get('/api/admin/ai/usage');
+      const purposes = new Set(report.byPurpose.map((r: any) => r.purpose));
+      for (const purpose of ['chat', 'title', 'document_reading', 'classify_lines', 'contract_reading', 'contract_markdown']) {
+        expect(purposes, purpose).toContain(purpose);
+      }
+      const doc = report.byPurpose.find((r: any) => r.purpose === 'document_reading');
+      expect(doc).toMatchObject({ currency: 'USD', hasUnpriced: false });
+      expect(doc.calls).toBeGreaterThan(0);
+      expect(doc.runs).toBeGreaterThan(0);
+      expect(doc.inputTokens).toBeGreaterThan(0);
     } finally {
       await stop();
     }

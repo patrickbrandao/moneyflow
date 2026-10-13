@@ -181,7 +181,7 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
         const message = await insertMessage(tx, conversation.id, 'assistant', content, runId);
         await tx.execute(sql`
           INSERT INTO ai_usage (run_id, message_id, purpose, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens)
-          VALUES (${runId}, ${message.id}, 'chat', ${response.usage.inputTokens}, ${response.usage.outputTokens},
+          VALUES (${runId}, ${message.id}, ${purpose ?? 'chat'}, ${response.usage.inputTokens}, ${response.usage.outputTokens},
                   ${response.usage.cacheWriteTokens}, ${response.usage.cacheReadTokens})`);
         await appendEvent(tx, runId, { type: 'message', message: { ...messageOut(message), usage: [] } });
         const run = await loadRun(tx, runId);
