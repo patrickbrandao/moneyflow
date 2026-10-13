@@ -19,6 +19,7 @@ import { AppError, findPgError, translateDbError, unprocessable } from '../../er
 import { withTx } from '../tx';
 import {
   type Catalog,
+  COMPOSITE_KEYS,
   DEFERRED_CLUSTER,
   EXCLUDED_TABLES,
   type ForeignKeyMeta,
@@ -246,7 +247,22 @@ function replay(table: string, data: BackupRow): { insert: BackupRow; post: Back
   if (table === 'card_invoices' && data.closed_at) {
     return { insert: { ...data, closed_at: null }, post: { closed_at: data.closed_at } };
   }
+  // Tag arquivada: o banco recusa ligá-la a uma entidade; entra ativa e é arquivada no fim (LATE_POST).
+  if (table === 'entity_tags' && data.archived_at) {
+    return { insert: { ...data, archived_at: null }, post: { archived_at: data.archived_at } };
+  }
   return { insert: data, post: null };
+}
+
+/** Tabelas cujo passo "depois" (replay) roda no fim da importação, depois de todos os registros. */
+const LATE_POST = new Set(['entity_tags']);
+
+/** Identificador da linha no arquivo: o id, ou a chave composta (`a|b`) nas tabelas sem id. */
+function rowKey(table: string, data: BackupRow): string {
+  const composite = COMPOSITE_KEYS[table];
+  if (!composite) return typeof data.id === 'string' ? data.id.toLowerCase() : '';
+  const parts = composite.map((column) => data[column]);
+  return parts.every((v) => typeof v === 'string' && UUID.test(v)) ? parts.map((v) => String(v).toLowerCase()).join('|') : '';
 }
 
 function describe(error: unknown): string {
@@ -278,7 +294,7 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
     for (const raw of rows) {
       if (!raw || typeof raw !== 'object') continue;
       const data = ref ? raw : normalizeRow(table, raw, normalizeState);
-      const id = typeof data.id === 'string' ? data.id.toLowerCase() : '';
+      const id = rowKey(table, data);
       const node: Node = {
         key: `${table}:${id}`,
         table,
@@ -291,7 +307,7 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
         target: id,
         deps: [],
       };
-      if (!UUID.test(id)) {
+      if (!id || (!COMPOSITE_KEYS[table] && !UUID.test(id))) {
         if (!ref) invalid.push({ ...node, status: 'failed', reason: t.backup.reasons.noId });
         continue;
       }
@@ -385,6 +401,7 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
       byTable.get(node.table)!.push(node.id);
     }
     for (const [table, ids] of byTable) {
+      if (COMPOSITE_KEYS[table]) continue;
       for (let i = 0; i < ids.length; i += 5000) {
         const found = await tx.execute<{ id: string }>(
           sql`SELECT id::text AS id FROM ${sql.identifier(table)} WHERE id = ANY(${uuidArray(ids.slice(i, i + 5000))})`,
@@ -394,6 +411,7 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
     }
     const inDb = new Map<string, boolean>();
     const existsInDb = async (table: string, id: string) => {
+      if (COMPOSITE_KEYS[table]) return false;
       const key = `${table}:${id}`;
       if (existing.has(key)) return true;
       if (!inDb.has(key)) {
@@ -407,7 +425,7 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
 
     /** Traduz as FKs do registro para os ids deste banco; erro = dependência que não se resolve. */
     const translate = async (node: Node): Promise<{ data: BackupRow; error?: string }> => {
-      const data: BackupRow = { ...node.data, id: node.id };
+      const data: BackupRow = COMPOSITE_KEYS[node.table] ? { ...node.data } : { ...node.data, id: node.id };
       for (const fk of catalog.get(node.table)!.fks) {
         const raw = node.data[fk.refColumn];
         if (typeof raw !== 'string') continue;
@@ -454,6 +472,15 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
       return null;
     };
 
+    /** Linha de tabela sem id que já existe (mesma chave composta, com as FKs traduzidas). */
+    const compositeExists = async (table: string, data: BackupRow) => {
+      const composite = COMPOSITE_KEYS[table];
+      if (!composite) return false;
+      const conditions = composite.map((column) => sql`${sql.identifier(column)} = ${String(data[column])}::uuid`);
+      const found = await tx.execute(sql`SELECT 1 FROM ${sql.identifier(table)} WHERE ${sql.join(conditions, sql` AND `)}`);
+      return found.rows.length > 0;
+    };
+
     const ownerPreexisted = (node: Node, column: string) => {
       const raw = node.data[column];
       if (typeof raw !== 'string') return false;
@@ -486,6 +513,8 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
          WHERE id = ${id}::uuid`);
     };
 
+    const late: { node: Node; data: BackupRow }[] = [];
+
     const processUnit = async (unit: Unit) => {
       const members = topoSort(
         unit.nodes,
@@ -500,6 +529,10 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
       let failure: { node: Node; reason: string } | null = null;
       for (const node of members) {
         const { data, error } = await translate(node);
+        if (!error && (await compositeExists(node.table, data))) {
+          Object.assign(node, { status: 'existing', target: node.id, reason: t.backup.reasons.existsId });
+          continue;
+        }
         if (await existsInDb(node.table, node.id)) {
           Object.assign(node, { status: 'existing', target: node.id, reason: t.backup.reasons.existsId });
           continue;
@@ -547,7 +580,8 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
         const ins: Step = { node, kind: 'insert', data: insert, deps: [], order: node.order * 2 };
         insertOf.set(node, ins);
         steps.push(ins);
-        if (post) {
+        if (post && LATE_POST.has(node.table)) late.push({ node, data: post });
+        else if (post) {
           const step: Step = { node, kind: 'post', data: post, deps: [ins], order: node.order * 2 + 1 };
           postOf.set(node, step);
           steps.push(step);
@@ -622,6 +656,20 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
     };
 
     for (const unit of sorted.order) await processUnit(unit);
+
+    // Passos tardios (tag arquivada): depois de todas as ligações.
+    for (const { node, data } of late) {
+      if (node.status !== 'imported') continue;
+      await tx.execute(sql`SAVEPOINT backup_late`);
+      try {
+        await updateRow(node.table, node.id, data);
+        await tx.execute(sql`RELEASE SAVEPOINT backup_late`);
+      } catch (error) {
+        await tx.execute(sql`ROLLBACK TO SAVEPOINT backup_late`);
+        await tx.execute(sql`RELEASE SAVEPOINT backup_late`);
+        Object.assign(node, { status: 'failed', reason: describe(error) });
+      }
+    }
     if (dryRun) throw new DryRunRollback();
   };
 

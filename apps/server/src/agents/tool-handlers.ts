@@ -19,6 +19,7 @@ import { calendarItems } from '../services/calendar';
 import * as cards from '../services/cards';
 import { categoryTree } from '../services/categories';
 import * as entities from '../services/entities';
+import * as entityTags from '../services/entity-tags';
 import { flowGraph } from '../services/flow';
 import { emitAgentEvent } from '../services/message-worker';
 import { listDestinations, sendAgentMessage } from '../services/messages';
@@ -112,7 +113,15 @@ const ENTITY_FIELDS: PreviewField[] = [
   { key: 'document', label: 'Documento' },
   { key: 'birthDate', label: 'Nascimento', format: 'date' },
   { key: 'notes', label: 'Observações' },
+  { key: 'isFavorite', label: 'Favorita', format: 'bool' },
 ];
+
+/** Nomes das tags (para as prévias), na ordem pedida. */
+async function tagNames(ctx: ServiceContext, ids: string[]) {
+  if (ids.length === 0) return '—';
+  const all = new Map((await entityTags.listTags(ctx, { archived: true })).map((tag) => [tag.id, tag.name]));
+  return ids.map((tagId) => all.get(tagId) ?? tagId).join(', ');
+}
 
 async function lineCaixa(ctx: ServiceContext, lineId: string) {
   const r = await ctx.db.execute<{ caixa_id: string; description: string; amount_cents: number; posted_on: string }>(sql`
@@ -192,6 +201,13 @@ const lineCreateInputOf = (i: LineCreateItem) => ({
   learnRule: i.learnRule,
 });
 
+/** Filtro de entidades das tools (tags e favoritas) no formato dos serviços. */
+const toolEntityFilter = (i: { tagIds?: string[]; tagMode: 'any' | 'all'; favoritesOnly: boolean }) => ({
+  tagIds: i.tagIds ?? [],
+  tagMode: i.tagMode,
+  favorites: i.favoritesOnly,
+});
+
 /* ---------------- handlers ---------------- */
 
 export const TOOL_HANDLERS: Handlers = {
@@ -201,7 +217,22 @@ export const TOOL_HANDLERS: Handlers = {
   get_caixa: { run: (ctx, i) => caixas.getCaixa(ctx, i.caixaId) },
   list_accounts: { run: (ctx, i) => caixas.listAccounts(ctx, { caixaId: i.caixaId }) },
   get_account_statement: { run: (ctx, i) => accountStatement(ctx, i.accountId, { from: i.from, to: i.to }) },
-  list_entities: { run: (ctx, i) => entities.listEntities(ctx, { q: i.q, kind: i.kind, archived: false, limit: i.limit }) },
+  list_entities: {
+    run: (ctx, i) =>
+      entities.listEntities(ctx, {
+        q: i.q,
+        kind: i.kind,
+        archived: false,
+        tagIds: i.tagIds ?? [],
+        tagMode: i.tagMode,
+        favorites: i.favoritesOnly,
+        limit: i.limit,
+      }),
+  },
+  list_entity_tags: {
+    run: async (ctx) =>
+      (await entityTags.listTags(ctx)).map((tag) => ({ id: tag.id, name: tag.name, colorSlot: tag.colorSlot, usageCount: tag.usageCount })),
+  },
   get_entity: { run: (ctx, i) => entities.getEntity(ctx, i.entityId) },
   list_categories: { run: (ctx, i) => categoryTree(ctx, { kind: i.kind }) },
   list_titles: {
@@ -225,13 +256,16 @@ export const TOOL_HANDLERS: Handlers = {
   list_card_purchases: { run: (ctx, i) => cards.listPurchases(ctx, i.cardId, { from: i.from, to: i.to, q: i.q, limit: i.limit }) },
   calendar: { run: (ctx, i) => calendarItems(ctx, { from: i.from, to: i.to, caixaIds: i.caixaIds ?? [] }) },
   report_categories: {
-    run: (ctx, i) => reports.categoryReport(ctx, { from: i.from, to: i.to, basis: i.basis, caixaIds: i.caixaIds ?? [] }),
+    run: (ctx, i) =>
+      reports.categoryReport(ctx, { from: i.from, to: i.to, basis: i.basis, caixaIds: i.caixaIds ?? [], ...toolEntityFilter(i) }),
   },
   report_entities: {
-    run: (ctx, i) => reports.entityReport(ctx, { from: i.from, to: i.to, basis: i.basis, caixaIds: i.caixaIds ?? [] }),
+    run: (ctx, i) =>
+      reports.entityReport(ctx, { from: i.from, to: i.to, basis: i.basis, caixaIds: i.caixaIds ?? [], ...toolEntityFilter(i) }),
   },
   report_projection: {
-    run: (ctx, i) => reports.projectionReport(ctx, { caixaIds: i.caixaIds ?? [], horizons: i.horizons ?? [30, 60, 90] }),
+    run: (ctx, i) =>
+      reports.projectionReport(ctx, { caixaIds: i.caixaIds ?? [], horizons: i.horizons ?? [30, 60, 90], ...toolEntityFilter(i) }),
   },
   flow_graph: { run: (ctx, i) => flowGraph(ctx, { from: i.from, to: i.to, caixaIds: i.caixaIds ?? [] }) },
   list_statement_imports: { run: (ctx, i) => statements.listImports(ctx, { accountId: i.accountId, cardCaixaId: i.cardCaixaId }) },
@@ -247,7 +281,9 @@ export const TOOL_HANDLERS: Handlers = {
   create_entity: {
     preview: async (ctx, i) => {
       ctx.access.assertRegistryWrite();
-      return { title: 'Criar entidade', summary: i.name, action: 'create', rows: diffRows(ENTITY_FIELDS, i) };
+      const rows = diffRows(ENTITY_FIELDS, i);
+      if (i.tagIds.length > 0) rows.push({ label: 'Tags', after: await tagNames(ctx, i.tagIds) });
+      return { title: 'Criar entidade', summary: i.name, action: 'create', rows };
     },
     run: (ctx, i) => entities.createEntity(ctx, i),
   },
@@ -255,14 +291,53 @@ export const TOOL_HANDLERS: Handlers = {
     preview: async (ctx, i) => {
       ctx.access.assertRegistryWrite();
       const before = await entities.getEntity(ctx, i.entityId);
-      return {
-        title: 'Editar entidade',
-        summary: before.name,
-        action: 'update',
-        rows: diffRows(ENTITY_FIELDS, i.changes as Record<string, unknown>, before as unknown as Record<string, unknown>),
-      };
+      const rows = diffRows(ENTITY_FIELDS, i.changes as Record<string, unknown>, before as unknown as Record<string, unknown>);
+      if (i.changes.tagIds !== undefined) {
+        rows.push({
+          label: 'Tags',
+          before: await tagNames(
+            ctx,
+            before.tags.map((tag) => tag.id),
+          ),
+          after: await tagNames(ctx, i.changes.tagIds),
+        });
+      }
+      return { title: 'Editar entidade', summary: before.name, action: 'update', rows };
     },
     run: (ctx, i) => entities.updateEntity(ctx, i.entityId, i.changes),
+  },
+  set_entity_tags: {
+    preview: async (ctx, i) => {
+      ctx.access.assertRegistryWrite();
+      const before = await entities.getEntity(ctx, i.entityId);
+      const active = new Map((await entityTags.listTags(ctx)).map((tag) => [tag.id, tag.name]));
+      const kept = new Set(before.tags.map((tag) => tag.id));
+      const unknown = i.tagIds.filter((tagId) => !active.has(tagId) && !kept.has(tagId));
+      if (unknown.length > 0) throw unprocessable(t.errors.entityTagUnavailable);
+      const names = (ids: string[]) =>
+        ids.map((tagId) => active.get(tagId) ?? before.tags.find((tag) => tag.id === tagId)?.name ?? tagId).join(', ') || '—';
+      return {
+        title: 'Definir tags da entidade',
+        summary: before.name,
+        action: 'update',
+        rows: [{ label: 'Tags', before: names(before.tags.map((tag) => tag.id)), after: names(i.tagIds) }],
+      };
+    },
+    run: (ctx, i) => entities.setEntityTags(ctx, i.entityId, i.tagIds),
+  },
+  set_entity_favorite: {
+    preview: async (ctx, i) => {
+      ctx.access.assertRegistryWrite();
+      const before = await entities.getEntity(ctx, i.entityId);
+      const label = (v: boolean) => (v ? t.entityTags.yes : t.entityTags.no);
+      return {
+        title: i.favorite ? t.entityTags.markFavorite : t.entityTags.unmarkFavorite,
+        summary: before.name,
+        action: 'update',
+        rows: [{ label: t.entityTags.favorite, before: label(before.isFavorite), after: label(i.favorite) }],
+      };
+    },
+    run: (ctx, i) => entities.setEntityFavorite(ctx, i.entityId, i.favorite),
   },
   add_pix_key: {
     preview: async (ctx, i) => {

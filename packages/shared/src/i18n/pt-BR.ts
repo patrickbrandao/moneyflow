@@ -140,6 +140,7 @@ export const ptBR = {
     invalidDocument: 'CPF ou CNPJ inválido.',
     invalidCpf: 'CPF inválido.',
     invalidCnpj: 'CNPJ inválido.',
+    entityTagUnavailable: 'Tag inexistente ou arquivada: escolha uma das tags ativas.',
     invalidPix: 'Chave PIX inválida para o tipo escolhido.',
     invalidCep: 'CEP inválido.',
     invalidUf: 'UF inválida.',

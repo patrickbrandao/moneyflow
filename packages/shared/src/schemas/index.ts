@@ -4,17 +4,7 @@ import { isValidDocument, normalizeDocument } from '../documents';
 import { ptBR } from '../i18n/pt-BR';
 import { isValidPixKey, normalizePixKey, PIX_KEY_TYPES } from '../pix';
 import { FREQUENCIES } from '../recurrence';
-import {
-  cents,
-  entityFilterFields,
-  id,
-  isoDate,
-  nonNegativeCents,
-  optionalText,
-  positiveCents,
-  queryBool,
-  requiredText,
-} from './common';
+import { cents, entityFilterFields, id, isoDate, nonNegativeCents, optionalText, positiveCents, queryBool, requiredText } from './common';
 
 export * from './common';
 export * from './contracts';
@@ -132,7 +122,6 @@ export const entityTagUpdateInput = z.object({
 });
 
 export const entityTagListQuery = z.object({ archived: queryBool });
-
 
 export const CONTACT_KINDS = ['phone', 'email', 'other'] as const;
 export const contactInput = z.object({

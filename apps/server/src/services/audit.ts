@@ -59,6 +59,8 @@ const GLOBAL_TABLES = new Set([
   'entity_bank_accounts',
   'entity_pix_keys',
   'entity_links',
+  'entity_tags',
+  'entity_tag_links',
   'categories',
   'nfe_documents',
   'nfe_items',
@@ -93,8 +95,13 @@ async function assertRecordReadable(ctx: ServiceContext, table: string, recordId
 /** Histórico de um registro (antes/depois de cada alteração). */
 export async function recordHistory(ctx: ServiceContext, table: string, recordId: string): Promise<AuditEntry[]> {
   await assertRecordReadable(ctx, table, recordId);
+  // Atribuir e remover tags é alteração da entidade: as ligações são auditadas com record_id = entity_id.
+  const tables = table === 'entities' ? ['entities', 'entity_tag_links'] : [table];
   const result = await ctx.db.execute(
-    sql`${entrySql} WHERE l.table_name = ${table} AND l.record_id = ${recordId} ORDER BY l.id DESC LIMIT 500`,
+    sql`${entrySql} WHERE l.table_name IN (${sql.join(
+      tables.map((name) => sql`${name}`),
+      sql`, `,
+    )}) AND l.record_id = ${recordId} ORDER BY l.id DESC LIMIT 500`,
   );
   return result.rows.map(toEntry);
 }

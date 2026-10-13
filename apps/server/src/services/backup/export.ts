@@ -16,6 +16,7 @@ import {
   EXCLUDED_TABLES,
   exportColumns,
   fullTables,
+  keyColumns,
   loadCatalog,
   RESOURCE_TABLES,
   SECRET_READERS,
@@ -50,18 +51,28 @@ async function fetchRows(
   catalog: Catalog,
   table: string,
   actorId: string,
-  options: { ids?: string[]; withSecrets: boolean; after?: string; limit?: number },
+  options: { ids?: string[]; withSecrets: boolean; after?: BackupRow; limit?: number },
 ): Promise<BackupRow[]> {
   const meta = catalog.get(table);
   if (!meta) return [];
+  const keys = keyColumns(table);
   const where: SQL[] = [];
   if (options.ids) where.push(sql`id = ANY(${uuidArray(options.ids)})`);
-  if (options.after) where.push(sql`id > ${options.after}::uuid`);
+  if (options.after) {
+    // Paginação pela chave (id, ou a chave composta como tupla).
+    const after = options.after;
+    where.push(
+      sql`(${columnList(keys)}) > (${sql.join(
+        keys.map((k) => sql`${String(after[k])}::uuid`),
+        sql`, `,
+      )})`,
+    );
+  }
   const result = await tx.execute<{ j: string }>(sql`
     SELECT row_to_json(backup_row)::text AS j
       FROM (SELECT ${columnList(exportColumns(meta))} FROM ${sql.identifier(table)}
              ${where.length ? sql`WHERE ${sql.join(where, sql` AND `)}` : sql``}
-             ORDER BY id ${options.limit ? sql`LIMIT ${options.limit}` : sql``}) backup_row`);
+             ORDER BY ${columnList(keys)} ${options.limit ? sql`LIMIT ${options.limit}` : sql``}) backup_row`);
   const rows = result.rows.map((r) => JSON.parse(r.j) as BackupRow);
   const secret = SECRET_READERS[table];
   if (options.withSecrets && secret && rows.length > 0) {
@@ -162,7 +173,7 @@ export async function exportFullZip(ctx: ServiceContext, path: string): Promise<
       for (const table of fullTables(catalog)) {
         push(`${firstTable ? '' : ','}${JSON.stringify(table)}:[`);
         firstTable = false;
-        let after: string | undefined;
+        let after: BackupRow | undefined;
         let firstRow = true;
         for (;;) {
           const rows = await fetchRows(tx, catalog, table, actorId, { withSecrets: true, after, limit: BATCH });
@@ -171,7 +182,7 @@ export async function exportFullZip(ctx: ServiceContext, path: string): Promise<
             firstRow = false;
           }
           if (rows.length < BATCH) break;
-          after = rows[rows.length - 1]!.id as string;
+          after = rows[rows.length - 1]!;
         }
         push(']');
       }
