@@ -5,7 +5,7 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 | Nº | Tarefa | Status | Tipo | Responsável | Origem |
 |---|---|---|---|---|---|
 | 004 | [Aviso de conclusão do agente com várias réplicas da API](004-aviso-de-conclusao-multi-replica.md) (escopo: `dedup_key` por evento; presença no banco adiada) | concluida | debito-tecnico | app | agente |
-| 006 | [Cobrir no e2e os fluxos do agente ainda sem teste contra a API real](006-front-sem-teste-contra-api-real.md) | em-andamento | debito-tecnico | app | agente |
+| 006 | [Cobrir no e2e os fluxos do agente ainda sem teste contra a API real](006-front-sem-teste-contra-api-real.md) | concluida | debito-tecnico | app | agente |
 | 011 | [Gravar e mostrar o uso de IA por finalidade](011-gravar-e-mostrar-uso-ia-por-finalidade.md) (depois da 001 e da 013) | concluida | melhoria | app | agente |
 | 012 | [Escolher o agente dos fluxos em /admin/ai e remover `AI_FLOW_AGENT`](012-escolher-agente-dos-fluxos-na-tela.md) (depois da 002) | concluida | melhoria | app | agente |
 | 013 | [Usar `ai_conversations.purpose` em vez de `screen_context.purpose`](013-usar-coluna-de-finalidade-da-conversa.md) (depois da 003) | concluida | debito-tecnico | app | agente |

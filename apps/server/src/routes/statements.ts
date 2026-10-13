@@ -33,10 +33,11 @@ export async function statementRoutes(app: FastifyInstance) {
       content: assertUpload(r.body),
     });
     // Linhas sem regra recebem sugestão do agente dos fluxos (spec 009/011), em segundo plano no worker.
-    await suggestImportClassifications(r.ctx, result.id, { auto: true }).catch((error) =>
-      r.log.warn({ err: error }, 'conciliação: sugestão do agente não enfileirada'),
-    );
-    return result;
+    const aiSuggestion = await suggestImportClassifications(r.ctx, result.id, { auto: true }).catch((error) => {
+      r.log.warn({ err: error }, 'conciliação: sugestão do agente não enfileirada');
+      return null;
+    });
+    return { ...result, aiSuggestion };
   });
   app.get('/api/statement-imports/:id', (r: Req) => statements.getImport(r.ctx, id(r)));
   app.delete('/api/statement-imports/:id', (r: Req) => statements.deleteImport(r.ctx, id(r)));

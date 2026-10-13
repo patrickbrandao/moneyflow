@@ -219,6 +219,7 @@ export type ConversationDetail = {
   conversation: ConversationDto;
   messages: AiMessageDto[];
   activeRun: AiRunDto | null;
+  /** As pendentes da execução ativa e as já decididas da conversa (o histórico mostra a tool recusada como recusada). */
   confirmations: ToolConfirmationDto[];
   usage: UsageTotals[];
   /** true = quem vê não é o dono (admin lendo): sem enviar, decidir ou cancelar. */

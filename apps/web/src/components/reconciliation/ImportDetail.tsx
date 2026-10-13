@@ -8,8 +8,24 @@ import {
   type StatementLineRow,
   t,
 } from '@moneyflow/shared';
-import { ArrowLeft, Ban, Check, CheckCheck, Download, Link2, Plus, RefreshCw, RotateCcw, Sparkles, Tag, Undo2, X } from 'lucide-react';
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import {
+  ArrowLeft,
+  Ban,
+  Check,
+  CheckCheck,
+  Download,
+  Link2,
+  Loader2,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Sparkles,
+  Tag,
+  Undo2,
+  X,
+} from 'lucide-react';
+import { type ReactNode, useEffect, useState } from 'react';
+import { followRun } from '../../agents/stream';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction, useApi } from '../../lib/hooks';
@@ -58,6 +74,9 @@ function RowAction({ icon, label, onClick, danger }: { icon: ReactNode; label: s
 
 type Dialog = { kind: 'match' | 'create' | 'classify'; line: StatementLineRow } | null;
 
+/** Execução do agente que está sugerindo a classificação das linhas (logo após importar ou pelo "Sugerir com IA"). */
+export type SuggestionRun = { runId: string; lines: number };
+
 /** Detalhe de um lote: linhas com status, par no app e as ações de conciliação. */
 export function ImportDetail({
   importId,
@@ -65,12 +84,14 @@ export function ImportDetail({
   card,
   onBack,
   onChanged,
+  suggestionRun = null,
 }: {
   importId: string;
   caixaId: string;
   card: CardOverview | null;
   onBack: () => void;
   onChanged: () => void;
+  suggestionRun?: SuggestionRun | null;
 }) {
   const detail = useApi<StatementImportDetail>(`/api/statement-imports/${importId}`);
   const [filter, setFilter] = useParamState('lines');
@@ -89,13 +110,26 @@ export function ImportDetail({
   const selectedSuggested = [...selected].filter((id) => suggestedIds.has(id));
   const selectedAgent = [...selected].filter((id) => agentIds.has(id));
   const toast = useToast();
-  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
-  useEffect(() => () => timers.current.forEach(clearTimeout), []);
+  const [suggesting, setSuggesting] = useState<SuggestionRun | null>(suggestionRun);
+  const { reload } = detail;
 
   const changed = () => {
-    void detail.reload();
+    void reload();
     onChanged();
   };
+
+  // As sugestões chegam pelo worker: segue o SSE da execução e recarrega as linhas quando ela termina.
+  const suggestingRunId = suggesting?.runId ?? null;
+  useEffect(() => {
+    if (!suggestingRunId) return;
+    const controller = new AbortController();
+    void followRun(suggestingRunId, { signal: controller.signal, onEvent: () => {} }).then((result) => {
+      if (result === 'aborted') return;
+      setSuggesting(null);
+      void reload();
+    });
+    return () => controller.abort();
+  }, [suggestingRunId, reload]);
 
   async function confirmLines(ids: string[]) {
     if (ids.length === 0) return;
@@ -129,8 +163,7 @@ export function ImportDetail({
     if (!result) return;
     if (!result.queued || result.lines === 0) return toast.success(ai.aiSuggestNothing);
     toast.success(ai.aiSuggestQueued(result.lines));
-    // As sugestões chegam pelo worker: recarrega algumas vezes.
-    for (const ms of [5000, 12000, 25000]) timers.current.push(setTimeout(() => changed(), ms));
+    if (result.runId) setSuggesting({ runId: result.runId, lines: result.lines });
   }
 
   useRegisterCommands(
@@ -179,7 +212,7 @@ export function ImportDetail({
           </Button>
         )}
         {canWrite && (
-          <Button variant="ghost" size="sm" onClick={() => void aiSuggest()} disabled={busy}>
+          <Button variant="ghost" size="sm" onClick={() => void aiSuggest()} disabled={busy || Boolean(suggesting)}>
             <Sparkles /> {ai.aiSuggest}
           </Button>
         )}
@@ -238,6 +271,13 @@ export function ImportDetail({
           <button type="button" className="link mt-1" onClick={() => setFailures([])}>
             {t.common.close}
           </button>
+        </div>
+      )}
+
+      {suggesting && (
+        <div className="notice info mb-3 flex items-center gap-2" data-testid="ai-suggesting">
+          <Loader2 className="spin size-4 flex-none" />
+          <span>{ai.aiSuggesting(suggesting.lines)}</span>
         </div>
       )}
 

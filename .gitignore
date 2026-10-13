@@ -19,9 +19,10 @@ coverage/
 # Claude Code (configurações locais)
 .claude/settings.local.json
 
-# Playwright
+# Playwright (e2e/.auth: sessão do admin gravada pelo global-setup)
 test-results/
 playwright-report/
+e2e/.auth/
 
 # Credenciais e anotações locais (nunca versionar)
 .local/

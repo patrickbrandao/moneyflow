@@ -383,6 +383,7 @@ export const agentsUiStrings = {
     aiSuggest: 'Sugerir com IA',
     aiSuggestQueued: (n: number) => `O agente vai sugerir a classificação de ${n} linha(s). As sugestões chegam em instantes.`,
     aiSuggestNothing: 'Não há linhas sem classificação para sugerir.',
+    aiSuggesting: (n: number) => `O agente está sugerindo a classificação de ${n} linha(s)…`,
     agentSuggestions: (n: number) => `${n} sugestão(ões) do agente`,
     agentSuggestionsHint: 'Classificações sugeridas pelo agente. Aprove para manter ou descarte para limpar.',
     approveSuggestions: (n: number) => `Aprovar sugestões (${n})`,

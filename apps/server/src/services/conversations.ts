@@ -22,6 +22,7 @@ import {
   conversationUsage,
   insertMessage,
   loadConfirmations,
+  loadConversationConfirmations,
   loadMessages,
   loadRun,
   messageDto,
@@ -205,7 +206,7 @@ export async function getConversation(ctx: ServiceContext, id: string): Promise<
     conversation: toDto(row),
     messages: messages.map((m) => messageDto(m, usage.get(m.id) ?? [])),
     activeRun: active ? runDto(active) : null,
-    confirmations: active ? await loadConfirmations(ctx.db, active.id, true) : [],
+    confirmations: await loadConversationConfirmations(ctx.db, id, active?.id ?? null),
     usage: await conversationUsage(ctx.db, id),
     readOnly: row.user_id !== ctx.access.actor.id,
   };

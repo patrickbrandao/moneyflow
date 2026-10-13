@@ -8,6 +8,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
+import { embeddingCredentials, embedPending, type IndexState, syncEmbeddingSources } from '../src/agents/embeddings';
 import { mcpExposedName } from '../src/agents/mcp-client';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { startAgentWorker } from '../src/agents/worker';
@@ -224,6 +225,12 @@ describe('execução do agente', () => {
     expect(result).toMatchObject({ is_error: true });
     expect(result.content).toContain('não quero');
     expect(detail.messages.at(-1).content[0].text).toMatch(/^Não deu certo/);
+    // Com a execução encerrada, o detalhe ainda traz a decisão (a tela marca a tool como recusada, não como erro).
+    expect(detail.activeRun).toBeNull();
+    const toolUse = detail.messages.find((m: any) => m.role === 'assistant').content.find((b: any) => b.type === 'tool_use');
+    expect(detail.confirmations).toEqual([
+      expect.objectContaining({ runId: sent.run.id, toolUseId: toolUse.id, status: 'rejected', reason: 'não quero' }),
+    ]);
   });
 
   it('permissões: o agente só enxerga as caixas do usuário que o acionou; admin lê a conversa (somente leitura)', async () => {
@@ -332,6 +339,66 @@ describe('provedor OpenAI-compatível', () => {
     expect(call.headers.authorization).toBe('Bearer sk-openai-SEGREDO-02');
     expect(call.body.tools.map((t: any) => t.function.name)).toEqual(['search_records', 'list_caixas']);
     expect(call.body.messages.some((m: any) => m.role === 'tool')).toBe(true);
+  });
+});
+
+describe('embeddings', () => {
+  it('provedor OpenAI-compatível com embeddings: indexa, grava o uso como embedding e a busca semântica acha o registro', async () => {
+    const embedder = await admin.post('/api/admin/ai/providers', {
+      name: `Embeddings falso ${uid()}`,
+      kind: 'openai',
+      baseUrl: `${llm.url}/v1`,
+      apiKey: 'sk-embed-SEGREDO-03',
+      embeddingModel: 'fake-embedding',
+    });
+    try {
+      const creds = await embeddingCredentials(h.db);
+      expect(creds).toMatchObject({ providerId: embedder.id, kind: 'openai', model: 'fake-embedding' });
+      const name = `Padaria Lua Azul ${uid()}`;
+      const entity = await admin.post('/api/entities', { kind: 'company', name });
+
+      // Indexação (o que a manutenção do worker faz): textos-fonte e depois os vetores pendentes.
+      const state: IndexState = { since: new Map() };
+      for (let i = 0; i < 100 && (await syncEmbeddingSources(h.db, creds!.model, state)) > 0; i += 1);
+      for (let i = 0; i < 100 && (await embedPending(h.db, creds!)) > 0; i += 1);
+      const indexed = await h.db.execute<{ source_text: string; needs_reindex: boolean; has_vector: boolean; caixa_id: string | null }>(sql`
+        SELECT source_text, needs_reindex, embedding IS NOT NULL AS has_vector, caixa_id FROM ai_embeddings
+         WHERE object_type = 'entity' AND object_id = ${entity.id} AND model = 'fake-embedding'`);
+      expect(indexed.rows).toEqual([{ source_text: name, needs_reindex: false, has_vector: true, caixa_id: null }]);
+      const embedCall = llm.calls.find((c) => c.path === '/v1/embeddings' && c.body.input.includes(name));
+      expect(embedCall?.headers.authorization).toBe('Bearer sk-embed-SEGREDO-03');
+      expect(embedCall?.body.model).toBe('fake-embedding');
+      const indexUsage = await h.db.execute<{ n: number }>(sql`
+        SELECT count(*)::int AS n FROM ai_usage
+         WHERE provider_id = ${embedder.id} AND purpose = 'embedding' AND user_id IS NULL AND input_tokens > 0`);
+      expect(indexUsage.rows[0]!.n).toBeGreaterThan(0);
+
+      // A tool semantic_search vetoriza a consulta (uso atribuído ao usuário) e devolve a entidade.
+      const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+      const sent = await chat(
+        admin,
+        conversation.id,
+        `chamar semantic_search ${JSON.stringify({ query: name, types: ['entity'], limit: 3 })}`,
+      );
+      await drain();
+      expect((await runStatus(sent.run.id)).status).toBe('completed');
+      const detail = await admin.get(`/api/conversations/${conversation.id}`);
+      const result = detail.messages.find((m: any) => m.role === 'tool').content[0];
+      expect(result.is_error).toBeFalsy();
+      const payload = JSON.parse(typeof result.content === 'string' ? result.content : result.content[0].text);
+      expect(payload.mode).toBe('embeddings');
+      expect(payload.hits[0]).toMatchObject({ type: 'entity', id: entity.id, text: name });
+      expect(payload.hits[0].score).toBeCloseTo(1, 5);
+      const queryUsage = await h.db.execute<{ n: number }>(sql`
+        SELECT count(*)::int AS n FROM ai_usage
+         WHERE provider_id = ${embedder.id} AND purpose = 'embedding' AND user_id = ${adminSession.id}`);
+      expect(queryUsage.rows[0]!.n).toBe(1);
+      // A chave do provedor de embeddings não sai pela API.
+      expect(JSON.stringify(await admin.get('/api/admin/ai/providers'))).not.toContain('sk-embed-SEGREDO-03');
+    } finally {
+      // Os demais testes usam o mesmo banco e esperam a busca por trigram.
+      await admin.patch(`/api/admin/ai/providers/${embedder.id}`, { isActive: false });
+    }
   });
 });
 
@@ -877,6 +944,16 @@ describe('IA nos fluxos', () => {
       }
       expect(lines.length).toBeGreaterThan(0);
       expect(lines[0].categoryId).not.toBeNull();
+      // Rastro do ator (herdado da tarefa 005): a sugestão sai na auditoria como agente, com a execução do fluxo.
+      const classifyRun = await h.db.execute<{ id: string }>(sql`
+        SELECT r.id FROM ai_runs r JOIN ai_conversations c ON c.id = r.conversation_id
+         WHERE c.purpose = 'classify_lines' AND c.screen_context ->> 'importId' = ${importId}`);
+      expect(classifyRun.rows).toHaveLength(1);
+      const suggestionAudit = await h.db.execute<{ actor_kind: string; agent_run_id: string | null; user_id: string | null }>(sql`
+        SELECT actor_kind, agent_run_id, user_id FROM audit_log
+         WHERE table_name = 'statement_lines' AND record_id = ${lines[0].id} AND action = 'update'
+           AND new_data ->> 'classification_source' = 'agent'`);
+      expect(suggestionAudit.rows).toEqual([{ actor_kind: 'agent', agent_run_id: classifyRun.rows[0]!.id, user_id: adminSession.id }]);
       const decided = await admin.post('/api/statement-lines/suggestions', { lineIds: [lines[0].id], decision: 'approve' });
       expect(decided.updated).toBe(1);
       const after = (await admin.get(`/api/statement-imports/${importId}`)).lines.find((l: any) => l.id === lines[0].id);
