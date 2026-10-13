@@ -6,7 +6,7 @@ autor: app
 responsavel: dba
 prioridade: media
 criada: 2026-10-11
-commit:
+commit: 499da8a
 ---
 
 # Marcar no banco qual agente atende os fluxos automáticos
