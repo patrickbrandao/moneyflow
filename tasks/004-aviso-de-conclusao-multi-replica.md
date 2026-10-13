@@ -1,12 +1,12 @@
 ---
-status: em-andamento
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: app
 responsavel: app
 prioridade: baixa
 criada: 2026-10-11
-commit:
+commit: 5140e59
 ---
 
 # Aviso de conclusão do agente com várias réplicas da API
@@ -34,3 +34,8 @@ Risco: baixo. Verificação (integração, `apps/server/test/agents.test.ts` ou 
 Ordem: independente. Prioridade baixa. Esforço: pequeno (~1 h).
 
 ## Resolução (executor)
+Item 1 corrigido (2026-10-13). `emitAgentEvent` (`apps/server/src/services/message-worker.ts`) recebe `eventKey`, uma chave determinística do evento, e a usa no sino (`${kind}:${eventKey}`) e na outbox (`${kind}:${eventKey}:${sub.id}`), no lugar de `Date.now()` e do recorte do texto. Chamadores: `agents/events-hub.ts` (`notifyIfFinished`) passa `run:<runId>:seq:<seq>`; a tool `notify_user` (`agents/tool-handlers.ts`) passa `run:<runId>:tool:<toolUseId>` e, pelo `/mcp` (sem execução), `mcp:tool:<toolUseId>`. Assim o mesmo evento avisado por outra réplica ou repetido numa retomada não duplica o sino nem o Telegram, e dois "aguardando confirmação" da mesma execução com o mesmo texto viram dois avisos.
+
+Teste: `apps/server/test/vision.test.ts` → "evento de agente: o mesmo evento emitido duas vezes (duas réplicas) gera um aviso por destino; outro seq gera outro" (um aviso e uma linha de outbox por destino para o mesmo seq; dois para seqs diferentes). Spec 011 (aviso de conclusão) atualizada: deduplica por evento; a decisão de presença ainda supõe uma réplica.
+
+Item 2 (presença no banco) fica fora do escopo, como decidido na triagem.

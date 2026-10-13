@@ -7,6 +7,8 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './tests',
+  // Uma sessão do admin para a suíte toda (o login tem limite por minuto): support/session.ts.
+  globalSetup: './global-setup.ts',
   timeout: 60_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,

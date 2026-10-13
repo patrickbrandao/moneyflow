@@ -17,8 +17,9 @@ import { loadMessages } from './store';
  * interrompe; o sino avisa): quando a execução termina — ou passa a esperar
  * confirmação — e NINGUÉM está com o stream dela aberto nesta API, cria a
  * notificação agent_completed (sino + destinos que assinam o evento) via
- * emitAgentEvent. Com várias réplicas da API, cada uma só enxerga os próprios
- * streams (a dedup_key evita aviso duplicado no sino).
+ * emitAgentEvent. A chave do evento (`run:<runId>:seq:<seq>`) deduplica o sino
+ * e a fila dos destinos se outra réplica avisar o mesmo evento; a decisão de
+ * presença, porém, só enxerga os streams desta réplica (tarefa 004).
  */
 
 type Listener = () => void;
@@ -115,7 +116,7 @@ export class RunEventsHub {
       title: string | null;
       purpose: string | null;
     }>(sql`
-      SELECT e.event_type, e.payload, r.user_id, r.conversation_id, c.title, c.screen_context ->> 'purpose' AS purpose
+      SELECT e.event_type, e.payload, r.user_id, r.conversation_id, c.title, c.purpose
         FROM ai_run_events e JOIN ai_runs r ON r.id = e.run_id JOIN ai_conversations c ON c.id = r.conversation_id
        WHERE e.run_id = ${runId} AND e.seq = ${seq}`);
     const row = result.rows[0];
@@ -136,6 +137,7 @@ export class RunEventsHub {
       kind: 'agent_completed',
       userId: row.user_id,
       agentRunId: runId,
+      eventKey: `run:${runId}:seq:${seq}`,
       title,
       text: text.slice(0, 2000) || title,
       link: `/?conversation=${row.conversation_id}`,

@@ -21,9 +21,6 @@ x-app: &app
     # TELEGRAM_API_BASE=http://host.docker.internal:18081 docker compose up -d
     TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-https://api.telegram.org}
     APP_URL: ${APP_URL:-}
-    # Agentes de IA (spec 011): agente dos fluxos (leitura de documento, sugestões da conciliação), pelo nome;
-    # vazio = o primeiro agente ativo.
-    AI_FLOW_AGENT: ${AI_FLOW_AGENT:-}
   # host.docker.internal também no Linux (a Bot API falsa dos e2e roda no host).
   extra_hosts:
     - "host.docker.internal:host-gateway"

@@ -1,12 +1,12 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: app
 responsavel: dba
 prioridade: baixa
 criada: 2026-10-11
-commit:
+commit: 499da8a
 ---
 
 # Coluna própria para a finalidade da conversa
@@ -41,3 +41,13 @@ Risco: baixo (coluna nova com padrão; o backfill é determinístico). Verifica�
 Ordem: 001 + 003 (dba) → 013 → 011 (app). Esforço: pequeno a médio (~1–2 h).
 
 ## Resolução (executor)
+Feito em 2026-10-13 (dba), na migration `database/migrations/0033_ai_purpose.sql` (junto com a 001).
+
+- `ai_conversations.purpose text NOT NULL DEFAULT 'chat'`, `ai_conversations_purpose_check` com `chat`, `document_reading`, `classify_lines`, `contract_reading`, `contract_markdown` (mesmo vocabulário de `ai_usage.purpose`).
+- Backfill: `purpose = screen_context->>'purpose'` quando o valor está na lista (sem mexer em `updated_at`); o resto fica `chat`. O `screen_context` não é alterado.
+- Imutável depois do INSERT, por trigger (`ai_conversations_purpose_immutable`, `BEFORE UPDATE OF purpose` só quando o valor muda): `23514` com `CONSTRAINT = 'ai_conversations_purpose_immutable_check'`. REVOKE de coluna não serviria (o papel tem UPDATE na tabela inteira).
+- `ai_conversation_fork` cria a cópia sempre como `chat` e tira a chave `purpose` do `screen_context` copiado (não recusa bifurcar conversa de fluxo).
+- Índices: `ai_conversations_chat_user_idx (user_id, last_message_at DESC NULLS LAST) WHERE purpose = 'chat'` (lista e busca do usuário) e `ai_conversations_purpose_idx (purpose, created_at) WHERE purpose <> 'chat'` (manutenção das conversas dos fluxos).
+- `COMMENT ON`, spec 016, pgTAP em `database/tests/0026_ai_conversations_and_runs.sql`, `schema.sql` e `packages/db/src/generated` regenerados.
+
+Verificação: `make -C database test` verde; backfill conferido à mão (finalidade válida copiada, inválida ou ausente fica `chat`). Próximo: tarefa 013 (app).

@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { expect, type Page, test } from '@playwright/test';
+import { loginAsAdmin } from '../support/session';
 
 /*
  * Fluxos da F2 (operação): importar um OFX de exemplo e conciliar; fechar a
@@ -7,17 +8,7 @@ import { expect, type Page, test } from '@playwright/test';
  * feita pela API com a sessão do login; o que se testa é a tela.
  */
 
-const username = process.env.E2E_USERNAME ?? process.env.ADMIN_USERNAME ?? 'admin';
-const password = process.env.E2E_PASSWORD ?? process.env.ADMIN_PASSWORD ?? 'admin12345';
 const FIXTURES = join(import.meta.dirname, '../../apps/server/test/fixtures');
-
-async function login(page: Page) {
-  await page.goto('/');
-  await page.getByLabel('Usuário ou e-mail').fill(username);
-  await page.getByLabel('Senha').fill(password);
-  await page.getByRole('button', { name: 'Entrar' }).click();
-  await expect(page.getByRole('heading', { name: /^Olá,/ })).toBeVisible();
-}
 
 /** Categoria de despesa, titular, caixa geral e conta corrente com R$ 1.000,00. */
 async function base(page: Page, tag: string) {
@@ -44,7 +35,7 @@ async function base(page: Page, tag: string) {
 
 test('importar OFX de exemplo e conciliar', async ({ page }) => {
   const tag = Date.now().toString(36);
-  await login(page);
+  await loginAsAdmin(page);
   const { post, expense, income, supplier, caixa, account } = await base(page, tag);
   // Já lançado no app: a assinatura (casa sozinha) e o supermercado a pagar (fica sugerido).
   await post(`/api/accounts/${account.id}/adjustments`, {
@@ -109,7 +100,7 @@ test('importar OFX de exemplo e conciliar', async ({ page }) => {
 
 test('fechar a fatura do cartão e pagar', async ({ page }) => {
   const tag = Date.now().toString(36);
-  await login(page);
+  await loginAsAdmin(page);
   const { post, expense, supplier, caixa, account } = await base(page, tag);
   const issuer = await post('/api/entities', { kind: 'company', name: `E2E F2 Emissor ${tag}` });
   const card = await post('/api/caixas', {

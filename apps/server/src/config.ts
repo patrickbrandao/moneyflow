@@ -33,8 +33,6 @@ export type Config = {
   agentConcurrency: number;
   /** Manutenção dos agentes (retenção de eventos, expiração de confirmações, embeddings), em ms. */
   agentMaintenanceMs: number;
-  /** Agente usado nos fluxos (leitura de documento, sugestões da conciliação), pelo nome; vazio = o primeiro ativo. */
-  aiFlowAgent: string | null;
   /** Espera máxima da leitura de documento por IA, em ms. */
   aiDocumentTimeoutMs: number;
   /** Backup (spec 019): conexão do dono do banco, só para pg_dump/pg_restore; null = dump e restauração desligados. */
@@ -81,7 +79,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     agentPollMs: Number(env.AGENT_POLL_MS ?? 1000),
     agentConcurrency: Math.max(1, Number(env.AGENT_CONCURRENCY ?? 4)),
     agentMaintenanceMs: Number(env.AGENT_MAINTENANCE_MS ?? 5 * 60 * 1000),
-    aiFlowAgent: env.AI_FLOW_AGENT?.trim() || null,
     aiDocumentTimeoutMs: Number(env.AI_DOCUMENT_TIMEOUT_MS ?? 120_000),
     ownerDatabaseUrl: env.DATABASE_OWNER_URL?.trim() || null,
     pgBinDir: env.PG_BIN_DIR?.trim() || null,

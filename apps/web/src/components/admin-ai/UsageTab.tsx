@@ -26,7 +26,7 @@ function Cost({ row }: { row: UsageTotals }) {
 
 const monthLabel = (month: string) => (/^\d{4}-\d{2}$/.test(month) ? formatMonth(`${month}-01`) : month);
 
-/** Uso de tokens e custo estimado por mês: por usuário e por agente/modelo (só medição, sem teto). */
+/** Uso de tokens e custo estimado por mês: por usuário, por finalidade e por agente/modelo (só medição, sem teto). */
 export function UsageTab() {
   const [from, setFrom] = useState(monthsAgo(2));
   const [to, setTo] = useState(monthsAgo(0));
@@ -70,6 +70,47 @@ export function UsageTab() {
                       <td className="mono text-xs">{monthLabel(row.month)}</td>
                       <td>{row.username ? `@${row.username}` : s.unknownUser}</td>
                       <td className="num mono text-xs">{formatInt(row.runs)}</td>
+                      <td className="num mono text-xs">{formatInt(row.calls)}</td>
+                      <td className="num mono text-xs">{formatInt(row.inputTokens)}</td>
+                      <td className="num mono text-xs">{formatInt(row.outputTokens)}</td>
+                      <td className="num mono text-xs">
+                        {formatInt(row.cacheWriteTokens)} / {formatInt(row.cacheReadTokens)}
+                      </td>
+                      <td className="num mono text-xs">
+                        <Cost row={row} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <section>
+            <h2 className="text-h3 mb-2">{s.byPurpose}</h2>
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>{s.month}</th>
+                    <th>{s.purpose}</th>
+                    <th className="num">{s.runs}</th>
+                    <th className="num">{s.users}</th>
+                    <th className="num">{s.calls}</th>
+                    <th className="num">{s.input}</th>
+                    <th className="num">{s.output}</th>
+                    <th className="num">{s.cache}</th>
+                    <th className="num">{s.cost}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {!data && <SkelRows cols={9} rows={3} />}
+                  {data?.byPurpose.length === 0 && <EmptyRow colSpan={9}>{s.empty}</EmptyRow>}
+                  {data?.byPurpose.map((row, index) => (
+                    <tr key={`${row.month}-${row.purpose}-${row.currency}-${index}`}>
+                      <td className="mono text-xs">{monthLabel(row.month)}</td>
+                      <td>{s.purposes[row.purpose] ?? row.purpose}</td>
+                      <td className="num mono text-xs">{formatInt(row.runs)}</td>
+                      <td className="num mono text-xs">{formatInt(row.users)}</td>
                       <td className="num mono text-xs">{formatInt(row.calls)}</td>
                       <td className="num mono text-xs">{formatInt(row.inputTokens)}</td>
                       <td className="num mono text-xs">{formatInt(row.outputTokens)}</td>

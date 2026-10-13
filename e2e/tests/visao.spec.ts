@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { expect, type Page, test } from '@playwright/test';
+import { loginAsAdmin } from '../support/session';
 
 /*
  * Fase 3 (visão e mensagens): canvas de fluxo com a gaveta; relatório por
@@ -12,18 +13,8 @@ import { expect, type Page, test } from '@playwright/test';
  * no `docker compose up` (ver AGENTS.md). Nada vai para o Telegram de verdade.
  */
 
-const username = process.env.E2E_USERNAME ?? process.env.ADMIN_USERNAME ?? 'admin';
-const password = process.env.E2E_PASSWORD ?? process.env.ADMIN_PASSWORD ?? 'admin12345';
 const telegramPort = Number(process.env.E2E_TELEGRAM_PORT ?? 18081);
 const year = new Date().getFullYear();
-
-async function login(page: Page) {
-  await page.goto('/');
-  await page.getByLabel('Usuário ou e-mail').fill(username);
-  await page.getByLabel('Senha').fill(password);
-  await page.getByRole('button', { name: 'Entrar' }).click();
-  await expect(page.getByRole('heading', { name: /^Olá,/ })).toBeVisible();
-}
 
 /** Caixa com conta, fornecedor e um título pago no ano corrente (preparados pela API, com a sessão da tela). */
 async function scenario(page: Page, tag: string) {
@@ -60,7 +51,7 @@ async function scenario(page: Page, tag: string) {
 
 test('canvas de fluxo: nós, gaveta com o lançamento e link para o título', async ({ page }) => {
   const tag = Date.now().toString(36);
-  await login(page);
+  await loginAsAdmin(page);
   const s = await scenario(page, tag);
 
   await page.goto(`/flow?from=${year}-01-01&to=${year}-12-31&caixas=${s.caixa.id}&mode=realized`);
@@ -80,7 +71,7 @@ test('canvas de fluxo: nós, gaveta com o lançamento e link para o título', as
 
 test('relatório por categoria e exportação CSV', async ({ page }) => {
   const tag = Date.now().toString(36);
-  await login(page);
+  await loginAsAdmin(page);
   const s = await scenario(page, tag);
 
   await page.goto(`/reports?from=${year}-01-01&to=${year}-12-31&caixas=${s.caixa.id}`);
@@ -126,7 +117,7 @@ test.describe('mensagens', () => {
     const tag = Date.now().toString(36);
     const chatId = `-100${Date.now() % 1_000_000_000}`;
     const token = `424242${Date.now() % 1000}:E2EfakeTokenSoParaTeste_${tag}`;
-    await login(page);
+    await loginAsAdmin(page);
 
     await page.goto('/messages');
     await page.getByRole('button', { name: 'Novo destino' }).first().click();

@@ -67,7 +67,14 @@ export function AgentsTab() {
                     {agent.mcpServers.length > 0 && ` · ${g.mcpSummary(agent.mcpServers.length)}`}
                   </td>
                   <td>
-                    <ActiveBadge active={agent.isActive} archived={Boolean(agent.archivedAt)} />
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <ActiveBadge active={agent.isActive} archived={Boolean(agent.archivedAt)} />
+                      {agent.useForFlows && (
+                        <Badge tone="accent" title={g.flowsBadgeTitle}>
+                          {g.flowsBadge}
+                        </Badge>
+                      )}
+                    </span>
                   </td>
                   <td className="text-right" onClick={(e) => e.stopPropagation()}>
                     <span className="row-actions">
@@ -147,6 +154,7 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
   const [colorSlot, setColorSlot] = useState(agent?.colorSlot ?? 1);
   const [icon, setIcon] = useState(agent?.icon ?? '');
   const [isActive, setIsActive] = useState(agent?.isActive ?? false);
+  const [useForFlows, setUseForFlows] = useState(agent?.useForFlows ?? false);
   const [links, setLinks] = useState<Record<string, McpLink>>(() =>
     Object.fromEntries(
       (agent?.mcpServers ?? []).map((l) => [
@@ -181,6 +189,7 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (isActive && (!providerId || !model.trim())) return setError(g.activeHint);
+    if (useForFlows && !isActive) return setError(g.useForFlowsNeedsActive);
     setError(null);
     const nextParams: AgentParams = {};
     const put = <K extends keyof AgentParams>(key: K, value: AgentParams[K] | undefined) => {
@@ -207,6 +216,7 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
       colorSlot,
       icon: icon.trim(),
       isActive,
+      useForFlows,
       mcpServers,
     };
     const saved = await run(
@@ -493,9 +503,22 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
             </div>
           </Field>
           <label className="check">
-            <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} /> {g.active}
+            <input
+              type="checkbox"
+              checked={isActive}
+              onChange={(e) => {
+                setIsActive(e.target.checked);
+                if (!e.target.checked) setUseForFlows(false);
+              }}
+            />{' '}
+            {g.active}
           </label>
           {isActive && (!providerId || !model.trim()) && <p className="hint">{g.activeHint}</p>}
+          <label className="check">
+            <input type="checkbox" checked={useForFlows} disabled={!isActive} onChange={(e) => setUseForFlows(e.target.checked)} />{' '}
+            {g.useForFlows}
+          </label>
+          <p className="hint">{isActive ? g.useForFlowsHint : g.useForFlowsNeedsActive}</p>
           <FormError>{error}</FormError>
         </div>
         <ModalActions>

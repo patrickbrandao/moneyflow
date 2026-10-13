@@ -101,20 +101,21 @@ export const agentParamsInput = z
 
 export const agentMcpLinkInput = z.object({ mcpServerId: id, enabledTools: toolList.default(null) });
 
-export const aiAgentCreateInput = z.object({
+/** Campos do agente sem valores padrão (o PATCH só muda o que vier). */
+const agentFields = {
   name: requiredText(120),
   description: optionalText(2000),
-  systemPrompt: z.string().max(200_000).default(''),
+  systemPrompt: z.string().max(200_000),
   providerId: id.nullish().transform((v) => v ?? null),
   model: modelName
     .nullish()
     .or(z.literal(''))
     .transform((v) => v || null),
-  params: agentParamsInput.default({}),
+  params: agentParamsInput,
   /** null = todas as tools internas; [] = nenhuma. */
-  enabledTools: toolList.default(null),
-  requireWriteConfirmation: z.boolean().default(true),
-  colorSlot: z.number().int().min(1).max(12).default(1),
+  enabledTools: toolList,
+  requireWriteConfirmation: z.boolean(),
+  colorSlot: z.number().int().min(1).max(12),
   icon: z
     .string()
     .trim()
@@ -122,14 +123,28 @@ export const aiAgentCreateInput = z.object({
     .nullish()
     .or(z.literal(''))
     .transform((v) => v || null),
-  isActive: z.boolean().default(false),
+  isActive: z.boolean(),
+  /** Agente dos fluxos automáticos (leitura de documento, conciliação, contrato); só um por vez. */
+  useForFlows: z.boolean(),
   mcpServers: z.array(agentMcpLinkInput).max(100).optional(),
+};
+
+export const aiAgentCreateInput = z.object({
+  ...agentFields,
+  systemPrompt: agentFields.systemPrompt.default(''),
+  params: agentParamsInput.default({}),
+  enabledTools: toolList.default(null),
+  requireWriteConfirmation: agentFields.requireWriteConfirmation.default(true),
+  colorSlot: agentFields.colorSlot.default(1),
+  isActive: agentFields.isActive.default(false),
+  useForFlows: agentFields.useForFlows.default(false),
 });
 
-export const aiAgentUpdateInput = aiAgentCreateInput.partial().extend({
-  params: agentParamsInput.optional(),
-  enabledTools: toolList.optional(),
-});
+/**
+ * Edição parcial: sem os padrões da criação (no Zod 4, `.partial()` mantém o
+ * `.default()`, e um PATCH com um campo só desativaria o agente e zeraria o prompt).
+ */
+export const aiAgentUpdateInput = z.object(agentFields).partial();
 
 export const MCP_VISIBILITIES = ['global', 'public', 'private'] as const;
 const headerName = z.string().regex(/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$/, 'Nome de cabeçalho inválido.');

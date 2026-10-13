@@ -38,7 +38,7 @@ Em **Administração → IA e agentes** (só admin):
 3. **Agentes**: nome, prompt de sistema, provedor e modelo (sugestões: `claude-sonnet-5-5` para o dia a dia, `claude-opus-5-5` para análises pesadas), tools habilitadas, se as escritas pedem confirmação, cor e servidores MCP. Ative o agente.
 4. **Servidores MCP** (opcional): URL Streamable HTTP, cabeçalhos secretos (ex.: `Authorization`) e visibilidade (`global`, `public`, `private`); **Atualizar tools** lê a lista de tools do servidor.
 
-Depois disso, o ícone **Agentes** na barra superior abre as conversas. O primeiro agente ativo (ou o definido em `AI_FLOW_AGENT`) também lê PDFs e imagens de boletos e notas na criação de títulos e sugere a classificação das linhas de extrato importadas.
+Depois disso, o ícone **Agentes** na barra superior abre as conversas. O agente marcado em **Agentes → Usar nos fluxos automáticos** (ou, sem marca, o primeiro agente ativo) também lê PDFs e imagens de boletos e notas na criação de títulos, sugere a classificação das linhas de extrato importadas e lê os PDFs dos contratos. A variável `AI_FLOW_AGENT` deixou de existir: quem a usava marca o agente nessa opção.
 
 Para usar as tools do MoneyFlow num cliente MCP externo, gere um token em **Minha conta → Tokens de API** e configure o cliente com `https://<seu-host>/mcp` e o cabeçalho `Authorization: Bearer <token>`.
 

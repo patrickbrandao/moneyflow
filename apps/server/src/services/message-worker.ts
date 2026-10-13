@@ -695,6 +695,11 @@ export async function consumeOutbox(db: Database, config: Config, opts: { batch?
  * mensagem para os destinos que assinam o evento e que esse usuário vê
  * (pessoais dele e das caixas que ele lê). Chamado pelas execuções de agente
  * na F4; o worker consome a fila como qualquer outra mensagem.
+ *
+ * `eventKey` identifica o evento de forma determinística (`run:<runId>:seq:<seq>`
+ * no aviso de conclusão, `run:<runId>:tool:<toolUseId>` na tool notify_user):
+ * o mesmo evento emitido de novo (outra réplica, retomada) não duplica o sino
+ * nem a fila.
  */
 export async function emitAgentEvent(
   db: Database,
@@ -702,6 +707,7 @@ export async function emitAgentEvent(
     kind: 'agent_completed' | 'agent_message';
     userId: string;
     agentRunId: string;
+    eventKey: string;
     title?: string | null;
     text: string;
     link?: string | null;
@@ -720,7 +726,7 @@ export async function emitAgentEvent(
       link: event.link ?? null,
       caixaId: event.caixaId ?? null,
       data: { agentRunId: event.agentRunId },
-      dedupKey: `${event.kind}:${event.agentRunId}:${event.text.length}:${event.text.slice(0, 40)}`,
+      dedupKey: `${event.kind}:${event.eventKey}`,
     },
   ]);
   const subs = await activeSubscriptions(db, [event.kind]);
@@ -737,7 +743,7 @@ export async function emitAgentEvent(
       event.kind,
       [
         {
-          dedupKey: `${event.kind}:${event.agentRunId}:${sub.id}:${Date.now()}`,
+          dedupKey: `${event.kind}:${event.eventKey}:${sub.id}`,
           caixaId: event.caixaId ?? null,
           payload: agentMessage(event.kind, event.title ?? null, event.text, linkTo(event.config, event.link ?? null)),
         },

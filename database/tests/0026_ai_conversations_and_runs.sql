@@ -328,6 +328,41 @@ SELECT is((SELECT count(*)::int FROM ai_message_attachments a JOIN ai_messages m
 SELECT throws_ok($$SELECT ai_conversation_fork('00000000-0000-7000-8000-0000000b1fff', '00000000-0000-7000-8000-0000000000a2')$$,
                  'P0002', NULL, 'mensagem inexistente');
 
+-- Finalidade da conversa (0033) ------------------------------------------------------------------------------------------------
+SELECT has_column('ai_conversations', 'purpose');
+SELECT col_not_null('ai_conversations', 'purpose');
+SELECT has_index('ai_conversations', i) FROM unnest(ARRAY['ai_conversations_chat_user_idx', 'ai_conversations_purpose_idx']) i;
+SELECT is((SELECT purpose FROM ai_conversations WHERE id = (SELECT id FROM fork)), 'chat', 'finalidade chat por padrão');
+INSERT INTO ai_conversations (id, user_id, agent_id, screen_context, purpose, archived_at) VALUES
+  ('00000000-0000-7000-8000-0000000b0009', '00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001',
+   '{"purpose": "document_reading", "route": "/titulos"}', 'document_reading', now());
+INSERT INTO ai_messages (id, conversation_id, role, content) VALUES
+  ('00000000-0000-7000-8000-0000000b1009', '00000000-0000-7000-8000-0000000b0009', 'user', '[{"type": "text", "text": "leia"}]');
+SELECT lives_ok(format($$INSERT INTO ai_conversations (user_id, agent_id, purpose) VALUES
+                  ('00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001', %L)$$, p), 'finalidade aceita: ' || p)
+  FROM unnest(ARRAY['chat', 'classify_lines', 'contract_reading', 'contract_markdown']) p;
+SELECT throws_ok($$INSERT INTO ai_conversations (user_id, agent_id, purpose) VALUES
+                   ('00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001', 'document')$$, '23514',
+                 'new row for relation "ai_conversations" violates check constraint "ai_conversations_purpose_check"',
+                 'finalidade fora do vocabulário');
+SELECT throws_ok($$UPDATE ai_conversations SET purpose = 'chat' WHERE id = '00000000-0000-7000-8000-0000000b0009'$$, '23514',
+                 'ai_conversations: purpose of conversation 00000000-0000-7000-8000-0000000b0009 is immutable',
+                 'finalidade imutável');
+SELECT throws_ok($$UPDATE ai_conversations SET purpose = 'classify_lines' WHERE id = (SELECT id FROM fork)$$, '23514', NULL,
+                 'conversa comum não vira fluxo');
+UPDATE ai_conversations SET screen_context = '{"route": "/caixas"}', title = 'Leitura'
+ WHERE id = '00000000-0000-7000-8000-0000000b0009';
+SELECT is((SELECT purpose FROM ai_conversations WHERE id = '00000000-0000-7000-8000-0000000b0009'), 'document_reading',
+          'trocar o contexto da tela não apaga a finalidade');
+SELECT lives_ok($$UPDATE ai_conversations SET purpose = purpose WHERE id = '00000000-0000-7000-8000-0000000b0009'$$,
+                'regravar o mesmo valor passa');
+UPDATE ai_conversations SET screen_context = '{"purpose": "document_reading", "route": "/titulos"}'
+ WHERE id = '00000000-0000-7000-8000-0000000b0009';
+CREATE TEMP TABLE fork_flow AS SELECT ai_conversation_fork('00000000-0000-7000-8000-0000000b1009',
+                                                           '00000000-0000-7000-8000-0000000000a2') AS id;
+SELECT results_eq($$SELECT purpose, screen_context FROM ai_conversations WHERE id = (SELECT id FROM fork_flow)$$,
+                  $$VALUES ('chat', '{"route": "/titulos"}'::jsonb)$$, 'bifurcar conversa de fluxo cria chat, sem purpose no contexto');
+
 -- Excluir a conversa de origem: a bifurcação perde só a referência
 DELETE FROM ai_conversations WHERE id = '00000000-0000-7000-8000-0000000b0001';
 SELECT results_eq($$SELECT forked_from_conversation_id, forked_from_message_id FROM ai_conversations WHERE id = (SELECT id FROM fork)$$,
