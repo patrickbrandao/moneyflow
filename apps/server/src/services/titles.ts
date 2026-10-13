@@ -228,10 +228,11 @@ export async function defaultMirrorCategory(tx: Executor, caixaId: string, direc
   return id;
 }
 
-async function resolveMirror(
+/** Plano do espelho de um título novo (também usado ao lançar a partir da linha do extrato). */
+export async function resolveMirror(
   ctx: ServiceContext,
   tx: Executor,
-  input: z.output<typeof titleCreateInput>,
+  input: Pick<z.output<typeof titleCreateInput>, 'caixaId' | 'direction' | 'entityId' | 'mirrorCaixaId' | 'mirrorCategoryId'>,
   originHolderId: string,
 ): Promise<MirrorPlan | null> {
   if (input.mirrorCaixaId === null) return null;
