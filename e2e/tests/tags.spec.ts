@@ -55,7 +55,10 @@ test('tags e favoritas: criar tag, atribuir, marcar favorita, aba Favoritas e fi
   await page.getByPlaceholder('Nome, fantasia ou CPF/CNPJ').fill(suffix);
   await expect(page.getByRole('row', { name: new RegExp(plain) })).toBeVisible();
   await page.getByRole('button', { name: 'Filtrar por tags' }).click();
-  await page.getByRole('checkbox', { name: tagName }).check();
+  // O filtro vive na URL e a navegação roda em transição: clica e espera o estado, sem exigir mudança imediata.
+  const tagBox = page.getByRole('checkbox', { name: tagName });
+  await tagBox.click();
+  await expect(tagBox).toBeChecked();
   await expect(page).toHaveURL(/tags=/);
   await expect(page.getByRole('row', { name: new RegExp(tagged) })).toBeVisible();
   await expect(page.getByRole('row', { name: new RegExp(plain) })).toHaveCount(0);
