@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-10-13
-commit:
+commit: d35f8c8
 ---
 
 # Trocar ou dispensar o espelho ao lançar a linha do extrato como título
