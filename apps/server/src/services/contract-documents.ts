@@ -336,7 +336,7 @@ async function runFlow(
   const conversation = await createConversation(
     ctx,
     { agentId, title: t.agents.flows.documentConversation(file.name).slice(0, 200) },
-    { screenContext: { purpose, fileName: file.name }, archived: true },
+    { purpose, screenContext: { fileName: file.name }, archived: true },
   );
   const attachmentId = await withTx(ctx, (tx) =>
     storeAttachment(tx, ctx, { name: file.name, mime: 'application/pdf', content: file.content }),

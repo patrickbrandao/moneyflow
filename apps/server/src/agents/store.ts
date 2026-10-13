@@ -187,6 +187,25 @@ export async function loadConfirmations(db: Executor, runId: string, pendingOnly
   return result.rows.map(confirmationDto);
 }
 
+/**
+ * As confirmações que a conversa mostra: as pendentes da execução ativa e as
+ * já decididas de todas as execuções (para o histórico marcar a tool recusada
+ * como recusada, não como erro, depois que a execução termina).
+ */
+export async function loadConversationConfirmations(
+  db: Executor,
+  conversationId: string,
+  activeRunId: string | null,
+): Promise<ToolConfirmationDto[]> {
+  const result = await db.execute<ConfirmationRow>(sql`
+    SELECT c.id, c.run_id, c.tool_use_id, c.tool_name, c.input, c.preview, c.status, c.reason, c.decided_at
+      FROM ai_tool_confirmations c JOIN ai_runs r ON r.id = c.run_id
+     WHERE r.conversation_id = ${conversationId}
+       AND (c.status <> 'pending' OR c.run_id = ${activeRunId}::uuid)
+     ORDER BY c.created_at, c.id`);
+  return result.rows.map(confirmationDto);
+}
+
 /** Histórico neutro para o modelo (na ordem). */
 export function toNeutral(rows: MessageRow[]): NeutralMessage[] {
   return rows.map((m) => ({ role: m.role, content: m.content }) as NeutralMessage);

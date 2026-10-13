@@ -537,6 +537,8 @@ export type StatementImportDetail = StatementImportSummary & {
   lines: StatementLineRow[];
   /** Quantas linhas do arquivo já existiam (dedup) no momento do import. */
   skippedDuplicates?: number;
+  /** Só na resposta do import: a sugestão do agente dos fluxos enfileirada para as linhas novas (a tela acompanha a execução). */
+  aiSuggestion?: { queued: boolean; runId: string | null; lines: number } | null;
 };
 
 export type StatementInspect = {

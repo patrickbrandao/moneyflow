@@ -1,12 +1,12 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: app
 responsavel: dba
 prioridade: media
 criada: 2026-10-11
-commit:
+commit: 499da8a
 ---
 
 # Separar o uso de IA da leitura de documento e da classificação
@@ -37,3 +37,12 @@ Risco: baixo (só amplia um CHECK e cria uma view). Verificação: `make -C data
 Ordem: 001 + 003 (dba, uma migration) → 013 → 011 (app). Esforço: pequeno (~1 h com o pgTAP).
 
 ## Resolução (executor)
+Feito em 2026-10-13 (dba), na migration `database/migrations/0033_ai_purpose.sql` (junto com a 003).
+
+- `ai_usage_purpose_check` ampliado: `chat`, `title`, `embedding`, `document_reading`, `classify_lines`, `contract_reading`, `contract_markdown` (nomes do código, `FLOW_PURPOSES`; os do pedido original, `document`/`classification`, não foram usados). Valor fora da lista: `23514 ai_usage_purpose_check`.
+- `ai_usage_before_insert`: quando chega `purpose = 'chat'` e a conversa (a informada ou a da execução) tem finalidade de fluxo, a linha assume a finalidade da conversa. `title` e as finalidades explícitas ficam como vieram.
+- View `ai_usage_monthly_by_purpose` (`security_invoker`): `month` (America/Sao_Paulo), `purpose`, `currency`, `calls`, `runs`, `users`, `input_tokens`, `output_tokens`, `cache_write_tokens`, `cache_read_tokens`, `cost_micros`, `has_unpriced`. `moneyflow_app` tem SELECT (GRANT explícito, além do default privilege).
+- `COMMENT ON` da coluna, da função e da view; spec 016 atualizada; pgTAP em `database/tests/0027_ai_usage.sql`; `schema.sql` e `packages/db/src/generated` regenerados.
+- O down devolve as linhas das finalidades novas para `chat` antes de restaurar o CHECK antigo.
+
+Verificação: `make -C database test` verde (32 arquivos, 1912 testes). Próximo: tarefa 011 (app).

@@ -63,6 +63,8 @@ export type AiAgentDto = {
   colorSlot: number;
   icon: string | null;
   isActive: boolean;
+  /** Atende os fluxos automáticos (só um por vez; precisa estar ativo). */
+  useForFlows: boolean;
   archivedAt: string | null;
   createdAt: string;
   mcpServers: AgentMcpLinkDto[];
@@ -121,6 +123,16 @@ export type UsageTotals = {
   hasUnpriced: boolean;
 };
 
+/** Finalidade de uma chamada medida em ai_usage (as quatro últimas são os fluxos automáticos). */
+export type AiUsagePurpose =
+  | 'chat'
+  | 'title'
+  | 'embedding'
+  | 'document_reading'
+  | 'classify_lines'
+  | 'contract_reading'
+  | 'contract_markdown';
+
 export type AiUsageReport = {
   byUser: (UsageTotals & { month: string; userId: string | null; username: string | null; runs: number })[];
   byAgent: (UsageTotals & {
@@ -131,6 +143,7 @@ export type AiUsageReport = {
     runs: number;
     users: number;
   })[];
+  byPurpose: (UsageTotals & { month: string; purpose: AiUsagePurpose; runs: number; users: number })[];
 };
 
 export type ScreenContext = {
@@ -206,6 +219,7 @@ export type ConversationDetail = {
   conversation: ConversationDto;
   messages: AiMessageDto[];
   activeRun: AiRunDto | null;
+  /** As pendentes da execução ativa e as já decididas da conversa (o histórico mostra a tool recusada como recusada). */
   confirmations: ToolConfirmationDto[];
   usage: UsageTotals[];
   /** true = quem vê não é o dono (admin lendo): sem enviar, decidir ou cancelar. */

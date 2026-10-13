@@ -1,12 +1,12 @@
 ---
-status: em-andamento
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: app
 responsavel: app
 prioridade: media
 criada: 2026-10-11
-commit:
+commit: 9b29f08
 ---
 
 # Cobrir no e2e os fluxos do agente ainda sem teste contra a API real
@@ -43,3 +43,24 @@ Risco: médio (pode revelar bugs no front, especialmente na reconexão do SSE). 
 Ordem: independente. Pode rodar depois de 013/011, para o teste de embeddings já ver a finalidade nova no `ai_usage`, mas não depende delas. Prioridade média. Esforço: grande (~1 dia).
 
 ## Resolução (executor)
+Feito em 2026-10-13 (app).
+
+**Testes novos**
+- e2e (`e2e/tests/agentes.spec.ts`, provedor falso na 18082), além do cenário que já havia:
+  - recusar uma escrita com motivo: o cartão some, nada é gravado, a tool fica "recusada", o agente responde com o motivo e o provedor recebe o `tool_result` com erro e o motivo;
+  - reconexão do SSE: a 1ª conexão de `/api/runs/*/events` é cortada na metade dos `text_delta` (`page.route` + `route.fetch`, sem o `done`); o console reconecta com `Last-Event-ID` = último id entregue, a resposta final aparece inteira uma vez só e bate com o histórico da API;
+  - admin lê a conversa de outro usuário (editor de uma caixa, com escrita esperando confirmação) pela lista "Todos os usuários": aviso de somente leitura, sem compositor, sem aprovar/recusar, sem ações de dono; a API recusa a decisão do admin;
+  - "Usar nos fluxos automáticos" em /admin/ai (tarefa 012) marcado pela tela (badge "Fluxos", `useForFlows` só nele) e, com ele, importar um OFX: as sugestões do agente aparecem sozinhas na tela do lote; duas aprovadas em lote pela seleção, uma descartada; as demais seguem do agente.
+- Integração (`apps/server/test/agents.test.ts`):
+  - embeddings: provedor OpenAI-compatível com `embeddingModel` apontando para o falso; indexação (`syncEmbeddingSources` + `embedPending`) grava a linha em `ai_embeddings` com vetor, a chamada a `/v1/embeddings` leva a chave e o modelo, `ai_usage` com `purpose = 'embedding'` (indexação sem usuário; consulta com o usuário) e a tool `semantic_search` devolve a entidade em modo `embeddings` com score 1;
+  - herdado da 005: a sugestão em `statement_lines` sai no `audit_log` com `actor_kind = 'agent'`, o `agent_run_id` da execução `classify_lines` e o usuário que importou;
+  - escrita rejeitada: com a execução encerrada, o detalhe da conversa ainda traz a confirmação `rejected` com o motivo.
+
+**Bugs achados e corrigidos**
+1. Sugestões da conciliação não apareciam depois do import: a sugestão automática é enfileirada no worker, mas a tela do lote não recarregava (só o botão "Sugerir com IA" tinha recargas em 5/12/25 s, que podiam chegar antes da execução terminar). Agora a resposta do `POST /api/statement-imports` traz `aiSuggestion` (`queued`, `runId`, `lines`), e a tela do lote segue o SSE da execução (`followRun`), com o aviso "O agente está sugerindo…", e recarrega as linhas quando ela termina; o "Sugerir com IA" usa o mesmo caminho (`ImportDetail.tsx`, `StatementImportPanel.tsx`, `routes/statements.ts`).
+2. Tool recusada aparecia como "Erro" no histórico: o detalhe da conversa só trazia as confirmações pendentes da execução ativa, então, terminada a execução, a recusa sumia e a tela marcava a tool como erro. Agora `getConversation` devolve as pendentes da execução ativa e as já decididas de todas as execuções da conversa (`loadConversationConfirmations` em `agents/store.ts`).
+3. A suíte e2e passava do limite de login (`LOGIN_RATE_LIMIT`, 10 por minuto): com os cenários novos, os testes do fim falhavam com `rate_limited`. O `e2e/global-setup.ts` abre a sessão do admin uma vez (`e2e/.auth/`, no `.gitignore`) e backup, visão, operação e agentes a reaproveitam (`loginAsAdmin` em `e2e/support/session.ts`); o login pela tela continua em fluxo-principal e contratos. A suíte agora roda duas vezes seguidas sem bater no limite.
+
+Nada no banco. Specs: 011 (reconexão do SSE, confirmações decididas no detalhe, `aiSuggestion` e a tela seguindo a execução). AGENTS.md: lista de e2e e a sessão compartilhada.
+
+Verificação: `pnpm lint`, `pnpm typecheck`, `pnpm test` (shared 111, server 94) e `pnpm build` passam; `pnpm e2e` completo (16 testes) passa contra a pilha deste worktree (`TELEGRAM_API_BASE=http://host.docker.internal:18081 docker compose up --build -d`), duas vezes seguidas.

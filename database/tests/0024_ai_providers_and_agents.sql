@@ -133,6 +133,31 @@ SELECT throws_ok($$UPDATE ai_agents SET archived_at = now() WHERE id = '00000000
 SELECT throws_ok($$DELETE FROM ai_providers WHERE id = '00000000-0000-7000-8000-0000000a1001'$$, '23503', NULL,
                  'provedor em uso não é excluído');
 
+-- Agente dos fluxos (0034) -----------------------------------------------------------------------------------------
+SELECT has_column('ai_agents', 'use_for_flows');
+SELECT col_not_null('ai_agents', 'use_for_flows');
+SELECT col_default_is('ai_agents', 'use_for_flows', 'false');
+SELECT has_index('ai_agents', 'ai_agents_use_for_flows_key');
+INSERT INTO ai_agents (id, name, provider_id, model) VALUES
+  ('00000000-0000-7000-8000-0000000a3002', 'Leitor', '00000000-0000-7000-8000-0000000a1001', 'claude-sonnet-4-5');
+SELECT lives_ok($$UPDATE ai_agents SET use_for_flows = true WHERE id = '00000000-0000-7000-8000-0000000a3002'$$, 'marca um agente');
+SELECT throws_ok($$UPDATE ai_agents SET use_for_flows = true WHERE id = '00000000-0000-7000-8000-0000000a3001'$$, '23505',
+                 'duplicate key value violates unique constraint "ai_agents_use_for_flows_key"', 'no máximo um marcado');
+SELECT throws_ok($$INSERT INTO ai_agents (name, is_active, use_for_flows) VALUES ('Inativo marcado', false, true)$$, '23514',
+                 'new row for relation "ai_agents" violates check constraint "ai_agents_use_for_flows_check"', 'marcado precisa estar ativo');
+SELECT throws_ok($$UPDATE ai_agents SET is_active = false WHERE id = '00000000-0000-7000-8000-0000000a3002'$$, '23514',
+                 'new row for relation "ai_agents" violates check constraint "ai_agents_use_for_flows_check"',
+                 'desativar o marcado exige desmarcar');
+SELECT throws_ok($$UPDATE ai_agents SET is_active = false, archived_at = now() WHERE id = '00000000-0000-7000-8000-0000000a3002'$$,
+                 '23514', NULL, 'arquivar o marcado exige desmarcar');
+SELECT lives_ok($$UPDATE ai_agents SET use_for_flows = false, is_active = false, archived_at = now()
+                   WHERE id = '00000000-0000-7000-8000-0000000a3002'$$, 'desmarca e arquiva na mesma operação');
+SELECT lives_ok($$UPDATE ai_agents SET use_for_flows = true WHERE id = '00000000-0000-7000-8000-0000000a3001'$$,
+                'troca o marcado');
+SELECT ok(EXISTS (SELECT 1 FROM audit_log WHERE table_name = 'ai_agents' AND record_id = '00000000-0000-7000-8000-0000000a3001'
+                    AND changed_columns = ARRAY['use_for_flows']), 'a marca é auditada');
+UPDATE ai_agents SET use_for_flows = false WHERE id = '00000000-0000-7000-8000-0000000a3001';
+
 -- Auditoria sem a chave ---------------------------------------------------------------------------------------------
 SELECT ok(EXISTS (SELECT 1 FROM audit_log WHERE table_name = t), t || ' é auditada')
   FROM unnest(ARRAY['ai_providers', 'ai_model_prices', 'ai_agents']) t;

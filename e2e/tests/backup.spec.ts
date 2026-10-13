@@ -1,24 +1,14 @@
 import { readFile } from 'node:fs/promises';
-import { expect, type Page, test } from '@playwright/test';
+import { expect, test } from '@playwright/test';
+import { loginAsAdmin } from '../support/session';
 
 /*
  * Backup e restauração (spec 019): exportar as categorias pela tela e simular
  * a importação do mesmo arquivo — tudo "já cadastrado", nada gravado.
  */
 
-const username = process.env.E2E_USERNAME ?? process.env.ADMIN_USERNAME ?? 'admin';
-const password = process.env.E2E_PASSWORD ?? process.env.ADMIN_PASSWORD ?? 'admin12345';
-
-async function login(page: Page) {
-  await page.goto('/');
-  await page.getByLabel('Usuário ou e-mail').fill(username);
-  await page.getByLabel('Senha').fill(password);
-  await page.getByRole('button', { name: 'Entrar' }).click();
-  await expect(page.getByRole('heading', { name: /^Olá,/ })).toBeVisible();
-}
-
 test('backup: exporta categorias e simula a importação do mesmo arquivo', async ({ page }) => {
-  await login(page);
+  await loginAsAdmin(page);
   // Garante ao menos uma categoria (a pilha pode estar sem o seed).
   const created = await page.request.post('/api/categories', {
     data: { kind: 'expense', name: `E2E backup ${Date.now().toString(36)}`, colorSlot: 2 },

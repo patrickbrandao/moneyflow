@@ -7,6 +7,7 @@ import {
   type AiPriceDto,
   type AiProviderDto,
   type AiProviderTestResult,
+  type AiUsagePurpose,
   type AiUsageReport,
   type aiAgentCreateInput,
   type aiAgentUpdateInput,
@@ -219,6 +220,7 @@ type AgentRow = {
   color_slot: number;
   icon: string | null;
   is_active: boolean;
+  use_for_flows: boolean;
   archived_at: unknown;
   created_at: unknown;
 };
@@ -226,7 +228,7 @@ type AgentRow = {
 async function loadAgents(db: Executor, where = sql`true`): Promise<AiAgentDto[]> {
   const result = await db.execute<AgentRow>(sql`
     SELECT a.id, a.name, a.description, a.system_prompt, a.provider_id, p.name AS provider_name, a.model, a.params, a.enabled_tools,
-           a.require_write_confirmation, a.color_slot, a.icon, a.is_active, a.archived_at, a.created_at
+           a.require_write_confirmation, a.color_slot, a.icon, a.is_active, a.use_for_flows, a.archived_at, a.created_at
       FROM ai_agents a LEFT JOIN ai_providers p ON p.id = a.provider_id
      WHERE ${where}
      ORDER BY a.archived_at NULLS FIRST, lower(a.name)`);
@@ -253,6 +255,7 @@ async function loadAgents(db: Executor, where = sql`true`): Promise<AiAgentDto[]
     colorSlot: Number(r.color_slot),
     icon: r.icon,
     isActive: r.is_active,
+    useForFlows: r.use_for_flows,
     archivedAt: iso(r.archived_at),
     createdAt: iso(r.created_at)!,
     mcpServers: links.rows
@@ -291,18 +294,24 @@ async function setLinks(tx: Tx, agentId: string, links: { mcpServerId: string; e
   }
 }
 
+/** Só um agente atende os fluxos: desmarca o atual antes de marcar outro (na mesma transação). */
+async function clearFlowAgent(tx: Tx, exceptId: string | null) {
+  await tx.execute(sql`UPDATE ai_agents SET use_for_flows = false WHERE use_for_flows ${exceptId ? sql`AND id <> ${exceptId}` : sql``}`);
+}
+
 const textArray = (values: string[] | null) => (values === null ? null : `{${values.map((v) => `"${v}"`).join(',')}}`);
 
 export async function createAgent(ctx: ServiceContext, input: z.output<typeof aiAgentCreateInput>) {
   ctx.access.assertAdmin();
   checkTools(input.enabledTools);
   const id = await withTx(ctx, async (tx) => {
+    if (input.useForFlows) await clearFlowAgent(tx, null);
     const result = await tx.execute<{ id: string }>(sql`
       INSERT INTO ai_agents (name, description, system_prompt, provider_id, model, params, enabled_tools, require_write_confirmation,
-                             color_slot, icon, is_active, created_by_user_id)
+                             color_slot, icon, is_active, use_for_flows, created_by_user_id)
       VALUES (${input.name}, ${input.description}, ${input.systemPrompt}, ${input.providerId}, ${input.model},
               ${JSON.stringify(input.params)}::jsonb, ${textArray(input.enabledTools)}::text[], ${input.requireWriteConfirmation},
-              ${input.colorSlot}, ${input.icon}, ${input.isActive}, ${ctx.access.actor.id})
+              ${input.colorSlot}, ${input.icon}, ${input.isActive}, ${input.useForFlows}, ${ctx.access.actor.id})
       RETURNING id`);
     const agentId = result.rows[0]!.id;
     if (input.mcpServers) await setLinks(tx, agentId, input.mcpServers);
@@ -327,7 +336,11 @@ export async function updateAgent(ctx: ServiceContext, id: string, input: z.outp
   if (input.colorSlot !== undefined) sets.push(sql`color_slot = ${input.colorSlot}`);
   if (input.icon !== undefined) sets.push(sql`icon = ${input.icon}`);
   if (input.isActive !== undefined) sets.push(sql`is_active = ${input.isActive}`);
+  // Desativar o agente dos fluxos tira a marca no mesmo UPDATE (o banco exige marcado = ativo).
+  if (input.useForFlows !== undefined) sets.push(sql`use_for_flows = ${input.useForFlows}`);
+  else if (input.isActive === false) sets.push(sql`use_for_flows = false`);
   await withTx(ctx, async (tx) => {
+    if (input.useForFlows) await clearFlowAgent(tx, id);
     if (sets.length > 0) await tx.execute(sql`UPDATE ai_agents SET ${sql.join(sets, sql`, `)} WHERE id = ${id}`);
     if (input.mcpServers) await setLinks(tx, id, input.mcpServers);
   });
@@ -341,7 +354,7 @@ export async function deleteAgent(ctx: ServiceContext, id: string) {
     deleteOrArchive(
       tx,
       async (sp) => (await sp.execute(sql`DELETE FROM ai_agents WHERE id = ${id} RETURNING id`)).rows.length,
-      (t2) => t2.execute(sql`UPDATE ai_agents SET is_active = false, archived_at = now() WHERE id = ${id}`),
+      (t2) => t2.execute(sql`UPDATE ai_agents SET is_active = false, use_for_flows = false, archived_at = now() WHERE id = ${id}`),
     ),
   );
 }
@@ -481,6 +494,8 @@ export async function usageReport(ctx: ServiceContext, q: z.output<typeof aiUsag
   const byAgent = await ctx.db.execute<Record<string, unknown>>(sql`
     SELECT u.*, a.name AS agent_name FROM ai_usage_monthly_by_agent u LEFT JOIN ai_agents a ON a.id = u.agent_id
      WHERE ${period} ORDER BY u.month DESC, a.name NULLS LAST, u.model, u.currency NULLS LAST`);
+  const byPurpose = await ctx.db.execute<Record<string, unknown>>(sql`
+    SELECT u.* FROM ai_usage_monthly_by_purpose u WHERE ${period} ORDER BY u.month DESC, u.purpose, u.currency NULLS LAST`);
   const month = (v: unknown) => String(v).slice(0, 7);
   return {
     byUser: byUser.rows.map((r) => ({
@@ -496,6 +511,13 @@ export async function usageReport(ctx: ServiceContext, q: z.output<typeof aiUsag
       agentId: (r.agent_id as string) ?? null,
       agentName: (r.agent_name as string) ?? null,
       model: r.model as string,
+      runs: Number(r.runs),
+      users: Number(r.users),
+    })),
+    byPurpose: byPurpose.rows.map((r) => ({
+      ...usageDto(r as never),
+      month: month(r.month),
+      purpose: r.purpose as AiUsagePurpose,
       runs: Number(r.runs),
       users: Number(r.users),
     })),

@@ -16,11 +16,13 @@ import {
 } from '@moneyflow/shared';
 import { type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
+import type { FlowPurpose } from '../agents/flows';
 import {
   appendEvent,
   conversationUsage,
   insertMessage,
   loadConfirmations,
+  loadConversationConfirmations,
   loadMessages,
   loadRun,
   messageDto,
@@ -72,7 +74,7 @@ const SELECT = sql`
     LEFT JOIN ai_runs r ON r.conversation_id = c.id AND r.status IN ('queued', 'running', 'awaiting_confirmation')`;
 
 /** Conversas dos fluxos (leitura de documento, classificação) não aparecem na lista. */
-const NOT_FLOW = sql`(c.screen_context IS NULL OR NOT (c.screen_context ? 'purpose'))`;
+const NOT_FLOW = sql`c.purpose = 'chat'`;
 
 function toDto(r: ConversationRow, snippet?: string | null): ConversationDto {
   return {
@@ -175,15 +177,17 @@ async function assertAgentUsable(db: Executor, agentId: string) {
 export async function createConversation(
   ctx: ServiceContext,
   input: z.output<typeof conversationCreateInput>,
-  extra?: { screenContext?: Record<string, unknown>; archived?: boolean },
+  extra?: { purpose?: FlowPurpose; screenContext?: Record<string, unknown>; archived?: boolean },
 ) {
   await assertAgentUsable(ctx.db, input.agentId);
   const screen = extra?.screenContext ?? input.screenContext ?? null;
+  // A finalidade é imutável no banco: a conversa de fluxo nasce com ela no INSERT.
+  const purpose = extra?.purpose ?? 'chat';
   const id = await withTx(ctx, async (tx) => {
     const result = await tx.execute<{ id: string }>(sql`
-      INSERT INTO ai_conversations (user_id, agent_id, title, title_source, screen_context, archived_at)
+      INSERT INTO ai_conversations (user_id, agent_id, title, title_source, screen_context, archived_at, purpose)
       VALUES (${ctx.access.actor.id}, ${input.agentId}, ${input.title ?? null}, ${input.title ? 'user' : 'auto'},
-              ${screen ? JSON.stringify(screen) : null}::jsonb, ${extra?.archived ? sql`now()` : null})
+              ${screen ? JSON.stringify(screen) : null}::jsonb, ${extra?.archived ? sql`now()` : null}, ${purpose})
       RETURNING id`);
     return result.rows[0]!.id;
   });
@@ -202,7 +206,7 @@ export async function getConversation(ctx: ServiceContext, id: string): Promise<
     conversation: toDto(row),
     messages: messages.map((m) => messageDto(m, usage.get(m.id) ?? [])),
     activeRun: active ? runDto(active) : null,
-    confirmations: active ? await loadConfirmations(ctx.db, active.id, true) : [],
+    confirmations: await loadConversationConfirmations(ctx.db, id, active?.id ?? null),
     usage: await conversationUsage(ctx.db, id),
     readOnly: row.user_id !== ctx.access.actor.id,
   };

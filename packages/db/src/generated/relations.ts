@@ -35,10 +35,10 @@ import {
   cardPurchaseAttachments,
   statementCsvMappings,
   statementImports,
-  aiConversations,
-  aiMessages,
   classificationRules,
   statementLines,
+  aiConversations,
+  aiMessages,
   periodClosings,
   canvasNodePositions,
   messageDestinations,
@@ -47,8 +47,8 @@ import {
   messageSubscriptions,
   aiMessageAttachments,
   aiRunEvents,
-  aiToolConfirmations,
   aiUsage,
+  aiToolConfirmations,
   userApiTokens,
   aiEmbeddings,
   contractCycles,
@@ -77,8 +77,8 @@ export const usersRelations = relations(users, ({ many }) => ({
   attachments: many(attachments),
   mcpServers: many(mcpServers),
   statementImports: many(statementImports),
-  aiConversations: many(aiConversations),
   classificationRules: many(classificationRules),
+  aiConversations: many(aiConversations),
   periodClosings: many(periodClosings),
   canvasNodePositions: many(canvasNodePositions),
   messageDestinations_createdByUserId: many(messageDestinations, {
@@ -88,8 +88,8 @@ export const usersRelations = relations(users, ({ many }) => ({
     relationName: 'messageDestinations_ownerUserId_users_id',
   }),
   aiRuns: many(aiRuns),
-  aiToolConfirmations: many(aiToolConfirmations),
   aiUsages: many(aiUsage),
+  aiToolConfirmations: many(aiToolConfirmations),
   userApiTokens: many(userApiTokens),
   messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
@@ -649,48 +649,6 @@ export const statementImportsRelations = relations(statementImports, ({ one, man
   statementLines: many(statementLines),
 }));
 
-export const aiConversationsRelations = relations(aiConversations, ({ one, many }) => ({
-  aiAgent: one(aiAgents, {
-    fields: [aiConversations.agentId],
-    references: [aiAgents.id],
-  }),
-  aiMessage: one(aiMessages, {
-    fields: [aiConversations.forkedFromConversationId],
-    references: [aiMessages.id],
-    relationName: 'aiConversations_forkedFromConversationId_aiMessages_id',
-  }),
-  user: one(users, {
-    fields: [aiConversations.userId],
-    references: [users.id],
-  }),
-  aiRuns: many(aiRuns),
-  aiMessages: many(aiMessages, {
-    relationName: 'aiMessages_conversationId_aiConversations_id',
-  }),
-  aiUsages: many(aiUsage),
-}));
-
-export const aiMessagesRelations = relations(aiMessages, ({ one, many }) => ({
-  aiConversations: many(aiConversations, {
-    relationName: 'aiConversations_forkedFromConversationId_aiMessages_id',
-  }),
-  aiRuns: many(aiRuns, {
-    relationName: 'aiRuns_conversationId_aiMessages_id',
-  }),
-  aiConversation: one(aiConversations, {
-    fields: [aiMessages.conversationId],
-    references: [aiConversations.id],
-    relationName: 'aiMessages_conversationId_aiConversations_id',
-  }),
-  aiRun: one(aiRuns, {
-    fields: [aiMessages.conversationId],
-    references: [aiRuns.id],
-    relationName: 'aiMessages_conversationId_aiRuns_id',
-  }),
-  aiMessageAttachments: many(aiMessageAttachments),
-  aiUsages: many(aiUsage),
-}));
-
 export const classificationRulesRelations = relations(classificationRules, ({ one, many }) => ({
   caixa: one(caixas, {
     fields: [classificationRules.caixaId],
@@ -761,6 +719,48 @@ export const statementLinesRelations = relations(statementLines, ({ one, many })
   }),
 }));
 
+export const aiConversationsRelations = relations(aiConversations, ({ one, many }) => ({
+  aiAgent: one(aiAgents, {
+    fields: [aiConversations.agentId],
+    references: [aiAgents.id],
+  }),
+  aiMessage: one(aiMessages, {
+    fields: [aiConversations.forkedFromConversationId],
+    references: [aiMessages.id],
+    relationName: 'aiConversations_forkedFromConversationId_aiMessages_id',
+  }),
+  user: one(users, {
+    fields: [aiConversations.userId],
+    references: [users.id],
+  }),
+  aiRuns: many(aiRuns),
+  aiMessages: many(aiMessages, {
+    relationName: 'aiMessages_conversationId_aiConversations_id',
+  }),
+  aiUsages: many(aiUsage),
+}));
+
+export const aiMessagesRelations = relations(aiMessages, ({ one, many }) => ({
+  aiConversations: many(aiConversations, {
+    relationName: 'aiConversations_forkedFromConversationId_aiMessages_id',
+  }),
+  aiRuns: many(aiRuns, {
+    relationName: 'aiRuns_conversationId_aiMessages_id',
+  }),
+  aiConversation: one(aiConversations, {
+    fields: [aiMessages.conversationId],
+    references: [aiConversations.id],
+    relationName: 'aiMessages_conversationId_aiConversations_id',
+  }),
+  aiRun: one(aiRuns, {
+    fields: [aiMessages.conversationId],
+    references: [aiRuns.id],
+    relationName: 'aiMessages_conversationId_aiRuns_id',
+  }),
+  aiMessageAttachments: many(aiMessageAttachments),
+  aiUsages: many(aiUsage),
+}));
+
 export const periodClosingsRelations = relations(periodClosings, ({ one }) => ({
   caixa: one(caixas, {
     fields: [periodClosings.caixaId],
@@ -824,8 +824,8 @@ export const aiRunsRelations = relations(aiRuns, ({ one, many }) => ({
     relationName: 'aiMessages_conversationId_aiRuns_id',
   }),
   aiRunEvents: many(aiRunEvents),
-  aiToolConfirmations: many(aiToolConfirmations),
   aiUsages: many(aiUsage),
+  aiToolConfirmations: many(aiToolConfirmations),
   contractDocumentVersions: many(contractDocumentVersions),
 }));
 
@@ -867,17 +867,6 @@ export const aiRunEventsRelations = relations(aiRunEvents, ({ one }) => ({
   }),
 }));
 
-export const aiToolConfirmationsRelations = relations(aiToolConfirmations, ({ one }) => ({
-  user: one(users, {
-    fields: [aiToolConfirmations.decidedByUserId],
-    references: [users.id],
-  }),
-  aiRun: one(aiRuns, {
-    fields: [aiToolConfirmations.runId],
-    references: [aiRuns.id],
-  }),
-}));
-
 export const aiUsageRelations = relations(aiUsage, ({ one }) => ({
   aiAgent: one(aiAgents, {
     fields: [aiUsage.agentId],
@@ -906,6 +895,17 @@ export const aiUsageRelations = relations(aiUsage, ({ one }) => ({
   user: one(users, {
     fields: [aiUsage.userId],
     references: [users.id],
+  }),
+}));
+
+export const aiToolConfirmationsRelations = relations(aiToolConfirmations, ({ one }) => ({
+  user: one(users, {
+    fields: [aiToolConfirmations.decidedByUserId],
+    references: [users.id],
+  }),
+  aiRun: one(aiRuns, {
+    fields: [aiToolConfirmations.runId],
+    references: [aiRuns.id],
   }),
 }));
 

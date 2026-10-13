@@ -8,6 +8,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
+import { embeddingCredentials, embedPending, type IndexState, syncEmbeddingSources } from '../src/agents/embeddings';
 import { mcpExposedName } from '../src/agents/mcp-client';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { startAgentWorker } from '../src/agents/worker';
@@ -224,6 +225,12 @@ describe('execução do agente', () => {
     expect(result).toMatchObject({ is_error: true });
     expect(result.content).toContain('não quero');
     expect(detail.messages.at(-1).content[0].text).toMatch(/^Não deu certo/);
+    // Com a execução encerrada, o detalhe ainda traz a decisão (a tela marca a tool como recusada, não como erro).
+    expect(detail.activeRun).toBeNull();
+    const toolUse = detail.messages.find((m: any) => m.role === 'assistant').content.find((b: any) => b.type === 'tool_use');
+    expect(detail.confirmations).toEqual([
+      expect.objectContaining({ runId: sent.run.id, toolUseId: toolUse.id, status: 'rejected', reason: 'não quero' }),
+    ]);
   });
 
   it('permissões: o agente só enxerga as caixas do usuário que o acionou; admin lê a conversa (somente leitura)', async () => {
@@ -332,6 +339,66 @@ describe('provedor OpenAI-compatível', () => {
     expect(call.headers.authorization).toBe('Bearer sk-openai-SEGREDO-02');
     expect(call.body.tools.map((t: any) => t.function.name)).toEqual(['search_records', 'list_caixas']);
     expect(call.body.messages.some((m: any) => m.role === 'tool')).toBe(true);
+  });
+});
+
+describe('embeddings', () => {
+  it('provedor OpenAI-compatível com embeddings: indexa, grava o uso como embedding e a busca semântica acha o registro', async () => {
+    const embedder = await admin.post('/api/admin/ai/providers', {
+      name: `Embeddings falso ${uid()}`,
+      kind: 'openai',
+      baseUrl: `${llm.url}/v1`,
+      apiKey: 'sk-embed-SEGREDO-03',
+      embeddingModel: 'fake-embedding',
+    });
+    try {
+      const creds = await embeddingCredentials(h.db);
+      expect(creds).toMatchObject({ providerId: embedder.id, kind: 'openai', model: 'fake-embedding' });
+      const name = `Padaria Lua Azul ${uid()}`;
+      const entity = await admin.post('/api/entities', { kind: 'company', name });
+
+      // Indexação (o que a manutenção do worker faz): textos-fonte e depois os vetores pendentes.
+      const state: IndexState = { since: new Map() };
+      for (let i = 0; i < 100 && (await syncEmbeddingSources(h.db, creds!.model, state)) > 0; i += 1);
+      for (let i = 0; i < 100 && (await embedPending(h.db, creds!)) > 0; i += 1);
+      const indexed = await h.db.execute<{ source_text: string; needs_reindex: boolean; has_vector: boolean; caixa_id: string | null }>(sql`
+        SELECT source_text, needs_reindex, embedding IS NOT NULL AS has_vector, caixa_id FROM ai_embeddings
+         WHERE object_type = 'entity' AND object_id = ${entity.id} AND model = 'fake-embedding'`);
+      expect(indexed.rows).toEqual([{ source_text: name, needs_reindex: false, has_vector: true, caixa_id: null }]);
+      const embedCall = llm.calls.find((c) => c.path === '/v1/embeddings' && c.body.input.includes(name));
+      expect(embedCall?.headers.authorization).toBe('Bearer sk-embed-SEGREDO-03');
+      expect(embedCall?.body.model).toBe('fake-embedding');
+      const indexUsage = await h.db.execute<{ n: number }>(sql`
+        SELECT count(*)::int AS n FROM ai_usage
+         WHERE provider_id = ${embedder.id} AND purpose = 'embedding' AND user_id IS NULL AND input_tokens > 0`);
+      expect(indexUsage.rows[0]!.n).toBeGreaterThan(0);
+
+      // A tool semantic_search vetoriza a consulta (uso atribuído ao usuário) e devolve a entidade.
+      const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+      const sent = await chat(
+        admin,
+        conversation.id,
+        `chamar semantic_search ${JSON.stringify({ query: name, types: ['entity'], limit: 3 })}`,
+      );
+      await drain();
+      expect((await runStatus(sent.run.id)).status).toBe('completed');
+      const detail = await admin.get(`/api/conversations/${conversation.id}`);
+      const result = detail.messages.find((m: any) => m.role === 'tool').content[0];
+      expect(result.is_error).toBeFalsy();
+      const payload = JSON.parse(typeof result.content === 'string' ? result.content : result.content[0].text);
+      expect(payload.mode).toBe('embeddings');
+      expect(payload.hits[0]).toMatchObject({ type: 'entity', id: entity.id, text: name });
+      expect(payload.hits[0].score).toBeCloseTo(1, 5);
+      const queryUsage = await h.db.execute<{ n: number }>(sql`
+        SELECT count(*)::int AS n FROM ai_usage
+         WHERE provider_id = ${embedder.id} AND purpose = 'embedding' AND user_id = ${adminSession.id}`);
+      expect(queryUsage.rows[0]!.n).toBe(1);
+      // A chave do provedor de embeddings não sai pela API.
+      expect(JSON.stringify(await admin.get('/api/admin/ai/providers'))).not.toContain('sk-embed-SEGREDO-03');
+    } finally {
+      // Os demais testes usam o mesmo banco e esperam a busca por trigram.
+      await admin.patch(`/api/admin/ai/providers/${embedder.id}`, { isActive: false });
+    }
   });
 });
 
@@ -827,6 +894,14 @@ describe('IA nos fluxos', () => {
         content: '# Contrato de prestação de serviços\n\n## Cláusula 1\nObjeto: suporte mensal.',
       });
       expect(v1.aiRunId).toBeTruthy();
+      // Uso gravado com a finalidade do fluxo (tarefa 011).
+      const md1 = await h.db.execute<{ purpose: string }>(sql`SELECT purpose FROM ai_usage WHERE run_id = ${v1.aiRunId}`);
+      expect(md1.rows.map((r) => r.purpose)).toEqual(['contract_markdown']);
+      const reading = await h.db.execute<{ purpose: string }>(sql`
+        SELECT u.purpose FROM ai_usage u JOIN ai_conversations c ON c.id = u.conversation_id
+         WHERE c.purpose = 'contract_reading'`);
+      expect(reading.rows.length).toBeGreaterThan(0);
+      expect(new Set(reading.rows.map((r) => r.purpose))).toEqual(new Set(['contract_reading']));
     } finally {
       await stop();
     }
@@ -869,12 +944,136 @@ describe('IA nos fluxos', () => {
       }
       expect(lines.length).toBeGreaterThan(0);
       expect(lines[0].categoryId).not.toBeNull();
+      // Rastro do ator (herdado da tarefa 005): a sugestão sai na auditoria como agente, com a execução do fluxo.
+      const classifyRun = await h.db.execute<{ id: string }>(sql`
+        SELECT r.id FROM ai_runs r JOIN ai_conversations c ON c.id = r.conversation_id
+         WHERE c.purpose = 'classify_lines' AND c.screen_context ->> 'importId' = ${importId}`);
+      expect(classifyRun.rows).toHaveLength(1);
+      const suggestionAudit = await h.db.execute<{ actor_kind: string; agent_run_id: string | null; user_id: string | null }>(sql`
+        SELECT actor_kind, agent_run_id, user_id FROM audit_log
+         WHERE table_name = 'statement_lines' AND record_id = ${lines[0].id} AND action = 'update'
+           AND new_data ->> 'classification_source' = 'agent'`);
+      expect(suggestionAudit.rows).toEqual([{ actor_kind: 'agent', agent_run_id: classifyRun.rows[0]!.id, user_id: adminSession.id }]);
       const decided = await admin.post('/api/statement-lines/suggestions', { lineIds: [lines[0].id], decision: 'approve' });
       expect(decided.updated).toBe(1);
       const after = (await admin.get(`/api/statement-imports/${importId}`)).lines.find((l: any) => l.id === lines[0].id);
       expect(after.classificationSource).toBe('user');
+
+      // Uso por finalidade (tarefa 011): cada fluxo grava a sua, e o painel separa os custos (o contrato rodou no teste anterior).
+      const usage = async (conversationId: string) =>
+        (await h.db.execute<{ purpose: string }>(sql`SELECT purpose FROM ai_usage WHERE conversation_id = ${conversationId}`)).rows.map(
+          (r) => r.purpose,
+        );
+      expect(await usage(res.json().conversationId)).toEqual(['document_reading']);
+      const classify = await h.db.execute<{ id: string }>(
+        sql`SELECT id FROM ai_conversations WHERE purpose = 'classify_lines' AND screen_context ->> 'importId' = ${importId}`,
+      );
+      expect(await usage(classify.rows[0]!.id)).toEqual(['classify_lines']);
+      const report = await admin.get('/api/admin/ai/usage');
+      const purposes = new Set(report.byPurpose.map((r: any) => r.purpose));
+      for (const purpose of ['document_reading', 'classify_lines', 'contract_reading', 'contract_markdown']) {
+        expect(purposes, purpose).toContain(purpose);
+      }
+      const doc = report.byPurpose.find((r: any) => r.purpose === 'document_reading');
+      expect(doc).toMatchObject({ currency: 'USD', hasUnpriced: false });
+      expect(doc.calls).toBeGreaterThan(0);
+      expect(doc.runs).toBeGreaterThan(0);
+      expect(doc.inputTokens).toBeGreaterThan(0);
     } finally {
       await stop();
     }
+  });
+
+  it('agente dos fluxos escolhido no admin: marcar B faz a leitura usar B; um marcado por vez; desativar ou arquivar tira a marca (tarefa 012)', async () => {
+    const base = { systemPrompt: 'Fluxos.', providerId: provider.id, model: 'claude-sonnet-5-5', isActive: true };
+    const b = await admin.post('/api/admin/ai/agents', { ...base, name: `Fluxos B ${uid()}`, useForFlows: true });
+    expect(b.useForFlows).toBe(true);
+    const flowAgentOf = async (fileName: string) => {
+      const stop = startAgentWorker(h.db, h.config, log, { pollMs: 100, maintenanceMs: 3_600_000 });
+      try {
+        const res = await h.app.inject({
+          method: 'POST',
+          url: `/api/title-entry/document?fileName=${fileName}`,
+          payload: Buffer.from('%PDF-1.4\n% boleto\n'),
+          headers: { cookie: adminSession.cookie, 'content-type': 'application/pdf' },
+        });
+        expect(res.statusCode, res.body).toBe(200);
+        const row = await h.db.execute<{ agent_id: string }>(
+          sql`SELECT agent_id FROM ai_conversations WHERE id = ${res.json().conversationId}`,
+        );
+        return row.rows[0]!.agent_id;
+      } finally {
+        await stop();
+      }
+    };
+    expect(await flowAgentOf('b.pdf')).toBe(b.id);
+
+    // Marcar C desmarca B na mesma transação.
+    const c = await admin.post('/api/admin/ai/agents', { ...base, name: `Fluxos C ${uid()}` });
+    expect(c).toMatchObject({ useForFlows: false, isActive: true });
+    expect((await admin.patch(`/api/admin/ai/agents/${c.id}`, { useForFlows: true })).useForFlows).toBe(true);
+    const marked = (await admin.get('/api/admin/ai/agents')).filter((a: any) => a.useForFlows).map((a: any) => a.id);
+    expect(marked).toEqual([c.id]);
+    expect(await flowAgentOf('c.pdf')).toBe(c.id);
+
+    // Marcar um agente inativo é recusado com a mensagem traduzida.
+    const off = await admin.raw('PATCH', `/api/admin/ai/agents/${b.id}`, { isActive: false, useForFlows: true });
+    expect(off.statusCode).toBe(422);
+    expect(off.json().error).toMatchObject({ code: 'ai_agents_use_for_flows_check' });
+    expect(off.json().error.message).toMatch(/Só um agente ativo/);
+
+    // Desativar o marcado tira a marca; sem marcado vale o primeiro ativo.
+    const disabled = await admin.patch(`/api/admin/ai/agents/${c.id}`, { isActive: false });
+    expect(disabled).toMatchObject({ isActive: false, useForFlows: false });
+    const first = await h.db.execute<{ id: string }>(sql`
+      SELECT a.id FROM ai_agents a JOIN ai_providers p ON p.id = a.provider_id
+       WHERE a.is_active AND a.archived_at IS NULL AND p.is_active AND p.archived_at IS NULL
+       ORDER BY a.created_at, a.id LIMIT 1`);
+    expect(await flowAgentOf('primeiro.pdf')).toBe(first.rows[0]!.id);
+
+    // Arquivar o marcado (tem conversas, então arquiva em vez de excluir) também tira a marca.
+    await admin.patch(`/api/admin/ai/agents/${b.id}`, { useForFlows: true });
+    await admin.del(`/api/admin/ai/agents/${b.id}`);
+    const archived = (await admin.get('/api/admin/ai/agents')).find((a: any) => a.id === b.id);
+    expect(archived).toMatchObject({ isActive: false, useForFlows: false });
+    expect(archived.archivedAt).not.toBeNull();
+  });
+
+  it('a finalidade da conversa do fluxo fica na coluna: mandar mensagem com screenContext não a põe na lista (tarefa 013)', async () => {
+    const stop = startAgentWorker(h.db, h.config, log, { pollMs: 100, maintenanceMs: 3_600_000 });
+    let conversationId: string;
+    try {
+      const res = await h.app.inject({
+        method: 'POST',
+        url: '/api/title-entry/document?fileName=nota.pdf',
+        payload: Buffer.from('%PDF-1.4\n% nota\n'),
+        headers: { cookie: adminSession.cookie, 'content-type': 'application/pdf' },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      conversationId = res.json().conversationId;
+    } finally {
+      await stop();
+    }
+    const row = async () =>
+      (
+        await h.db.execute<{ purpose: string; screen_context: Record<string, unknown> }>(
+          sql`SELECT purpose, screen_context FROM ai_conversations WHERE id = ${conversationId}`,
+        )
+      ).rows[0]!;
+    expect(await row()).toMatchObject({ purpose: 'document_reading', screen_context: { fileName: 'nota.pdf' } });
+    expect((await row()).screen_context).not.toHaveProperty('purpose');
+
+    // Substituir o screen_context (como o console faz a cada mensagem) não apaga a finalidade.
+    const sent = await admin.post(`/api/conversations/${conversationId}/messages`, {
+      text: 'e agora?',
+      screenContext: { route: '/titulos', title: 'Títulos' },
+    });
+    await admin.post(`/api/runs/${sent.run.id}/cancel`);
+    expect(await row()).toMatchObject({ purpose: 'document_reading', screen_context: { route: '/titulos' } });
+    for (const archived of ['0', '1']) {
+      expect((await admin.get(`/api/conversations?archived=${archived}`)).map((c: any) => c.id)).not.toContain(conversationId);
+    }
+    // A finalidade é imutável no banco.
+    await expect(h.db.execute(sql`UPDATE ai_conversations SET purpose = 'chat' WHERE id = ${conversationId}`)).rejects.toThrow();
   });
 });

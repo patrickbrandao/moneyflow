@@ -84,6 +84,44 @@ SELECT results_eq($$SELECT agent_id, model, calls, users FROM ai_usage_monthly_b
                   $$VALUES ('00000000-0000-7000-8000-0000000a3001'::uuid, 'claude-sonnet-4-5', 2, 1),
                            (NULL::uuid, 'text-embedding-3-small', 1, 0)$$, 'por agente e mês');
 
+-- Finalidade (0033) ------------------------------------------------------------------------------------------------
+SELECT has_view('ai_usage_monthly_by_purpose');
+SELECT ok(has_table_privilege('moneyflow_app', 'ai_usage_monthly_by_purpose', 'SELECT'), 'app lê o uso por finalidade');
+SELECT ok((SELECT 'security_invoker=true' = ANY (reloptions) FROM pg_class WHERE relname = 'ai_usage_monthly_by_purpose'),
+          'visão por finalidade é security_invoker');
+INSERT INTO ai_conversations (id, user_id, agent_id, purpose, archived_at) VALUES
+  ('00000000-0000-7000-8000-0000000b0003', '00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001',
+   'document_reading', now());
+INSERT INTO ai_runs (id, conversation_id, user_id, agent_id) VALUES
+  ('00000000-0000-7000-8000-0000000b2003', '00000000-0000-7000-8000-0000000b0003', '00000000-0000-7000-8000-0000000000a2',
+   '00000000-0000-7000-8000-0000000a3001');
+INSERT INTO ai_usage (id, run_id, input_tokens) VALUES
+  ('00000000-0000-7000-8000-0000000b4010', '00000000-0000-7000-8000-0000000b2003', 1000);
+SELECT is((SELECT purpose FROM ai_usage WHERE id = '00000000-0000-7000-8000-0000000b4010'), 'document_reading',
+          'chat numa conversa de fluxo assume a finalidade da conversa');
+INSERT INTO ai_usage (id, run_id, purpose, input_tokens) VALUES
+  ('00000000-0000-7000-8000-0000000b4011', '00000000-0000-7000-8000-0000000b2003', 'title', 1000);
+SELECT is((SELECT purpose FROM ai_usage WHERE id = '00000000-0000-7000-8000-0000000b4011'), 'title', 'title fica title');
+SELECT lives_ok(format($$INSERT INTO ai_usage (provider_id, model, purpose) VALUES ('00000000-0000-7000-8000-0000000a1001', 'claude-sonnet-4-5', %L)$$, p),
+                'finalidade aceita: ' || p)
+  FROM unnest(ARRAY['classify_lines', 'contract_reading', 'contract_markdown']) p;
+SELECT lives_ok($$INSERT INTO ai_usage (run_id, purpose) VALUES ('00000000-0000-7000-8000-0000000b2001', 'document_reading')$$,
+                'finalidade explícita gravada pela aplicação');
+SELECT is((SELECT count(*)::int FROM ai_usage WHERE run_id = '00000000-0000-7000-8000-0000000b2001' AND purpose = 'chat'), 1,
+          'chat numa conversa comum continua chat');
+SELECT throws_ok($$INSERT INTO ai_usage (provider_id, model, purpose) VALUES ('00000000-0000-7000-8000-0000000a1001', 'x', 'document')$$,
+                 '23514', 'new row for relation "ai_usage" violates check constraint "ai_usage_purpose_check"', 'finalidade fora da lista');
+SELECT results_eq($$SELECT purpose, calls, runs, users, input_tokens, cost_micros FROM ai_usage_monthly_by_purpose
+                     WHERE currency = 'USD' ORDER BY purpose$$,
+                  $$VALUES ('chat', 1, 1, 1, 1000::bigint, 21000::bigint),
+                           ('classify_lines', 1, 0, 0, 0::bigint, 0::bigint),
+                           ('contract_markdown', 1, 0, 0, 0::bigint, 0::bigint),
+                           ('contract_reading', 1, 0, 0, 0::bigint, 0::bigint),
+                           ('document_reading', 2, 2, 1, 1000::bigint, 3000::bigint),
+                           ('embedding', 1, 0, 0, 1000000::bigint, 20000::bigint),
+                           ('title', 2, 2, 1, 1200::bigint, 3750::bigint)$$,
+                  'uso por mês e finalidade');
+
 -- Excluir a conversa: o uso fica, sem as ligações
 DELETE FROM ai_conversations WHERE id = '00000000-0000-7000-8000-0000000b0001';
 SELECT results_eq($$SELECT run_id, message_id, conversation_id, user_id, cost_micros FROM ai_usage WHERE id = '00000000-0000-7000-8000-0000000b4001'$$,

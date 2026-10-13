@@ -207,6 +207,31 @@ function topoSort<T>(items: T[], depsOf: (item: T) => Iterable<T>, less: (a: T, 
   return { order, rest: items.filter((item) => !done.has(item)) };
 }
 
+const FLOW_PURPOSES = new Set(['document_reading', 'classify_lines', 'contract_reading', 'contract_markdown']);
+
+/**
+ * Ajustes de linhas do arquivo antes do merge:
+ * - ai_agents: a marca "agente dos fluxos" (use_for_flows) só entra se o banco
+ *   ainda não tem um agente marcado; senão o agente entra sem a marca, em vez
+ *   de virar conflito (só um marcado por vez).
+ * - ai_conversations: um arquivo anterior à coluna `purpose` marcava as
+ *   conversas dos fluxos em screen_context.purpose; a finalidade vem de lá.
+ */
+function normalizeRow(table: string, data: BackupRow, state: { flowAgentTaken: boolean }): BackupRow {
+  if (table === 'ai_agents' && data.use_for_flows === true && state.flowAgentTaken) {
+    return { ...data, use_for_flows: false };
+  }
+  if (table === 'ai_conversations' && data.purpose === undefined) {
+    const screen = data.screen_context as Record<string, unknown> | null | undefined;
+    const legacy = screen && typeof screen === 'object' ? screen.purpose : undefined;
+    if (typeof legacy === 'string' && FLOW_PURPOSES.has(legacy)) {
+      const { purpose: _purpose, ...rest } = screen!;
+      return { ...data, purpose: legacy, screen_context: Object.keys(rest).length > 0 ? rest : null };
+    }
+  }
+  return data;
+}
+
 /** Estados que só se alcançam por transição: insere no estado inicial e atualiza depois. */
 function replay(table: string, data: BackupRow): { insert: BackupRow; post: BackupRow | null } {
   if (table === 'titles') {
@@ -243,12 +268,16 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
   if (included.size === 0) throw unprocessable(t.backup.errors.emptyFile, 'empty_backup');
   const ignoredTables = Object.keys(file.tables).filter((name) => !catalog.has(name) || (kind === 'full' && EXCLUDED_TABLES.has(name)));
 
+  const flowAgent = await ctx.db.execute<{ taken: boolean }>(sql`SELECT EXISTS (SELECT 1 FROM ai_agents WHERE use_for_flows) AS taken`);
+  const normalizeState = { flowAgentTaken: Boolean(flowAgent.rows[0]?.taken) };
+
   const nodes = new Map<string, Node>();
   const invalid: Node[] = [];
   const addRows = (table: string, rows: BackupRow[], ref: boolean) => {
     if (!catalog.has(table) || EXCLUDED_TABLES.has(table)) return;
-    for (const data of rows) {
-      if (!data || typeof data !== 'object') continue;
+    for (const raw of rows) {
+      if (!raw || typeof raw !== 'object') continue;
+      const data = ref ? raw : normalizeRow(table, raw, normalizeState);
       const id = typeof data.id === 'string' ? data.id.toLowerCase() : '';
       const node: Node = {
         key: `${table}:${id}`,

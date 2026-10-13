@@ -1,10 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { addDays, isoWeekday, todayIso } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { consumeOutbox, produceMessages, produceNotifications } from '../src/services/message-worker';
-import { client, type Harness, scenario, startApp, userSession } from './helpers';
+import { consumeOutbox, emitAgentEvent, produceMessages, produceNotifications } from '../src/services/message-worker';
+import { client, type Harness, scenario, startApp, uid, userSession } from './helpers';
 
 /*
  * Fase 3: relatórios (permissão por caixa e is_internal), canvas de fluxo
@@ -436,6 +437,40 @@ describe('mensagens (spec 013)', () => {
     // Rodar de novo no mesmo dia não reenfileira.
     await produceMessages(h.db, h.config, late);
     expect(await count()).toBe(2);
+  });
+
+  it('evento de agente: o mesmo evento emitido duas vezes (duas réplicas) gera um aviso por destino; outro seq gera outro', async () => {
+    const owner = await userSession(h);
+    const user = client(h, owner.cookie);
+    const dest = await user.post('/api/message-destinations', { name: `Agente ${uid()}`, botToken: TOKEN, chatId: '88' });
+    await user.put(`/api/message-destinations/${dest.id}/subscriptions`, { eventKind: 'agent_completed', params: {} });
+    const runId = randomUUID();
+    const emit = (seq: number) =>
+      emitAgentEvent(h.db, {
+        kind: 'agent_completed',
+        userId: owner.id,
+        agentRunId: runId,
+        eventKey: `run:${runId}:seq:${seq}`,
+        title: 'Aguardando confirmação',
+        text: 'Mesmo texto',
+        link: '/?conversation=x',
+        config: h.config,
+      });
+    expect((await emit(3)).queued).toBe(1);
+    expect((await emit(3)).queued).toBe(0);
+    const counts = async () => {
+      const outbox = await h.db.execute<{ n: number }>(
+        sql`SELECT count(*)::int AS n FROM message_outbox WHERE destination_id = ${dest.id} AND agent_run_id = ${runId}`,
+      );
+      const bell = await h.db.execute<{ n: number }>(
+        sql`SELECT count(*)::int AS n FROM notifications WHERE user_id = ${owner.id} AND kind = 'agent_completed'`,
+      );
+      return { outbox: outbox.rows[0]!.n, bell: bell.rows[0]!.n };
+    };
+    expect(await counts()).toEqual({ outbox: 1, bell: 1 });
+    // Mesmo texto, outro evento da execução (seq diferente): outro aviso.
+    expect((await emit(7)).queued).toBe(1);
+    expect(await counts()).toEqual({ outbox: 2, bell: 2 });
   });
 });
 
