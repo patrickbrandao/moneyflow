@@ -111,12 +111,13 @@ SELECT ok(NOT ai_tool_list_valid('{a,a}'), 'sem repetição');
 SELECT ok(NOT ai_tool_list_valid(ARRAY['a', NULL]), 'sem nulos');
 SELECT ok(NOT ai_tool_list_valid('{"com espaço"}'), 'formato do nome');
 
-INSERT INTO ai_agents (id, name, system_prompt, provider_id, model, params, enabled_tools, color_slot, icon) VALUES
+INSERT INTO ai_agents (id, name, system_prompt, provider_id, model, params, color_slot, icon) VALUES
   ('00000000-0000-7000-8000-0000000a3001', 'Assistente', 'Você ajuda.', '00000000-0000-7000-8000-0000000a1001',
-   'claude-sonnet-4-5', '{"temperature": 0.3}', NULL, 3, 'bot');
-SELECT results_eq($$SELECT is_active, require_write_confirmation, enabled_tools IS NULL FROM ai_agents
+   'claude-sonnet-4-5', '{"temperature": 0.3}', 3, 'bot');
+-- enabled_tools e require_write_confirmation saíram na 0038 (kit de ferramentas; testes em 0038_ai_tool_kits.sql).
+SELECT results_eq($$SELECT is_active, tool_kit_id IS NULL FROM ai_agents
                      WHERE id = '00000000-0000-7000-8000-0000000a3001'$$,
-                  $$VALUES (true, true, true)$$, 'ativo, confirmação de escrita por padrão, todas as tools');
+                  $$VALUES (true, true)$$, 'ativo e, por padrão, sem kit');
 SELECT lives_ok($$INSERT INTO ai_agents (name, is_active) VALUES ('Rascunho', false)$$, 'agente inativo sem provedor');
 SELECT throws_ok($$INSERT INTO ai_agents (name) VALUES ('Sem provedor')$$, '23514', NULL, 'ativo exige provedor e modelo');
 SELECT throws_ok($$INSERT INTO ai_agents (name, provider_id, is_active) VALUES ('Sem modelo', '00000000-0000-7000-8000-0000000a1001', true)$$,
@@ -126,8 +127,6 @@ SELECT throws_ok($$INSERT INTO ai_agents (name, is_active, color_slot) VALUES ('
 SELECT throws_ok($$INSERT INTO ai_agents (name, is_active, icon) VALUES ('Ícone', false, 'Bot')$$, '23514', NULL, 'ícone lucide kebab-case');
 SELECT throws_ok($$INSERT INTO ai_agents (name, is_active, params) VALUES ('Params', false, '{"temperature": 3}')$$, '23514', NULL,
                  'parâmetros validados');
-SELECT throws_ok($$INSERT INTO ai_agents (name, is_active, enabled_tools) VALUES ('Tools', false, '{x,x}')$$, '23514', NULL,
-                 'tools validadas');
 SELECT throws_ok($$UPDATE ai_agents SET archived_at = now() WHERE id = '00000000-0000-7000-8000-0000000a3001'$$, '23514', NULL,
                  'arquivado não fica ativo');
 SELECT throws_ok($$DELETE FROM ai_providers WHERE id = '00000000-0000-7000-8000-0000000a1001'$$, '23503', NULL,

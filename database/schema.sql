@@ -542,6 +542,77 @@ COMMENT ON FUNCTION public.ai_embeddings_search(p_query public.vector, p_model t
 
 
 --
+-- Name: ai_legacy_tool_registry(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_legacy_tool_registry() RETURNS TABLE(tool_name text, kind text, confirm text)
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT v.tool_name, v.kind, v.confirm
+    FROM (VALUES
+      -- leituras (25)
+      ('search_records', 'read', 'never'),
+      ('semantic_search', 'read', 'never'),
+      ('list_caixas', 'read', 'never'),
+      ('get_caixa', 'read', 'never'),
+      ('list_accounts', 'read', 'never'),
+      ('get_account_statement', 'read', 'never'),
+      ('list_entities', 'read', 'never'),
+      ('list_entity_tags', 'read', 'never'),
+      ('get_entity', 'read', 'never'),
+      ('list_categories', 'read', 'never'),
+      ('list_titles', 'read', 'never'),
+      ('get_title', 'read', 'never'),
+      ('list_transfers', 'read', 'never'),
+      ('get_card', 'read', 'never'),
+      ('get_invoice', 'read', 'never'),
+      ('list_card_purchases', 'read', 'never'),
+      ('calendar', 'read', 'never'),
+      ('report_categories', 'read', 'never'),
+      ('report_entities', 'read', 'never'),
+      ('report_projection', 'read', 'never'),
+      ('flow_graph', 'read', 'never'),
+      ('list_statement_imports', 'read', 'never'),
+      ('get_statement_import', 'read', 'never'),
+      ('list_line_candidates', 'read', 'never'),
+      ('list_message_destinations', 'read', 'never'),
+      -- escritas (24)
+      ('create_entity', 'write', 'agent'),
+      ('update_entity', 'write', 'agent'),
+      ('set_entity_tags', 'write', 'agent'),
+      ('set_entity_favorite', 'write', 'agent'),
+      ('add_pix_key', 'write', 'agent'),
+      ('create_title', 'write', 'agent'),
+      ('update_title', 'write', 'agent'),
+      ('end_series', 'write', 'agent'),
+      ('settle_title', 'write', 'agent'),
+      ('reverse_settlement', 'write', 'agent'),
+      ('create_transfer', 'write', 'agent'),
+      ('create_card_purchase', 'write', 'agent'),
+      ('match_statement_line', 'write', 'agent'),
+      ('match_statement_lines', 'write', 'agent'),
+      ('confirm_statement_lines', 'write', 'agent'),
+      ('unmatch_statement_line', 'write', 'agent'),
+      ('ignore_statement_lines', 'write', 'agent'),
+      ('unignore_statement_lines', 'write', 'agent'),
+      ('create_from_statement_line', 'write', 'agent'),
+      ('create_from_statement_lines', 'write', 'agent'),
+      ('classify_statement_lines', 'write', 'agent'),
+      ('apply_classification_suggestions', 'write', 'agent'),
+      ('send_telegram_message', 'write', 'always'),
+      ('notify_user', 'write', 'never')
+    ) AS v (tool_name, kind, confirm)
+$$;
+
+
+--
+-- Name: FUNCTION ai_legacy_tool_registry(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_legacy_tool_registry() IS 'Retrato FIXO do registro de tools da v0.1.7 (packages/shared/src/agents/tools.ts): 49 tools, 25 read e 24 write, com o confirm de cada uma (never|agent|always). Usado pela migração de enabled_tools/require_write_confirmation para kits (0038) e para a aplicação conferir o retrato contra AGENT_TOOLS. Não acompanha o registro: tools novas não entram aqui.';
+
+
+--
 -- Name: ai_message_content_valid(text, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1363,6 +1434,94 @@ BEGIN
   RETURN NEW;
 END
 $$;
+
+
+--
+-- Name: ai_tool_kit_from_legacy(text, text[], boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_tool_kit_from_legacy(p_agent_name text, p_enabled_tools text[], p_require_write_confirmation boolean) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  confirm_writes constant boolean := coalesce(p_require_write_confirmation, true);
+  base     text;
+  kit_name text;
+  suffix   text;
+  n        int := 1;
+  kid      uuid;
+BEGIN
+  IF p_enabled_tools IS NULL AND NOT confirm_writes THEN
+    RETURN NULL;  -- lista nula e flag false: sem kit (poder completo)
+  END IF;
+
+  base := 'Kit – ' || btrim(p_agent_name);
+  kit_name := rtrim(left(base, 120));
+  WHILE EXISTS (SELECT 1 FROM ai_tool_kits k WHERE lower(k.name) = lower(kit_name)) LOOP
+    n := n + 1;
+    suffix := ' (' || n || ')';
+    kit_name := rtrim(left(base, 120 - length(suffix))) || suffix;
+  END LOOP;
+
+  INSERT INTO ai_tool_kits (name, description)
+  VALUES (kit_name, 'Criado na migração para kits (F7) a partir da configuração do agente "' || btrim(p_agent_name) || '".')
+  RETURNING id INTO kid;
+
+  INSERT INTO ai_tool_kit_tools (kit_id, tool_name, mode)
+  SELECT kid, r.tool_name,
+         CASE WHEN r.kind = 'write' AND (r.confirm = 'always' OR (r.confirm = 'agent' AND confirm_writes))
+              THEN 'ask' ELSE 'allow' END
+    FROM ai_legacy_tool_registry() r
+   WHERE p_enabled_tools IS NULL OR r.tool_name = ANY (p_enabled_tools);
+
+  RETURN kid;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_tool_kit_from_legacy(p_agent_name text, p_enabled_tools text[], p_require_write_confirmation boolean); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_tool_kit_from_legacy(p_agent_name text, p_enabled_tools text[], p_require_write_confirmation boolean) IS 'Interna (migração 0038): cria o kit equivalente à configuração antiga de um agente (enabled_tools, require_write_confirmation) e devolve o id, ou NULL se a lista era nula e a flag false (sem kit). Kit "Kit – <nome>" (truncado em 120, sufixo " (n)" se colidir) com as tools da lista que existem no retrato ai_legacy_tool_registry() (todas, se nula): ask nas escritas que pediam confirmação, allow no resto.';
+
+
+--
+-- Name: ai_tool_kit_tools_audit_row(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_tool_kit_tools_audit_row() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed, coalesce(n ->> 'kit_id', o ->> 'kit_id')::uuid);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_tool_kit_tools_audit_row(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_tool_kit_tools_audit_row() IS 'Trigger de auditoria de ai_tool_kit_tools: grava com record_id = kit_id (a linha não tem id), para incluir, remover e trocar o modo de uma tool aparecerem no histórico do kit.';
 
 
 --
@@ -5280,8 +5439,6 @@ CREATE TABLE public.ai_agents (
     provider_id uuid,
     model text,
     params jsonb DEFAULT '{}'::jsonb NOT NULL,
-    enabled_tools text[],
-    require_write_confirmation boolean DEFAULT true NOT NULL,
     color_slot smallint DEFAULT 1 NOT NULL,
     icon text,
     is_active boolean DEFAULT true NOT NULL,
@@ -5290,10 +5447,10 @@ CREATE TABLE public.ai_agents (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     use_for_flows boolean DEFAULT false NOT NULL,
+    tool_kit_id uuid,
     CONSTRAINT ai_agents_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
     CONSTRAINT ai_agents_color_slot_check CHECK (((color_slot >= 1) AND (color_slot <= 12))),
     CONSTRAINT ai_agents_description_check CHECK ((length(description) <= 2000)),
-    CONSTRAINT ai_agents_enabled_tools_check CHECK (public.ai_tool_list_valid(enabled_tools)),
     CONSTRAINT ai_agents_icon_check CHECK ((icon ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text)),
     CONSTRAINT ai_agents_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
     CONSTRAINT ai_agents_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
@@ -5340,20 +5497,6 @@ COMMENT ON COLUMN public.ai_agents.params IS 'Parâmetros do modelo validados po
 
 
 --
--- Name: COLUMN ai_agents.enabled_tools; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_agents.enabled_tools IS 'Tools internas habilitadas (nomes de packages/shared). NULL = todas; {} = nenhuma. As tools de MCP são escolhidas por servidor em agent_mcp_servers.';
-
-
---
--- Name: COLUMN ai_agents.require_write_confirmation; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_agents.require_write_confirmation IS 'true (padrão) = tools de escrita (inclusive "enviar mensagem") pedem confirmação do usuário (ai_tool_confirmations).';
-
-
---
 -- Name: COLUMN ai_agents.color_slot; Type: COMMENT; Schema: public; Owner: -
 --
 
@@ -5379,6 +5522,13 @@ COMMENT ON COLUMN public.ai_agents.is_active IS 'false = não aparece para novas
 --
 
 COMMENT ON COLUMN public.ai_agents.use_for_flows IS 'true = agente que atende os fluxos automáticos (leitura de documento, sugestões da conciliação, leitura do PDF do contrato e PDF → markdown). No máximo um (ai_agents_use_for_flows_key, 23505) e só ativo e não arquivado (ai_agents_use_for_flows_check, 23514: desmarque antes de desativar ou arquivar). Nenhum marcado = a aplicação escolhe (primeiro agente ativo).';
+
+
+--
+-- Name: COLUMN ai_agents.tool_kit_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agents.tool_kit_id IS 'Kit de ferramentas (spec 021). Nulo = sem kit = poder completo: todas as tools internas em allow, menos as de segredo (sempre ask). Excluir o kit em uso (inclusive por agente arquivado) dá 23503 (ai_agents_tool_kit_id_fkey).';
 
 
 --
@@ -5954,6 +6104,86 @@ COMMENT ON COLUMN public.ai_tool_confirmations.status IS 'pending → approved |
 --
 
 COMMENT ON COLUMN public.ai_tool_confirmations.reason IS 'Motivo opcional da rejeição (vai para o modelo no tool_result).';
+
+
+--
+-- Name: ai_tool_kit_tools; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_tool_kit_tools (
+    kit_id uuid NOT NULL,
+    tool_name text NOT NULL,
+    mode text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_tool_kit_tools_mode_check CHECK ((mode = ANY (ARRAY['allow'::text, 'ask'::text]))),
+    CONSTRAINT ai_tool_kit_tools_tool_name_check CHECK (public.ai_tool_list_valid(ARRAY[tool_name]))
+);
+
+
+--
+-- Name: TABLE ai_tool_kit_tools; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_tool_kit_tools IS 'Tools internas liberadas por um kit (lista de permissões: tool fora do kit não é enviada ao modelo; tool nova do registro não entra sozinha). Some com o kit (CASCADE). Auditada com record_id = kit_id.';
+
+
+--
+-- Name: COLUMN ai_tool_kit_tools.tool_name; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_kit_tools.tool_name IS 'Nome da tool no registro (packages/shared). O banco valida só o formato (o de ai_tool_list_valid); a aplicação valida contra o registro.';
+
+
+--
+-- Name: COLUMN ai_tool_kit_tools.mode; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_kit_tools.mode IS 'allow = executa sem perguntar; ask = mostra o cartão "Aplicar?" com a prévia e espera o usuário. Vale para leituras e escritas; o modo sugerido (leituras e notify_user allow, demais escritas ask) é da aplicação.';
+
+
+--
+-- Name: ai_tool_kits; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_tool_kits (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    name text NOT NULL,
+    description text,
+    created_by_user_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_tool_kits_description_check CHECK ((length(description) <= 2000)),
+    CONSTRAINT ai_tool_kits_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120)))
+);
+
+
+--
+-- Name: TABLE ai_tool_kits; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_tool_kits IS 'Kits de ferramentas dos agentes (spec 021): quais tools internas um agente pode usar e, para cada uma, allow ou ask. Um agente tem no máximo um kit (ai_agents.tool_kit_id); um kit serve a vários. Kit em uso não é excluído (23503); não há arquivamento. Valem só para as tools internas (as de MCP externo seguem agent_mcp_servers).';
+
+
+--
+-- Name: COLUMN ai_tool_kits.name; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_kits.name IS 'Nome (até 120), único sem distinção de maiúsculas (ai_tool_kits_name_key). Chave natural no backup.';
+
+
+--
+-- Name: COLUMN ai_tool_kits.description; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_kits.description IS 'Descrição opcional (até 2000 caracteres).';
+
+
+--
+-- Name: COLUMN ai_tool_kits.created_by_user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_kits.created_by_user_id IS 'Quem criou. Nulo = criado pela migração 0038 ou usuário excluído.';
 
 
 --
@@ -9585,6 +9815,22 @@ ALTER TABLE ONLY public.ai_tool_confirmations
 
 
 --
+-- Name: ai_tool_kit_tools ai_tool_kit_tools_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_tool_kit_tools
+    ADD CONSTRAINT ai_tool_kit_tools_pkey PRIMARY KEY (kit_id, tool_name);
+
+
+--
+-- Name: ai_tool_kits ai_tool_kits_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_tool_kits
+    ADD CONSTRAINT ai_tool_kits_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: ai_usage ai_usage_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10293,6 +10539,13 @@ CREATE INDEX ai_agents_provider_id_idx ON public.ai_agents USING btree (provider
 
 
 --
+-- Name: ai_agents_tool_kit_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_agents_tool_kit_id_idx ON public.ai_agents USING btree (tool_kit_id);
+
+
+--
 -- Name: ai_agents_use_for_flows_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10486,6 +10739,20 @@ CREATE INDEX ai_tool_confirmations_decided_by_user_id_idx ON public.ai_tool_conf
 --
 
 CREATE INDEX ai_tool_confirmations_pending_idx ON public.ai_tool_confirmations USING btree (run_id) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: ai_tool_kits_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_tool_kits_created_by_user_id_idx ON public.ai_tool_kits USING btree (created_by_user_id);
+
+
+--
+-- Name: ai_tool_kits_name_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ai_tool_kits_name_key ON public.ai_tool_kits USING btree (lower(name));
 
 
 --
@@ -11714,6 +11981,34 @@ CREATE TRIGGER ai_tool_confirmations_validate BEFORE INSERT OR UPDATE ON public.
 
 
 --
+-- Name: ai_tool_kit_tools ai_tool_kit_tools_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_tool_kit_tools_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_tool_kit_tools FOR EACH ROW EXECUTE FUNCTION public.ai_tool_kit_tools_audit_row();
+
+
+--
+-- Name: ai_tool_kit_tools ai_tool_kit_tools_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_tool_kit_tools_set_updated_at BEFORE UPDATE ON public.ai_tool_kit_tools FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_tool_kits ai_tool_kits_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_tool_kits_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_tool_kits FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: ai_tool_kits ai_tool_kits_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_tool_kits_set_updated_at BEFORE UPDATE ON public.ai_tool_kits FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
 -- Name: ai_usage ai_usage_after_insert; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -12803,6 +13098,14 @@ ALTER TABLE ONLY public.ai_agents
 
 
 --
+-- Name: ai_agents ai_agents_tool_kit_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agents
+    ADD CONSTRAINT ai_agents_tool_kit_id_fkey FOREIGN KEY (tool_kit_id) REFERENCES public.ai_tool_kits(id);
+
+
+--
 -- Name: ai_conversations ai_conversations_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -12944,6 +13247,22 @@ ALTER TABLE ONLY public.ai_tool_confirmations
 
 ALTER TABLE ONLY public.ai_tool_confirmations
     ADD CONSTRAINT ai_tool_confirmations_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.ai_runs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_tool_kit_tools ai_tool_kit_tools_kit_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_tool_kit_tools
+    ADD CONSTRAINT ai_tool_kit_tools_kit_id_fkey FOREIGN KEY (kit_id) REFERENCES public.ai_tool_kits(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_tool_kits ai_tool_kits_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_tool_kits
+    ADD CONSTRAINT ai_tool_kits_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
 
 
 --

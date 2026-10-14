@@ -38,7 +38,7 @@ A [027](027-tools-de-controle-total.md) acrescenta as categorias Contratos, Impo
 ## Banco (dba)
 - `ai_tool_kits`: `id`, `name`, `description`, `created_by_user_id`, `created_at` e `updated_at`.
 - `ai_tool_kit_tools`: `kit_id`, `tool_name` e `mode` (`allow|ask`), com chave primária (`kit_id`, `tool_name`). O nome segue o formato de `ai_tool_list_valid`, e a aplicação valida contra o registro.
-- `ai_agents.tool_kit_id`: FK nula para `ai_tool_kits`, `ON DELETE RESTRICT` (o kit em uso devolve `23503`, e a API traduz listando os agentes).
+- `ai_agents.tool_kit_id`: FK nula para `ai_tool_kits`, sem `ON DELETE` (NO ACTION: o kit em uso devolve `23503 ai_agents_tool_kit_id_fkey`, e a API traduz listando os agentes).
 - As colunas `ai_agents.enabled_tools` e `require_write_confirmation` saem.
 - **Migração** (ninguém ganha nem perde poder, com uma exceção anotada):
   - a migration traz um retrato fixo das 49 tools da v0.1.7 (25 de leitura, 24 de escrita), escrito nela; nomes desconhecidos em `enabled_tools` são descartados;

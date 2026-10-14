@@ -197,14 +197,26 @@ ON CONFLICT (kind, parent_id, lower(name)) DO NOTHING;
 -- Agente de exemplo (spec 011) ------------------------------------------------------------
 -- Sem provedor nem chave (segredos não entram em seed): nasce INATIVO. O admin escolhe o
 -- provedor e o modelo na tela de agentes e o ativa.
-INSERT INTO ai_agents (name, description, system_prompt, params, enabled_tools, require_write_confirmation,
-                       color_slot, icon, is_active)
+-- Kit de ferramentas (spec 021) com todas as tools do retrato da v0.1.7 no modo sugerido:
+-- leituras e notify_user em allow, as demais escritas em ask.
+INSERT INTO ai_tool_kits (name, description)
+VALUES ('Padrão', 'Todas as ferramentas, com o modo sugerido: leituras e "avisar o usuário" direto, as demais escritas pedem aprovação.')
+ON CONFLICT ((lower(name))) DO NOTHING;
+
+INSERT INTO ai_tool_kit_tools (kit_id, tool_name, mode)
+SELECT k.id, r.tool_name, CASE WHEN r.kind = 'write' AND r.confirm <> 'never' THEN 'ask' ELSE 'allow' END
+  FROM ai_tool_kits k CROSS JOIN ai_legacy_tool_registry() r
+ WHERE lower(k.name) = lower('Padrão')
+ON CONFLICT (kit_id, tool_name) DO NOTHING;
+
+INSERT INTO ai_agents (name, description, system_prompt, params, tool_kit_id, color_slot, icon, is_active)
 VALUES ('Assistente geral',
         'Responde sobre contas, caixas e títulos e ajuda a lançar e conciliar, com as permissões de quem o aciona.',
         'Você é o assistente financeiro do MoneyFlow. Responda em português do Brasil, de forma objetiva. '
         'Valores em reais (R$). Use as ferramentas para consultar os dados antes de responder e nunca invente '
         'números. Antes de alterar qualquer registro, explique o que vai fazer.',
-        '{"temperature": 0.3, "max_tool_iterations": 20}', NULL, true, 1, 'bot', false)
+        '{"temperature": 0.3, "max_tool_iterations": 20}',
+        (SELECT id FROM ai_tool_kits WHERE lower(name) = lower('Padrão')), 1, 'bot', false)
 ON CONFLICT ((lower(name))) DO NOTHING;
 
 

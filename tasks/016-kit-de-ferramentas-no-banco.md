@@ -1,5 +1,5 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: usuario
 autor: principal
@@ -58,3 +58,39 @@ Specs revisadas em 2026-10-14: os "pontos para a revisão da spec" foram resolvi
 3. (021, Migração) Falta definir o que fazer com nomes de tools desconhecidos e com nomes de kit acima de 120 caracteres. Recomendação: descartar os nomes desconhecidos e truncar o nome do kit.
 
 ## Resolução (executor)
+Feito pelo dba em 2026-10-14 (sem commit ainda; a sessão principal commita).
+
+**Migration `database/migrations/0038_ai_tool_kits.sql`**
+- `ai_tool_kits` (`id`, `name`, `description`, `created_by_user_id`, `created_at`, `updated_at`): nome até 120, único sem distinção de maiúsculas (`ai_tool_kits_name_key`, 23505); descrição até 2000; sem arquivamento.
+- `ai_tool_kit_tools` (`kit_id`, `tool_name`, `mode`, `created_at`, `updated_at`), chave (`kit_id`, `tool_name`): `mode` `allow|ask` obrigatório e sem padrão (`ai_tool_kit_tools_mode_check`, 23514); nome no formato de `ai_tool_list_valid` (`ai_tool_kit_tools_tool_name_check`); CASCADE com o kit.
+- `ai_agents.tool_kit_id` com índice. **Desvio da letra da spec**: a FK não tem `ON DELETE RESTRICT`, e sim o padrão NO ACTION (como `entity_tag_links`), porque `RESTRICT` devolve `23001` (restrict_violation), não o `23503` que a spec e o `errors.ts` esperam. O efeito é o mesmo: kit em uso, inclusive por agente arquivado, não é excluído (`23503 ai_agents_tool_kit_id_fkey`). A 016 registra isso; a linha da 021 ("`ON DELETE RESTRICT`") pode ser ajustada pela sessão principal.
+- Auditoria: `ai_tool_kits` por `audit_row()`; `ai_tool_kit_tools` por `ai_tool_kit_tools_audit_row()`, com `record_id = kit_id`. GRANTs de DML para `moneyflow_app`.
+- Migração: `ai_legacy_tool_registry()` é o retrato fixo das 49 tools da v0.1.7 (25 read, 24 write e o `confirm` de cada uma), executável pela aplicação para o teste da 017. `ai_tool_kit_from_legacy(nome, lista, flag)` é interna, sem EXECUTE para o app, e aplica a regra da 021. As decisões da revisão valem: nomes desconhecidos são descartados, e o nome é truncado em 120 com sufixo " (n)" se colidir. A função roda sobre cada agente, inclusive os arquivados. Depois, `enabled_tools` e `require_write_confirmation` saem.
+- Down: recria as duas colunas a partir dos kits:
+  - sem kit: `NULL`/`false`;
+  - com kit: a lista das tools do kit, ou `NULL` se o kit tem todo o retrato;
+  - a flag fica `true` se alguma tool, fora `send_telegram_message`, está em `ask`.
+- Seed (`seeds/dev.sql`): kit "Padrão" (as 49 tools no modo sugerido) ligado ao "Assistente geral".
+
+**Testes**
+- `database/tests/0038_ai_tool_kits.sql`:
+  - estrutura, FKs e tipo de exclusão, índices, privilégios;
+  - o retrato (49/25/24, confirms fixos);
+  - nome único, vazio e longo, descrição, modo inválido ou ausente, formato do nome, repetição;
+  - kit em uso não excluído (23503), também com agente arquivado;
+  - exclusão do kit livre em cascata;
+  - os três casos da migração mais a lista vazia, os nomes desconhecidos, a equivalência tool a tool com o `needsConfirmation` da v0.1.7, o truncamento e as colisões;
+  - auditoria;
+  - papel da aplicação.
+- `database/tests/0024_ai_providers_and_agents.sql`: tiradas as asserções das colunas removidas.
+- `make test`: PASS (34 arquivos, 2077 testes).
+- Conferido também à mão num banco descartável, com up → down → up e agentes cobrindo todos os casos.
+- `make dump` rodado.
+
+**Para a 017 (app)**
+- Rodar `pnpm db:pull`.
+- Tirar `enabled_tools` e `require_write_confirmation` de `runner.ts`, `tools-runtime.ts` e `ai-admin.ts`.
+- Ler o kit por `ai_agents.tool_kit_id` → `ai_tool_kit_tools (tool_name, mode)`.
+- Traduzir `23503 ai_agents_tool_kit_id_fkey` listando os agentes, e `23505 ai_tool_kits_name_key`.
+- Testar `ai_legacy_tool_registry()` contra `AGENT_TOOLS`.
+- No catálogo do backup, incluir `ai_tool_kits` (chave natural `lower(name)`) e `ai_tool_kit_tools` em `COMPOSITE_KEYS`, filho do kit; o agente referencia o kit por nome.

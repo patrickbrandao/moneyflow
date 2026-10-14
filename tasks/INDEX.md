@@ -4,7 +4,6 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 
 | Nº | Tarefa | Status | Tipo | Responsável | Origem |
 |---|---|---|---|---|---|
-| 016 | [Kit de ferramentas no banco (F7)](016-kit-de-ferramentas-no-banco.md) (primeira da F7) | aberta | banco | dba | usuario |
 | 017 | [Kit de ferramentas na aplicação (F7)](017-kit-de-ferramentas-na-aplicacao.md) (depois da 016) | aberta | melhoria | app | usuario |
 | 018 | [Instruções do usuário, versões do prompt e instructions do MCP no banco (F8)](018-prompts-e-instrucoes-no-banco.md) (depois da F7 (017)) | aberta | banco | dba | usuario |
 | 019 | [Montagem do prompt, variáveis, versões e instructions do MCP na aplicação (F8)](019-prompts-e-instrucoes-na-aplicacao.md) (depois da 018) | aberta | melhoria | app | usuario |
@@ -22,6 +21,7 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 | 031 | [Orçamentos com aviso e bloqueio, limite por minuto e painel de uso (F14)](031-orcamentos-e-limites-na-aplicacao.md) (depois da 030) | aberta | melhoria | app | usuario |
 | 032 | [Tarefas agendadas, conciliação com IA e Telegram de entrada no banco (F15)](032-fluxos-autonomos-no-banco.md) (depois da F14) | aberta | banco | dba | usuario |
 | 033 | [Tarefas agendadas, conciliação completa ao importar e conversa pelo Telegram (F15)](033-fluxos-autonomos-na-aplicacao.md) (depois da 032) | aberta | melhoria | app | usuario |
+| 016 | [Kit de ferramentas no banco (F7)](016-kit-de-ferramentas-no-banco.md) (primeira da F7; depois vem a 017) | concluida | banco | dba | usuario |
 | 004 | [Aviso de conclusão do agente com várias réplicas da API](004-aviso-de-conclusao-multi-replica.md) (escopo: `dedup_key` por evento; presença no banco adiada) | concluida | debito-tecnico | app | agente |
 | 006 | [Cobrir no e2e os fluxos do agente ainda sem teste contra a API real](006-front-sem-teste-contra-api-real.md) | concluida | debito-tecnico | app | agente |
 | 011 | [Gravar e mostrar o uso de IA por finalidade](011-gravar-e-mostrar-uso-ia-por-finalidade.md) (depois da 001 e da 013) | concluida | melhoria | app | agente |
