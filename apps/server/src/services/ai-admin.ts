@@ -1,5 +1,7 @@
-import type { Executor, Tx } from '@moneyflow/db';
+import { type Executor, type Tx, userColumns, users } from '@moneyflow/db';
 import {
+  type AgentPromptPreviewDto,
+  type AgentPromptVersionDto,
   type AgentToolInfo,
   type AiAgentDto,
   type AiPriceDto,
@@ -14,6 +16,7 @@ import {
   type aiProviderCreateInput,
   type aiProviderUpdateInput,
   type aiUsageQuery,
+  type McpInstructionsMode,
   type McpServerDto,
   type McpToolInfo,
   type mcpServerCreateInput,
@@ -23,12 +26,14 @@ import {
   type toolKitDuplicateInput,
   type toolKitUpdateInput,
 } from '@moneyflow/shared';
-import { type SQL, sql } from 'drizzle-orm';
+import { eq, type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { createLlmClient, LlmError } from '../agents/llm';
 import { connectMcp } from '../agents/mcp-client';
+import { assemblePrompt, loadPromptInputs, promptParts } from '../agents/prompt';
 import { usageDto } from '../agents/store';
 import { internalTool, internalTools } from '../agents/tools-runtime';
+import { type Actor, loadAccess } from '../authz/access';
 import type { ServiceContext } from '../context';
 import { badRequest, findPgError, notFound, unprocessable } from '../errors';
 import { deleteOrArchive, withTx } from './tx';
@@ -229,6 +234,7 @@ type AgentRow = {
   icon: string | null;
   is_active: boolean;
   use_for_flows: boolean;
+  prompt_version: number | null;
   archived_at: unknown;
   created_at: unknown;
 };
@@ -236,7 +242,8 @@ type AgentRow = {
 async function loadAgents(db: Executor, where = sql`true`): Promise<AiAgentDto[]> {
   const result = await db.execute<AgentRow>(sql`
     SELECT a.id, a.name, a.description, a.system_prompt, a.provider_id, p.name AS provider_name, a.model, a.params, a.tool_kit_id,
-           k.name AS tool_kit_name, a.color_slot, a.icon, a.is_active, a.use_for_flows, a.archived_at, a.created_at
+           k.name AS tool_kit_name, a.color_slot, a.icon, a.is_active, a.use_for_flows, a.archived_at, a.created_at,
+           (SELECT max(v.version) FROM ai_agent_prompt_versions v WHERE v.agent_id = a.id) AS prompt_version
       FROM ai_agents a LEFT JOIN ai_providers p ON p.id = a.provider_id LEFT JOIN ai_tool_kits k ON k.id = a.tool_kit_id
      WHERE ${where}
      ORDER BY a.archived_at NULLS FIRST, lower(a.name)`);
@@ -264,6 +271,7 @@ async function loadAgents(db: Executor, where = sql`true`): Promise<AiAgentDto[]
     icon: r.icon,
     isActive: r.is_active,
     useForFlows: r.use_for_flows,
+    promptVersion: r.prompt_version === null ? null : Number(r.prompt_version),
     archivedAt: iso(r.archived_at),
     createdAt: iso(r.created_at)!,
     mcpServers: links.rows
@@ -321,6 +329,8 @@ export async function createAgent(ctx: ServiceContext, input: z.output<typeof ai
               ${input.useForFlows}, ${ctx.access.actor.id})
       RETURNING id`);
     const agentId = result.rows[0]!.id;
+    // A versão 1 do prompt, com o autor e a nota (sem ela, o banco a criaria no COMMIT).
+    await insertPromptVersion(tx, agentId, input.systemPrompt, input.promptNote, ctx.access.actor.id, null);
     if (input.mcpServers) await setLinks(tx, agentId, input.mcpServers);
     return agentId;
   });
@@ -329,12 +339,13 @@ export async function createAgent(ctx: ServiceContext, input: z.output<typeof ai
 
 export async function updateAgent(ctx: ServiceContext, id: string, input: z.output<typeof aiAgentUpdateInput>) {
   ctx.access.assertAdmin();
-  await getAgent(ctx.db, id);
+  const current = await getAgent(ctx.db, id);
   await checkKit(ctx.db, input.toolKitId);
+  // O prompt muda só criando uma versão (o banco copia o conteúdo para o agente; spec 022).
+  const newPrompt = input.systemPrompt !== undefined && input.systemPrompt !== current.systemPrompt ? input.systemPrompt : null;
   const sets: SQL[] = [];
   if (input.name !== undefined) sets.push(sql`name = ${input.name}`);
   if (input.description !== undefined) sets.push(sql`description = ${input.description}`);
-  if (input.systemPrompt !== undefined) sets.push(sql`system_prompt = ${input.systemPrompt}`);
   if (input.providerId !== undefined) sets.push(sql`provider_id = ${input.providerId}`);
   if (input.model !== undefined) sets.push(sql`model = ${input.model}`);
   if (input.params !== undefined) sets.push(sql`params = ${JSON.stringify(input.params)}::jsonb`);
@@ -347,10 +358,104 @@ export async function updateAgent(ctx: ServiceContext, id: string, input: z.outp
   else if (input.isActive === false) sets.push(sql`use_for_flows = false`);
   await withTx(ctx, async (tx) => {
     if (input.useForFlows) await clearFlowAgent(tx, id);
+    if (newPrompt !== null) await insertPromptVersion(tx, id, newPrompt, input.promptNote, ctx.access.actor.id, null);
     if (sets.length > 0) await tx.execute(sql`UPDATE ai_agents SET ${sql.join(sets, sql`, `)} WHERE id = ${id}`);
     if (input.mcpServers) await setLinks(tx, id, input.mcpServers);
   });
   return getAgent(ctx.db, id);
+}
+
+/* ---------------- versões do prompt (spec 022) ---------------- */
+
+/** Nova versão (o banco atribui o número, travando o agente, e copia o conteúdo para ai_agents.system_prompt). */
+async function insertPromptVersion(
+  tx: Tx,
+  agentId: string,
+  content: string,
+  note: string | null | undefined,
+  authorId: string,
+  restoredFrom: string | null,
+) {
+  const result = await tx.execute<{ id: string }>(sql`
+    INSERT INTO ai_agent_prompt_versions (agent_id, content, note, created_by_user_id, restored_from_version_id)
+    VALUES (${agentId}, ${content}, ${note ?? null}, ${authorId}, ${restoredFrom})
+    RETURNING id`);
+  return result.rows[0]!.id;
+}
+
+export async function listPromptVersions(ctx: ServiceContext, agentId: string): Promise<AgentPromptVersionDto[]> {
+  ctx.access.assertAdmin();
+  await getAgent(ctx.db, agentId);
+  const result = await ctx.db.execute<{
+    id: string;
+    version: number;
+    content: string;
+    note: string | null;
+    created_by_user_id: string | null;
+    username: string | null;
+    restored_from_version_id: string | null;
+    restored_from_version: number | null;
+    created_at: unknown;
+  }>(sql`
+    SELECT v.id, v.version, v.content, v.note, v.created_by_user_id, u.username, v.restored_from_version_id,
+           r.version AS restored_from_version, v.created_at
+      FROM ai_agent_prompt_versions v
+      LEFT JOIN users u ON u.id = v.created_by_user_id
+      LEFT JOIN ai_agent_prompt_versions r ON r.id = v.restored_from_version_id
+     WHERE v.agent_id = ${agentId}
+     ORDER BY v.version DESC`);
+  return result.rows.map((r) => ({
+    id: r.id,
+    version: Number(r.version),
+    content: r.content,
+    note: r.note,
+    createdByUserId: r.created_by_user_id,
+    createdByUsername: r.username,
+    restoredFromVersionId: r.restored_from_version_id,
+    restoredFromVersion: r.restored_from_version === null ? null : Number(r.restored_from_version),
+    createdAt: iso(r.created_at)!,
+  }));
+}
+
+/** Restaurar = versão nova com o conteúdo antigo e a nota "Restaurada da versão N". */
+export async function restorePromptVersion(ctx: ServiceContext, agentId: string, versionId: string) {
+  ctx.access.assertAdmin();
+  await getAgent(ctx.db, agentId);
+  const found = await ctx.db.execute<{ version: number; content: string }>(
+    sql`SELECT version, content FROM ai_agent_prompt_versions WHERE id = ${versionId} AND agent_id = ${agentId}`,
+  );
+  const source = found.rows[0];
+  if (!source) throw notFound(t.agents.errors.promptVersionNotFound);
+  await withTx(ctx, (tx) =>
+    insertPromptVersion(
+      tx,
+      agentId,
+      source.content,
+      t.agents.systemPrompt.restoredNote(Number(source.version)),
+      ctx.access.actor.id,
+      versionId,
+    ),
+  );
+  return getAgent(ctx.db, agentId);
+}
+
+/** "Ver prompt montado": o prompt final do agente para um usuário (conversa comum, sem tela), sem chamar o modelo. */
+export async function previewPrompt(ctx: ServiceContext, agentId: string, userId: string): Promise<AgentPromptPreviewDto> {
+  ctx.access.assertAdmin();
+  const agent = await getAgent(ctx.db, agentId);
+  const [user] = await ctx.db.select(userColumns).from(users).where(eq(users.id, userId));
+  if (!user) throw notFound();
+  const actor: Actor = {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    role: user.role as Actor['role'],
+    isActive: user.isActive,
+  };
+  const access = await loadAccess(ctx.db, actor);
+  const inputs = await loadPromptInputs(ctx.db, access, { id: agent.id, name: agent.name, system_prompt: agent.systemPrompt }, null);
+  const prompt = assemblePrompt(inputs, { purpose: null, screen: null });
+  return { userId: user.id, username: user.username, parts: promptParts(prompt), volatileVariables: prompt.volatileVariables };
 }
 
 export async function deleteAgent(ctx: ServiceContext, id: string) {
@@ -505,6 +610,8 @@ type McpRow = {
   url: string;
   secret_header_names: string[];
   visibility: McpServerDto['visibility'];
+  instructions_mode: McpInstructionsMode;
+  instructions_cache: string | null;
   is_active: boolean;
   tools_cache: McpToolInfo[] | null;
   tools_cached_at: unknown;
@@ -514,8 +621,11 @@ type McpRow = {
   created_at: unknown;
 };
 
-const MCP_COLUMNS = sql`s.id, s.name, s.url, s.secret_header_names, s.visibility, s.is_active, s.tools_cache, s.tools_cached_at, s.tools_error,
-  s.notes, s.archived_at, s.created_at`;
+const MCP_COLUMNS = sql`s.id, s.name, s.url, s.secret_header_names, s.visibility, s.instructions_mode, s.instructions_cache, s.is_active,
+  s.tools_cache, s.tools_cached_at, s.tools_error, s.notes, s.archived_at, s.created_at`;
+
+/** O banco aceita até 50 mil caracteres no cache das instructions. */
+const MAX_MCP_INSTRUCTIONS = 50_000;
 
 const mcpDto = (r: McpRow): McpServerDto => ({
   id: r.id,
@@ -523,6 +633,8 @@ const mcpDto = (r: McpRow): McpServerDto => ({
   url: r.url,
   headerNames: r.secret_header_names ?? [],
   visibility: r.visibility,
+  instructionsMode: r.instructions_mode,
+  instructions: r.instructions_cache,
   isActive: r.is_active,
   tools: r.tools_cache,
   toolsCachedAt: iso(r.tools_cached_at),
@@ -550,9 +662,9 @@ export async function createMcpServer(ctx: ServiceContext, input: z.output<typeo
   ctx.access.assertAdmin();
   const id = await withTx(ctx, async (tx) => {
     const result = await tx.execute<{ id: string }>(sql`
-      INSERT INTO mcp_servers (name, url, secret_headers, visibility, is_active, notes, created_by_user_id)
-      VALUES (${input.name}, ${input.url}, ${JSON.stringify(input.headers)}::jsonb, ${input.visibility}, ${input.isActive}, ${input.notes},
-              ${ctx.access.actor.id})
+      INSERT INTO mcp_servers (name, url, secret_headers, visibility, instructions_mode, is_active, notes, created_by_user_id)
+      VALUES (${input.name}, ${input.url}, ${JSON.stringify(input.headers)}::jsonb, ${input.visibility}, ${input.instructionsMode},
+              ${input.isActive}, ${input.notes}, ${ctx.access.actor.id})
       RETURNING id`);
     return result.rows[0]!.id;
   });
@@ -566,6 +678,7 @@ export async function updateMcpServer(ctx: ServiceContext, id: string, input: z.
   if (input.name !== undefined) sets.push(sql`name = ${input.name}`);
   if (input.url !== undefined) sets.push(sql`url = ${input.url}`);
   if (input.visibility !== undefined) sets.push(sql`visibility = ${input.visibility}`);
+  if (input.instructionsMode !== undefined) sets.push(sql`instructions_mode = ${input.instructionsMode}`);
   if (input.isActive !== undefined) sets.push(sql`is_active = ${input.isActive}`);
   if (input.notes !== undefined) sets.push(sql`notes = ${input.notes}`);
   await withTx(ctx, async (tx) => {
@@ -591,7 +704,7 @@ export async function deleteMcpServer(ctx: ServiceContext, id: string) {
   );
 }
 
-/** Testa o servidor e atualiza o cache de tools (ou grava o erro). */
+/** Testa o servidor e atualiza o cache de tools e das instructions do initialize (ou grava o erro). */
 export async function refreshMcpServer(ctx: ServiceContext, id: string) {
   ctx.access.assertAdmin();
   const server = await getMcpServer(ctx.db, id);
@@ -599,10 +712,12 @@ export async function refreshMcpServer(ctx: ServiceContext, id: string) {
     sql`SELECT admin_mcp_server_headers(${id}::uuid, ${ctx.access.actor.id}::uuid) AS headers`,
   );
   let tools: McpToolInfo[] | null = null;
+  let instructions: string | null = null;
   let error: string | null = null;
   try {
     const session = await connectMcp(server.url, headers.rows[0]?.headers ?? {});
     try {
+      instructions = session.instructions()?.slice(0, MAX_MCP_INSTRUCTIONS) ?? null;
       tools = await session.listTools();
     } finally {
       await session.close();
@@ -612,7 +727,8 @@ export async function refreshMcpServer(ctx: ServiceContext, id: string) {
   }
   await withTx(ctx, (tx) =>
     tools
-      ? tx.execute(sql`UPDATE mcp_servers SET tools_cache = ${JSON.stringify(tools)}::jsonb, tools_cached_at = now(), tools_error = NULL
+      ? tx.execute(sql`UPDATE mcp_servers SET tools_cache = ${JSON.stringify(tools)}::jsonb, tools_cached_at = now(), tools_error = NULL,
+                               instructions_cache = ${instructions}
                         WHERE id = ${id}`)
       : tx.execute(sql`UPDATE mcp_servers SET tools_error = ${error} WHERE id = ${id}`),
   );

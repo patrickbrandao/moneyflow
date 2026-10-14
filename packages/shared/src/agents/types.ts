@@ -6,6 +6,7 @@ import type { AgentToolCategory, AgentToolKind, AgentToolMode } from './tools';
 
 export type AiProviderKind = 'anthropic' | 'openai';
 export type McpVisibility = 'global' | 'public' | 'private';
+export type McpInstructionsMode = 'ignore' | 'system' | 'user';
 export type AiRunStatus = 'queued' | 'running' | 'awaiting_confirmation' | 'completed' | 'failed' | 'canceled';
 export type ConfirmationStatus = 'pending' | 'approved' | 'rejected' | 'expired';
 
@@ -66,9 +67,48 @@ export type AiAgentDto = {
   isActive: boolean;
   /** Atende os fluxos automáticos (só um por vez; precisa estar ativo). */
   useForFlows: boolean;
+  /** Número da versão atual do prompt (spec 022). */
+  promptVersion: number | null;
   archivedAt: string | null;
   createdAt: string;
   mcpServers: AgentMcpLinkDto[];
+};
+
+/** Versão do prompt de um agente (spec 022): imutável; a última é o prompt atual. */
+export type AgentPromptVersionDto = {
+  id: string;
+  version: number;
+  content: string;
+  note: string | null;
+  createdByUserId: string | null;
+  createdByUsername: string | null;
+  restoredFromVersionId: string | null;
+  restoredFromVersion: number | null;
+  createdAt: string;
+};
+
+/** Uma parte do prompt montado, na ordem; `cacheBreakpoint` = ponto de cache da Anthropic logo depois dela. */
+export type PromptPart = {
+  kind: 'stable' | 'user' | 'volatile' | 'mcp_user';
+  text: string;
+  cacheBreakpoint: boolean;
+};
+
+/** "Ver prompt montado" (spec 022): o prompt final para um usuário, sem chamar o modelo. */
+export type AgentPromptPreviewDto = {
+  userId: string;
+  username: string;
+  parts: PromptPart[];
+  /** O prompt do agente usa variáveis voláteis e foi para depois do ponto de cache 2. */
+  volatileVariables: boolean;
+};
+
+/** Minha conta → IA (spec 022). */
+export type UserAiSettingsDto = {
+  instructions: string;
+  primaryCaixaId: string | null;
+  primaryCaixaName: string | null;
+  updatedAt: string | null;
 };
 
 /** Agente como o usuário comum vê (para escolher numa conversa nova). */
@@ -122,6 +162,10 @@ export type McpServerDto = {
   /** Só os nomes dos cabeçalhos secretos. */
   headerNames: string[];
   visibility: McpVisibility;
+  /** O que fazer com as instructions do servidor (spec 022). */
+  instructionsMode: McpInstructionsMode;
+  /** Instructions do initialize em cache (null = o servidor não mandou ou nunca foi listado). */
+  instructions: string | null;
   isActive: boolean;
   tools: McpToolInfo[] | null;
   toolsCachedAt: string | null;

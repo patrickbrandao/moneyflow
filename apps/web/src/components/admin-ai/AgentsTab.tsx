@@ -1,6 +1,14 @@
-import { type AgentParams, type AiAgentDto, type AiProviderDto, type AiToolKitDto, type McpServerDto, t } from '@moneyflow/shared';
-import { Bot, Pencil, Plus, Trash2 } from 'lucide-react';
-import { type FormEvent, type ReactNode, useId, useState } from 'react';
+import {
+  type AgentParams,
+  type AiAgentDto,
+  type AiProviderDto,
+  type AiToolKitDto,
+  type McpServerDto,
+  scanPromptVariables,
+  t,
+} from '@moneyflow/shared';
+import { Bot, Eye, History, Pencil, Plus, Trash2 } from 'lucide-react';
+import { type FormEvent, type ReactNode, useId, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { agentColor } from '../../agents/format';
 import { api } from '../../lib/api';
@@ -8,10 +16,12 @@ import { useAction, useApi } from '../../lib/hooks';
 import { LoadError, SkelRows } from '../domain';
 import { FormError, ModalActions } from '../forms';
 import { Badge, Button, cx, EmptyRow, EmptyState, Field, Modal } from '../ui';
+import { PromptHistory, PromptPreview, PromptVariables } from './AgentPrompt';
 import { ActiveBadge, ANTHROPIC_SUGGESTIONS, optionalNumber, useProviderModels, useRemove } from './shared';
 
 const g = t.agentsUi.admin.agents;
 const mcpT = t.agentsUi.admin.mcp;
+const promptT = t.agentsUi.admin.prompt;
 
 /** Agentes (só o admin cria): provedor/modelo, parâmetros, kit de ferramentas (spec 021), cor, ícone e MCPs. */
 export function AgentsTab() {
@@ -113,6 +123,7 @@ export function AgentsTab() {
             setEditing(null);
             void reload();
           }}
+          onChanged={() => void reload()}
         />
       )}
     </>
@@ -130,7 +141,22 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null; onClose: () => void; onSaved: () => void }) {
+function AgentFormModal({
+  agent: initial,
+  onClose,
+  onSaved,
+  onChanged,
+}: {
+  agent: AiAgentDto | null;
+  onClose: () => void;
+  onSaved: () => void;
+  /** Mudou fora do "Salvar" (restaurar uma versão do prompt): recarrega a lista sem fechar. */
+  onChanged: () => void;
+}) {
+  // O agente salvo (a versão atual do prompt muda ao restaurar pelo histórico).
+  const [agent, setAgent] = useState(initial);
+  const [view, setView] = useState<'form' | 'history' | 'preview'>('form');
+  const promptRef = useRef<HTMLTextAreaElement>(null);
   const providers = useApi<AiProviderDto[]>('/api/admin/ai/providers');
   const kits = useApi<AiToolKitDto[]>('/api/admin/ai/tool-kits');
   const servers = useApi<McpServerDto[]>('/api/admin/ai/mcp-servers');
@@ -140,6 +166,9 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
   const [name, setName] = useState(agent?.name ?? '');
   const [description, setDescription] = useState(agent?.description ?? '');
   const [systemPrompt, setSystemPrompt] = useState(agent?.systemPrompt ?? '');
+  const [promptNote, setPromptNote] = useState('');
+  const scan = useMemo(() => scanPromptVariables(systemPrompt), [systemPrompt]);
+  const promptChanged = systemPrompt !== (agent?.systemPrompt ?? '');
   const [providerId, setProviderId] = useState(agent?.providerId ?? '');
   const [model, setModel] = useState(agent?.model ?? '');
   const params = agent?.params ?? {};
@@ -175,8 +204,21 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
     });
   }
 
+  /** Insere a variável na posição do cursor do prompt. */
+  function insertVariable(token: string) {
+    const area = promptRef.current;
+    const start = area?.selectionStart ?? systemPrompt.length;
+    const end = area?.selectionEnd ?? systemPrompt.length;
+    setSystemPrompt(systemPrompt.slice(0, start) + token + systemPrompt.slice(end));
+    requestAnimationFrame(() => {
+      area?.focus();
+      area?.setSelectionRange(start + token.length, start + token.length);
+    });
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (scan.unknown.length > 0) return setError(g.unknownVariables(scan.unknown.map((n) => `{{${n}}}`).join(', ')));
     if (isActive && (!providerId || !model.trim())) return setError(g.activeHint);
     if (useForFlows && !isActive) return setError(g.useForFlowsNeedsActive);
     setError(null);
@@ -197,6 +239,7 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
       name: name.trim(),
       description,
       systemPrompt,
+      promptNote: promptChanged || !agent ? promptNote : null,
       providerId: providerId || null,
       model: model.trim(),
       params: nextParams,
@@ -212,6 +255,31 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
       agent ? g.saved : g.created,
     );
     if (saved) onSaved();
+  }
+
+  if (agent && view === 'history') {
+    return (
+      <Modal open title={promptT.historyTitle(agent.name)} onClose={onClose} wide>
+        <PromptHistory
+          agent={agent}
+          onBack={() => setView('form')}
+          onRestored={(saved) => {
+            // O prompt restaurado entra no formulário (o que estava sendo editado e não foi salvo é trocado).
+            setAgent(saved);
+            setSystemPrompt(saved.systemPrompt);
+            setPromptNote('');
+            onChanged();
+          }}
+        />
+      </Modal>
+    );
+  }
+  if (agent && view === 'preview') {
+    return (
+      <Modal open title={promptT.previewTitle(agent.name)} onClose={onClose} wide>
+        <PromptPreview agent={agent} dirty={promptChanged} onBack={() => setView('form')} />
+      </Modal>
+    );
   }
 
   return (
@@ -236,9 +304,50 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
           <Field label={g.description}>
             <input className="field" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={2000} />
           </Field>
-          <Field label={g.systemPrompt} hint={g.systemPromptHint}>
-            <textarea className="field" rows={6} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
-          </Field>
+          <div>
+            <div className="mb-1 flex flex-wrap items-center gap-2">
+              <span className="label !mb-0">{g.systemPrompt}</span>
+              {agent?.promptVersion && (
+                <span data-testid="prompt-version">
+                  <Badge tone="outline">{g.promptVersion(agent.promptVersion)}</Badge>
+                </span>
+              )}
+              <span className="flex-1" />
+              {agent && (
+                <>
+                  <Button size="sm" variant="ghost" onClick={() => setView('history')}>
+                    <History /> {g.history}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setView('preview')}>
+                    <Eye /> {g.preview}
+                  </Button>
+                </>
+              )}
+            </div>
+            <textarea
+              ref={promptRef}
+              className="field"
+              rows={6}
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              aria-label={g.systemPrompt}
+            />
+            <p className="hint">{g.systemPromptHint}</p>
+            {scan.unknown.length > 0 && (
+              <p className="notice danger mt-2">{g.unknownVariables(scan.unknown.map((n) => `{{${n}}}`).join(', '))}</p>
+            )}
+            {scan.volatile && (
+              <p className="notice warn mt-2" data-testid="prompt-volatile-warning">
+                {g.volatileWarning}
+              </p>
+            )}
+          </div>
+          <PromptVariables onInsert={insertVariable} />
+          {(promptChanged || !agent) && (
+            <Field label={g.promptNote} hint={g.promptNoteHint}>
+              <input className="field" value={promptNote} onChange={(e) => setPromptNote(e.target.value)} maxLength={500} />
+            </Field>
+          )}
           <div className="form-grid cols-2">
             <Field label={g.provider}>
               <select className="field" value={providerId} onChange={(e) => setProviderId(e.target.value)}>

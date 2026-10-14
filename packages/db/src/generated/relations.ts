@@ -24,13 +24,13 @@ import {
   titleAttachments,
   movements,
   settlementAttachments,
-  mcpServers,
   movementAttachments,
   entityAttachments,
   nfeDocuments,
   nfeItems,
   cardInvoices,
   agentMcpServers,
+  mcpServers,
   cardPurchases,
   cardInvoiceItems,
   cardPurchaseAttachments,
@@ -57,6 +57,8 @@ import {
   recurrenceRules,
   messageOutbox,
   notifications,
+  userAiSettings,
+  aiAgentPromptVersions,
   contractDocuments,
   contractDocumentVersions,
   contractAmendments,
@@ -79,7 +81,6 @@ export const usersRelations = relations(users, ({ many }) => ({
   caixaMembers: many(caixaMembers),
   aiAgents: many(aiAgents),
   attachments: many(attachments),
-  mcpServers: many(mcpServers),
   statementImports: many(statementImports),
   classificationRules: many(classificationRules),
   aiConversations: many(aiConversations),
@@ -96,8 +97,11 @@ export const usersRelations = relations(users, ({ many }) => ({
   aiToolConfirmations: many(aiToolConfirmations),
   aiToolKits: many(aiToolKits),
   userApiTokens: many(userApiTokens),
+  mcpServers: many(mcpServers),
   messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
+  userAiSettings: many(userAiSettings),
+  aiAgentPromptVersions: many(aiAgentPromptVersions),
   contracts: many(contracts),
   contractDocuments: many(contractDocuments),
   contractDocumentVersions: many(contractDocumentVersions),
@@ -233,6 +237,7 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
   }),
   messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
+  userAiSettings: many(userAiSettings),
   contracts_caixaId: many(contracts, {
     relationName: 'contracts_caixaId_caixas_id',
   }),
@@ -269,6 +274,7 @@ export const aiAgentsRelations = relations(aiAgents, ({ one, many }) => ({
   aiConversations: many(aiConversations),
   aiRuns: many(aiRuns),
   aiUsages: many(aiUsage),
+  aiAgentPromptVersions: many(aiAgentPromptVersions),
 }));
 
 export const aiToolKitsRelations = relations(aiToolKits, ({ one, many }) => ({
@@ -482,14 +488,6 @@ export const settlementAttachmentsRelations = relations(settlementAttachments, (
   }),
 }));
 
-export const mcpServersRelations = relations(mcpServers, ({ one, many }) => ({
-  user: one(users, {
-    fields: [mcpServers.createdByUserId],
-    references: [users.id],
-  }),
-  agentMcpServers: many(agentMcpServers),
-}));
-
 export const movementAttachmentsRelations = relations(movementAttachments, ({ one }) => ({
   attachment: one(attachments, {
     fields: [movementAttachments.attachmentId],
@@ -561,6 +559,14 @@ export const agentMcpServersRelations = relations(agentMcpServers, ({ one }) => 
   mcpServer: one(mcpServers, {
     fields: [agentMcpServers.mcpServerId],
     references: [mcpServers.id],
+  }),
+}));
+
+export const mcpServersRelations = relations(mcpServers, ({ one, many }) => ({
+  agentMcpServers: many(agentMcpServers),
+  user: one(users, {
+    fields: [mcpServers.createdByUserId],
+    references: [users.id],
   }),
 }));
 
@@ -1015,6 +1021,36 @@ export const notificationsRelations = relations(notifications, ({ one }) => ({
   user: one(users, {
     fields: [notifications.userId],
     references: [users.id],
+  }),
+}));
+
+export const userAiSettingsRelations = relations(userAiSettings, ({ one }) => ({
+  caixa: one(caixas, {
+    fields: [userAiSettings.primaryCaixaId],
+    references: [caixas.id],
+  }),
+  user: one(users, {
+    fields: [userAiSettings.userId],
+    references: [users.id],
+  }),
+}));
+
+export const aiAgentPromptVersionsRelations = relations(aiAgentPromptVersions, ({ one, many }) => ({
+  aiAgent: one(aiAgents, {
+    fields: [aiAgentPromptVersions.agentId],
+    references: [aiAgents.id],
+  }),
+  user: one(users, {
+    fields: [aiAgentPromptVersions.createdByUserId],
+    references: [users.id],
+  }),
+  aiAgentPromptVersion: one(aiAgentPromptVersions, {
+    fields: [aiAgentPromptVersions.agentId],
+    references: [aiAgentPromptVersions.id],
+    relationName: 'aiAgentPromptVersions_agentId_aiAgentPromptVersions_id',
+  }),
+  aiAgentPromptVersions: many(aiAgentPromptVersions, {
+    relationName: 'aiAgentPromptVersions_agentId_aiAgentPromptVersions_id',
   }),
 }));
 

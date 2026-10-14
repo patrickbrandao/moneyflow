@@ -4,8 +4,9 @@ import { type LlmClient, type LlmCredentials, LlmError, type LlmRequest, type Ll
 
 /*
  * Adaptador da Claude API (Messages API, @anthropic-ai/sdk) com streaming,
- * tool use, prompt caching (ponto de cache na última tool e no prompt de
- * sistema estável; a parte volátil vai depois) e entrada de imagem/PDF.
+ * tool use, prompt caching (spec 022: pontos de cache na última tool, no fim da
+ * parte estável do sistema e no fim da parte por usuário — 3 dos 4 que a API
+ * aceita; a parte volátil vai depois) e entrada de imagem/PDF.
  *
  * Raciocínio: nos modelos atuais (família 5.x) o pensamento é adaptativo e
  * não aceita budget_tokens nem temperature/top_p; thinking_budget_tokens > 0
@@ -136,6 +137,7 @@ export function anthropicClient(credentials: LlmCredentials): LlmClient {
         ...(index === request.tools.length - 1 ? { cache_control: { type: 'ephemeral' as const } } : {}),
       }));
       const system: Anthropic.TextBlockParam[] = [{ type: 'text', text: request.system, cache_control: { type: 'ephemeral' } }];
+      if (request.systemUser) system.push({ type: 'text', text: request.systemUser, cache_control: { type: 'ephemeral' } });
       if (request.systemVolatile) system.push({ type: 'text', text: request.systemVolatile });
       const thinkingOn = (params.thinking_budget_tokens ?? 0) > 0;
       const maxTokens = params.max_tokens ?? DEFAULT_MAX_TOKENS;

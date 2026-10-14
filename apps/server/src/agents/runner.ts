@@ -4,11 +4,9 @@ import {
   type AssistantBlock,
   balanceToolUses,
   blocksText,
-  formatDate,
-  type ScreenContext,
+  type NeutralMessage,
   type ToolResultBlock,
   t,
-  todayIso,
 } from '@moneyflow/shared';
 import { eq, sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
@@ -16,8 +14,9 @@ import { type Actor, loadAccess } from '../authz/access';
 import type { Config } from '../config';
 import type { ServiceContext } from '../context';
 import { findPgError } from '../errors';
-import { applyFlowResult, FLOW_PURPOSES, type FlowPurpose, flowSystemPrompt } from './flows';
+import { applyFlowResult, FLOW_PURPOSES, type FlowPurpose } from './flows';
 import { createLlmClient, type LlmAttachment, type LlmClient, LlmError, type LlmResponse } from './llm';
+import { assemblePrompt, loadPromptInputs } from './prompt';
 import {
   appendEvent,
   insertMessage,
@@ -68,23 +67,6 @@ type ConversationRow = {
   screen_context: Record<string, unknown> | null;
   purpose: string;
 };
-
-/** Prompt de sistema: estável (cacheável) e volátil (data, usuário, tela). */
-export function buildSystemPrompt(
-  agent: Pick<AgentRow, 'system_prompt'>,
-  actor: Actor,
-  screen: Record<string, unknown> | null,
-  purpose: FlowPurpose | null,
-) {
-  const stable = [t.agents.systemPrompt.base, agent.system_prompt.trim(), purpose ? flowSystemPrompt(purpose) : '']
-    .filter(Boolean)
-    .join('\n\n');
-  const volatile = [t.agents.systemPrompt.today(formatDate(todayIso()), actor.username)];
-  if (screen && Object.keys(screen).length > 0 && !purpose) {
-    volatile.push(`${t.agents.systemPrompt.screen}\n${JSON.stringify(screen as ScreenContext)}`);
-  }
-  return { stable, volatile: volatile.join('\n') };
-}
 
 export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
   const { db, log } = deps;
@@ -142,6 +124,9 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
       { internal: !purpose, mcp: !purpose, isAdmin: actor.role === 'admin' },
     );
 
+    // Instruções do usuário, contexto automático e instructions dos MCP: montados uma vez por execução (spec 022).
+    const promptInputs = await loadPromptInputs(db, access, agent, purpose);
+
     await appendEvent(db, runId, { type: 'status', status: 'running' });
     const maxIterations = purpose ? 1 : (agent.params.max_tool_iterations ?? DEFAULT_MAX_ITERATIONS);
 
@@ -163,12 +148,18 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
         return;
       }
 
-      const system = buildSystemPrompt(agent, actor, conversation.screen_context, purpose);
+      const system = assemblePrompt(promptInputs, { purpose, screen: conversation.screen_context });
+      const history = balanceToolUses(toNeutral(rows));
+      // MCP no modo user: bloco do papel user no início do histórico enviado, nunca gravado em ai_messages.
+      const messages: NeutralMessage[] = system.mcpUserBlock
+        ? [{ role: 'user', content: [{ type: 'text', text: system.mcpUserBlock }] }, ...history]
+        : history;
       const response = await callModel(db, llm, runId, {
         model: claimed.model,
         system: system.stable,
+        systemUser: system.user,
         systemVolatile: system.volatile,
-        messages: balanceToolUses(toNeutral(rows)),
+        messages,
         tools: tools.list,
         params: agent.params,
         loadAttachment: (attachmentId) => loadAttachment(db, conversation.id, attachmentId),

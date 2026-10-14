@@ -78,6 +78,8 @@ export const auditStrings = {
     statement_csv_mappings: 'Mapeamentos de CSV',
     ai_tool_kits: 'Kits de ferramentas',
     ai_tool_kit_tools: 'Tools dos kits',
+    ai_agent_prompt_versions: 'Versões do prompt',
+    user_ai_settings: 'Configurações de IA do usuário',
   } as Record<string, string>,
   columns: {
     name: 'Nome',

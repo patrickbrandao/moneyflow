@@ -1019,6 +1019,38 @@ body.agent-resizing .agent-side-grip {
   flex: none;
 }
 
+/* ---- prompt do agente (spec 022) ---- */
+.prompt-var {
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+}
+.prompt-var:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.prompt-cache-mark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 2px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+.prompt-cache-mark::before,
+.prompt-cache-mark::after {
+  content: "";
+  flex: 1;
+  border-top: 1px dashed var(--accent);
+}
+
 /* ---- kit de ferramentas (spec 021) ---- */
 .kit-toolbar {
   display: flex;

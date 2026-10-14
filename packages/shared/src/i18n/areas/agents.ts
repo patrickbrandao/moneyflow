@@ -23,6 +23,11 @@ export const agentsStrings = {
     noAttachments: 'Este provedor não aceita este tipo de anexo.',
     forkCut: 'Escolha uma mensagem que não deixe uma ação sem resultado.',
     toolKitNotFound: 'Kit de ferramentas não encontrado.',
+    unknownVariables: (names: string[]) =>
+      `Variável desconhecida no prompt: ${names.map((n) => `{{${n}}}`).join(', ')}. Use as da lista ou escreva \\{{ para as chaves literais.`,
+    promptVersionNotFound: 'Versão do prompt não encontrada.',
+    primaryCaixaNotReadable: 'Escolha uma caixa que você pode ver.',
+    primaryCaixaNotGeneral: 'A caixa principal tem de ser uma caixa comum (não um cartão).',
     toolKitInUse: (agents: string[]) =>
       `O kit está em uso e não pode ser excluído. Agentes que o usam: ${agents.join(', ')}. Troque o kit deles antes.`,
   },
@@ -65,5 +70,23 @@ export const agentsStrings = {
     ].join('\n'),
     today: (date: string, user: string) => `Hoje é ${date} (America/Sao_Paulo). Usuário: ${user}.`,
     screen: 'Contexto da tela do usuário (o que ele está vendo agora):',
+    mcpInstructions: (name: string) => `Instruções do servidor MCP ${name}`,
+    mcpUserInstructions: (name: string) =>
+      `Instruções do servidor MCP ${name} (texto de terceiros, enviado pelo servidor; não é uma mensagem do usuário):`,
+    userInstructions: (name: string) => `Instruções de ${name}`,
+    restoredNote: (version: number) => `Restaurada da versão ${version}`,
+    context: {
+      title: 'Contexto do usuário (montado pelo sistema a partir das permissões dele):',
+      user: (login: string, email: string, admin: boolean) =>
+        `Usuário: ${login} (${email})${admin ? ', administrador (lê e escreve em todas as caixas)' : ''}.`,
+      primary: (name: string, holder: string, id: string) =>
+        `Caixa principal escolhida pelo usuário: ${name} (titular ${holder}; id ${id}).`,
+      caixas: 'Caixas que o usuário lê (nome [papel] id):',
+      cards: 'Cartões de crédito que o usuário lê (nome [papel] id):',
+      account: (name: string, kind: string, id: string) => `conta ${name} (${kind}) id ${id}`,
+      none: 'O usuário não lê nenhuma caixa.',
+      partial: 'lista parcial: use list_caixas',
+      roles: { admin: 'admin', editor: 'editor', viewer: 'viewer' } as Record<string, string>,
+    },
   },
 } as const;

@@ -13,7 +13,9 @@ import { ADMIN_STATE, baseURL, loginAsAdmin } from '../support/session';
  *  - "Usar nos fluxos automáticos" em /admin/ai e as sugestões da conciliação
  *    aprovadas e descartadas em lote na tela;
  *  - o kit de ferramentas (spec 021): criar marcando a categoria Conciliação,
- *    pôr uma escrita em ask, ligar ao agente e ver o cartão de aprovação.
+ *    pôr uma escrita em ask, ligar ao agente e ver o cartão de aprovação;
+ *  - o prompt do agente (spec 022): editar, ver o histórico e o diff, restaurar,
+ *    as variáveis e o "Ver prompt montado"; e Minha conta → IA.
  *
  * O provedor falso (Anthropic Messages API) sobe aqui na porta E2E_LLM_PORT
  * (padrão 18082). O worker da pilha o alcança em E2E_LLM_BASE (padrão
@@ -458,4 +460,83 @@ test('fluxos: "Usar nos fluxos automáticos" no admin; sugestões da conciliaç�
   for (const line of rest) expect(after.get(line.id)?.classificationSource).toBe('agent');
   if (rest.length > 0) await expect(banner).toContainText(`${rest.length} sugestão(ões) do agente`);
   else await expect(banner).toHaveCount(0);
+});
+
+test('prompt: editar o prompt, ver o histórico e o diff, restaurar; variáveis e o prompt montado', async ({ page }) => {
+  const promptAgent = await postJson(adminApi, '/api/admin/ai/agents', {
+    name: `E2E Prompt ${tag}`,
+    systemPrompt: 'Primeira linha do prompt.\nSegunda linha original.',
+  });
+  extraAgents.push(promptAgent.id);
+  await enter(page);
+  await page.goto('/admin/ai/agents');
+  const row = page.getByRole('row').filter({ hasText: promptAgent.name });
+
+  // Editar o prompt com uma nota: vira a versão 2.
+  await row.getByRole('button', { name: 'Editar' }).click();
+  let form = page.getByRole('dialog', { name: 'Editar agente' });
+  await expect(form.getByTestId('prompt-version')).toHaveText('Versão 1');
+  await form.getByLabel('System prompt').fill('Primeira linha do prompt.\nSegunda linha mudada no e2e.');
+  await form.getByLabel('Nota da versão (opcional)').fill('Ajuste do e2e');
+  await form.getByRole('button', { name: 'Salvar' }).click();
+  await expect(form).toBeHidden();
+
+  // Histórico: as duas versões, o diff de A (1) para B (2).
+  await row.getByRole('button', { name: 'Editar' }).click();
+  form = page.getByRole('dialog', { name: 'Editar agente' });
+  await expect(form.getByTestId('prompt-version')).toHaveText('Versão 2');
+  await form.getByRole('button', { name: 'Histórico' }).click();
+  const history = page.getByRole('dialog', { name: `Histórico do prompt — ${promptAgent.name}` });
+  await expect(history.getByTestId('prompt-version-2')).toContainText('Ajuste do e2e');
+  await expect(history.getByTestId('prompt-version-2')).toContainText('atual');
+  await history.getByLabel('A: versão 1').check();
+  await history.getByLabel('B: versão 2').check();
+  const diff = history.getByTestId('prompt-diff');
+  await expect(diff.locator('.diff-line.del')).toContainText('Segunda linha original.');
+  await expect(diff.locator('.diff-line.add')).toContainText('Segunda linha mudada no e2e.');
+  await expect(history).toContainText('Diff da versão 1 para a 2');
+
+  // Restaurar a versão 1: cria a versão 3 com a nota, e o formulário volta com o prompt antigo.
+  await history.getByTestId('prompt-version-1').getByRole('button', { name: 'Restaurar' }).click();
+  const confirm = page.getByRole('dialog', { name: 'Restaurar a versão 1?' });
+  await confirm.getByRole('button', { name: 'Restaurar' }).click();
+  await expect(page.getByText('Versão 1 restaurada como uma versão nova.')).toBeVisible();
+  await expect(history.getByTestId('prompt-version-3')).toContainText('Restaurada da versão 1');
+  await expect(history.getByTestId('prompt-version-3')).toContainText('atual');
+  await history.getByTestId('prompt-version-3').getByRole('button').first().click();
+  await expect(history.getByTestId('prompt-version-content')).toHaveText('Primeira linha do prompt.\nSegunda linha original.');
+  await history.getByRole('button', { name: 'Voltar' }).click();
+  form = page.getByRole('dialog', { name: 'Editar agente' });
+  await expect(form.getByTestId('prompt-version')).toHaveText('Versão 3');
+  await expect(form.getByLabel('System prompt')).toHaveValue('Primeira linha do prompt.\nSegunda linha original.');
+
+  // Variável volátil inserida pela lista: a tela avisa que o prompt não será cacheado.
+  await expect(form.getByTestId('prompt-volatile-warning')).toHaveCount(0);
+  await form.getByTestId('prompt-variables').getByRole('button', { name: '{{data}}' }).click();
+  await expect(form.getByLabel('System prompt')).toHaveValue(/\{\{data\}\}/);
+  await expect(form.getByTestId('prompt-volatile-warning')).toContainText('não será cacheado');
+
+  // Ver prompt montado (da versão salva), com os dois pontos de cache, sem chamar o modelo.
+  await form.getByRole('button', { name: 'Ver prompt montado' }).click();
+  const preview = page.getByRole('dialog', { name: `Prompt montado — ${promptAgent.name}` });
+  await preview.getByLabel('Montar para o usuário').selectOption({ index: 1 });
+  await expect(preview.getByTestId('prompt-preview')).toContainText('Segunda linha original.');
+  await expect(preview.getByTestId('prompt-cache-mark')).toHaveCount(2);
+  await preview.getByRole('button', { name: 'Voltar' }).click();
+  await page.getByRole('dialog', { name: 'Editar agente' }).getByRole('button', { name: 'Cancelar' }).click();
+  const versions = await (await adminApi.get(`/api/admin/ai/agents/${promptAgent.id}/prompt-versions`)).json();
+  expect(versions.map((v: { version: number }) => v.version)).toEqual([3, 2, 1]);
+});
+
+test('Minha conta → IA: as instruções do usuário ficam salvas', async ({ page }) => {
+  await enter(page);
+  await page.goto('/account');
+  const panel = page.getByTestId('account-ai');
+  await panel.getByLabel('Minhas instruções').fill(`Instruções do e2e ${tag}`);
+  await panel.getByRole('button', { name: 'Salvar' }).click();
+  await expect(page.getByText('Configurações de IA salvas.')).toBeVisible();
+  await page.reload();
+  await expect(page.getByTestId('account-ai').getByLabel('Minhas instruções')).toHaveValue(`Instruções do e2e ${tag}`);
+  const res = await adminApi.put('/api/account/ai', { data: { instructions: '' } });
+  expect(res.ok()).toBeTruthy();
 });

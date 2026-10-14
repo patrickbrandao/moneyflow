@@ -1,4 +1,11 @@
-import { formatDateTime, type McpServerDto, type McpVisibility, t } from '@moneyflow/shared';
+import {
+  formatDateTime,
+  MCP_INSTRUCTIONS_MODES,
+  type McpInstructionsMode,
+  type McpServerDto,
+  type McpVisibility,
+  t,
+} from '@moneyflow/shared';
 import { ChevronRight, Pencil, Plug, Plus, RefreshCw, Trash2, Undo2, X } from 'lucide-react';
 import { type FormEvent, Fragment, useState } from 'react';
 import { api } from '../../lib/api';
@@ -124,6 +131,7 @@ export function McpTab() {
                         <p className="hint !mt-0">{m.visibilityHelp[server.visibility]}</p>
                         {server.toolsCachedAt && <p className="hint">{m.cachedAt(formatDateTime(server.toolsCachedAt))}</p>}
                         {server.toolsError && <p className="notice danger mt-2">{server.toolsError}</p>}
+                        <McpInstructions server={server} />
                         {server.tools && server.tools.length > 0 ? (
                           <ul className="mt-2 grid gap-1.5">
                             {server.tools.map((tool) => (
@@ -169,12 +177,35 @@ export function McpTab() {
   );
 }
 
+/** O modo das instructions e o texto em cache (spec 022): avisa quando ele vai ao modelo. */
+function McpInstructions({ server }: { server: McpServerDto }) {
+  return (
+    <div className="mt-2" data-testid="mcp-instructions">
+      <p className="text-[12.5px]">
+        <span className="font-medium">{m.instructionsMode}:</span> {m.instructionsModes[server.instructionsMode]}
+      </p>
+      {server.instructions ? (
+        <>
+          <p className={cx('notice mt-1', server.instructionsMode === 'ignore' ? '' : 'warn')}>
+            {server.instructionsMode === 'ignore' ? m.instructionsIgnored : m.instructionsWarning}
+          </p>
+          <span className="label mt-2">{m.instructionsCached}</span>
+          <pre className="panel contract-raw !max-h-[30vh]">{server.instructions}</pre>
+        </>
+      ) : (
+        <p className="hint">{m.instructionsNone}</p>
+      )}
+    </div>
+  );
+}
+
 type HeaderChange = { mode: 'keep' | 'replace' | 'remove'; value: string };
 
 function McpFormModal({ server, onClose, onSaved }: { server: McpServerDto | null; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(server?.name ?? '');
   const [url, setUrl] = useState(server?.url ?? '');
   const [visibility, setVisibility] = useState<McpVisibility>(server?.visibility ?? 'public');
+  const [instructionsMode, setInstructionsMode] = useState<McpInstructionsMode>(server?.instructionsMode ?? 'ignore');
   const [isActive, setIsActive] = useState(server?.isActive ?? true);
   const [notes, setNotes] = useState(server?.notes ?? '');
   const [existing, setExisting] = useState<Record<string, HeaderChange>>(() =>
@@ -196,9 +227,9 @@ function McpFormModal({ server, onClose, onSaved }: { server: McpServerDto | nul
         if (change.mode === 'replace' && change.value) setHeaders[header] = change.value;
         if (change.mode === 'remove') removeHeaders.push(header);
       }
-      body = { name: name.trim(), url: url.trim(), visibility, isActive, notes, setHeaders, removeHeaders };
+      body = { name: name.trim(), url: url.trim(), visibility, instructionsMode, isActive, notes, setHeaders, removeHeaders };
     } else {
-      body = { name: name.trim(), url: url.trim(), visibility, isActive, notes, headers: fresh };
+      body = { name: name.trim(), url: url.trim(), visibility, instructionsMode, isActive, notes, headers: fresh };
     }
     const saved = await run(
       () =>
@@ -236,6 +267,21 @@ function McpFormModal({ server, onClose, onSaved }: { server: McpServerDto | nul
               ))}
             </select>
           </Field>
+          <Field label={m.instructionsMode} hint={m.instructionsModeHelp[instructionsMode]}>
+            <select
+              className="field"
+              value={instructionsMode}
+              onChange={(e) => setInstructionsMode(e.target.value as McpInstructionsMode)}
+              data-testid="mcp-instructions-mode"
+            >
+              {MCP_INSTRUCTIONS_MODES.map((mode) => (
+                <option key={mode} value={mode}>
+                  {m.instructionsModes[mode]}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {server?.instructions && instructionsMode !== 'ignore' && <p className="notice warn mt-0">{m.instructionsWarning}</p>}
           <div>
             <span className="label">{m.headers}</span>
             <p className="hint !mt-0 mb-2">{m.headersHint}</p>

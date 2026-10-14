@@ -57,7 +57,7 @@ export const RESOURCE_TABLES: Record<BackupResource, string[]> = {
   ],
   caixas: ['caixas', 'financial_accounts', 'caixa_members', 'caixa_hidden_categories'],
   'ai-providers': ['ai_providers', 'ai_model_prices'],
-  users: ['users', 'caixa_members', 'user_api_tokens'],
+  users: ['users', 'caixa_members', 'user_api_tokens', 'user_ai_settings'],
 };
 
 /**
@@ -110,12 +110,15 @@ export const OWNED_BY: Record<string, string[]> = {
   entity_tag_links: ['entity_id'],
   ai_model_prices: ['provider_id'],
   ai_tool_kit_tools: ['kit_id'],
+  // Agente já cadastrado fica com o histórico dele (spec 022).
+  ai_agent_prompt_versions: ['agent_id'],
   agent_mcp_servers: ['agent_id', 'mcp_server_id'],
   message_subscriptions: ['destination_id'],
   message_subscription_caixas: ['subscription_id'],
   caixa_members: ['user_id', 'caixa_id'],
   caixa_hidden_categories: ['caixa_id'],
   user_api_tokens: ['user_id'],
+  user_ai_settings: ['user_id'],
   canvas_node_positions: ['user_id'],
 };
 
@@ -138,6 +141,10 @@ export const DEFERRED_CLUSTER = new Set([
   'contract_renewal_tasks',
   'contract_documents',
   'contract_document_versions',
+  // Prompt do agente (spec 022): a versão 1 sai no COMMIT se o agente não tem versão; o agente e as versões do arquivo
+  // entram juntos, senão o SET CONSTRAINTS de outra unidade criaria a versão 1 antes e a do arquivo seria recusada.
+  'ai_agents',
+  'ai_agent_prompt_versions',
 ]);
 
 /**
@@ -149,6 +156,8 @@ export const DEFERRED_CLUSTER = new Set([
 export const COMPOSITE_KEYS: Record<string, string[]> = {
   entity_tag_links: ['entity_id', 'tag_id'],
   ai_tool_kit_tools: ['kit_id', 'tool_name'],
+  // Uma linha por usuário (spec 022): a chave é o próprio user_id.
+  user_ai_settings: ['user_id'],
 };
 
 /** Colunas que identificam a linha (id ou a chave composta). */

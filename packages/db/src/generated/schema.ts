@@ -856,46 +856,6 @@ export const settlementAttachments = pgTable(
   ],
 );
 
-export const mcpServers = pgTable(
-  'mcp_servers',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    name: text().notNull(),
-    url: text().notNull(),
-    secretHeaders: jsonb('secret_headers').default({}).notNull(),
-    secretHeaderNames: text('secret_header_names').array().notNull().generatedAlwaysAs(sql`mcp_header_names(secret_headers)`),
-    visibility: text().default('public').notNull(),
-    isActive: boolean('is_active').default(true).notNull(),
-    toolsCache: jsonb('tools_cache'),
-    toolsCachedAt: timestamp('tools_cached_at', { withTimezone: true, mode: 'string' }),
-    toolsError: text('tools_error'),
-    createdByUserId: uuid('created_by_user_id'),
-    notes: text(),
-    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('mcp_servers_created_by_user_id_idx').using('btree', table.createdByUserId.asc().nullsLast().op('uuid_ops')),
-    uniqueIndex('mcp_servers_name_key').using('btree', sql`lower(name)`),
-    foreignKey({
-      columns: [table.createdByUserId],
-      foreignColumns: [users.id],
-      name: 'mcp_servers_created_by_user_id_fkey',
-    }).onDelete('set null'),
-    check('mcp_servers_active_check', sql`NOT (is_active AND (archived_at IS NOT NULL))`),
-    check('mcp_servers_name_check', sql`(btrim(name) <> ''::text) AND (length(name) <= 120)`),
-    check('mcp_servers_secret_headers_check', sql`CHECK (mcp_headers_valid(secret_headers`),
-    check(
-      'mcp_servers_tools_cache_check',
-      sql`(tools_cache IS NULL) OR ((jsonb_typeof(tools_cache) = 'array'::text) AND (tools_cached_at IS NOT NULL))`,
-    ),
-    check('mcp_servers_tools_error_check', sql`length(tools_error) <= 2000`),
-    check('mcp_servers_url_check', sql`(url ~ '^https?://[^[:space:]]+$'::text) AND (length(url) <= 2000)`),
-    check('mcp_servers_visibility_check', sql`visibility = ANY (ARRAY['global'::text, 'public'::text, 'private'::text])`),
-  ],
-);
-
 export const movementAttachments = pgTable(
   'movement_attachments',
   {
@@ -2284,6 +2244,50 @@ export const aiEmbeddings = pgTable(
   ],
 );
 
+export const mcpServers = pgTable(
+  'mcp_servers',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    name: text().notNull(),
+    url: text().notNull(),
+    secretHeaders: jsonb('secret_headers').default({}).notNull(),
+    secretHeaderNames: text('secret_header_names').array().notNull().generatedAlwaysAs(sql`mcp_header_names(secret_headers)`),
+    visibility: text().default('public').notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
+    toolsCache: jsonb('tools_cache'),
+    toolsCachedAt: timestamp('tools_cached_at', { withTimezone: true, mode: 'string' }),
+    toolsError: text('tools_error'),
+    createdByUserId: uuid('created_by_user_id'),
+    notes: text(),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    instructionsMode: text('instructions_mode').default('ignore').notNull(),
+    instructionsCache: text('instructions_cache'),
+  },
+  (table) => [
+    index('mcp_servers_created_by_user_id_idx').using('btree', table.createdByUserId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('mcp_servers_name_key').using('btree', sql`lower(name)`),
+    foreignKey({
+      columns: [table.createdByUserId],
+      foreignColumns: [users.id],
+      name: 'mcp_servers_created_by_user_id_fkey',
+    }).onDelete('set null'),
+    check('mcp_servers_active_check', sql`NOT (is_active AND (archived_at IS NOT NULL))`),
+    check('mcp_servers_instructions_cache_check', sql`length(instructions_cache) <= 50000`),
+    check('mcp_servers_instructions_mode_check', sql`instructions_mode = ANY (ARRAY['ignore'::text, 'system'::text, 'user'::text])`),
+    check('mcp_servers_name_check', sql`(btrim(name) <> ''::text) AND (length(name) <= 120)`),
+    check('mcp_servers_secret_headers_check', sql`CHECK (mcp_headers_valid(secret_headers`),
+    check(
+      'mcp_servers_tools_cache_check',
+      sql`(tools_cache IS NULL) OR ((jsonb_typeof(tools_cache) = 'array'::text) AND (tools_cached_at IS NOT NULL))`,
+    ),
+    check('mcp_servers_tools_error_check', sql`length(tools_error) <= 2000`),
+    check('mcp_servers_url_check', sql`(url ~ '^https?://[^[:space:]]+$'::text) AND (length(url) <= 2000)`),
+    check('mcp_servers_visibility_check', sql`visibility = ANY (ARRAY['global'::text, 'public'::text, 'private'::text])`),
+  ],
+);
+
 export const titles = pgTable(
   'titles',
   {
@@ -2572,6 +2576,74 @@ export const notifications = pgTable(
     ),
     check('notifications_link_check', sql`(link ~ '^/[^/]'::text) OR (link = '/'::text)`),
     check('notifications_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
+  ],
+);
+
+export const userAiSettings = pgTable(
+  'user_ai_settings',
+  {
+    userId: uuid('user_id').primaryKey().notNull(),
+    instructions: text().default('').notNull(),
+    primaryCaixaId: uuid('primary_caixa_id'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('user_ai_settings_primary_caixa_id_idx').using('btree', table.primaryCaixaId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.primaryCaixaId],
+      foreignColumns: [caixas.id],
+      name: 'user_ai_settings_primary_caixa_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'user_ai_settings_user_id_fkey',
+    }).onDelete('cascade'),
+    check('user_ai_settings_instructions_check', sql`length(instructions) <= 20000`),
+  ],
+);
+
+export const aiAgentPromptVersions = pgTable(
+  'ai_agent_prompt_versions',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    agentId: uuid('agent_id').notNull(),
+    version: integer().notNull(),
+    content: text().notNull(),
+    note: text(),
+    createdByUserId: uuid('created_by_user_id'),
+    restoredFromVersionId: uuid('restored_from_version_id'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_agent_prompt_versions_created_by_user_id_idx').using('btree', table.createdByUserId.asc().nullsLast().op('uuid_ops')),
+    index('ai_agent_prompt_versions_restored_from_version_id_idx').using(
+      'btree',
+      table.restoredFromVersionId.asc().nullsLast().op('uuid_ops'),
+    ),
+    foreignKey({
+      columns: [table.agentId],
+      foreignColumns: [aiAgents.id],
+      name: 'ai_agent_prompt_versions_agent_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.createdByUserId],
+      foreignColumns: [users.id],
+      name: 'ai_agent_prompt_versions_created_by_user_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.agentId, table.restoredFromVersionId],
+      foreignColumns: [table.id, table.agentId],
+      name: 'ai_agent_prompt_versions_restored_from_version_id_fkey',
+    }),
+    unique('ai_agent_prompt_versions_agent_version_key').on(table.agentId, table.version),
+    unique('ai_agent_prompt_versions_id_agent_key').on(table.agentId, table.id),
+    check('ai_agent_prompt_versions_content_check', sql`length(content) <= 200000`),
+    check('ai_agent_prompt_versions_note_check', sql`length(note) <= 500`),
+    check('ai_agent_prompt_versions_restored_self_check', sql`restored_from_version_id <> id`),
+    check('ai_agent_prompt_versions_version_check', sql`version >= 1`),
   ],
 );
 
@@ -3113,22 +3185,6 @@ export const cardInvoicePayerTotals = pgView('card_invoice_payer_totals', {
     sql`SELECT v.id AS card_invoice_id, v.card_caixa_id, v.reference_month, v.due_date, p.payer_caixa_id, COALESCE(it.items_cents, 0::numeric)::bigint AS items_cents, COALESCE(tt.billed_cents, 0::numeric)::bigint AS billed_cents, COALESCE(tt.settled_cents, 0::numeric)::bigint AS settled_cents, COALESCE(tt.open_cents, 0::numeric)::bigint AS open_cents, COALESCE(co.carried_out_cents, 0::numeric)::bigint AS carried_out_cents FROM card_invoices v JOIN LATERAL ( SELECT i.payer_caixa_id FROM card_invoice_items i WHERE i.card_invoice_id = v.id UNION SELECT t.counterparty_caixa_id FROM titles t WHERE t.card_invoice_id = v.id AND t.caixa_id = v.card_caixa_id) p ON true LEFT JOIN LATERAL ( SELECT sum(i.amount_cents) AS items_cents FROM card_invoice_items i WHERE i.card_invoice_id = v.id AND i.payer_caixa_id = p.payer_caixa_id) it ON true LEFT JOIN LATERAL ( SELECT sum(b.amount_cents) FILTER (WHERE b.status <> 'canceled'::text) AS billed_cents, sum(b.settled_cents) AS settled_cents, sum(b.open_cents) AS open_cents FROM title_balances b JOIN titles t ON t.id = b.title_id WHERE t.card_invoice_id = v.id AND t.caixa_id = v.card_caixa_id AND t.counterparty_caixa_id = p.payer_caixa_id) tt ON true LEFT JOIN LATERAL ( SELECT sum(i.amount_cents) AS carried_out_cents FROM card_invoice_items i WHERE i.carried_from_invoice_id = v.id AND i.payer_caixa_id = p.payer_caixa_id) co ON true`,
   );
 
-export const effectiveAgentMcpServers = pgView('effective_agent_mcp_servers', {
-  agentId: uuid('agent_id'),
-  mcpServerId: uuid('mcp_server_id'),
-  name: text(),
-  url: text(),
-  visibility: text(),
-  linked: boolean(),
-  enabledTools: text('enabled_tools'),
-  tools: jsonb(),
-  toolsCachedAt: timestamp('tools_cached_at', { withTimezone: true, mode: 'string' }),
-})
-  .with({ securityInvoker: true })
-  .as(
-    sql`SELECT a.id AS agent_id, s.id AS mcp_server_id, s.name, s.url, s.visibility, l.id IS NOT NULL AS linked, l.enabled_tools, CASE WHEN s.tools_cache IS NULL OR l.enabled_tools IS NULL THEN s.tools_cache ELSE COALESCE(( SELECT jsonb_agg(x.t ORDER BY x.ord) AS jsonb_agg FROM jsonb_array_elements(s.tools_cache) WITH ORDINALITY x(t, ord) WHERE (x.t ->> 'name'::text) = ANY (l.enabled_tools)), '[]'::jsonb) END AS tools, s.tools_cached_at FROM ai_agents a JOIN mcp_servers s ON s.is_active AND s.archived_at IS NULL LEFT JOIN agent_mcp_servers l ON l.agent_id = a.id AND l.mcp_server_id = s.id WHERE s.visibility = 'global'::text OR l.id IS NOT NULL`,
-  );
-
 export const cardInvoiceLines = pgView('card_invoice_lines', {
   cardInvoiceItemId: uuid('card_invoice_item_id'),
   cardInvoiceId: uuid('card_invoice_id'),
@@ -3261,6 +3317,24 @@ export const aiUsageMonthlyByAgent = pgView('ai_usage_monthly_by_agent', {
   .with({ securityInvoker: true })
   .as(
     sql`SELECT date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date AS month, agent_id, provider_id, model, currency, count(*)::integer AS calls, count(DISTINCT run_id)::integer AS runs, count(DISTINCT user_id)::integer AS users, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced FROM ai_usage u GROUP BY (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date), agent_id, provider_id, model, currency`,
+  );
+
+export const effectiveAgentMcpServers = pgView('effective_agent_mcp_servers', {
+  agentId: uuid('agent_id'),
+  mcpServerId: uuid('mcp_server_id'),
+  name: text(),
+  url: text(),
+  visibility: text(),
+  linked: boolean(),
+  enabledTools: text('enabled_tools'),
+  tools: jsonb(),
+  toolsCachedAt: timestamp('tools_cached_at', { withTimezone: true, mode: 'string' }),
+  instructionsMode: text('instructions_mode'),
+  instructionsCache: text('instructions_cache'),
+})
+  .with({ securityInvoker: true })
+  .as(
+    sql`SELECT a.id AS agent_id, s.id AS mcp_server_id, s.name, s.url, s.visibility, l.id IS NOT NULL AS linked, l.enabled_tools, CASE WHEN s.tools_cache IS NULL OR l.enabled_tools IS NULL THEN s.tools_cache ELSE COALESCE(( SELECT jsonb_agg(x.t ORDER BY x.ord) AS jsonb_agg FROM jsonb_array_elements(s.tools_cache) WITH ORDINALITY x(t, ord) WHERE (x.t ->> 'name'::text) = ANY (l.enabled_tools)), '[]'::jsonb) END AS tools, s.tools_cached_at, s.instructions_mode, s.instructions_cache FROM ai_agents a JOIN mcp_servers s ON s.is_active AND s.archived_at IS NULL LEFT JOIN agent_mcp_servers l ON l.agent_id = a.id AND l.mcp_server_id = s.id WHERE s.visibility = 'global'::text OR l.id IS NOT NULL`,
   );
 
 export const attachmentLinks = pgView('attachment_links', {

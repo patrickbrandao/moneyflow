@@ -23,7 +23,8 @@ function stopReason(reason: string | null | undefined): LlmStopReason {
 }
 
 async function toMessages(request: LlmRequest): Promise<ChatMessage[]> {
-  const system = request.systemVolatile ? `${request.system}\n\n${request.systemVolatile}` : request.system;
+  // Mesma ordem das partes da Anthropic (spec 022), sem marcas de cache.
+  const system = [request.system, request.systemUser, request.systemVolatile].filter(Boolean).join('\n\n');
   const out: ChatMessage[] = [{ role: 'system', content: system }];
   for (const message of request.messages as NeutralMessage[]) {
     if (message.role === 'user') {

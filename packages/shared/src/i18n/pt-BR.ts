@@ -27,6 +27,7 @@ export const ptBR = {
     saving: 'Salvando…',
     cancel: 'Cancelar',
     close: 'Fechar',
+    back: 'Voltar',
     create: 'Criar',
     add: 'Adicionar',
     edit: 'Editar',

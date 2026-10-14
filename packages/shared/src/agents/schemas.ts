@@ -1,5 +1,7 @@
 import { z } from 'zod';
+import { ptBR } from '../i18n/pt-BR';
 import { id, optionalText, queryBool, requiredText } from '../schemas/common';
+import { scanPromptVariables } from './prompt-vars';
 import { AGENT_TOOL_MODES } from './tools';
 
 /* Entradas da API dos agentes (spec 011): administração, conversas e tokens. */
@@ -102,11 +104,22 @@ export const agentParamsInput = z
 
 export const agentMcpLinkInput = z.object({ mcpServerId: id, enabledTools: toolList.default(null) });
 
+/** Prompt do agente: variável desconhecida é recusada ao salvar (spec 022), com o nome. */
+const systemPrompt = z
+  .string()
+  .max(200_000)
+  .superRefine((text, issue) => {
+    const { unknown } = scanPromptVariables(text);
+    if (unknown.length > 0) issue.addIssue({ code: 'custom', message: ptBR.agents.errors.unknownVariables(unknown) });
+  });
+
 /** Campos do agente sem valores padrão (o PATCH só muda o que vier). */
 const agentFields = {
   name: requiredText(120),
   description: optionalText(2000),
-  systemPrompt: z.string().max(200_000),
+  systemPrompt,
+  /** Nota da versão do prompt criada nesta gravação (spec 022; só vale quando o prompt muda). */
+  promptNote: optionalText(500),
   providerId: id.nullish().transform((v) => v ?? null),
   model: modelName
     .nullish()
@@ -171,7 +184,18 @@ export const toolKitUpdateInput = z.object({
 /** Duplicar: nome da cópia opcional ("Cópia de …" quando omitido). */
 export const toolKitDuplicateInput = z.object({ name: requiredText(120).optional() });
 
+/** Ver o prompt montado de um agente para um usuário (spec 022), sem chamar o modelo. */
+export const promptPreviewInput = z.object({ userId: id });
+
+/** Minha conta → IA (spec 022): instruções para todos os agentes e a caixa principal. */
+export const userAiSettingsInput = z.object({
+  instructions: z.string().max(20_000).default(''),
+  primaryCaixaId: id.nullish().transform((v) => v ?? null),
+});
+
 export const MCP_VISIBILITIES = ['global', 'public', 'private'] as const;
+/** O que fazer com as instructions do servidor MCP (spec 022): ignorar (padrão), no prompt de sistema ou como bloco user. */
+export const MCP_INSTRUCTIONS_MODES = ['ignore', 'system', 'user'] as const;
 const headerName = z.string().regex(/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$/, 'Nome de cabeçalho inválido.');
 
 export const mcpServerCreateInput = z.object({
@@ -180,6 +204,7 @@ export const mcpServerCreateInput = z.object({
   /** Write-only: nome → valor (ex.: Authorization). */
   headers: z.record(headerName, z.string().max(8000)).default({}),
   visibility: z.enum(MCP_VISIBILITIES).default('public'),
+  instructionsMode: z.enum(MCP_INSTRUCTIONS_MODES).default('ignore'),
   isActive: z.boolean().default(true),
   notes: optionalText(),
 });
@@ -192,6 +217,7 @@ export const mcpServerUpdateInput = z.object({
   /** Remove estes cabeçalhos. */
   removeHeaders: z.array(headerName).max(30).default([]),
   visibility: z.enum(MCP_VISIBILITIES).optional(),
+  instructionsMode: z.enum(MCP_INSTRUCTIONS_MODES).optional(),
   isActive: z.boolean().optional(),
   notes: optionalText().optional(),
 });

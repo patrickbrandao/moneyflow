@@ -11,6 +11,8 @@ import type { McpToolInfo } from '@moneyflow/shared';
 const TIMEOUT_MS = 60_000;
 
 export type McpSession = {
+  /** As instructions da resposta do initialize (spec 022); null = o servidor não mandou. */
+  instructions(): string | null;
   listTools(): Promise<McpToolInfo[]>;
   callTool(name: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>;
   close(): Promise<void>;
@@ -21,6 +23,10 @@ export async function connectMcp(url: string, headers: Record<string, string>): 
   const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } });
   await client.connect(transport, { timeout: TIMEOUT_MS });
   return {
+    instructions() {
+      const text = client.getInstructions();
+      return typeof text === 'string' && text.trim() ? text : null;
+    },
     async listTools() {
       const tools: McpToolInfo[] = [];
       let cursor: string | undefined;

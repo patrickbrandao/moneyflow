@@ -347,6 +347,75 @@ describe('backup: recursos num sistema novo', () => {
     expect(await kitOf(free.id)).toBeNull();
   });
 
+  it('prompt (spec 022): as versões do agente vão e voltam com números, notas e a restauração; arquivo sem versões ganha a 1', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const a = client(h, adminA.cookie);
+    const bApi = client(b, adminB.cookie);
+    const tag = uid();
+    const agent = await a.post('/api/admin/ai/agents', { name: `Versões ${tag}`, systemPrompt: 'v1 do prompt', promptNote: 'criação' });
+    await a.patch(`/api/admin/ai/agents/${agent.id}`, { systemPrompt: 'v2 do prompt', promptNote: 'ajuste' });
+    const first = (await a.get(`/api/admin/ai/agents/${agent.id}/prompt-versions`)).at(-1);
+    await a.post(`/api/admin/ai/agents/${agent.id}/prompt-versions/${first.id}/restore`);
+    const original = await a.get(`/api/admin/ai/agents/${agent.id}/prompt-versions`);
+    expect(original.map((v: any) => v.version)).toEqual([3, 2, 1]);
+
+    const full = await h.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminA.cookie } });
+    expect(full.statusCode, full.body.slice(0, 300)).toBe(200);
+    const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+    const agentRow = json.tables.ai_agents.find((r: any) => r.id === agent.id);
+    const versionRows = json.tables.ai_agent_prompt_versions.filter((r: any) => r.agent_id === agent.id);
+    expect(versionRows).toHaveLength(3);
+    const fileOf = (tables: Record<string, unknown[]>) => ({ ...json, tables, references: {} });
+
+    const report = await importFile(b, adminB.cookie, 'full', fileOf({ ai_agents: [agentRow], ai_agent_prompt_versions: versionRows }));
+    expect(failures(report)).toEqual([]);
+    expect(sum(report, 'ai_agent_prompt_versions').imported).toBe(3);
+    const imported = await bApi.get(`/api/admin/ai/agents/${agent.id}/prompt-versions`);
+    expect(imported.map((v: any) => [v.id, v.version, v.content, v.note, v.restoredFromVersionId])).toEqual(
+      original.map((v: any) => [v.id, v.version, v.content, v.note, v.restoredFromVersionId]),
+    );
+    expect((await bApi.get('/api/admin/ai/agents')).find((x: any) => x.id === agent.id)).toMatchObject({
+      systemPrompt: 'v1 do prompt',
+      promptVersion: 3,
+    });
+    // Reimportar: o agente já existe aqui e fica com o histórico dele.
+    const again = await importFile(b, adminB.cookie, 'full', fileOf({ ai_agents: [agentRow], ai_agent_prompt_versions: versionRows }));
+    expect(failures(again)).toEqual([]);
+    expect(sum(again, 'ai_agent_prompt_versions').imported).toBe(0);
+
+    // Arquivo de antes das versões (v0.1.7): o banco cria a versão 1 com o prompt do agente.
+    const legacy = { ...agentRow, id: randomUUID(), name: `Sem versões ${tag}`, system_prompt: 'prompt antigo' };
+    const legacyReport = await importFile(b, adminB.cookie, 'full', fileOf({ ai_agents: [legacy] }));
+    expect(failures(legacyReport)).toEqual([]);
+    const legacyVersions = await bApi.get(`/api/admin/ai/agents/${legacy.id}/prompt-versions`);
+    expect(legacyVersions.map((v: any) => [v.version, v.content])).toEqual([[1, 'prompt antigo']]);
+  });
+
+  it('as instruções de IA do usuário vão no recurso usuários; a caixa principal ausente vira nula', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const a = client(h, adminA.cookie);
+    const s = await scenario(h, a);
+    const someone = await userSession(h);
+    await a.put(`/api/users/${someone.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
+    await client(h, someone.cookie).put('/api/account/ai', { instructions: 'Minhas instruções de backup', primaryCaixaId: s.caixaA.id });
+
+    const file = await exportJson(h, adminA.cookie, 'users');
+    expect(file.tables.user_ai_settings.find((r: any) => r.user_id === someone.id)).toMatchObject({
+      instructions: 'Minhas instruções de backup',
+      primary_caixa_id: s.caixaA.id,
+    });
+    const report = await importFile(b, adminB.cookie, 'users', file);
+    expect(issuesOf(report, 'user_ai_settings', 'failed')).toEqual([]);
+    expect(await client(b, adminB.cookie).get(`/api/users/${someone.id}/ai`)).toMatchObject({
+      instructions: 'Minhas instruções de backup',
+      primaryCaixaId: null,
+    });
+    const again = await importFile(b, adminB.cookie, 'users', file);
+    expect(sum(again, 'user_ai_settings').imported).toBe(0);
+  });
+
   it('caixas exigem o titular; entidades casam pelo documento e conflitos de chave PIX voltam com o motivo', async () => {
     if (skip) return;
     const adminA = await userSession(h, 'admin');

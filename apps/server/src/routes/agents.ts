@@ -15,16 +15,19 @@ import {
   mcpServerCreateInput,
   mcpServerUpdateInput,
   messageSendInput,
+  promptPreviewInput,
   suggestionDecisionInput,
   toolKitCreateInput,
   toolKitDuplicateInput,
   toolKitUpdateInput,
+  userAiSettingsInput,
 } from '@moneyflow/shared';
 import type { FastifyInstance } from 'fastify';
 import type { RunEventsHub } from '../agents/events-hub';
 import { param, parse, type Req } from '../http';
 import * as admin from '../services/ai-admin';
 import { suggestImportClassifications } from '../services/ai-flows';
+import * as aiSettings from '../services/ai-settings';
 import * as tokens from '../services/api-tokens';
 import * as conversations from '../services/conversations';
 import { decideSuggestions } from '../services/reconciliation';
@@ -153,6 +156,11 @@ export async function agentRoutes(app: FastifyInstance) {
     await pump();
   });
 
+  /* ---------------- Minha conta → IA (spec 022) ---------------- */
+  app.get('/api/account/ai', (r: Req) => aiSettings.getMyAiSettings(r.ctx));
+  app.put('/api/account/ai', (r: Req) => aiSettings.putMyAiSettings(r.ctx, parse(userAiSettingsInput, r.body)));
+  app.get('/api/users/:id/ai', (r: Req) => aiSettings.getUserAiSettings(r.ctx, id(r)));
+
   /* ---------------- tokens pessoais ---------------- */
   app.get('/api/account/api-tokens', (r: Req) => tokens.listApiTokens(r.ctx));
   app.post('/api/account/api-tokens', (r: Req) => tokens.createApiToken(r.ctx, parse(apiTokenCreateInput, r.body)));
@@ -187,6 +195,13 @@ export async function agentRoutes(app: FastifyInstance) {
   app.post('/api/admin/ai/agents', (r: Req) => admin.createAgent(r.ctx, parse(aiAgentCreateInput, r.body)));
   app.patch('/api/admin/ai/agents/:id', (r: Req) => admin.updateAgent(r.ctx, id(r), parse(aiAgentUpdateInput, r.body)));
   app.delete('/api/admin/ai/agents/:id', (r: Req) => admin.deleteAgent(r.ctx, id(r)));
+  app.get('/api/admin/ai/agents/:id/prompt-versions', (r: Req) => admin.listPromptVersions(r.ctx, id(r)));
+  app.post('/api/admin/ai/agents/:id/prompt-versions/:versionId/restore', (r: Req) =>
+    admin.restorePromptVersion(r.ctx, id(r), param(r, 'versionId')),
+  );
+  app.post('/api/admin/ai/agents/:id/prompt-preview', (r: Req) =>
+    admin.previewPrompt(r.ctx, id(r), parse(promptPreviewInput, r.body).userId),
+  );
   app.get('/api/admin/ai/mcp-servers', (r: Req) => admin.listMcpServers(r.ctx));
   app.post('/api/admin/ai/mcp-servers', (r: Req) => admin.createMcpServer(r.ctx, parse(mcpServerCreateInput, r.body)));
   app.patch('/api/admin/ai/mcp-servers/:id', (r: Req) => admin.updateMcpServer(r.ctx, id(r), parse(mcpServerUpdateInput, r.body)));

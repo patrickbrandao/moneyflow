@@ -1,5 +1,5 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: usuario
 autor: principal
@@ -75,3 +75,79 @@ Specs revisadas em 2026-10-14: os "pontos para a revisão da spec" foram resolvi
 2. (022, Instruções do usuário) "O admin as vê no detalhe do usuário" não tem rota. Recomendação: `GET /api/admin/users/:id/ai`.
 
 ## Resolução (executor)
+Feito pelo app em 2026-10-14, na branch `spec/f7-agentes-ia`, sem commit (a sessão principal commita). `pnpm db:pull` rodado (`user_ai_settings`, `ai_agent_prompt_versions`, colunas novas de `mcp_servers` e da visão).
+
+**Montagem do prompt (`apps/server/src/agents/prompt.ts`, novo)**
+- `assemblePrompt` (puro) devolve três partes na ordem da spec e o bloco user dos MCP:
+  - estável: base, prompt do agente com as variáveis estáveis, MCP `system` ("Instruções do servidor MCP <nome>") e prompt do fluxo;
+  - por usuário: "Instruções de <login>" (nunca nos fluxos) e o contexto automático;
+  - volátil: o prompt do agente quando usa variável volátil, a data, o usuário e a tela.
+- `loadPromptInputs` lê uma vez por execução as instruções, a caixa principal (só se ainda legível e não arquivada), o contexto (`autoContext`, pelo `Access`: até 60 caixas contando os cartões e 300 contas, com "lista parcial: use list_caixas") e as `instructions` de `effective_agent_mcp_servers` fora do modo `ignore`. Fluxos: sem instruções do usuário e sem MCP.
+- `runner.ts`: `buildSystemPrompt` saiu; o bloco dos MCP `user` entra no início do histórico enviado, sem gravar em `ai_messages`.
+- `llm/types.ts` ganhou `systemUser`. `anthropic.ts` põe o 2º ponto de cache no fim dessa parte (com a última tool, são 3 dos 4). `openai.ts` concatena na mesma ordem.
+
+**Variáveis (`packages/shared/src/agents/prompt-vars.ts`, novo)**
+- O registro `PROMPT_VARIABLES` e as funções `scanPromptVariables`, `renderPromptVariables` (escape `\{{`) e `volatilePromptValues` (`mes_ano` = "outubro de 2026").
+- `aiAgentCreateInput`/`aiAgentUpdateInput` recusam variável desconhecida (400, com o nome) e aceitam `promptNote`.
+
+**Versões e MCP (`services/ai-admin.ts`)**
+- Criar o agente insere a versão 1 na mesma transação (autor e nota). Mudar o prompt = `INSERT` na tabela de versões (o mesmo prompt não cria versão; o `UPDATE` não toca mais `system_prompt`).
+- `listPromptVersions`, `restorePromptVersion` (versão nova com `restored_from_version_id` e "Restaurada da versão N") e `previewPrompt` (o prompt de um usuário, com as partes e os pontos de cache). `AiAgentDto.promptVersion`.
+- MCP: `instructionsMode` no criar e no editar. O `refreshMcpServer` grava `instructions_cache` (de `getInstructions()`, cortado em 50 mil) junto com o `tools_cache`. `McpServerDto.instructionsMode` e `instructions`.
+- `mcp-client.ts`: `session.instructions()`.
+
+**Minha conta → IA (`services/ai-settings.ts`, novo)**
+- `GET/PUT /api/account/ai` faz upsert por `ON CONFLICT (user_id)`. A caixa principal passa pelo `Access`: fora das legíveis, 404 com mensagem; cartão, 422.
+- `GET /api/users/:id/ai` é a leitura do admin (decisão registrada na 022, no lugar de `/api/admin/users/:id/ai`).
+
+**Rotas** (`routes/agents.ts`)
+- `GET /api/admin/ai/agents/:id/prompt-versions`;
+- `POST /api/admin/ai/agents/:id/prompt-versions/:versionId/restore`;
+- `POST /api/admin/ai/agents/:id/prompt-preview` (`userId`).
+
+**Erros** (`i18n/errors.ts`)
+- Os da 018: `ai_agents_system_prompt_version_check`, `ai_agent_prompt_versions_{version,immutable,note,content}_check`, `_restored_from_version_id_fkey` e `_restored_self_check`, `user_ai_settings_{primary_caixa,instructions}_check`, `mcp_servers_instructions_{mode,cache}_check`.
+- A auditoria nomeia as duas tabelas novas.
+
+**Backup (`catalog.ts`)**
+- `ai_agents` e `ai_agent_prompt_versions` em `DEFERRED_CLUSTER`;
+- `OWNED_BY.ai_agent_prompt_versions = ['agent_id']`;
+- `user_ai_settings` em `COMPOSITE_KEYS`/`OWNED_BY` (`['user_id']`) e no recurso `users`.
+
+**Tela**
+- Minha conta: painel IA (`components/account/AiSettingsPanel.tsx`) com as instruções (contador de 20 mil) e a "Minha caixa principal" (caixas comuns legíveis).
+- Usuários: ação "Instruções de IA" (leitura, admin).
+- Agente (`AgentsTab.tsx` + `AgentPrompt.tsx`):
+  - versão atual, lista de variáveis (clicar insere no cursor), aviso de variável desconhecida e o de volátil ("…não será cacheado");
+  - "Nota da versão" quando o prompt muda;
+  - "Histórico", com conteúdo, diff A→B pelo `text-diff.ts` e restaurar com confirmação;
+  - "Ver prompt montado": escolhe o usuário e mostra as partes com os pontos de cache.
+  - O histórico e o prompt montado abrem dentro do próprio modal.
+- MCP: modo das instruções no formulário. O detalhe mostra o modo e o texto em cache, com o aviso de que ele vai ao modelo.
+- Correção encontrada pelo e2e (`components/ui.tsx`): a confirmação (`useConfirm`) pedida de dentro de um modal abria por baixo dele. Agora sai por portal no `<body>`, acima dos modais.
+
+**Testes**
+- `packages/shared/test/prompt-vars.test.ts`: parser, escape, render, voláteis e recusa no schema.
+- `apps/server/test/agent-prompts.test.ts` (8, novo):
+  - Minha conta → IA (upsert, caixa ilegível e cartão, leitura do admin, auditoria com o ator);
+  - ordem e conteúdo das três partes com os `cache_control`, nos modos MCP `ignore`/`system`/`user` (bloco user não gravado) e sem instruções;
+  - cache de 50 mil, sem auditoria no refresh;
+  - variável desconhecida (400) e volátil fora das partes cacheadas, com preview;
+  - contexto de um viewer: só a caixa dele, com conta, papel, cartão e caixa principal; perder o acesso a tira;
+  - corte em 60 caixas;
+  - versões (nota, autor, sem versão quando o prompt não muda, restaurar, versão de outro agente 404, 403 para não admin, UPDATE direto recusado, ator na auditoria);
+  - fluxo de leitura de documento sem as instruções do usuário nem o MCP, mas com o contexto.
+- `apps/server/test/backup.test.ts`:
+  - ida e volta das versões (ids, números, notas e restauração preservados; reimportar não duplica; arquivo sem versões ganha a 1);
+  - `user_ai_settings` no recurso usuários, com a caixa ausente anulada.
+- `e2e/tests/agentes.spec.ts`:
+  - editar o prompt, ver o histórico e o diff, restaurar, inserir `{{data}}` (aviso) e "Ver prompt montado" com 2 pontos de cache;
+  - Minha conta → IA salva.
+
+**Verificação**
+- `pnpm lint` e `pnpm typecheck` passaram.
+- `pnpm test` (Testcontainers) passou: shared com 125 testes, server com 128.
+- `pnpm build` passou.
+- e2e completo contra a pilha Docker reconstruída (`TELEGRAM_API_BASE=http://host.docker.internal:18081`): 21 passaram, inclusive os 8 de `agentes.spec.ts`. A pilha foi parada no fim.
+
+**Docs**: 022 (decisões da execução: rota do admin, rota de restaurar, fluxos sem MCP, limites, nota da versão, DTOs), 011 (montagem do prompt e cache) e `AGENTS.md`.

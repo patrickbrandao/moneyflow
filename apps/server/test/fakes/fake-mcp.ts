@@ -7,15 +7,19 @@ import { z } from 'zod';
 /*
  * Servidor MCP FALSO (Streamable HTTP, sem estado) para os testes do MCP
  * client: exige o cabeçalho secreto Authorization e expõe duas tools,
- * echo (somente leitura) e create_ticket (escrita).
+ * echo (somente leitura) e create_ticket (escrita). Opcional: as instructions
+ * da resposta do initialize (spec 022).
  */
 
 export type FakeMcp = { url: string; calls: { tool: string; args: unknown }[]; authHeaders: string[]; close: () => Promise<void> };
 
-export async function startFakeMcp(secret: string): Promise<FakeMcp> {
+export async function startFakeMcp(secret: string, options: { instructions?: string } = {}): Promise<FakeMcp> {
   const fake: FakeMcp = { url: '', calls: [], authHeaders: [], close: async () => {} };
   const build = () => {
-    const server = new McpServer({ name: 'fake-mcp', version: '1.0.0' });
+    const server = new McpServer(
+      { name: 'fake-mcp', version: '1.0.0' },
+      options.instructions ? { instructions: options.instructions } : undefined,
+    );
     server.registerTool(
       'echo',
       { description: 'Repete o texto.', inputSchema: { text: z.string() }, annotations: { readOnlyHint: true } },

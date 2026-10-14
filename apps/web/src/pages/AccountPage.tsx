@@ -2,6 +2,7 @@ import { t } from '@moneyflow/shared';
 import { KeyRound, UserRound, Wallet } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { AiSettingsPanel } from '../components/account/AiSettingsPanel';
 import { ApiTokensPanel } from '../components/account/ApiTokensPanel';
 import { RoleBadge } from '../components/domain';
 import { FormError } from '../components/forms';
@@ -10,7 +11,7 @@ import { api } from '../lib/api';
 import { useUser } from '../lib/auth';
 import { useAction } from '../lib/hooks';
 
-/** Minha conta: dados, caixas a que tenho acesso e troca de senha. */
+/** Minha conta: dados, caixas a que tenho acesso, troca de senha, IA (spec 022) e tokens de API. */
 export function AccountPage() {
   const user = useUser();
   const [current, setCurrent] = useState('');
@@ -119,6 +120,7 @@ export function AccountPage() {
             </div>
           </form>
         </Panel>
+        <AiSettingsPanel />
         <ApiTokensPanel />
       </div>
     </div>

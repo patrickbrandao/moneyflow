@@ -1,5 +1,14 @@
-import { CAIXA_ROLES, type CaixaSummary, formatDateTime, GLOBAL_ROLES, type Membership, t, type UserRow } from '@moneyflow/shared';
-import { Eye, EyeOff, KeyRound, Pencil, Plus, ShieldCheck, Trash2, UserCheck, UserX } from 'lucide-react';
+import {
+  CAIXA_ROLES,
+  type CaixaSummary,
+  formatDateTime,
+  GLOBAL_ROLES,
+  type Membership,
+  t,
+  type UserAiSettingsDto,
+  type UserRow,
+} from '@moneyflow/shared';
+import { Eye, EyeOff, KeyRound, Pencil, Plus, ShieldCheck, Sparkles, Trash2, UserCheck, UserX } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import { LoadError, PageHead, RoleBadge, SkelRows } from '../components/domain';
@@ -21,6 +30,7 @@ export function UsersPage() {
   const { data, error, reload } = useApi<UserRow[]>(me.role === 'admin' ? '/api/users' : null);
   const [editing, setEditing] = useState<UserRow | null>(null);
   const [roles, setRoles] = useState<UserRow | null>(null);
+  const [aiOf, setAiOf] = useState<UserRow | null>(null);
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const confirm = useConfirm();
   const { run } = useAction();
@@ -139,6 +149,15 @@ export function UsersPage() {
                       <button type="button" className="row-action" title={t.common.edit} onClick={() => setEditing(user)}>
                         <Pencil />
                       </button>
+                      <button
+                        type="button"
+                        className="row-action"
+                        title={t.agentsUi.account.adminView}
+                        aria-label={t.agentsUi.account.adminView}
+                        onClick={() => setAiOf(user)}
+                      >
+                        <Sparkles />
+                      </button>
                       {user.role !== 'admin' && (
                         <button type="button" className="row-action" title={t.user.memberships} onClick={() => setRoles(user)}>
                           <ShieldCheck />
@@ -181,6 +200,7 @@ export function UsersPage() {
           }}
         />
       )}
+      {aiOf && <UserAiModal user={aiOf} onClose={() => setAiOf(null)} />}
       {roles && (
         <MembershipsModal
           user={roles}
@@ -192,6 +212,39 @@ export function UsersPage() {
         />
       )}
     </div>
+  );
+}
+
+/** Instruções de IA e caixa principal do usuário (spec 022): o admin só lê; quem edita é o próprio usuário. */
+function UserAiModal({ user, onClose }: { user: UserRow; onClose: () => void }) {
+  const a = t.agentsUi.account;
+  const { data, error, reload } = useApi<UserAiSettingsDto>(`/api/users/${user.id}/ai`);
+  return (
+    <Modal open title={a.adminTitle(user.username)} onClose={onClose} wide>
+      <div className="modal-body form-grid">
+        <p className="panel-hint">{a.adminHint}</p>
+        {error && <LoadError error={error} onRetry={() => void reload()} />}
+        {data && (
+          <>
+            <dl className="kv">
+              <dt>{a.primaryCaixa}</dt>
+              <dd>{data.primaryCaixaName ?? a.primaryNone}</dd>
+            </dl>
+            <span className="label">{a.instructions}</span>
+            {data.instructions ? (
+              <pre className="panel contract-raw !max-h-[50vh]">{data.instructions}</pre>
+            ) : (
+              <p className="hint">{a.adminEmpty}</p>
+            )}
+          </>
+        )}
+      </div>
+      <ModalActions>
+        <Button variant="ghost" onClick={onClose}>
+          {t.common.close}
+        </Button>
+      </ModalActions>
+    </Modal>
   );
 }
 

@@ -17,9 +17,11 @@ export type LlmStopReason = 'end_turn' | 'tool_use' | 'max_tokens' | 'refusal' |
 
 export type LlmRequest = {
   model: string;
-  /** Parte estável do prompt de sistema (cacheável). */
+  /** Parte estável do prompt de sistema: termina no ponto de cache 1 (spec 022). */
   system: string;
-  /** Parte volátil (data, contexto da tela): vai depois do ponto de cache. */
+  /** Parte estável por usuário (instruções e contexto automático): termina no ponto de cache 2. */
+  systemUser?: string;
+  /** Parte volátil (data, contexto da tela): vai depois dos pontos de cache. */
   systemVolatile?: string;
   messages: NeutralMessage[];
   tools: LlmTool[];
