@@ -6,3 +6,12 @@
 4. **F4, IA**: agentes, janelas, tools, MCP client/server, sugestões e leitura de documentos ([011](011-agentes-de-ia.md)).
 5. **F5, Contratos**: contratos, documentos, renovação e avisos ([020](020-contratos.md)).
 6. **F6, Cadastro organizado**: tags e favoritas de entidade, filtro por entidade em relatórios e canvas, e o CNPJ alfanumérico em todo o sistema ([003](003-entidades.md), [014](014-visualizacao-e-relatorios.md)).
+7. **F7, Kit de Ferramentas**: perfis de tools com `allow`/`ask` por tool e categorias; substitui a lista de tools e a flag de confirmação do agente ([021](021-kit-de-ferramentas.md)).
+8. **F8, Prompts e instruções**: instruções do usuário, contexto automático, variáveis, versões do prompt e as `instructions` dos MCP ([022](022-prompts-e-instrucoes.md)).
+9. **F9, Requisições**: registro das requisições ao provedor com tentativas, retenção (variável e banco) e detalhe do provedor ([023](023-requisicoes-ao-provedor.md)).
+10. **F10, Capacidades**: flags e modelos por capacidade no provedor, Anthropic compatível, provedor por inferência no agente, visão por descrição e embeddings por modelo em uso ([024](024-capacidades-dos-provedores.md)).
+11. **F11, Chat multimídia**: prévia de imagem/PDF/markdown, gravação e transcrição de áudio, player com velocidades e modo áudio ([025](025-chat-multimidia.md)).
+12. **F12, Sessões**: fio contínuo por usuário e agente, dividido em sessões; finalizar sessão ([026](026-sessoes-dos-agentes.md)).
+13. **F13, Controle total**: tools para tudo o que a interface faz, inclusive a configuração de IA, usuários e backup, em dois lotes F13a/F13b ([027](027-tools-de-controle-total.md)).
+14. **F14, Limites e uso**: orçamentos mensais com aviso e bloqueio, limite de execuções por minuto e painel de uso ([028](028-limites-e-uso.md)).
+15. **F15, Fluxos autônomos**: tarefas agendadas, conciliação completa ao importar e conversa pelo Telegram por webhook ([029](029-fluxos-autonomos.md)).

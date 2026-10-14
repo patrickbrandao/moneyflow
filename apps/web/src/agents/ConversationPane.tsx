@@ -1,8 +1,11 @@
 import {
   type AiBlock,
   type AiMessageDto,
-  type ConversationDetail,
+  type ChatAttachmentDto,
   formatDateTime,
+  formatFileSize,
+  isAudioMime,
+  isImageMime,
   type PreviewRow,
   type ToolConfirmationDto,
   type ToolResultBlock,
@@ -16,6 +19,8 @@ import {
   CheckCheck,
   ChevronRight,
   CircleSlash,
+  Download,
+  KeyRound,
   Loader2,
   Paperclip,
   SendHorizontal,
@@ -42,26 +47,51 @@ import { LoadError } from '../components/domain';
 import { useToast } from '../components/Toast';
 import { Badge, Button, cx, Skel } from '../components/ui';
 import { attachmentUrl } from '../lib/upload';
+import { useAgents } from './AgentsProvider';
+import { AttachmentPreview, MediaProvider, SpeechButton, TranscriptionBadge } from './AttachmentPreview';
+import { RecordButton, RecorderPanel, useAudioRecorder } from './AudioRecorder';
 import { agentColor, toolLabel, usageLine } from './format';
 import { Markdown } from './Markdown';
 import { hasRecord, readRecord, recordMarkdown } from './records';
-import { type ConversationState, type LiveTool, useConversation } from './useConversation';
+import { type ConversationState, type LiveTool, type PaneDetail, type PaneTarget, useConversation } from './useConversation';
 
 const u = t.agentsUi;
 
 export type PaneHeaderInfo = {
-  detail: ConversationDetail | null;
+  detail: PaneDetail | null;
   state: ConversationState;
 };
 
 /**
- * O miolo de uma conversa (janela flutuante ou painel): cabeçalho fornecido
- * por quem embrulha, mensagens, confirmações, composer e rodapé de uso.
+ * O miolo de uma sessão (janela flutuante ou painel): cabeçalho fornecido por
+ * quem embrulha, mensagens, confirmações, composer e rodapé de uso. A sessão
+ * finalizada e a de outro usuário ficam em somente leitura (spec 026).
  */
-export function ConversationPane({ conversationId, header }: { conversationId: string; header: (info: PaneHeaderInfo) => ReactNode }) {
-  const state = useConversation(conversationId);
+export function ConversationPane({ target, header }: { target: PaneTarget; header: (info: PaneHeaderInfo) => ReactNode }) {
+  const state = useConversation(target);
   const { detail, error } = state;
-  const readOnly = detail?.readOnly ?? false;
+  // Sessão de um fluxo (tarefa agendada, conciliação, spec 029): sem composer, mas o dono aprova as ações pendentes.
+  const flow = Boolean(detail?.conversation && detail.conversation.purpose !== 'chat');
+  const finished = Boolean(detail?.conversation?.archivedAt) && !flow;
+  const readOnly = (detail?.readOnly ?? false) || finished || flow;
+  const canDecide = !(detail?.readOnly ?? false) && !finished;
+  const agentInactive = target.kind === 'agent' && state.agent !== null && !state.agent.isActive;
+  // Modo áudio (spec 025): por janela, só com texto→áudio no agente.
+  const audioMode = Boolean(useAgents().state.windows.find((w) => w.id === target.windowId)?.audioMode && detail?.media.speech);
+  const images = useMemo(() => {
+    const list: { id: string; fileName: string }[] = [];
+    const meta = new Map(detail?.attachments.map((a) => [a.id, a]) ?? []);
+    for (const message of detail?.messages ?? []) {
+      if (message.role !== 'user') continue;
+      for (const block of message.content) {
+        if (block.type !== 'attachment') continue;
+        const mime = meta.get(block.attachment_id)?.mimeType ?? block.mime_type ?? '';
+        if (isImageMime(mime) && !list.some((i) => i.id === block.attachment_id))
+          list.push({ id: block.attachment_id, fileName: block.file_name ?? block.attachment_id });
+      }
+    }
+    return list;
+  }, [detail?.messages, detail?.attachments]);
   const [dragging, setDragging] = useState(false);
   const composer = useRef<ComposerHandle | null>(null);
 
@@ -112,10 +142,30 @@ export function ConversationPane({ conversationId, header }: { conversationId: s
         </div>
       ) : (
         <>
-          {readOnly && <div className="agent-readonly">{u.window.readOnly}</div>}
-          <Messages state={state} detail={detail} />
-          {!readOnly && <Confirmations state={state} detail={detail} />}
-          {!readOnly && <Composer ref={composer} state={state} />}
+          {detail.readOnly ? (
+            <div className="agent-readonly">{u.window.readOnly}</div>
+          ) : finished ? (
+            <div className="agent-readonly" data-testid="agent-finished-notice">
+              {u.window.finished}
+            </div>
+          ) : flow ? (
+            <div className="agent-readonly" data-testid="agent-flow-notice">
+              {u.window.flowSession}
+            </div>
+          ) : agentInactive ? (
+            <div className="agent-readonly">{u.window.agentInactive}</div>
+          ) : null}
+          <MediaProvider
+            conversationId={state.conversationId ?? ''}
+            readOnly={readOnly}
+            transcribes={detail.media.transcription}
+            attachments={detail.attachments}
+            images={images}
+          >
+            <Messages state={state} detail={detail} audioMode={audioMode} />
+            {canDecide && <Confirmations state={state} detail={detail} />}
+            {!readOnly && !agentInactive && <Composer ref={composer} state={state} transcribes={detail.media.transcription} />}
+          </MediaProvider>
           <Footer state={state} detail={detail} />
         </>
       )}
@@ -128,7 +178,7 @@ export function ConversationPane({ conversationId, header }: { conversationId: s
 
 type ToolOutcome = { content: string; isError: boolean };
 
-function Messages({ state, detail }: { state: ConversationState; detail: ConversationDetail }) {
+function Messages({ state, detail, audioMode }: { state: ConversationState; detail: PaneDetail; audioMode: boolean }) {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const results = useMemo(() => {
@@ -165,7 +215,15 @@ function Messages({ state, detail }: { state: ConversationState; detail: Convers
         stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
       }}
     >
-      {visible.length === 0 && !state.busy && <p className="agent-empty">{u.chat.empty}</p>}
+      {visible.length === 0 && !state.busy && (
+        <div className="agent-empty">
+          <p>{u.chat.empty}</p>
+          {/* Segredos (spec 027): nunca no texto livre; o agente pede no cartão de aprovação. */}
+          <p className="agent-composer-note" data-testid="agent-secrets-notice">
+            <KeyRound /> {u.chat.secretsNotice}
+          </p>
+        </div>
+      )}
       {visible.map((message) => (
         <MessageView
           key={message.id}
@@ -174,6 +232,7 @@ function Messages({ state, detail }: { state: ConversationState; detail: Convers
           confirmations={confirmationsByTool}
           liveTools={state.liveTools}
           active={state.busy}
+          audioMode={audioMode}
         />
       ))}
       {state.busy && (state.liveThinking || state.liveText) && (
@@ -215,26 +274,32 @@ function MessageView({
   confirmations,
   liveTools,
   active,
+  audioMode,
 }: {
   message: AiMessageDto;
   results: Map<string, ToolOutcome>;
   confirmations: Map<string, ToolConfirmationDto>;
   liveTools: Record<string, LiveTool>;
   active: boolean;
+  audioMode: boolean;
 }) {
+  const hasText = message.content.some((b) => b.type === 'text' && b.text.trim() !== '');
   if (message.role === 'user') {
     return (
-      <div className="agent-msg user">
+      <div className="agent-msg user" data-testid="agent-message-user">
         {message.content.map((block, index) => (
           <UserBlock key={index} block={block} />
         ))}
-        <span className="agent-time">{formatDateTime(message.createdAt)}</span>
+        <span className="agent-time">
+          {audioMode && hasText && <SpeechButton messageId={message.id} />}
+          {formatDateTime(message.createdAt)}
+        </span>
       </div>
     );
   }
-  const hasText = message.content.some((b) => b.type === 'text' && b.text.trim() !== '');
   return (
     <div className="agent-msg assistant" {...(hasText ? { 'data-testid': 'agent-message-assistant' } : {})}>
+      {audioMode && hasText && !active && <SpeechButton messageId={message.id} />}
       {message.content.map((block, index) => {
         switch (block.type) {
           case 'text':
@@ -268,13 +333,7 @@ function MessageView({
 
 function UserBlock({ block }: { block: AiBlock }) {
   if (block.type === 'text') return block.text.trim() ? <Markdown text={block.text} /> : null;
-  if (block.type === 'attachment') {
-    return (
-      <a className="agent-chip" href={attachmentUrl(block.attachment_id)} title={u.chat.download}>
-        <Paperclip /> <span className="truncate">{block.file_name ?? block.attachment_id}</span>
-      </a>
-    );
-  }
+  if (block.type === 'attachment') return <AttachmentPreview block={block} />;
   return null;
 }
 
@@ -325,6 +384,7 @@ function ToolView({
       <Wrench />
     );
   const result = outcome?.content ?? '';
+  const file = toolFile(outcome);
   return (
     <details className={cx('agent-tool', `is-${status}`)} data-testid="agent-tool" data-status={status} data-tool={block.name}>
       <summary>
@@ -344,24 +404,51 @@ function ToolView({
           </>
         )}
       </div>
+      {file && (
+        <a className="agent-tool-file" href={attachmentUrl(file.attachmentId)} download={file.fileName} data-testid="agent-tool-file">
+          <Download /> {u.tool.file(file.fileName, formatFileSize(file.sizeBytes))}
+        </a>
+      )}
     </details>
   );
 }
 
+type ToolFile = { attachmentId: string; fileName: string; sizeBytes: number };
+
+/** Arquivo gerado pela tool (spec 027): o resultado traz só id, nome e tamanho. */
+function toolFile(outcome?: ToolOutcome): ToolFile | null {
+  if (!outcome || outcome.isError || !outcome.content.includes('"attachmentId"')) return null;
+  try {
+    const file = (JSON.parse(outcome.content) as { file?: ToolFile }).file;
+    return file && typeof file.attachmentId === 'string' ? file : null;
+  } catch {
+    return null;
+  }
+}
+
 /* ---------------- confirmações ("Aplicar?") ---------------- */
 
-function Confirmations({ state, detail }: { state: ConversationState; detail: ConversationDetail }) {
+function Confirmations({ state, detail }: { state: ConversationState; detail: PaneDetail }) {
   const pending = detail.confirmations.filter((c) => c.status === 'pending');
   const [busy, setBusy] = useState(false);
   const [rejecting, setRejecting] = useState<string | 'all' | null>(null);
   const [reason, setReason] = useState('');
+  // Segredos digitados (spec 027): só na memória do cartão; vão na decisão e são descartados.
+  const [secrets, setSecrets] = useState<Record<string, Record<string, string>>>({});
   const toast = useToast();
   if (pending.length === 0) return null;
+
+  const missingSecret = (c: ToolConfirmationDto) =>
+    (c.preview?.secretFields ?? []).some((f) => f.required && !secrets[c.id]?.[f.key]?.trim());
+  const setSecret = (id: string, key: string, value: string) => setSecrets((all) => ({ ...all, [id]: { ...all[id], [key]: value } }));
 
   async function decide(decision: 'approved' | 'rejected', ids?: string[], why?: string) {
     setBusy(true);
     try {
-      await state.decide(decision, ids, why);
+      const targets = ids ?? pending.map((c) => c.id);
+      const typed = Object.fromEntries(targets.filter((id) => secrets[id]).map((id) => [id, secrets[id]!]));
+      await state.decide(decision, ids, why, decision === 'approved' ? typed : undefined);
+      setSecrets((all) => Object.fromEntries(Object.entries(all).filter(([id]) => !targets.includes(id))));
       setRejecting(null);
       setReason('');
     } catch (error) {
@@ -406,7 +493,12 @@ function Confirmations({ state, detail }: { state: ConversationState; detail: Co
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => setRejecting('all')}>
               {u.confirm.rejectAll}
             </Button>
-            <Button size="sm" disabled={busy} onClick={() => void decide('approved')} data-testid="agent-approve-all">
+            <Button
+              size="sm"
+              disabled={busy || pending.some(missingSecret)}
+              onClick={() => void decide('approved')}
+              data-testid="agent-approve-all"
+            >
               <CheckCheck /> {u.confirm.approveAll}
             </Button>
           </span>
@@ -431,6 +523,33 @@ function Confirmations({ state, detail }: { state: ConversationState; detail: Co
                 {warning}
               </p>
             ))}
+            {c.preview?.secretFields && c.preview.secretFields.length > 0 && (
+              <fieldset className="agent-secrets" data-testid="agent-secrets">
+                <legend>
+                  <KeyRound /> {u.confirm.secretsTitle}
+                </legend>
+                {c.preview.secretFields.map((field) => (
+                  <label key={field.key} className="agent-secret">
+                    <span>
+                      {field.label}
+                      {field.required && <em> · {u.confirm.secretRequired}</em>}
+                    </span>
+                    <input
+                      type="password"
+                      className="field field-sm"
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      value={secrets[c.id]?.[field.key] ?? ''}
+                      onChange={(e) => setSecret(c.id, field.key, e.target.value)}
+                      aria-label={field.label}
+                      data-testid="agent-secret-input"
+                    />
+                    {field.hint && <span className="hint">{field.hint}</span>}
+                  </label>
+                ))}
+                <p className="hint">{u.confirm.secretsHint}</p>
+              </fieldset>
+            )}
             {rejecting === c.id ? (
               rejectForm([c.id])
             ) : (
@@ -438,7 +557,12 @@ function Confirmations({ state, detail }: { state: ConversationState; detail: Co
                 <Button size="sm" variant="ghost" disabled={busy} onClick={() => setRejecting(c.id)}>
                   {u.confirm.reject}
                 </Button>
-                <Button size="sm" disabled={busy} onClick={() => void decide('approved', [c.id])} data-testid="agent-approve">
+                <Button
+                  size="sm"
+                  disabled={busy || missingSecret(c)}
+                  onClick={() => void decide('approved', [c.id])}
+                  data-testid="agent-approve"
+                >
                   <Check /> {u.confirm.approve}
                 </Button>
               </div>
@@ -450,7 +574,7 @@ function Confirmations({ state, detail }: { state: ConversationState; detail: Co
   );
 }
 
-function PreviewRows({ rows }: { rows: PreviewRow[] }) {
+export function PreviewRows({ rows }: { rows: PreviewRow[] }) {
   if (rows.length === 0) return null;
   return (
     <dl className="agent-diff">
@@ -476,9 +600,28 @@ function PreviewRows({ rows }: { rows: PreviewRow[] }) {
 
 type ComposerHandle = { insert: (text: string) => void; attachFile: (file: File) => void };
 
-function Composer({ state, ref }: { state: ConversationState; ref: Ref<ComposerHandle> }) {
+/** Duração de um arquivo de áudio pelo navegador (metadados), até 3 s; null se não souber. */
+function probeDuration(file: File): Promise<number | null> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const el = new Audio();
+    const done = (value: number | null) => {
+      clearTimeout(timer);
+      el.src = '';
+      URL.revokeObjectURL(url);
+      resolve(value);
+    };
+    const timer = setTimeout(() => done(null), 3000);
+    el.preload = 'metadata';
+    el.onloadedmetadata = () => done(Number.isFinite(el.duration) && el.duration > 0 ? Math.round(el.duration * 1000) : null);
+    el.onerror = () => done(null);
+    el.src = url;
+  });
+}
+
+function Composer({ state, ref, transcribes }: { state: ConversationState; ref: Ref<ComposerHandle>; transcribes: boolean }) {
   const [text, setText] = useState('');
-  const [attachments, setAttachments] = useState<{ id: string; fileName: string }[]>([]);
+  const [attachments, setAttachments] = useState<ChatAttachmentDto[]>([]);
   const [uploading, setUploading] = useState(0);
   const [sending, setSending] = useState(false);
   const area = useRef<HTMLTextAreaElement>(null);
@@ -487,15 +630,16 @@ function Composer({ state, ref }: { state: ConversationState; ref: Ref<ComposerH
   const disabled = state.busy || sending;
 
   const attachFile = useCallback(
-    async (file: File) => {
+    async (file: File, knownDurationMs?: number) => {
       if (file.size > MAX_ATTACHMENT_BYTES) {
         toast.error(u.chat.attachmentTooLarge);
         return;
       }
       setUploading((n) => n + 1);
       try {
-        const row = await state.attach(file);
-        setAttachments((list) => [...list, { id: row.id, fileName: row.fileName }]);
+        const durationMs = knownDurationMs ?? (isAudioMime(file.type) ? await probeDuration(file) : null);
+        const row = await state.attach(file, durationMs);
+        setAttachments((list) => [...list, row]);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : String(error));
       } finally {
@@ -524,6 +668,9 @@ function Composer({ state, ref }: { state: ConversationState; ref: Ref<ComposerH
   }, []);
 
   useImperativeHandle(ref, () => ({ insert, attachFile: (file) => void attachFile(file) }), [insert, attachFile]);
+
+  // Gravação pelo microfone (spec 025): só com áudio→texto no agente; o áudio vira um anexo como os outros.
+  const recorder = useAudioRecorder(useCallback((file: File, durationMs: number) => void attachFile(file, durationMs), [attachFile]));
 
   // Cresce com o texto até um limite (e recalcula quando a largura muda: painel, redimensionar).
   const fit = useCallback(() => {
@@ -574,11 +721,13 @@ function Composer({ state, ref }: { state: ConversationState; ref: Ref<ComposerH
 
   return (
     <div className="agent-composer">
+      {transcribes && <RecorderPanel recorder={recorder} />}
       {(attachments.length > 0 || uploading > 0) && (
         <div className="agent-chips">
           {attachments.map((a) => (
-            <span key={a.id} className="agent-chip">
+            <span key={a.id} className="agent-chip" data-testid="composer-attachment">
               <Paperclip /> <span className="truncate">{a.fileName}</span>
+              {isAudioMime(a.mimeType) && <TranscriptionBadge attachmentId={a.id} initial={a.transcription} />}
               <button
                 type="button"
                 aria-label={u.chat.removeAttachment(a.fileName)}
@@ -604,6 +753,7 @@ function Composer({ state, ref }: { state: ConversationState; ref: Ref<ComposerH
           onKeyDown={onKeyDown}
           placeholder={state.busy ? u.chat.placeholderBusy : u.chat.placeholder}
           aria-label={u.chat.composer}
+          title={u.chat.secretsNotice}
           disabled={disabled}
           data-testid="agent-composer"
         />
@@ -629,6 +779,7 @@ function Composer({ state, ref }: { state: ConversationState; ref: Ref<ComposerH
           >
             <Paperclip />
           </button>
+          {transcribes && <RecordButton recorder={recorder} disabled={disabled} />}
           {state.busy ? (
             <button
               type="button"
@@ -662,7 +813,7 @@ function Composer({ state, ref }: { state: ConversationState; ref: Ref<ComposerH
 
 /* ---------------- rodapé ---------------- */
 
-function Footer({ state, detail }: { state: ConversationState; detail: ConversationDetail }) {
+function Footer({ state, detail }: { state: ConversationState; detail: PaneDetail }) {
   const run = state.run;
   return (
     <div className="agent-foot">

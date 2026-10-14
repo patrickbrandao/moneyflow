@@ -1,11 +1,23 @@
 import {
+  agentSessionStartInput,
+  agentSessionsQuery,
+  agentTaskCreateInput,
+  agentTaskListQuery,
+  agentTaskUpdateInput,
+  agentThreadsQuery,
   aiAgentCreateInput,
   aiAgentUpdateInput,
+  aiBudgetCreateInput,
+  aiBudgetUpdateInput,
   aiPriceInput,
   aiProviderCreateInput,
   aiProviderUpdateInput,
+  aiRequestBodyQuery,
+  aiRequestListQuery,
+  aiUsagePanelQuery,
   aiUsageQuery,
   apiTokenCreateInput,
+  appSettingInput,
   confirmationDecisionInput,
   conversationCreateInput,
   conversationForkInput,
@@ -15,17 +27,28 @@ import {
   mcpServerCreateInput,
   mcpServerUpdateInput,
   messageSendInput,
+  promptPreviewInput,
   suggestionDecisionInput,
+  toolKitCreateInput,
+  toolKitDuplicateInput,
+  toolKitUpdateInput,
+  userAiSettingsInput,
 } from '@moneyflow/shared';
 import type { FastifyInstance } from 'fastify';
 import type { RunEventsHub } from '../agents/events-hub';
+import { AppError } from '../errors';
 import { param, parse, type Req } from '../http';
+import * as tasks from '../services/agent-tasks';
 import * as admin from '../services/ai-admin';
+import * as budgets from '../services/ai-budgets';
 import { suggestImportClassifications } from '../services/ai-flows';
+import * as requests from '../services/ai-requests';
+import * as aiSettings from '../services/ai-settings';
 import * as tokens from '../services/api-tokens';
+import * as chatMedia from '../services/chat-media';
 import * as conversations from '../services/conversations';
 import { decideSuggestions } from '../services/reconciliation';
-import { UPLOAD_BODY_LIMIT } from './attachments';
+import { contentDisposition, UPLOAD_BODY_LIMIT } from './attachments';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -35,26 +58,54 @@ declare module 'fastify' {
 
 const FINAL = new Set(['completed', 'failed', 'canceled']);
 
+/** Chave de configuração na URL (`area.nome`); a lista das conhecidas fica no serviço (404 nas demais). */
+const settingKey = (r: Req) => {
+  const key = String((r.params as Record<string, string>).key ?? '');
+  if (!/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/.test(key)) throw new AppError(404, 'not_found', 'Configuração não encontrada.');
+  return key;
+};
+
 /* Agentes de IA (spec 011): conversas, execuções (SSE), administração, tokens e a IA nos fluxos. */
 export async function agentRoutes(app: FastifyInstance) {
   const id = (r: Req) => param(r, 'id');
 
-  /* ---------------- conversas ---------------- */
+  /* ---------------- sessões por agente (spec 026) ---------------- */
   app.get('/api/agents', (r: Req) => conversations.listAgentOptions(r.ctx));
+  app.get('/api/agents/threads', (r: Req) => conversations.listThreads(r.ctx, parse(agentThreadsQuery, r.query)));
+  app.get('/api/agents/:agentId/thread', (r: Req) => conversations.getThread(r.ctx, param(r, 'agentId')));
+  app.get('/api/agents/:agentId/sessions', (r: Req) =>
+    conversations.listSessions(r.ctx, param(r, 'agentId'), parse(agentSessionsQuery, r.query)),
+  );
+  app.post('/api/agents/:agentId/sessions', (r: Req) =>
+    conversations.startSession(r.ctx, param(r, 'agentId'), parse(agentSessionStartInput, r.body ?? {}).screenContext ?? null),
+  );
+  app.post('/api/agents/:agentId/messages', (r: Req) =>
+    conversations.sendToAgent(r.ctx, param(r, 'agentId'), parse(messageSendInput, r.body)),
+  );
+  app.post('/api/conversations/:id/finish', (r: Req) => conversations.finishSession(r.ctx, id(r)));
+
+  /* ---------------- conversas (sessões, por id) ---------------- */
   app.get('/api/conversations', (r: Req) => conversations.listConversations(r.ctx, parse(conversationListQuery, r.query)));
   app.post('/api/conversations', (r: Req) => conversations.createConversation(r.ctx, parse(conversationCreateInput, r.body)));
   app.get('/api/conversations/:id', (r: Req) => conversations.getConversation(r.ctx, id(r)));
   app.patch('/api/conversations/:id', (r: Req) => conversations.updateConversation(r.ctx, id(r), parse(conversationUpdateInput, r.body)));
   app.delete('/api/conversations/:id', (r: Req) => conversations.deleteConversation(r.ctx, id(r)));
   app.post('/api/conversations/:id/fork', (r: Req) => conversations.forkConversation(r.ctx, id(r), parse(conversationForkInput, r.body)));
+  // Upload do chat (spec 025): o arquivo cru no corpo; fileName e, no áudio, durationMs (do navegador) na query.
   app.post('/api/conversations/:id/attachments', { bodyLimit: UPLOAD_BODY_LIMIT, config: { rawUpload: true } }, (r: Req) =>
-    conversations.uploadMessageAttachment(r.ctx, id(r), {
+    chatMedia.uploadChatAttachment(r.ctx, id(r), {
       name: String(r.query.fileName ?? 'arquivo'),
       mime: r.headers['content-type'] ?? '',
       content: r.body,
+      durationMs: r.query.durationMs,
     }),
   );
   app.post('/api/conversations/:id/messages', (r: Req) => conversations.sendMessage(r.ctx, id(r), parse(messageSendInput, r.body)));
+  // Modo áudio (spec 025): gera (ou devolve o já gerado) o áudio da mensagem.
+  app.post('/api/conversations/:id/messages/:messageId/speech', (r: Req) => chatMedia.messageSpeech(r.ctx, id(r), param(r, 'messageId')));
+  // Derivados de um anexo (transcrição, descrição) e o "tentar de novo" da transcrição.
+  app.get('/api/attachments/:id/derivatives', (r: Req) => chatMedia.listDerivatives(r.ctx, id(r)));
+  app.post('/api/attachments/:id/transcribe', (r: Req) => chatMedia.retryTranscription(r.ctx, id(r)));
 
   /* ---------------- execuções ---------------- */
   app.get('/api/runs/:id', (r: Req) => conversations.getRun(r.ctx, id(r)));
@@ -150,6 +201,35 @@ export async function agentRoutes(app: FastifyInstance) {
     await pump();
   });
 
+  /* ---------------- Minha conta → IA (spec 022) ---------------- */
+  app.get('/api/account/ai', (r: Req) => aiSettings.getMyAiSettings(r.ctx));
+  app.put('/api/account/ai', (r: Req) => aiSettings.putMyAiSettings(r.ctx, parse(userAiSettingsInput, r.body)));
+  app.get('/api/users/:id/ai', (r: Req) => aiSettings.getUserAiSettings(r.ctx, id(r)));
+  /** O próprio uso do mês e o orçamento que cobre o usuário (spec 028). */
+  app.get('/api/account/ai/usage', (r: Req) => budgets.myUsage(r.ctx));
+
+  /* ---------------- tarefas agendadas (spec 029): as próprias em Minha conta; o admin, de qualquer um ---------------- */
+  app.get('/api/account/agent-tasks', (r: Req) => tasks.listTasks(r.ctx));
+  app.post('/api/account/agent-tasks', (r: Req) => tasks.createTask(r.ctx, { ...parse(agentTaskCreateInput, r.body), userId: null }));
+  app.get('/api/account/agent-tasks/:id', (r: Req) => tasks.getTask(r.ctx, id(r)));
+  app.patch('/api/account/agent-tasks/:id', (r: Req) => tasks.updateTask(r.ctx, id(r), parse(agentTaskUpdateInput, r.body)));
+  app.delete('/api/account/agent-tasks/:id', (r: Req) => tasks.deleteTask(r.ctx, id(r)));
+  app.get('/api/account/agent-tasks/:id/runs', (r: Req) => tasks.listTaskRuns(r.ctx, id(r)));
+  app.post('/api/account/agent-tasks/:id/run', (r: Req) => tasks.runTaskNow(r.ctx, id(r)));
+  const adminOnly = (r: Req) => {
+    r.ctx.access.assertAdmin();
+    return r.ctx;
+  };
+  app.get('/api/admin/ai/agent-tasks', (r: Req) =>
+    tasks.listTasks(adminOnly(r), { userId: parse(agentTaskListQuery, r.query).userId ?? 'all' }),
+  );
+  app.post('/api/admin/ai/agent-tasks', (r: Req) => tasks.createTask(adminOnly(r), parse(agentTaskCreateInput, r.body)));
+  app.get('/api/admin/ai/agent-tasks/:id', (r: Req) => tasks.getTask(adminOnly(r), id(r)));
+  app.patch('/api/admin/ai/agent-tasks/:id', (r: Req) => tasks.updateTask(adminOnly(r), id(r), parse(agentTaskUpdateInput, r.body)));
+  app.delete('/api/admin/ai/agent-tasks/:id', (r: Req) => tasks.deleteTask(adminOnly(r), id(r)));
+  app.get('/api/admin/ai/agent-tasks/:id/runs', (r: Req) => tasks.listTaskRuns(adminOnly(r), id(r)));
+  app.post('/api/admin/ai/agent-tasks/:id/run', (r: Req) => tasks.runTaskNow(adminOnly(r), id(r)));
+
   /* ---------------- tokens pessoais ---------------- */
   app.get('/api/account/api-tokens', (r: Req) => tokens.listApiTokens(r.ctx));
   app.post('/api/account/api-tokens', (r: Req) => tokens.createApiToken(r.ctx, parse(apiTokenCreateInput, r.body)));
@@ -172,14 +252,53 @@ export async function agentRoutes(app: FastifyInstance) {
   app.post('/api/admin/ai/prices', (r: Req) => admin.createPrice(r.ctx, parse(aiPriceInput, r.body)));
   app.delete('/api/admin/ai/prices/:id', (r: Req) => admin.deletePrice(r.ctx, id(r)));
   app.get('/api/admin/ai/tools', async (r: Req) => admin.listToolCatalog(r.ctx));
+  app.get('/api/admin/ai/tool-kits', (r: Req) => admin.listToolKits(r.ctx));
+  app.post('/api/admin/ai/tool-kits', (r: Req) => admin.createToolKit(r.ctx, parse(toolKitCreateInput, r.body)));
+  app.get('/api/admin/ai/tool-kits/:id', (r: Req) => admin.getToolKit(r.ctx, id(r)));
+  app.patch('/api/admin/ai/tool-kits/:id', (r: Req) => admin.updateToolKit(r.ctx, id(r), parse(toolKitUpdateInput, r.body)));
+  app.delete('/api/admin/ai/tool-kits/:id', (r: Req) => admin.deleteToolKit(r.ctx, id(r)));
+  app.post('/api/admin/ai/tool-kits/:id/duplicate', (r: Req) =>
+    admin.duplicateToolKit(r.ctx, id(r), parse(toolKitDuplicateInput, r.body ?? {})),
+  );
   app.get('/api/admin/ai/agents', (r: Req) => admin.listAgents(r.ctx));
   app.post('/api/admin/ai/agents', (r: Req) => admin.createAgent(r.ctx, parse(aiAgentCreateInput, r.body)));
   app.patch('/api/admin/ai/agents/:id', (r: Req) => admin.updateAgent(r.ctx, id(r), parse(aiAgentUpdateInput, r.body)));
   app.delete('/api/admin/ai/agents/:id', (r: Req) => admin.deleteAgent(r.ctx, id(r)));
+  app.get('/api/admin/ai/agents/:id/prompt-versions', (r: Req) => admin.listPromptVersions(r.ctx, id(r)));
+  app.post('/api/admin/ai/agents/:id/prompt-versions/:versionId/restore', (r: Req) =>
+    admin.restorePromptVersion(r.ctx, id(r), param(r, 'versionId')),
+  );
+  app.post('/api/admin/ai/agents/:id/prompt-preview', (r: Req) =>
+    admin.previewPrompt(r.ctx, id(r), parse(promptPreviewInput, r.body).userId),
+  );
   app.get('/api/admin/ai/mcp-servers', (r: Req) => admin.listMcpServers(r.ctx));
   app.post('/api/admin/ai/mcp-servers', (r: Req) => admin.createMcpServer(r.ctx, parse(mcpServerCreateInput, r.body)));
   app.patch('/api/admin/ai/mcp-servers/:id', (r: Req) => admin.updateMcpServer(r.ctx, id(r), parse(mcpServerUpdateInput, r.body)));
   app.delete('/api/admin/ai/mcp-servers/:id', (r: Req) => admin.deleteMcpServer(r.ctx, id(r)));
   app.post('/api/admin/ai/mcp-servers/:id/refresh', (r: Req) => admin.refreshMcpServer(r.ctx, id(r)));
   app.get('/api/admin/ai/usage', (r: Req) => admin.usageReport(r.ctx, parse(aiUsageQuery, r.query)));
+
+  /* ---------------- orçamentos e painel de uso (spec 028) ---------------- */
+  app.get('/api/admin/ai/usage/panel', (r: Req) => budgets.usagePanel(r.ctx, parse(aiUsagePanelQuery, r.query)));
+  app.get('/api/admin/ai/budgets', (r: Req) => budgets.listBudgets(r.ctx));
+  app.post('/api/admin/ai/budgets', (r: Req) => budgets.createBudget(r.ctx, parse(aiBudgetCreateInput, r.body)));
+  app.patch('/api/admin/ai/budgets/:id', (r: Req) => budgets.updateBudget(r.ctx, id(r), parse(aiBudgetUpdateInput, r.body)));
+  app.delete('/api/admin/ai/budgets/:id', (r: Req) => budgets.deleteBudget(r.ctx, id(r)));
+
+  /* ---------------- requisições ao provedor e configurações (spec 023) ---------------- */
+  app.get('/api/admin/ai/requests', (r: Req) => requests.listRequests(r.ctx, parse(aiRequestListQuery, r.query)));
+  app.get('/api/admin/ai/requests/:id', (r: Req) => requests.getRequest(r.ctx, id(r)));
+  app.get('/api/admin/ai/requests/:id/body', async (r: Req, reply) => {
+    const file = await requests.requestBody(r.ctx, id(r), parse(aiRequestBodyQuery, r.query).part);
+    reply
+      .header('content-type', file.mime)
+      .header('content-disposition', contentDisposition(file.fileName))
+      .header('cache-control', 'private, no-store')
+      .header('x-content-type-options', 'nosniff');
+    return reply.send(file.body);
+  });
+  app.get('/api/admin/ai/providers/:id/summary', (r: Req) => requests.providerSummary(r.ctx, id(r)));
+  app.get('/api/admin/settings/:key', (r: Req) => requests.getSetting(r.ctx, settingKey(r)));
+  app.put('/api/admin/settings/:key', (r: Req) => requests.putSetting(r.ctx, settingKey(r), parse(appSettingInput, r.body).value));
+  app.delete('/api/admin/settings/:key', (r: Req) => requests.deleteSetting(r.ctx, settingKey(r)));
 }

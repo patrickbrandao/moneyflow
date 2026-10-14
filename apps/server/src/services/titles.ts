@@ -469,6 +469,21 @@ export async function deleteTitle(ctx: ServiceContext, id: string, scope: 'this'
   });
 }
 
+/** Arquiva o título e o espelho (some das listas, sem apagar nem cancelar); o de fatura de cartão não. */
+export async function archiveTitle(ctx: ServiceContext, id: string): Promise<TitleDetail> {
+  const title = await loadTitle(ctx.db, id);
+  ctx.access.assertWrite(title.caixaId);
+  if (title.cardInvoiceId) throw unprocessable(strings.errors.cardInvoiceTitleLocked);
+  const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
+  await withTx(ctx, (tx) =>
+    tx
+      .update(titles)
+      .set({ archivedAt: sql`now()` })
+      .where(and(inArray(titles.id, pair), isNull(titles.archivedAt))),
+  );
+  return getTitle(ctx, id);
+}
+
 export async function restoreTitle(ctx: ServiceContext, id: string): Promise<TitleDetail> {
   const title = await loadTitle(ctx.db, id);
   ctx.access.assertWrite(title.caixaId);

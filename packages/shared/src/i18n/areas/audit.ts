@@ -76,6 +76,17 @@ export const auditStrings = {
     card_purchase_attachments: 'Anexos de compra',
     entity_attachments: 'Anexos de entidade',
     statement_csv_mappings: 'Mapeamentos de CSV',
+    ai_tool_kits: 'Kits de ferramentas',
+    ai_tool_kit_tools: 'Tools dos kits',
+    ai_agent_prompt_versions: 'Versões do prompt',
+    user_ai_settings: 'Configurações de IA do usuário',
+    app_settings: 'Configurações do sistema',
+    ai_requests: 'Requisições ao provedor de IA',
+    ai_request_attempts: 'Tentativas das requisições',
+    ai_agent_inferences: 'Inferências do agente',
+    ai_budgets: 'Orçamentos de IA',
+    ai_attachment_derivatives: 'Derivados de anexo (IA)',
+    ai_embedding_indexes: 'Índices de embeddings',
   } as Record<string, string>,
   columns: {
     name: 'Nome',
@@ -139,6 +150,9 @@ export const auditStrings = {
     is_favorite: 'Favorita',
     tag_id: 'Tag',
     color_slot: 'Cor',
+    tool_name: 'Tool',
+    mode: 'Modo',
+    tool_kit_id: 'Kit de ferramentas',
   } as Record<string, string>,
   /** Valores de enum mais comuns nas colunas status/kind/direction. */
   values: {
@@ -159,5 +173,7 @@ export const auditStrings = {
     manual: 'Manual',
     recurrence: 'Série',
     card_invoice: 'Fatura de cartão',
+    allow: 'Executa direto (allow)',
+    ask: 'Pede aprovação (ask)',
   } as Record<string, string>,
 };

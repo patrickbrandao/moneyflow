@@ -40,7 +40,28 @@ export const EXCLUDED_TABLES = new Set([
   'ai_run_events',
   'ai_tool_confirmations',
   'ai_embeddings',
+  // Requisições ao provedor (spec 023): operacionais, com conversas e dados financeiros.
+  'ai_requests',
+  'ai_request_attempts',
+  // Cache dos anexos (descrição, texto do PDF, transcrição, áudio gerado) e os índices de embeddings (spec 024).
+  'ai_attachment_derivatives',
+  'ai_embedding_indexes',
+  // Fluxos autônomos (spec 029): o histórico dos disparos é operacional (como ai_runs); os códigos de pareamento são
+  // de uso único e curtos (só o hash, sem leitor); a dedup do webhook é estado (sem id, já fica fora do catálogo).
+  'ai_scheduled_task_runs',
+  'telegram_pairing_codes',
+  'telegram_updates_seen',
 ]);
+
+/**
+ * Linhas que ficam fora do backup: o áudio gerado de uma mensagem (spec 024)
+ * pertence ao derivado, que é cache e não vai; sem outro vínculo, não vai também.
+ */
+export const ROW_FILTERS: Record<string, SQL> = {
+  attachments: sql`(NOT EXISTS (SELECT 1 FROM ai_attachment_derivatives d WHERE d.result_attachment_id = attachments.id)
+                    OR EXISTS (SELECT 1 FROM attachment_links l
+                                WHERE l.attachment_id = attachments.id AND l.target_kind <> 'ai_message_speech'))`,
+};
 
 /** Tabelas de cada recurso exportável (a primeira é a principal). */
 export const RESOURCE_TABLES: Record<BackupResource, string[]> = {
@@ -57,19 +78,23 @@ export const RESOURCE_TABLES: Record<BackupResource, string[]> = {
   ],
   caixas: ['caixas', 'financial_accounts', 'caixa_members', 'caixa_hidden_categories'],
   'ai-providers': ['ai_providers', 'ai_model_prices'],
-  users: ['users', 'caixa_members', 'user_api_tokens'],
+  users: ['users', 'caixa_members', 'user_api_tokens', 'user_ai_settings'],
 };
 
 /**
  * Segredos que o papel da aplicação não lê: cada um sai por uma função do
  * banco que exige um admin ativo como ator (docs/016).
  */
-export const SECRET_READERS: Record<string, { column: string; fn: string }> = {
-  users: { column: 'password', fn: 'admin_reveal_password' },
-  ai_providers: { column: 'api_key', fn: 'admin_ai_provider_api_key' },
-  mcp_servers: { column: 'secret_headers', fn: 'admin_mcp_server_headers' },
-  message_destinations: { column: 'bot_token', fn: 'admin_message_destination_token' },
-  user_api_tokens: { column: 'token_hash', fn: 'admin_api_token_hash' },
+export const SECRET_READERS: Record<string, { column: string; fn: string }[]> = {
+  users: [{ column: 'password', fn: 'admin_reveal_password' }],
+  ai_providers: [{ column: 'api_key', fn: 'admin_ai_provider_api_key' }],
+  mcp_servers: [{ column: 'secret_headers', fn: 'admin_mcp_server_headers' }],
+  // O destino do Telegram tem dois: o token do bot e o hash do segredo do webhook (spec 029).
+  message_destinations: [
+    { column: 'bot_token', fn: 'admin_message_destination_token' },
+    { column: 'webhook_secret_hash', fn: 'admin_message_destination_webhook_secret' },
+  ],
+  user_api_tokens: [{ column: 'token_hash', fn: 'admin_api_token_hash' }],
 };
 
 /**
@@ -85,6 +110,8 @@ export const NATURAL_KEYS: Record<string, string[][]> = {
   entity_tags: [['lower:name']],
   ai_providers: [['lower:name']],
   ai_agents: [['lower:name']],
+  // O agente aponta para o kit pelo nome (spec 021).
+  ai_tool_kits: [['lower:name']],
   mcp_servers: [['lower:name']],
   message_destinations: [['owner_user_id', 'owner_caixa_id', 'lower:name']],
   ai_model_prices: [['provider_id', 'model', 'valid_from']],
@@ -107,12 +134,17 @@ export const OWNED_BY: Record<string, string[]> = {
   entity_links: ['entity_id', 'related_entity_id'],
   entity_tag_links: ['entity_id'],
   ai_model_prices: ['provider_id'],
+  ai_tool_kit_tools: ['kit_id'],
+  // Agente já cadastrado fica com o histórico dele (spec 022) e com as inferências dele (spec 024).
+  ai_agent_prompt_versions: ['agent_id'],
+  ai_agent_inferences: ['agent_id'],
   agent_mcp_servers: ['agent_id', 'mcp_server_id'],
   message_subscriptions: ['destination_id'],
   message_subscription_caixas: ['subscription_id'],
   caixa_members: ['user_id', 'caixa_id'],
   caixa_hidden_categories: ['caixa_id'],
   user_api_tokens: ['user_id'],
+  user_ai_settings: ['user_id'],
   canvas_node_positions: ['user_id'],
 };
 
@@ -135,15 +167,27 @@ export const DEFERRED_CLUSTER = new Set([
   'contract_renewal_tasks',
   'contract_documents',
   'contract_document_versions',
+  // Prompt do agente (spec 022): a versão 1 sai no COMMIT se o agente não tem versão; o agente e as versões do arquivo
+  // entram juntos, senão o SET CONSTRAINTS de outra unidade criaria a versão 1 antes e a do arquivo seria recusada.
+  'ai_agents',
+  'ai_agent_prompt_versions',
 ]);
 
 /**
  * Tabelas sem coluna `id` (chave primária composta): a linha é identificada
  * pelas colunas da chave (no relatório, `a|b`), e "já cadastrado" = mesma chave
- * depois de traduzir as FKs.
+ * depois de traduzir as FKs. As colunas que são FK levam uuid; as demais, texto
+ * (o nome da tool no kit).
  */
 export const COMPOSITE_KEYS: Record<string, string[]> = {
   entity_tag_links: ['entity_id', 'tag_id'],
+  ai_tool_kit_tools: ['kit_id', 'tool_name'],
+  // Uma linha por usuário (spec 022): a chave é o próprio user_id.
+  user_ai_settings: ['user_id'],
+  // Configurações do sistema (spec 023): a chave é o texto `area.nome`.
+  app_settings: ['key'],
+  // Provedor por inferência do agente (spec 024): a capacidade é texto.
+  ai_agent_inferences: ['agent_id', 'capability'],
 };
 
 /** Colunas que identificam a linha (id ou a chave composta). */
@@ -251,7 +295,9 @@ const LABEL_COLUMNS = [
   'username',
   'title',
   'description',
+  'tool_name',
   'key_value',
+  'key',
   'value',
   'model',
   'pattern',

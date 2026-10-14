@@ -6,8 +6,13 @@ import type { AddressInfo } from 'node:net';
  * Provedor de LLM FALSO para testes (integração da API e e2e): fala o
  * suficiente da Anthropic Messages API (/v1/messages com streaming SSE,
  * /v1/models) e da OpenAI (/v1/chat/completions com streaming, /v1/models,
- * /v1/embeddings) para os SDKs oficiais, apontados por base_url. Nenhuma API
- * real é chamada.
+ * /v1/embeddings com `dimensions`, /v1/audio/transcriptions em multipart e
+ * /v1/audio/speech) para os SDKs oficiais, apontados por base_url. Nenhuma API
+ * real é chamada. Um modelo de embeddings com "768" no nome devolve 768
+ * dimensões (o teste da flag recusa); a transcrição devolve "transcrição de
+ * teste (<n> bytes)" e duration (ou o que estiver em `audioQueue`: texto,
+ * atraso ou erro HTTP); a fala, bytes de um "mp3" falso, ou um WAV de verdade
+ * (silêncio que o navegador toca) com `speechFormat = 'wav'`.
  *
  * O "cérebro" padrão é determinístico, guiado pelo texto do usuário:
  *  - "listar caixas"            → chama a tool list_caixas
@@ -17,9 +22,13 @@ import type { AddressInfo } from 'node:net';
  *  - "devagar"                  → resposta longa e lenta (para testar o "parar")
  *  - resultado de tool          → "Pronto: <resumo do resultado>"
  *  - prompt de leitura de documento / de contrato / classificação / título → JSON ou título de teste
+ *  - descrição de anexo (visão por descrição, spec 024) → "Descrição de teste: …"
  *  - conversão de contrato em markdown → um markdown curto
  *  - qualquer outra coisa       → "Olá! Sou o agente de teste."
- * Os testes podem trocar o cérebro (`brain`) ou enfileirar respostas (`queue`).
+ * Os testes podem trocar o cérebro (`brain`) ou enfileirar respostas (`queue`),
+ * inclusive falhas: `{ status: 429, headers: { 'retry-after': '1' } }` (erro
+ * HTTP com cabeçalhos) e `{ dropAfter: 2 }` (o stream cai depois de 2 pedaços,
+ * com a resposta 200 já enviada) — para as tentativas da spec 023.
  */
 
 export type FakeToolCall = { name: string; input: Record<string, unknown> };
@@ -32,6 +41,10 @@ export type FakeReply = {
   usage?: { input: number; output: number; cacheWrite?: number; cacheRead?: number };
   /** Responde com erro HTTP (ex.: 500, 429). */
   status?: number;
+  /** Cabeçalhos extras da resposta de erro (ex.: retry-after, x-ratelimit-*). */
+  headers?: Record<string, string>;
+  /** Derruba a conexão depois de N pedaços do texto (queda no meio do stream). */
+  dropAfter?: number;
 };
 
 export type NeutralView = {
@@ -45,11 +58,18 @@ export type NeutralView = {
 
 export type FakeCall = { api: 'anthropic' | 'openai'; path: string; headers: Record<string, string | string[] | undefined>; body: any };
 
+/** Resposta enfileirada da transcrição (spec 025): texto, atraso ou falha HTTP. */
+export type FakeAudioReply = { text?: string; delayMs?: number; status?: number };
+
 export type FakeLlm = {
   url: string;
   port: number;
   calls: FakeCall[];
   queue: FakeReply[];
+  /** Próximas respostas de /v1/audio/transcriptions (vazia = a padrão). */
+  audioQueue: FakeAudioReply[];
+  /** Formato da fala: 'mp3' (bytes falsos) ou 'wav' (silêncio tocável). */
+  speechFormat: 'mp3' | 'wav';
   brain: (view: NeutralView) => FakeReply;
   close: () => Promise<void>;
 };
@@ -58,6 +78,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function defaultBrain(view: NeutralView): FakeReply {
   if (/Gere um título curto/.test(view.system)) return { text: 'Conversa de teste' };
+  if (/Descreva o anexo para outro modelo/.test(view.system)) {
+    return { text: view.hasDocument ? 'Descrição de teste: boleto de R$ 123,45 com vencimento em 10/05/2030.' : 'Sem anexo.' };
+  }
   if (/ler o contrato anexado/.test(view.system)) {
     return {
       text: JSON.stringify({
@@ -228,9 +251,15 @@ async function streamAnthropic(res: ServerResponse, body: any, reply: FakeReply)
   let index = 0;
   if (reply.text) {
     send('content_block_start', { type: 'content_block_start', index, content_block: { type: 'text', text: '' } });
+    let sent = 0;
     for (const chunk of split(reply.text, reply.chunks ?? 3)) {
       if (res.destroyed) return;
+      if (reply.dropAfter !== undefined && sent >= reply.dropAfter) {
+        res.destroy();
+        return;
+      }
       send('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'text_delta', text: chunk } });
+      sent += 1;
       if (reply.delayMs) await sleep(reply.delayMs);
     }
     send('content_block_stop', { type: 'content_block_stop', index });
@@ -267,9 +296,15 @@ async function streamOpenAi(res: ServerResponse, body: any, reply: FakeReply) {
       `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model: body.model, choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`,
     );
   chunk({ role: 'assistant', content: '' });
+  let sent = 0;
   for (const piece of split(reply.text ?? '', reply.chunks ?? 3)) {
     if (res.destroyed) return;
+    if (reply.dropAfter !== undefined && sent >= reply.dropAfter) {
+      res.destroy();
+      return;
+    }
     chunk({ content: piece });
+    sent += 1;
     if (reply.delayMs) await sleep(reply.delayMs);
   }
   (reply.toolCalls ?? []).forEach((call, index) => {
@@ -309,11 +344,60 @@ export function fakeEmbedding(text: string): number[] {
   return out.slice(0, 1536);
 }
 
+/** WAV PCM mono de 8 kHz e 8 bits, em silêncio, com a duração pedida (tocável pelo navegador). */
+export function silentWav(ms: number): Buffer {
+  const rate = 8000;
+  const samples = Math.max(1, Math.round((rate * ms) / 1000));
+  const out = Buffer.alloc(44 + samples, 0x80);
+  out.write('RIFF', 0, 'ascii');
+  out.writeUInt32LE(36 + samples, 4);
+  out.write('WAVE', 8, 'ascii');
+  out.write('fmt ', 12, 'ascii');
+  out.writeUInt32LE(16, 16);
+  out.writeUInt16LE(1, 20);
+  out.writeUInt16LE(1, 22);
+  out.writeUInt32LE(rate, 24);
+  out.writeUInt32LE(rate, 28);
+  out.writeUInt16LE(1, 32);
+  out.writeUInt16LE(8, 34);
+  out.write('data', 36, 'ascii');
+  out.writeUInt32LE(samples, 40);
+  return out;
+}
+
+/** Campos de um multipart/form-data (arquivos viram { fileName, contentType, bytes }). */
+function parseMultipart(raw: Buffer, contentType: string): Record<string, unknown> {
+  const boundary = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
+  if (!boundary) return {};
+  const marker = `--${boundary[1] ?? boundary[2]}`;
+  const out: Record<string, unknown> = {};
+  for (const part of raw.toString('latin1').split(marker)) {
+    const split = part.indexOf('\r\n\r\n');
+    if (split === -1) continue;
+    const head = part.slice(0, split);
+    const body = part.slice(split + 4).replace(/\r\n$/, '');
+    const name = /name="([^"]+)"/.exec(head)?.[1];
+    if (!name) continue;
+    const fileName = /filename="([^"]*)"/.exec(head)?.[1];
+    if (fileName !== undefined) {
+      out[name] = {
+        fileName,
+        contentType: /content-type:\s*([^\r\n]+)/i.exec(head)?.[1] ?? null,
+        bytes: Buffer.byteLength(body, 'latin1'),
+      };
+    } else out[name] = Buffer.from(body, 'latin1').toString('utf8');
+  }
+  return out;
+}
+
 async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
-  const raw = Buffer.concat(chunks).toString('utf8');
-  return raw ? JSON.parse(raw) : {};
+  const raw = Buffer.concat(chunks);
+  const type = String(req.headers['content-type'] ?? '');
+  if (/multipart\/form-data/i.test(type)) return parseMultipart(raw, type);
+  const text = raw.toString('utf8');
+  return text ? JSON.parse(text) : {};
 }
 
 export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm> {
@@ -322,20 +406,26 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
     port: 0,
     calls: [],
     queue: [],
+    audioQueue: [],
+    speechFormat: 'mp3',
     brain: defaultBrain,
     close: async () => {},
   };
   const server: Server = createServer(async (req, res) => {
     try {
-      const path = (req.url ?? '').split('?')[0]!;
+      let path = (req.url ?? '').split('?')[0]!;
+      // Prefixo /nolist: um compatível sem listagem de modelos (GET /v1/models dá 404; o resto funciona).
+      const noList = path.startsWith('/nolist/');
+      if (noList) path = path.slice('/nolist'.length);
       const body = req.method === 'POST' ? await readBody(req) : {};
-      const json = (status: number, data: unknown) => {
-        res.writeHead(status, { 'content-type': 'application/json' });
+      const json = (status: number, data: unknown, headers: Record<string, string> = {}) => {
+        res.writeHead(status, { 'content-type': 'application/json', ...headers });
         res.end(JSON.stringify(data));
       };
       if (req.method === 'GET' && path === '/v1/models') {
         const anthropic = 'anthropic-version' in req.headers;
         fake.calls.push({ api: anthropic ? 'anthropic' : 'openai', path, headers: req.headers, body });
+        if (noList) return json(404, { type: 'error', error: { type: 'not_found_error', message: 'Not found' } });
         return anthropic
           ? json(200, {
               data: ['claude-sonnet-5-5', 'claude-opus-5-5'].map((id) => ({
@@ -356,12 +446,40 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
       if (req.method === 'POST' && path === '/v1/embeddings') {
         fake.calls.push({ api: 'openai', path, headers: req.headers, body });
         const inputs: string[] = Array.isArray(body.input) ? body.input : [body.input];
+        // Modelo com "768" no nome: devolve 768 dimensões (o MoneyFlow exige 1536).
+        const size = /768/.test(String(body.model)) ? 768 : 1536;
         return json(200, {
           object: 'list',
           model: body.model,
-          data: inputs.map((text, index) => ({ object: 'embedding', index, embedding: fakeEmbedding(String(text)) })),
+          data: inputs.map((text, index) => ({
+            object: 'embedding',
+            index,
+            embedding: fakeEmbedding(`${body.model}|${String(text)}`).slice(0, size),
+          })),
           usage: { prompt_tokens: inputs.join(' ').length, total_tokens: inputs.join(' ').length },
         });
+      }
+      if (req.method === 'POST' && path === '/v1/audio/transcriptions') {
+        fake.calls.push({ api: 'openai', path, headers: req.headers, body });
+        const file = body.file as { bytes?: number } | undefined;
+        const reply = fake.audioQueue.shift() ?? {};
+        if (reply.delayMs) await sleep(reply.delayMs);
+        if (reply.status && reply.status >= 400) return json(reply.status, { error: { message: 'falha simulada na transcrição' } });
+        return json(200, {
+          text: reply.text ?? `transcrição de teste (${file?.bytes ?? 0} bytes)`,
+          usage: { type: 'duration', seconds: 1.5 },
+        });
+      }
+      if (req.method === 'POST' && path === '/v1/audio/speech') {
+        fake.calls.push({ api: 'openai', path, headers: req.headers, body });
+        if (fake.speechFormat === 'wav') {
+          res.writeHead(200, { 'content-type': 'audio/wav' });
+          res.end(silentWav(4000));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'audio/mpeg' });
+        res.end(Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xfb, 0x90, 0x00]));
+        return;
       }
       const anthropic = req.method === 'POST' && path === '/v1/messages';
       const openai = req.method === 'POST' && path === '/v1/chat/completions';
@@ -373,6 +491,7 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
         return json(
           reply.status,
           anthropic ? { type: 'error', error: { type: 'api_error', message: 'falha simulada' } } : { error: { message: 'falha simulada' } },
+          reply.headers,
         );
       }
       if (anthropic) await streamAnthropic(res, body, reply);

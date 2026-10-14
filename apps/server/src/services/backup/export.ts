@@ -19,6 +19,7 @@ import {
   keyColumns,
   loadCatalog,
   RESOURCE_TABLES,
+  ROW_FILTERS,
   SECRET_READERS,
   uuidArray,
 } from './catalog';
@@ -33,6 +34,21 @@ import {
  */
 
 const BATCH = 500;
+
+/** Carimbo do nome do arquivo, no fuso de São Paulo (AAAAMMDD-HHMM). */
+export function backupStamp() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '00';
+  return `${get('year')}${get('month')}${get('day')}-${get('hour')}${get('minute')}`;
+}
 
 export async function schemaVersion(db: Executor): Promise<string | null> {
   const result = await db.execute<{ v: string | null }>(sql`SELECT app_schema_version() AS v`);
@@ -57,13 +73,15 @@ async function fetchRows(
   if (!meta) return [];
   const keys = keyColumns(table);
   const where: SQL[] = [];
+  if (ROW_FILTERS[table]) where.push(ROW_FILTERS[table]);
   if (options.ids) where.push(sql`id = ANY(${uuidArray(options.ids)})`);
   if (options.after) {
-    // Paginação pela chave (id, ou a chave composta como tupla).
+    // Paginação pela chave (id, ou a chave composta como tupla; as colunas que não são FK são texto).
     const after = options.after;
+    const uuidKeys = new Set(['id', ...meta.fks.map((fk) => fk.refColumn)]);
     where.push(
       sql`(${columnList(keys)}) > (${sql.join(
-        keys.map((k) => sql`${String(after[k])}::uuid`),
+        keys.map((k) => (uuidKeys.has(k) ? sql`${String(after[k])}::uuid` : sql`${String(after[k])}::text`)),
         sql`, `,
       )})`,
     );
@@ -74,8 +92,8 @@ async function fetchRows(
              ${where.length ? sql`WHERE ${sql.join(where, sql` AND `)}` : sql``}
              ORDER BY ${columnList(keys)} ${options.limit ? sql`LIMIT ${options.limit}` : sql``}) backup_row`);
   const rows = result.rows.map((r) => JSON.parse(r.j) as BackupRow);
-  const secret = SECRET_READERS[table];
-  if (options.withSecrets && secret && rows.length > 0) {
+  const secrets = options.withSecrets && rows.length > 0 ? (SECRET_READERS[table] ?? []) : [];
+  for (const secret of secrets) {
     const values = await tx.execute<{ id: string; s: unknown }>(sql`
       SELECT id::text AS id, ${sql.raw(secret.fn)}(id, ${actorId}::uuid) AS s
         FROM ${sql.identifier(table)} WHERE id = ANY(${uuidArray(rows.map((r) => r.id as string))})`);

@@ -1,14 +1,13 @@
 import { type Database, userColumns, users } from '@moneyflow/db';
 import {
   type AgentParams,
+  type AiUsagePurpose,
   type AssistantBlock,
   balanceToolUses,
   blocksText,
-  formatDate,
-  type ScreenContext,
+  type NeutralMessage,
   type ToolResultBlock,
   t,
-  todayIso,
 } from '@moneyflow/shared';
 import { eq, sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
@@ -16,8 +15,13 @@ import { type Actor, loadAccess } from '../authz/access';
 import type { Config } from '../config';
 import type { ServiceContext } from '../context';
 import { findPgError } from '../errors';
-import { applyFlowResult, FLOW_PURPOSES, type FlowPurpose, flowSystemPrompt } from './flows';
-import { createLlmClient, type LlmAttachment, type LlmClient, LlmError, type LlmResponse } from './llm';
+import { exceededBudget } from '../services/ai-budgets';
+import { notifyAwaitingApproval } from '../services/autonomous-notify';
+import { deliverRunToTelegram, startTyping, telegramOrigin } from '../services/telegram-inbound';
+import { applyFlowResult, isJsonFlow, isToolFlow } from './flows';
+import { createLlmClient, type LlmClient, LlmError, type LlmResponse } from './llm';
+import { assemblePrompt, loadPromptInputs } from './prompt';
+import { RunAttachments } from './run-attachments';
 import {
   appendEvent,
   insertMessage,
@@ -25,6 +29,7 @@ import {
   loadMessages,
   loadRun,
   pendingToolUses,
+  preparedResults,
   type RunRow,
   runDto,
   toNeutral,
@@ -38,7 +43,7 @@ import { RunTools, toolErrorMessage } from './tools-runtime';
  *  - heartbeat a cada poucos segundos (renova a reserva e descobre o pedido de
  *    cancelamento; perder a reserva = parar sem gravar mais nada);
  *  - eventos de streaming em ai_run_events (NOTIFY → SSE da API);
- *  - tools de escrita com confirmação viram ai_tool_confirmations e a execução
+ *  - tools em ask no kit do agente (spec 021) e as escritas de MCP viram ai_tool_confirmations e a execução
  *    passa a awaiting_confirmation; decididas, ela volta à fila e este mesmo
  *    loop retoma executando as aprovadas e devolvendo a recusa das rejeitadas;
  *  - escritas de negócio com o ator agent + app.agent_run_id (ServiceContext).
@@ -49,6 +54,8 @@ export type ClaimedRun = RunRow & { lock_token: string };
 
 const HEARTBEAT_MS = 3_000;
 const DEFAULT_MAX_ITERATIONS = 20;
+/** Voltas mínimas da conciliação com IA (spec 029): uma ou mais tools por linha do lote. */
+const RECONCILE_MIN_ITERATIONS = 60;
 const FLUSH_MS = 120;
 
 class LockLost extends Error {}
@@ -59,8 +66,6 @@ type AgentRow = {
   name: string;
   system_prompt: string;
   params: AgentParams;
-  enabled_tools: string[] | null;
-  require_write_confirmation: boolean;
 };
 
 type ConversationRow = {
@@ -71,24 +76,27 @@ type ConversationRow = {
   purpose: string;
 };
 
-/** Prompt de sistema: estável (cacheável) e volátil (data, usuário, tela). */
-export function buildSystemPrompt(
-  agent: Pick<AgentRow, 'system_prompt'>,
-  actor: Actor,
-  screen: Record<string, unknown> | null,
-  purpose: FlowPurpose | null,
-) {
-  const stable = [t.agents.systemPrompt.base, agent.system_prompt.trim(), purpose ? flowSystemPrompt(purpose) : '']
-    .filter(Boolean)
-    .join('\n\n');
-  const volatile = [t.agents.systemPrompt.today(formatDate(todayIso()), actor.username)];
-  if (screen && Object.keys(screen).length > 0 && !purpose) {
-    volatile.push(`${t.agents.systemPrompt.screen}\n${JSON.stringify(screen as ScreenContext)}`);
+/**
+ * Roda a execução reservada. Vinda do Telegram (spec 029): "digitando…"
+ * enquanto roda e, ao parar (concluída, falhou ou esperando aprovação), a
+ * resposta final ou os botões Aprovar/Recusar no chat.
+ */
+export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
+  const origin = await telegramOrigin(deps.db, claimed.id).catch(() => null);
+  const stopTyping = origin ? await startTyping(deps.db, deps.config, origin).catch(() => () => {}) : () => {};
+  try {
+    await runLoop(deps, claimed);
+  } finally {
+    stopTyping();
   }
-  return { stable, volatile: volatile.join('\n') };
+  if (origin) {
+    await deliverRunToTelegram(deps, claimed.id).catch((error) =>
+      deps.log.warn({ err: error, runId: claimed.id }, 'agente: resposta ao Telegram falhou'),
+    );
+  }
 }
 
-export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
+async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
   const { db, log } = deps;
   const runId = claimed.id;
   const token = claimed.lock_token;
@@ -121,7 +129,11 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
   try {
     const loaded = await loadContext(db, claimed);
     const { agent, conversation, actor } = loaded;
-    const purpose = FLOW_PURPOSES.includes(conversation.purpose as FlowPurpose) ? (conversation.purpose as FlowPurpose) : null;
+    // Fluxo JSON (leitura de documento, classificação…): sem tools, uma volta. Fluxo com tools (tarefa agendada,
+    // conciliação, spec 029): o loop normal com o kit do agente; a conciliação só com as tools internas.
+    const purpose = isJsonFlow(conversation.purpose) ? conversation.purpose : null;
+    const toolFlow = isToolFlow(conversation.purpose) ? conversation.purpose : null;
+    const usagePurpose: AiUsagePurpose = purpose ?? toolFlow ?? 'chat';
     const access = await loadAccess(db, actor);
     const ctx: ServiceContext = { db, config: deps.config, access, actorKind: 'agent', agentRunId: runId };
 
@@ -129,31 +141,82 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
       sql`SELECT kind, base_url, api_key, model FROM ai_run_provider_credentials(${runId}::uuid)`,
     );
     const cred = creds.rows[0]!;
-    const llm = createLlmClient({ kind: cred.kind, baseUrl: cred.base_url, apiKey: cred.api_key });
+    const flags = await db.execute<{ log_bodies: boolean; prompt_cache_enabled: boolean; thinking_enabled: boolean }>(
+      sql`SELECT log_bodies, prompt_cache_enabled, thinking_enabled FROM ai_providers WHERE id = ${claimed.provider_id}`,
+    );
+    const flag = flags.rows[0];
+    // Cada chamada vira uma requisição registrada (spec 023), com as tentativas do invólucro; o banco completa os vínculos pela execução.
+    // Cache de prompt e raciocínio seguem os interruptores do provedor (spec 024).
+    const llm = createLlmClient(
+      {
+        kind: cred.kind,
+        baseUrl: cred.base_url,
+        apiKey: cred.api_key,
+        promptCache: flag?.prompt_cache_enabled ?? true,
+        thinking: flag?.thinking_enabled ?? true,
+      },
+      {
+        db,
+        runId,
+        logBodies: Boolean(flag?.log_bodies),
+        maxAttempts: deps.config.aiRequestMaxAttempts,
+        backoffMs: deps.config.aiRequestBackoffMs,
+        log,
+      },
+    );
 
-    // Fluxos (leitura de documento, sugestões de classificação) rodam sem tools.
+    // Tools internas pelo kit do agente (spec 021); fluxos JSON (leitura de documento, sugestões de classificação) rodam
+    // sem tools; a conciliação com IA (spec 029) só com as internas.
     tools = await RunTools.forAgent(
       db,
-      { id: agent.id, enabledTools: purpose ? [] : agent.enabled_tools },
+      agent.id,
       async (serverId) => {
         const r = await db.execute<{ headers: Record<string, string> }>(
           sql`SELECT ai_run_mcp_headers(${runId}::uuid, ${serverId}::uuid) AS headers`,
         );
         return r.rows[0]?.headers ?? {};
       },
-      { mcp: !purpose },
+      { internal: !purpose, mcp: !purpose && toolFlow !== 'reconcile_statement', isAdmin: actor.role === 'admin' },
     );
 
+    // Instruções do usuário, contexto automático e instructions dos MCP: montados uma vez por execução (spec 022).
+    const promptInputs = await loadPromptInputs(db, access, agent, purpose ?? toolFlow);
+
+    // Imagens e PDFs pela visão do agente: direta, por descrição ou pela camada de texto (spec 024).
+    const attachments = new RunAttachments(deps, {
+      runId,
+      conversationId: conversation.id,
+      agentId: agent.id,
+      userId: actor.id,
+      textProviderId: claimed.provider_id,
+      signal: abort.signal,
+    });
+
     await appendEvent(db, runId, { type: 'status', status: 'running' });
-    const maxIterations = purpose ? 1 : (agent.params.max_tool_iterations ?? DEFAULT_MAX_ITERATIONS);
+    const maxIterations = purpose
+      ? 1
+      : toolFlow === 'reconcile_statement'
+        ? // Um lote tem muitas linhas: a conciliação ganha voltas a mais que a conversa.
+          Math.max(agent.params.max_tool_iterations ?? DEFAULT_MAX_ITERATIONS, RECONCILE_MIN_ITERATIONS)
+        : (agent.params.max_tool_iterations ?? DEFAULT_MAX_ITERATIONS);
 
     for (;;) {
       await checkpoint();
+      // O kit vale na próxima chamada: relido a cada volta (lista e modos), sem reabrir as sessões MCP.
+      await tools.refreshInternal(db);
       const rows = await loadMessages(db, conversation.id);
       const pending = pendingToolUses(rows);
       if (pending.length > 0) {
-        const outcome = await resolvePending(ctx, tools, agent, runId, token, conversation.id, pending);
-        if (outcome === 'awaiting') return;
+        const outcome = await resolvePending(ctx, tools, runId, token, conversation.id, pending);
+        if (outcome === 'awaiting') {
+          // Tarefa agendada e conciliação (spec 029): o sino avisa que há ação esperando aprovação.
+          if (toolFlow) {
+            await notifyAwaitingApproval(db, deps.config, runId).catch((error) =>
+              log.warn({ err: error, runId }, 'agente: aviso de aprovação pendente falhou'),
+            );
+          }
+          return;
+        }
         continue;
       }
       const iterations = rows.filter((m) => m.role === 'assistant' && m.run_id === runId).length;
@@ -163,16 +226,36 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
         return;
       }
 
-      const system = buildSystemPrompt(agent, actor, conversation.screen_context, purpose);
+      // Orçamento do mês (spec 028), antes de cada chamada: estourado no meio, termina failed com budget_exceeded
+      // guardando o que já foi feito (o admin que aciona fica isento).
+      const blocked = await exceededBudget(db, actor, agent.id, conversation.purpose !== 'chat');
+      if (blocked) {
+        const message = t.agents.errors.budgetExceeded(blocked);
+        await appendEvent(db, runId, { type: 'error', message, code: 'budget_exceeded' });
+        await finish(db, runId, token, 'failed', message);
+        return;
+      }
+
+      const system = assemblePrompt(promptInputs, { purpose: purpose ?? toolFlow, screen: toolFlow ? null : conversation.screen_context });
+      const history = balanceToolUses(toNeutral(rows));
+      // MCP no modo user: bloco do papel user no início do histórico enviado, nunca gravado em ai_messages.
+      const messages: NeutralMessage[] = system.mcpUserBlock
+        ? [{ role: 'user', content: [{ type: 'text', text: system.mcpUserBlock }] }, ...history]
+        : history;
+      await attachments.prepare(messages);
+      if (lost) throw new LockLost();
       const response = await callModel(db, llm, runId, {
         model: claimed.model,
         system: system.stable,
+        systemUser: system.user,
         systemVolatile: system.volatile,
-        messages: balanceToolUses(toNeutral(rows)),
+        messages,
         tools: tools.list,
         params: agent.params,
-        loadAttachment: (attachmentId) => loadAttachment(db, conversation.id, attachmentId),
+        loadAttachment: attachments.load,
         signal: abort.signal,
+        operation: 'chat',
+        purpose: usagePurpose,
       });
       if (lost) throw new LockLost();
 
@@ -180,9 +263,9 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
       await db.transaction(async (tx) => {
         const message = await insertMessage(tx, conversation.id, 'assistant', content, runId);
         await tx.execute(sql`
-          INSERT INTO ai_usage (run_id, message_id, purpose, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens)
-          VALUES (${runId}, ${message.id}, ${purpose ?? 'chat'}, ${response.usage.inputTokens}, ${response.usage.outputTokens},
-                  ${response.usage.cacheWriteTokens}, ${response.usage.cacheReadTokens})`);
+          INSERT INTO ai_usage (run_id, message_id, purpose, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, request_id)
+          VALUES (${runId}, ${message.id}, ${usagePurpose}, ${response.usage.inputTokens}, ${response.usage.outputTokens},
+                  ${response.usage.cacheWriteTokens}, ${response.usage.cacheReadTokens}, ${response.requestId})`);
         await appendEvent(tx, runId, { type: 'message', message: { ...messageOut(message), usage: [] } });
         const run = await loadRun(tx, runId);
         if (run) await appendEvent(tx, runId, { type: 'usage', run: runDto(run) });
@@ -216,7 +299,7 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
       const rows = await loadMessages(db, conversation.id);
       const last = [...rows].reverse().find((m) => m.role === 'assistant' && m.run_id === runId);
       await applyFlowResult(ctx, purpose, conversation.screen_context ?? {}, last ? blocksText(last.content) : '');
-    } else if (conversation.title === null && conversation.title_source === 'auto') {
+    } else if (!toolFlow && conversation.title === null && conversation.title_source === 'auto') {
       await autoTitle(db, llm, runId, conversation.id, claimed.model).catch((error) =>
         log.warn({ err: error, runId }, 'agente: título automático falhou'),
       );
@@ -264,7 +347,7 @@ function messageOut(m: Awaited<ReturnType<typeof insertMessage>>) {
 
 async function loadContext(db: Database, run: RunRow) {
   const agentResult = await db.execute<AgentRow>(sql`
-    SELECT id, name, system_prompt, params, enabled_tools, require_write_confirmation FROM ai_agents WHERE id = ${run.agent_id}`);
+    SELECT id, name, system_prompt, params FROM ai_agents WHERE id = ${run.agent_id}`);
   const conversationResult = await db.execute<ConversationRow>(
     sql`SELECT id, title, title_source, screen_context, purpose FROM ai_conversations WHERE id = ${run.conversation_id}`,
   );
@@ -275,18 +358,6 @@ async function loadContext(db: Database, run: RunRow) {
     conversation: conversationResult.rows[0]!,
     actor: { id: user.id, username: user.username, email: user.email, role: user.role as Actor['role'], isActive: user.isActive } as Actor,
   };
-}
-
-async function loadAttachment(db: Database, conversationId: string, attachmentId: string): Promise<LlmAttachment | null> {
-  const result = await db.execute<{ file_name: string; mime_type: string; content: Buffer }>(sql`
-    SELECT a.file_name, a.mime_type, a.content
-      FROM attachments a
-      JOIN ai_message_attachments ma ON ma.attachment_id = a.id
-      JOIN ai_messages m ON m.id = ma.message_id
-     WHERE a.id = ${attachmentId} AND m.conversation_id = ${conversationId}
-     LIMIT 1`);
-  const row = result.rows[0];
-  return row ? { fileName: row.file_name, mime: row.mime_type, data: Buffer.from(row.content) } : null;
 }
 
 /** Chama o modelo com streaming: deltas de texto viram eventos (agrupados a cada ~120 ms). */
@@ -322,9 +393,14 @@ async function callModel(db: Database, llm: LlmClient, runId: string, request: P
   }
 }
 
-async function insertToolResults(db: Database, runId: string, conversationId: string, results: ToolResultBlock[]) {
+/** Grava os resultados das tools; os arquivos gerados (producesFile) viram anexos desta mensagem da sessão (spec 027). */
+async function insertToolResults(db: Database, runId: string, conversationId: string, results: ToolResultBlock[], files: string[] = []) {
   await db.transaction(async (tx) => {
     const message = await insertMessage(tx, conversationId, 'tool', results, runId);
+    for (const attachmentId of files) {
+      await tx.execute(sql`
+        INSERT INTO ai_message_attachments (message_id, attachment_id) VALUES (${message.id}, ${attachmentId}) ON CONFLICT DO NOTHING`);
+    }
     await appendEvent(tx, runId, { type: 'message', message: { ...messageOut(message), usage: [] } });
   });
 }
@@ -336,7 +412,6 @@ async function insertToolResults(db: Database, runId: string, conversationId: st
 async function resolvePending(
   ctx: ServiceContext,
   tools: RunTools,
-  agent: AgentRow,
   runId: string,
   token: string,
   conversationId: string,
@@ -354,7 +429,7 @@ async function resolvePending(
       preErrors.set(use.id, t.agents.errors.toolInvalidInput('JSON inválido'));
       continue;
     }
-    if (!tools.requiresConfirmation(tool, agent.require_write_confirmation) || confirmations.has(use.id)) continue;
+    if (!tools.requiresConfirmation(tool) || confirmations.has(use.id)) continue;
     try {
       toConfirm.push({ use, preview: await tools.preview(ctx, tool, use.input) });
     } catch (error) {
@@ -386,33 +461,46 @@ async function resolvePending(
   const started = await db.execute<{ tool_use_id: string }>(sql`
     SELECT payload ->> 'toolUseId' AS tool_use_id FROM ai_run_events WHERE run_id = ${runId} AND event_type = 'tool_start'`);
   const alreadyStarted = new Set(started.rows.map((r) => r.tool_use_id));
+  // Tools com segredo (spec 027): a API já as executou na decisão; aqui só o resultado gravado.
+  const prepared = await preparedResults(db, runId);
 
   const results: ToolResultBlock[] = [];
+  const files: string[] = [];
   for (const use of pending) {
     const tool = tools.resolve(use.name);
     const confirmation = confirmations.get(use.id);
-    let outcome: { content: string; isError: boolean; summary: string };
+    const secret = tool?.source === 'internal' && Boolean(tool.def.secrets?.length);
+    let outcome: { content: string; isError: boolean; summary: string; files?: string[] };
+    let announce = true;
     if (!tool) outcome = errorOutcome(t.agents.errors.toolUnknown(use.name));
     else if (preErrors.has(use.id)) outcome = errorOutcome(preErrors.get(use.id)!);
     else if (confirmation && confirmation.status === 'rejected')
       outcome = errorOutcome(t.agents.errors.confirmationRejected(confirmation.reason));
     else if (confirmation && confirmation.status === 'expired') outcome = errorOutcome(t.agents.errors.confirmationExpired);
-    else if (!confirmation && tool.write && alreadyStarted.has(use.id))
+    else if (secret) {
+      // O worker nunca executa uma tool de segredo: sem o resultado da decisão, pede o console.
+      const ready = prepared.get(use.id);
+      outcome = ready ?? errorOutcome(t.agents.errors.secretNeedsConsole);
+      announce = !ready;
+    } else if (!confirmation && tool.write && alreadyStarted.has(use.id))
       outcome = errorOutcome('A execução foi interrompida durante esta ação; confira o resultado antes de repetir.');
     else {
       await appendEvent(db, runId, { type: 'tool_start', toolUseId: use.id, name: use.name, title: tool.title });
       outcome = await tools.execute(ctx, tool, use.input, { toolUseId: use.id, runId });
     }
-    await appendEvent(db, runId, {
-      type: 'tool_result',
-      toolUseId: use.id,
-      name: use.name,
-      isError: outcome.isError,
-      summary: outcome.summary,
-    });
+    if (announce) {
+      await appendEvent(db, runId, {
+        type: 'tool_result',
+        toolUseId: use.id,
+        name: use.name,
+        isError: outcome.isError,
+        summary: outcome.summary,
+      });
+    }
+    files.push(...(outcome.files ?? []));
     results.push({ type: 'tool_result', tool_use_id: use.id, content: outcome.content, ...(outcome.isError ? { is_error: true } : {}) });
   }
-  await insertToolResults(db, runId, conversationId, results);
+  await insertToolResults(db, runId, conversationId, results, files);
   return 'done';
 }
 
@@ -469,11 +557,13 @@ async function autoTitle(db: Database, llm: LlmClient, runId: string, conversati
     tools: [],
     params: { max_tokens: 1024, reasoning_effort: 'low' },
     loadAttachment: async () => null,
+    operation: 'title',
+    purpose: 'title',
   });
   await db.execute(sql`
-    INSERT INTO ai_usage (run_id, purpose, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens)
+    INSERT INTO ai_usage (run_id, purpose, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, request_id)
     VALUES (${runId}, 'title', ${response.usage.inputTokens}, ${response.usage.outputTokens}, ${response.usage.cacheWriteTokens},
-            ${response.usage.cacheReadTokens})`);
+            ${response.usage.cacheReadTokens}, ${response.requestId})`);
   const title = blocksText(response.content)
     .replace(/["'«»“”]/g, '')
     .replace(/\s+/g, ' ')

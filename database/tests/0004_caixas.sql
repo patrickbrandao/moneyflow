@@ -9,10 +9,10 @@ SELECT has_table('caixa_members');
 SELECT has_table('financial_accounts');
 SELECT columns_are('caixas', ARRAY['id', 'name', 'kind', 'holder_entity_id', 'is_primary', 'description',
                                    'default_payer_caixa_id', 'credit_limit_cents', 'closing_day', 'due_day',
-                                   'card_last4', 'archived_at', 'created_at', 'updated_at']);
+                                   'card_last4', 'archived_at', 'created_at', 'updated_at', 'ai_auto_reconcile']);
 SELECT columns_are('financial_accounts', ARRAY['id', 'caixa_id', 'kind', 'name', 'bank_code', 'ispb', 'branch',
                                                'account_number', 'opening_balance_cents', 'opening_date',
-                                               'archived_at', 'created_at', 'updated_at']);
+                                               'archived_at', 'created_at', 'updated_at', 'ai_auto_reconcile']);
 SELECT col_type_is('caixas', 'credit_limit_cents', 'bigint');
 SELECT col_type_is('financial_accounts', 'opening_balance_cents', 'bigint');
 SELECT fk_ok('caixas', 'holder_entity_id', 'entities', 'id');

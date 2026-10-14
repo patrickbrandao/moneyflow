@@ -8,7 +8,8 @@ SELECT has_table(t) FROM unnest(ARRAY['attachments', 'title_attachments', 'settl
                                       'movement_attachments', 'entity_attachments']) t;
 SELECT has_view('attachment_links');
 SELECT columns_are('attachments', ARRAY['id', 'file_name', 'mime_type', 'content', 'size_bytes', 'sha256',
-                                        'uploaded_by_user_id', 'created_at', 'updated_at']);
+                                        'uploaded_by_user_id', 'created_at', 'updated_at',
+                                        'duration_ms', 'page_count']);  -- 0042
 SELECT col_type_is('attachments', 'content', 'bytea');
 SELECT col_is_pk('attachments', 'id');
 SELECT fk_ok('attachments', 'uploaded_by_user_id', 'users', 'id');

@@ -21,6 +21,16 @@ x-app: &app
     # TELEGRAM_API_BASE=http://host.docker.internal:18081 docker compose up -d
     TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-https://api.telegram.org}
     APP_URL: ${APP_URL:-}
+    # Telegram de entrada (spec 029): URL pública HTTPS da API para o webhook (app_settings telegram.public_base_url vence).
+    PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    # Requisições ao provedor de IA (spec 023): tentativas por chamada e a retenção padrão (dias), na API e no worker.
+    AI_REQUEST_MAX_ATTEMPTS: ${AI_REQUEST_MAX_ATTEMPTS:-3}
+    AI_REQUEST_RETENTION_DAYS: ${AI_REQUEST_RETENTION_DAYS:-30}
+    # Chat multimídia (spec 025): espera da execução pelas transcrições pendentes (ms).
+    AI_TRANSCRIPTION_TIMEOUT_MS: ${AI_TRANSCRIPTION_TIMEOUT_MS:-120000}
+    # Limite de execuções de IA por minuto por usuário (spec 028); o valor salvo na tela (app_settings) vence.
+    AI_RUNS_PER_MINUTE: ${AI_RUNS_PER_MINUTE:-10}
+    AI_FLOW_RUNS_PER_MINUTE: ${AI_FLOW_RUNS_PER_MINUTE:-30}
   # host.docker.internal também no Linux (a Bot API falsa dos e2e roda no host).
   extra_hosts:
     - "host.docker.internal:host-gateway"

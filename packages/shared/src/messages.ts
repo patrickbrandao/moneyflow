@@ -121,6 +121,8 @@ export const dedupKeys = {
   contractEnding: (cycleId: string, daysBefore: number) => `contract_ending:${cycleId}:D-${daysBefore}`,
   contractRenewal: (taskId: string, day: string) => `contract_renewal_pending:${taskId}:${day}`,
   contractReadjustment: (contractId: string, date: string) => `contract_readjustment:${contractId}:${date}`,
+  // Orçamento de IA (spec 028): por orçamento, mês (AAAA-MM) e limiar.
+  aiBudgetAlert: (budgetId: string, month: string, threshold: number) => `ai_budget_alert:${budgetId}:${month.slice(0, 7)}:${threshold}`,
 };
 
 /**
@@ -278,7 +280,7 @@ export function testMessage(destinationName: string, at: string): MessagePayload
 
 /** Eventos de agente (F4): título e texto livres, sempre escapados. */
 export function agentMessage(
-  kind: 'agent_completed' | 'agent_message',
+  kind: 'agent_completed' | 'agent_message' | 'ai_awaiting_approval',
   title: string | null,
   text: string,
   url?: string | null,
@@ -288,6 +290,24 @@ export function agentMessage(
     escapeHtml(text),
     linkLine(url) && '',
     linkLine(url),
+  ]);
+}
+
+/** Orçamento de IA (spec 028): aviso no percentual e a 100% (bloqueio). */
+export function budgetAlertMessage(input: {
+  scope: string;
+  threshold: number;
+  spent: string;
+  limit: string;
+  percent: string;
+  url?: string | null;
+}): MessagePayload {
+  return payload([
+    b(T.budgetAlert(input.scope, input.threshold)),
+    escapeHtml(T.budgetAlertDetail(input.spent, input.limit, input.percent)),
+    input.threshold >= 100 && escapeHtml(T.budgetBlocked),
+    linkLine(input.url) && '',
+    linkLine(input.url),
   ]);
 }
 

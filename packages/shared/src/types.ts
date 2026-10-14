@@ -169,6 +169,8 @@ export type AccountRow = {
   archivedAt: string | null;
   balanceCents: number;
   canWrite: boolean;
+  /** "Conciliar com IA ao importar" (spec 029). */
+  aiAutoReconcile: boolean;
 };
 
 export type MemberRow = { id: string; userId: string; username: string; email: string; isActive: boolean; role: CaixaRole };
@@ -181,6 +183,8 @@ export type CardSettings = {
   closingDay: number;
   dueDay: number;
   cardLast4: string;
+  /** "Conciliar com IA ao importar" (spec 029). */
+  aiAutoReconcile: boolean;
 };
 
 export type CaixaDetail = CaixaSummary & { accounts: AccountRow[]; canWrite: boolean; card: CardSettings | null };
@@ -556,7 +560,9 @@ export type StatementImportDetail = StatementImportSummary & {
   /** Quantas linhas do arquivo já existiam (dedup) no momento do import. */
   skippedDuplicates?: number;
   /** Só na resposta do import: a sugestão do agente dos fluxos enfileirada para as linhas novas (a tela acompanha a execução). */
-  aiSuggestion?: { queued: boolean; runId: string | null; lines: number } | null;
+  aiSuggestion?: { queued: boolean; runId: string | null; lines: number; skippedReason?: string } | null;
+  /** Só na resposta do import, com "Conciliar com IA ao importar" ligado (spec 029): a conciliação enfileirada. */
+  aiReconcile?: { queued: boolean; runId: string | null; conversationId: string | null; lines: number; skippedReason?: string } | null;
 };
 
 export type StatementInspect = {
@@ -947,7 +953,9 @@ export type MessageEventKind =
   | 'contract_notice_deadline'
   | 'contract_ending'
   | 'contract_renewal_pending'
-  | 'contract_readjustment';
+  | 'contract_readjustment'
+  | 'ai_budget_alert'
+  | 'ai_awaiting_approval';
 
 export type DestinationOwnerKind = 'user' | 'caixa' | 'global';
 
@@ -971,6 +979,19 @@ export type MessageDestinationDto = {
   subscriptions: number;
   lastSentAt: string | null;
   failedCount: number;
+  /** "Receber mensagens" (spec 029): o webhook está ligado e este agente responde. */
+  inboundEnabled: boolean;
+  inboundAgentId: string | null;
+  inboundAgentName: string | null;
+  /** Chats pareados ativos neste destino. */
+  pairedChats: number;
+};
+
+/** Se dá para ligar a entrada do Telegram: exige uma URL pública HTTPS (app_settings telegram.public_base_url ou PUBLIC_BASE_URL). */
+export type TelegramInboundConfigDto = {
+  publicBaseUrl: string | null;
+  source: 'setting' | 'env' | null;
+  available: boolean;
 };
 
 export type MessageSubscriptionDto = {
@@ -1012,6 +1033,8 @@ export type NotificationKind =
   | 'contract_readjustment'
   | 'agent_completed'
   | 'agent_message'
+  | 'ai_budget_alert'
+  | 'ai_awaiting_approval'
   | 'mirror_pending'
   | 'mirror_disputed'
   | 'invoice_closed'

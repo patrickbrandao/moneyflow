@@ -105,7 +105,11 @@ export function assertUpload(body: unknown): Buffer {
 }
 
 /** Grava o arquivo (dentro de uma transação aberta) e devolve o id. */
-export async function storeAttachment(tx: Tx, ctx: ServiceContext, file: { name: string; mime: string; content: Buffer }) {
+export async function storeAttachment(
+  tx: Tx,
+  ctx: ServiceContext,
+  file: { name: string; mime: string; content: Buffer; durationMs?: number | null; pageCount?: number | null },
+) {
   const [row] = await tx
     .insert(attachments)
     .values({
@@ -113,6 +117,9 @@ export async function storeAttachment(tx: Tx, ctx: ServiceContext, file: { name:
       mimeType: cleanMime(file.mime),
       content: file.content,
       uploadedByUserId: ctx.access.actor.id,
+      // Spec 025: duração do áudio e páginas do PDF (o banco confere o tipo).
+      durationMs: file.durationMs ?? null,
+      pageCount: file.pageCount ?? null,
     })
     .returning({ id: attachments.id });
   return row!.id;
@@ -141,6 +148,28 @@ export async function uploadAttachment(
   return toRow(result.rows[0]!);
 }
 
+/**
+ * Liga um anexo já gravado (o arquivo de uma mensagem do agente, spec 027) a
+ * um registro, com a mesma checagem do upload (escrita no alvo). Quem chama
+ * confere antes que o anexo pode ser usado (sessão da execução ou legível).
+ */
+export async function linkExistingAttachment(
+  ctx: ServiceContext,
+  attachmentId: string,
+  query: { target: AttachmentTarget; targetId: string },
+): Promise<AttachmentRow> {
+  await assertTarget(ctx, query.target, query.targetId, true);
+  await withTx(ctx, (tx) => linkAttachment(tx, query.target, query.targetId, attachmentId));
+  const result = await ctx.db.execute(sql`${rowSql} WHERE a.id = ${attachmentId}`);
+  if (!result.rows[0]) throw notFound();
+  return toRow(result.rows[0]);
+}
+
+/** Confere (sem gravar) que o usuário pode anexar arquivos ao alvo (prévia das tools). */
+export async function assertAttachTarget(ctx: ServiceContext, target: AttachmentTarget, targetId: string) {
+  await assertTarget(ctx, target, targetId, true);
+}
+
 export async function listAttachments(
   ctx: ServiceContext,
   query: { target: AttachmentTarget; targetId: string },
@@ -155,7 +184,7 @@ export async function listAttachments(
 }
 
 /** O anexo é legível se algum alvo dele for legível. */
-async function assertReadable(ctx: ServiceContext, attachmentId: string) {
+export async function assertReadable(ctx: ServiceContext, attachmentId: string) {
   const links = await ctx.db.execute<{ target_kind: string; target_id: string }>(
     sql`SELECT target_kind, target_id FROM attachment_links WHERE attachment_id = ${attachmentId}`,
   );
@@ -165,8 +194,8 @@ async function assertReadable(ctx: ServiceContext, attachmentId: string) {
       if (await canReadContractDocument(ctx, link.target_id)) return;
       continue;
     }
-    if (link.target_kind === 'ai_message') {
-      // Anexo de mensagem de agente: o dono da conversa (e o admin, que lê todas).
+    if (link.target_kind === 'ai_message' || link.target_kind === 'ai_message_speech') {
+      // Anexo de mensagem de agente (ou o áudio gerado dela, spec 025): o dono da conversa (e o admin, que lê todas).
       if (ctx.access.isAdmin) return;
       const owner = await ctx.db.execute<{ user_id: string }>(
         sql`SELECT c.user_id FROM ai_messages m JOIN ai_conversations c ON c.id = m.conversation_id WHERE m.id = ${link.target_id}`,

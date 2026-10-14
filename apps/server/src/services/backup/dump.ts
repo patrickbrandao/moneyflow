@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type BackupStatus, type DumpRestoreResult, t } from '@moneyflow/shared';
+import { sql } from 'drizzle-orm';
 import { strFromU8, strToU8, unzipSync, Zip, ZipDeflate, ZipPassThrough } from 'fflate';
 import type { Config } from '../../config';
 import type { ServiceContext } from '../../context';
@@ -130,7 +131,15 @@ export async function createDumpZip(ctx: ServiceContext, zipPath: string, log: B
       const dumpPath = join(dir, DUMP_FILE);
       const out = await run(
         pgBin(ctx.config, 'pg_dump'),
-        ['--format=custom', '--compress=6', '--file', dumpPath],
+        [
+          '--format=custom',
+          '--compress=6',
+          // Requisições ao provedor (spec 023): só a estrutura; os dados trazem conversas e dados financeiros.
+          '--exclude-table-data=public.ai_requests',
+          '--exclude-table-data=public.ai_request_attempts',
+          '--file',
+          dumpPath,
+        ],
         pgEnv(ctx.config.ownerDatabaseUrl!),
       );
       if (out.code !== 0) {
@@ -263,6 +272,10 @@ export async function restoreDump(ctx: ServiceContext, body: unknown, log: Backu
         throw unprocessable(t.backup.errors.restoreFailed(detail || out.stderr.slice(0, 300)), 'restore_failed');
       }
       resetCatalog();
+      // O dump não traz as requisições: o uso que apontava para elas fica sem o vínculo (FK NOT VALID, spec 023).
+      await ctx.db
+        .execute(sql`SELECT ai_usage_unlink_missing_requests()`)
+        .catch((error) => log.error({ err: error }, 'restauração: falha ao anular os vínculos de requisições'));
       return {
         restored: true as const,
         schemaVersion: fromDump,

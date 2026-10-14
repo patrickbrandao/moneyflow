@@ -38,4 +38,10 @@ export const statementLink = (caixaId: string, accountId: string) => `${caixaTab
 export const reconciliationLink = (caixaId: string, accountId: string, importId?: string) =>
   `${caixaTab(caixaId, 'reconciliation')}?account=${accountId}${importId ? `&import=${importId}` : ''}`;
 
+/** Lote de extrato importado: a conciliação da conta ou o import da fatura do cartão. */
+export const importLink = (imp: { id: string; caixaId: string; financialAccountId: string | null; cardCaixaId: string | null }) =>
+  imp.financialAccountId
+    ? reconciliationLink(imp.caixaId, imp.financialAccountId, imp.id)
+    : `${caixaTab(imp.cardCaixaId ?? imp.caixaId, 'import')}?import=${imp.id}`;
+
 export const transfersLink = (caixaId?: string) => `/transfers${caixaId ? `?caixa=${caixaId}` : ''}`;

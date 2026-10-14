@@ -176,6 +176,9 @@ function AccountFormModal({
   const [accountNumber, setAccountNumber] = useState(account?.accountNumber ?? '');
   const [opening, setOpening] = useState<number | null>(account?.openingBalanceCents ?? 0);
   const [openingDate, setOpeningDate] = useState(account?.openingDate ?? todayIso());
+  const [aiAutoReconcile, setAiAutoReconcile] = useState(account?.aiAutoReconcile ?? false);
+  // "Conciliar com IA ao importar" (spec 029): só conta corrente e poupança, na edição.
+  const reconciles = Boolean(account) && (kind === 'checking' || kind === 'savings');
   const [error, setError] = useState<string | null>(null);
   const { run, busy } = useAction();
   const bank = kind !== 'cash';
@@ -189,6 +192,7 @@ function AccountFormModal({
       openingBalanceCents: opening,
       openingDate,
       ...(bank ? { bankCode: bankCode || null, branch: branch || null, accountNumber: accountNumber || null } : {}),
+      ...(reconciles ? { aiAutoReconcile } : {}),
     };
     const saved = await run(
       () => (account ? api.patch(`/api/accounts/${account.id}`, body) : api.post(`/api/caixas/${caixaId}/accounts`, { ...body, kind })),
@@ -242,6 +246,15 @@ function AccountFormModal({
         <Field label={t.caixa.openingDate}>
           <input type="date" className="field" value={openingDate} onChange={(e) => setOpeningDate(e.target.value)} required />
         </Field>
+        {reconciles && (
+          <div className="span-all">
+            <label className="check">
+              <input type="checkbox" checked={aiAutoReconcile} onChange={(e) => setAiAutoReconcile(e.target.checked)} />{' '}
+              {t.agentsUi.reconcile.auto}
+            </label>
+            <p className="hint">{t.agentsUi.reconcile.autoHint}</p>
+          </div>
+        )}
         <div className="span-all">
           <FormError>{error}</FormError>
         </div>

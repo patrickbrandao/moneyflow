@@ -47,13 +47,15 @@ export function PricesTab() {
                 <th className="num">{p.output}</th>
                 <th className="num">{p.cacheWrite}</th>
                 <th className="num">{p.cacheRead}</th>
+                <th className="num">{p.audioInput}</th>
+                <th className="num">{p.speech}</th>
                 <th>{p.validFrom}</th>
                 <th />
               </tr>
             </thead>
             <tbody>
-              {!data && <SkelRows cols={8} />}
-              {data?.length === 0 && <EmptyRow colSpan={8}>{p.empty}</EmptyRow>}
+              {!data && <SkelRows cols={10} />}
+              {data?.length === 0 && <EmptyRow colSpan={10}>{p.empty}</EmptyRow>}
               {data?.map((row) => (
                 <tr key={row.id}>
                   <td>{row.providerName}</td>
@@ -62,6 +64,8 @@ export function PricesTab() {
                   <td className="num mono text-xs">{price(row.outputPricePerMillion, row.currency)}</td>
                   <td className="num mono text-xs">{price(row.cacheWritePricePerMillion, row.currency)}</td>
                   <td className="num mono text-xs">{price(row.cacheReadPricePerMillion, row.currency)}</td>
+                  <td className="num mono text-xs">{price(row.audioInputPerMinute, row.currency)}</td>
+                  <td className="num mono text-xs">{price(row.speechPerMillionChars, row.currency)}</td>
                   <td className="mono text-xs">{formatDateTime(row.validFrom)}</td>
                   <td className="text-right">
                     <button
@@ -102,6 +106,8 @@ function PriceFormModal({ providers, onClose, onSaved }: { providers: AiProvider
   const [output, setOutput] = useState('');
   const [cacheWrite, setCacheWrite] = useState('');
   const [cacheRead, setCacheRead] = useState('');
+  const [audioInput, setAudioInput] = useState('');
+  const [speech, setSpeech] = useState('');
   const [validFrom, setValidFrom] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [models] = useProviderModels();
@@ -126,6 +132,8 @@ function PriceFormModal({ providers, onClose, onSaved }: { providers: AiProvider
           outputPricePerMillion: outputPrice,
           cacheWritePricePerMillion: optionalNumber(cacheWrite) ?? null,
           cacheReadPricePerMillion: optionalNumber(cacheRead) ?? null,
+          audioInputPerMinute: optionalNumber(audioInput) ?? null,
+          speechPerMillionChars: optionalNumber(speech) ?? null,
           ...(validFrom ? { validFrom: new Date(validFrom).toISOString() } : {}),
         }),
       p.created,
@@ -189,7 +197,10 @@ function PriceFormModal({ providers, onClose, onSaved }: { providers: AiProvider
             {num(p.output, output, setOutput, true)}
             {num(p.cacheWrite, cacheWrite, setCacheWrite)}
             {num(p.cacheRead, cacheRead, setCacheRead)}
+            {num(p.audioInput, audioInput, setAudioInput)}
+            {num(p.speech, speech, setSpeech)}
           </div>
+          <p className="hint !mt-0">{p.audioHint}</p>
           <Field label={p.validFrom} hint={p.validFromHint}>
             <input className="field" type="datetime-local" value={validFrom} onChange={(e) => setValidFrom(e.target.value)} />
           </Field>

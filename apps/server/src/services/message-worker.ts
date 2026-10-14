@@ -2,6 +2,7 @@ import { type Database, type Executor, userColumns, users } from '@moneyflow/db'
 import {
   addDays,
   agentMessage,
+  budgetAlertMessage,
   cardLimitMessage,
   contractInstallmentLabel,
   dedupKeys,
@@ -9,6 +10,7 @@ import {
   dueReminderMessage,
   formatBRL,
   formatDate,
+  formatMicros,
   invoiceClosedMessage,
   invoiceLink,
   limitPercent,
@@ -30,6 +32,7 @@ import {
 import { eq, sql } from 'drizzle-orm';
 import { type Actor, loadAccess } from '../authz/access';
 import type { Config } from '../config';
+import { type BudgetAlert, budgetAlerts } from './ai-budgets';
 import { contractMessages, contractNotifications } from './contract-worker';
 import { type ClaimedMessage, deliver } from './messages';
 import { createNotifications, type NewNotification } from './notifications';
@@ -457,13 +460,82 @@ async function activeSubscriptions(db: Database, kinds?: string[]) {
   return result.rows;
 }
 
+/* ---------------- orçamento de IA (spec 028) ---------------- */
+
+const budgetPercent = (percent: number) => `${percent.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}%`;
+/** Onde ver o orçamento: o painel de uso (admin) ou Minha conta (o usuário coberto). */
+const budgetLink = (forAdmin: boolean) => (forAdmin ? '/admin/ai/usage' : '/account');
+
+async function activeAdminIds(db: Executor): Promise<Set<string>> {
+  const result = await db.execute<{ id: string }>(sql`SELECT id FROM users WHERE role = 'admin' AND is_active`);
+  return new Set(result.rows.map((r) => r.id));
+}
+
+/**
+ * Avisos de orçamento para um destino: o global recebe todos; o pessoal de um
+ * admin, todos; o pessoal de outro usuário, só os do escopo `user` dele; o de
+ * caixa, nenhum (orçamento não é de caixa). Dedup por orçamento, mês e limiar.
+ */
+function budgetMessages(config: Config, sub: SubscriptionRow, alerts: BudgetAlert[], admins: Set<string>): Outgoing[] {
+  if (sub.owner_caixa_id) return [];
+  const forAdmin = !sub.owner_user_id || admins.has(sub.owner_user_id);
+  return alerts
+    .filter((a) => forAdmin || (a.scope === 'user' && a.userId === sub.owner_user_id))
+    .map((a) => ({
+      dedupKey: dedupKeys.aiBudgetAlert(a.budgetId, a.month, a.threshold),
+      caixaId: null,
+      payload: budgetAlertMessage({
+        scope: a.label,
+        threshold: a.threshold,
+        spent: formatMicros(a.spentMicros, a.currency),
+        limit: formatMicros(a.limitMicros, a.currency),
+        percent: budgetPercent(a.percent),
+        url: linkTo(config, budgetLink(forAdmin)),
+      }),
+    }));
+}
+
+/** Avisos do sino: o usuário do escopo `user` e todos os admins, uma vez por orçamento, mês e limiar. */
+function budgetNotifications(alerts: BudgetAlert[], admins: Set<string>): NewNotification[] {
+  const N = t.notifications;
+  const out: NewNotification[] = [];
+  for (const a of alerts) {
+    const recipients = new Set(admins);
+    if (a.scope === 'user' && a.userId) recipients.add(a.userId);
+    for (const userId of recipients) {
+      out.push({
+        userId,
+        kind: 'ai_budget_alert',
+        title: N.budgetAlert(a.label, a.threshold),
+        body: N.budgetAlertBody(
+          formatMicros(a.spentMicros, a.currency),
+          formatMicros(a.limitMicros, a.currency),
+          budgetPercent(a.percent),
+          a.threshold >= 100,
+        ),
+        link: budgetLink(admins.has(userId)),
+        data: { budgetId: a.budgetId, threshold: a.threshold, month: a.month.slice(0, 7) },
+        dedupKey: dedupKeys.aiBudgetAlert(a.budgetId, a.month, a.threshold),
+      });
+    }
+  }
+  return out;
+}
+
 /** Gera e enfileira as mensagens do momento para todas as assinaturas. */
 export async function produceMessages(db: Database, config: Config, clock: SpClock = spClock()) {
   const scopes = new Map<string, Promise<string[]>>();
+  let budget: Promise<{ alerts: BudgetAlert[]; admins: Set<string> }> | null = null;
   let queued = 0;
   let failed = 0;
   for (const sub of await activeSubscriptions(db)) {
     try {
+      if (sub.event_kind === 'ai_budget_alert') {
+        budget ??= Promise.all([budgetAlerts(db), activeAdminIds(db)]).then(([alerts, admins]) => ({ alerts, admins }));
+        const { alerts, admins } = await budget;
+        queued += await enqueue(db, sub.destination_id, sub.id, sub.event_kind, budgetMessages(config, sub, alerts, admins));
+        continue;
+      }
       if (!scopes.has(sub.destination_id)) scopes.set(sub.destination_id, destinationScope(db, sub));
       const caixaIds = await applyFilter(db, await scopes.get(sub.destination_id)!, sub.caixa_filter);
       const items = await eventsFor(db, config, sub, caixaIds, clock);
@@ -658,6 +730,10 @@ export async function produceNotifications(db: Database, config: Config, clock: 
     }
   }
 
+  // Orçamentos de IA (spec 028): aviso no percentual e a 100%.
+  const [alerts, admins] = await Promise.all([budgetAlerts(db), activeAdminIds(db)]);
+  items.push(...budgetNotifications(alerts, admins));
+
   let created = 0;
   for (let i = 0; i < items.length; i += 200) created += await createNotifications(db, items.slice(i, i + 200));
   return { created };
@@ -704,7 +780,7 @@ export async function consumeOutbox(db: Database, config: Config, opts: { batch?
 export async function emitAgentEvent(
   db: Database,
   event: {
-    kind: 'agent_completed' | 'agent_message';
+    kind: 'agent_completed' | 'agent_message' | 'ai_awaiting_approval';
     userId: string;
     agentRunId: string;
     eventKey: string;
@@ -734,7 +810,10 @@ export async function emitAgentEvent(
   for (const sub of subs) {
     const scope = await destinationScope(db, sub);
     const personal = sub.owner_user_id === event.userId;
-    const sharedCaixa = sub.owner_caixa_id !== null && (event.caixaId ? scope.includes(event.caixaId) : scope.length > 0);
+    // A aprovação pendente sem caixa (tarefa agendada) é do usuário: só os destinos pessoais dele.
+    const sharedCaixa =
+      sub.owner_caixa_id !== null &&
+      (event.caixaId ? scope.includes(event.caixaId) : event.kind !== 'ai_awaiting_approval' && scope.length > 0);
     if (!personal && !sharedCaixa) continue;
     queued += await enqueue(
       db,

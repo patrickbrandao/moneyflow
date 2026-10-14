@@ -23,6 +23,7 @@ import { entityRoutes } from './routes/entities';
 import { mcpRoutes } from './routes/mcp';
 import { operationRoutes } from './routes/operation';
 import { statementRoutes } from './routes/statements';
+import { telegramRoutes } from './routes/telegram';
 import { titleRoutes } from './routes/titles';
 import { userRoutes } from './routes/users';
 import { visionRoutes } from './routes/vision';
@@ -85,6 +86,7 @@ export async function buildApp({
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof AppError) {
+      if (error.headers) reply.headers(error.headers);
       return reply.status(error.status).send({ error: { code: error.code, message: error.message, details: error.details } });
     }
     const translated = translateDbError(error);
@@ -104,7 +106,8 @@ export async function buildApp({
   // Sessão: toda rota /api (menos as públicas) exige cookie válido de usuário ativo.
   app.addHook('onRequest', async (request) => {
     const path = request.url.split('?')[0]!;
-    if (!path.startsWith('/api/') || PUBLIC.has(path)) return;
+    // O webhook do Telegram (spec 029) não tem sessão: autentica pelo segredo do cabeçalho.
+    if (!path.startsWith('/api/') || PUBLIC.has(path) || path.startsWith('/api/telegram/webhook/')) return;
     const token = request.cookies[SESSION_COOKIE];
     const session = token ? await resolveSession(db, token) : null;
     if (!session) throw new AppError(401, 'unauthenticated', t.auth.unauthenticated);
@@ -132,6 +135,7 @@ export async function buildApp({
   await app.register(mcpRoutes);
   await app.register(backupRoutes);
   await app.register(contractRoutes);
+  await app.register(telegramRoutes);
 
   // Em produção a API serve o SPA compilado (imagem única).
   const webDist = config.webDist ? resolve(config.webDist) : null;

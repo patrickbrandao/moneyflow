@@ -1,4 +1,5 @@
-import { t } from '@moneyflow/shared';
+import { type AiCapability, t } from '@moneyflow/shared';
+import { AudioLines, Binary, Eye, type LucideIcon, Mic, Type } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useAction } from '../../lib/hooks';
 import { useStored } from '../../lib/storage';
@@ -44,4 +45,30 @@ export function optionalNumber(value: string): number | undefined {
   if (value.trim() === '') return undefined;
   const n = Number(value.replace(',', '.'));
   return Number.isFinite(n) ? n : undefined;
+}
+
+/** Ícone de cada capacidade (spec 024). */
+export const CAPABILITY_ICONS: Record<AiCapability, LucideIcon> = {
+  text: Type,
+  vision: Eye,
+  embeddings: Binary,
+  transcription: Mic,
+  speech: AudioLines,
+};
+
+/** Ícones das capacidades (do provedor, ou configuradas no agente), com o nome no título. */
+export function CapabilityIcons({ capabilities, testId }: { capabilities: readonly AiCapability[]; testId?: string }) {
+  return (
+    <span className="capability-icons" data-testid={testId}>
+      {capabilities.map((capability) => {
+        const Icon = CAPABILITY_ICONS[capability];
+        const label = t.agents.capabilities[capability] ?? capability;
+        return (
+          <span key={capability} className="capability-icon" title={label} aria-label={label} data-capability={capability}>
+            <Icon size={13} />
+          </span>
+        );
+      })}
+    </span>
+  );
 }

@@ -1,49 +1,57 @@
 import { type ConversationDetail, type ConversationDto, t } from '@moneyflow/shared';
 import { type FormEvent, useState } from 'react';
 import { ModalActions } from '../components/forms';
+import { useToast } from '../components/Toast';
 import { Button, Field, Modal, useConfirm } from '../components/ui';
 import { api } from '../lib/api';
 import { useAction } from '../lib/hooks';
-import { conversationMeta, useAgents } from './AgentsProvider';
+import { useAgents } from './AgentsProvider';
 
 const u = t.agentsUi;
 
-type Target = Pick<ConversationDto, 'id' | 'title' | 'pinnedAt' | 'archivedAt'>;
+type Target = Pick<ConversationDto, 'id' | 'title'>;
 
 /**
- * Ações de uma conversa (lista do ícone e cabeçalho da janela): renomear,
- * fixar, arquivar, excluir e bifurcar a partir da última mensagem.
+ * Ações de uma sessão (lista do ícone e cabeçalho da janela, spec 026):
+ * renomear, copiar o id, excluir uma finalizada e "Bifurcar daqui" (a cópia
+ * vira a sessão ativa do agente e abre na janela dele). Finalizar fica na
+ * janela do agente (useConversation.finish), com a confirmação daqui.
  * Devolve também o modal de renomear, para quem usa renderizar.
  */
 export function useConversationActions(onChanged?: (conversation: ConversationDto | null) => void) {
   const agents = useAgents();
   const confirm = useConfirm();
+  const toast = useToast();
   const { run, busy } = useAction();
   const [renaming, setRenaming] = useState<Target | null>(null);
   const [title, setTitle] = useState('');
 
   const changed = (conversation: ConversationDto | null) => {
     agents.bumpList();
-    if (conversation) agents.updateMeta({ id: conversation.id, title: conversation.title });
+    if (conversation) {
+      // A janela de leitura é chaveada pela sessão; a do agente, pelo agente.
+      agents.updateMeta({ id: conversation.id, title: conversation.title });
+      if (!conversation.archivedAt) agents.updateMeta({ id: conversation.agentId, title: conversation.title });
+    }
     onChanged?.(conversation);
   };
-
-  async function patch(target: Target, body: { title?: string; pinned?: boolean; archived?: boolean }, success?: string) {
-    const result = await run(() => api.patch<ConversationDto>(`/api/conversations/${target.id}`, body), success);
-    if (result) changed(result);
-    return result;
-  }
 
   const actions = {
     rename(target: Target) {
       setTitle(target.title ?? '');
       setRenaming(target);
     },
-    togglePin: (target: Target) => patch(target, { pinned: !target.pinnedAt }),
-    toggleArchive: (target: Target) => {
-      if (!target.archivedAt) agents.close(target.id);
-      return patch(target, { archived: !target.archivedAt });
+    async copyId(target: Pick<ConversationDto, 'id'>) {
+      try {
+        await navigator.clipboard.writeText(target.id);
+        toast.success(u.actions.copied);
+      } catch {
+        window.prompt(u.actions.sessionId, target.id);
+      }
     },
+    /** Confirmação do "Finalizar sessão"; quem chama finaliza (a janela do agente volta ao fio vazio). */
+    confirmFinish: () =>
+      confirm({ title: u.actions.finishConfirm, description: u.actions.finishDescription, confirmLabel: u.actions.finish }),
     async remove(target: Target) {
       const name = target.title ?? u.list.untitled;
       const ok = await confirm({
@@ -52,13 +60,15 @@ export function useConversationActions(onChanged?: (conversation: ConversationDt
         confirmLabel: t.common.delete,
         danger: true,
       });
-      if (!ok) return;
+      if (!ok) return false;
       const result = await run(() => api.del(`/api/conversations/${target.id}`), u.actions.deleted);
       if (result) {
         agents.close(target.id);
         changed(null);
       }
+      return Boolean(result);
     },
+    /** Bifurcar daqui: copia a sessão inteira (até a última mensagem) numa nova, que vira a ativa do agente. */
     async fork(target: Pick<ConversationDto, 'id'>) {
       const created = await run(async () => {
         const detail = await api.get<ConversationDetail>(`/api/conversations/${target.id}`);
@@ -67,17 +77,26 @@ export function useConversationActions(onChanged?: (conversation: ConversationDt
         return api.post<ConversationDto>(`/api/conversations/${target.id}/fork`, { messageId: last.id });
       }, u.actions.forked);
       if (created) {
-        agents.open(conversationMeta(created));
+        agents.close(target.id);
+        agents.openConversation(created);
+        agents.bumpSessions();
         changed(created);
       }
+      return created;
     },
   };
 
   async function submitRename(event: FormEvent) {
     event.preventDefault();
     if (!renaming || !title.trim()) return;
-    const result = await patch(renaming, { title: title.trim() }, u.actions.renamed);
-    if (result) setRenaming(null);
+    const result = await run(
+      () => api.patch<ConversationDto>(`/api/conversations/${renaming.id}`, { title: title.trim() }),
+      u.actions.renamed,
+    );
+    if (result) {
+      changed(result);
+      setRenaming(null);
+    }
   }
 
   const modal = (

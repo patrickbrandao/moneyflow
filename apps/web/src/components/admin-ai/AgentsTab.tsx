@@ -1,18 +1,41 @@
-import { type AgentParams, type AgentToolInfo, type AiAgentDto, type AiProviderDto, type McpServerDto, t } from '@moneyflow/shared';
-import { Bot, Pencil, Plus, Trash2 } from 'lucide-react';
-import { type FormEvent, type ReactNode, useId, useState } from 'react';
+import {
+  type AgentParams,
+  AI_INFERENCE_CAPABILITIES,
+  type AiAgentDto,
+  type AiCapability,
+  type AiInferenceCapability,
+  type AiProviderDto,
+  type AiToolKitDto,
+  inferencesFromProvider,
+  type McpServerDto,
+  scanPromptVariables,
+  t,
+} from '@moneyflow/shared';
+import { Bot, Eye, History, Pencil, Plus, Trash2 } from 'lucide-react';
+import { type FormEvent, type ReactNode, useId, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { agentColor } from '../../agents/format';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
 import { LoadError, SkelRows } from '../domain';
 import { FormError, ModalActions } from '../forms';
 import { Badge, Button, cx, EmptyRow, EmptyState, Field, Modal } from '../ui';
-import { ActiveBadge, ANTHROPIC_SUGGESTIONS, optionalNumber, useProviderModels, useRemove } from './shared';
+import { PromptHistory, PromptPreview, PromptVariables } from './AgentPrompt';
+import {
+  ActiveBadge,
+  ANTHROPIC_SUGGESTIONS,
+  CAPABILITY_ICONS,
+  CapabilityIcons,
+  optionalNumber,
+  useProviderModels,
+  useRemove,
+} from './shared';
 
 const g = t.agentsUi.admin.agents;
 const mcpT = t.agentsUi.admin.mcp;
+const promptT = t.agentsUi.admin.prompt;
 
-/** Agentes (só o admin cria): provedor/modelo, parâmetros, tools internas, confirmação, cor, ícone e MCPs. */
+/** Agentes (só o admin cria): provedor/modelo, parâmetros, kit de ferramentas (spec 021), cor, ícone e MCPs. */
 export function AgentsTab() {
   const { data, error, reload } = useApi<AiAgentDto[]>('/api/admin/ai/agents');
   const [editing, setEditing] = useState<AiAgentDto | 'new' | null>(null);
@@ -61,9 +84,20 @@ export function AgentsTab() {
                     </span>
                     {agent.description && <span className="row-sub">{agent.description}</span>}
                   </td>
-                  <td className="mono text-xs">{g.model_(agent.providerName, agent.model)}</td>
+                  <td className="mono text-xs">
+                    {g.model_(agent.providerName, agent.model)}
+                    <span className="mt-1 block">
+                      <CapabilityIcons
+                        capabilities={[
+                          ...(agent.providerId ? (['text'] as AiCapability[]) : []),
+                          ...agent.inferences.map((i) => i.capability),
+                        ]}
+                        testId="agent-capabilities"
+                      />
+                    </span>
+                  </td>
                   <td className="text-[12.5px] text-dim">
-                    {g.toolsSummary(agent.enabledTools ? agent.enabledTools.length : null)}
+                    {g.toolsSummary(agent.toolKitName)}
                     {agent.mcpServers.length > 0 && ` · ${g.mcpSummary(agent.mcpServers.length)}`}
                   </td>
                   <td>
@@ -112,6 +146,7 @@ export function AgentsTab() {
             setEditing(null);
             void reload();
           }}
+          onChanged={() => void reload()}
         />
       )}
     </>
@@ -119,6 +154,22 @@ export function AgentsTab() {
 }
 
 type McpLink = { linked: boolean; restrict: boolean; tools: string[] };
+type InferenceForm = { providerId: string; model: string; voice: string };
+type InferencesForm = Record<AiInferenceCapability, InferenceForm>;
+
+const emptyInference: InferenceForm = { providerId: '', model: '', voice: '' };
+
+function initialInferences(agent: AiAgentDto | null): InferencesForm {
+  return Object.fromEntries(
+    AI_INFERENCE_CAPABILITIES.map((capability) => {
+      const current = agent?.inferences.find((i) => i.capability === capability);
+      return [
+        capability,
+        current ? { providerId: current.providerId, model: current.model ?? '', voice: current.voice ?? '' } : emptyInference,
+      ];
+    }),
+  ) as InferencesForm;
+}
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -129,9 +180,24 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null; onClose: () => void; onSaved: () => void }) {
+function AgentFormModal({
+  agent: initial,
+  onClose,
+  onSaved,
+  onChanged,
+}: {
+  agent: AiAgentDto | null;
+  onClose: () => void;
+  onSaved: () => void;
+  /** Mudou fora do "Salvar" (restaurar uma versão do prompt): recarrega a lista sem fechar. */
+  onChanged: () => void;
+}) {
+  // O agente salvo (a versão atual do prompt muda ao restaurar pelo histórico).
+  const [agent, setAgent] = useState(initial);
+  const [view, setView] = useState<'form' | 'history' | 'preview'>('form');
+  const promptRef = useRef<HTMLTextAreaElement>(null);
   const providers = useApi<AiProviderDto[]>('/api/admin/ai/providers');
-  const tools = useApi<AgentToolInfo[]>('/api/admin/ai/tools');
+  const kits = useApi<AiToolKitDto[]>('/api/admin/ai/tool-kits');
   const servers = useApi<McpServerDto[]>('/api/admin/ai/mcp-servers');
   const [models] = useProviderModels();
   const listId = useId();
@@ -139,7 +205,13 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
   const [name, setName] = useState(agent?.name ?? '');
   const [description, setDescription] = useState(agent?.description ?? '');
   const [systemPrompt, setSystemPrompt] = useState(agent?.systemPrompt ?? '');
+  const [promptNote, setPromptNote] = useState('');
+  const scan = useMemo(() => scanPromptVariables(systemPrompt), [systemPrompt]);
+  const promptChanged = systemPrompt !== (agent?.systemPrompt ?? '');
   const [providerId, setProviderId] = useState(agent?.providerId ?? '');
+  // Provedor padrão (spec 024): só preenche os campos; cada um pode ser trocado depois.
+  const [defaultProviderId, setDefaultProviderId] = useState(agent?.providerId ?? '');
+  const [inferences, setInferences] = useState<InferencesForm>(() => initialInferences(agent));
   const [model, setModel] = useState(agent?.model ?? '');
   const params = agent?.params ?? {};
   const [maxTokens, setMaxTokens] = useState(params.max_tokens?.toString() ?? '');
@@ -148,9 +220,7 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
   const [topP, setTopP] = useState(params.top_p?.toString() ?? '');
   const [thinking, setThinking] = useState(params.thinking_budget_tokens?.toString() ?? '');
   const [effort, setEffort] = useState<AgentParams['reasoning_effort'] | ''>(params.reasoning_effort ?? '');
-  const [allTools, setAllTools] = useState(agent ? agent.enabledTools === null : true);
-  const [enabled, setEnabled] = useState<Set<string>>(new Set(agent?.enabledTools ?? []));
-  const [requireConfirmation, setRequireConfirmation] = useState(agent?.requireWriteConfirmation ?? true);
+  const [toolKitId, setToolKitId] = useState(agent?.toolKitId ?? '');
   const [colorSlot, setColorSlot] = useState(agent?.colorSlot ?? 1);
   const [icon, setIcon] = useState(agent?.icon ?? '');
   const [isActive, setIsActive] = useState(agent?.isActive ?? false);
@@ -167,17 +237,29 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
   const { run, busy } = useAction();
 
   const provider = providers.data?.find((x) => x.id === providerId);
-  const suggestions = [...new Set([...(models[providerId] ?? []), ...(provider?.kind === 'anthropic' ? ANTHROPIC_SUGGESTIONS : [])])];
-  const toolList = tools.data ?? [];
+  /** Provedores ativos com a flag (e o escolhido, mesmo que não esteja mais). */
+  const withCapability = (capability: AiCapability, selected: string) =>
+    (providers.data ?? []).filter((x) => x.id === selected || (x.isActive && !x.archivedAt && x.capabilities.includes(capability)));
 
-  function toggleTool(name: string) {
-    setEnabled((current) => {
-      const next = new Set(current);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
+  function chooseDefault(id: string) {
+    setDefaultProviderId(id);
+    const chosen = providers.data?.find((x) => x.id === id);
+    if (!chosen) return;
+    const filled = inferencesFromProvider(chosen);
+    if (filled.providerId) {
+      setProviderId(filled.providerId);
+      if (!model.trim() && chosen.defaultModels.text) setModel(chosen.defaultModels.text);
+    }
+    setInferences((current) => {
+      const next = { ...current };
+      for (const inference of filled.inferences) next[inference.capability] = { providerId: inference.providerId, model: '', voice: '' };
       return next;
     });
   }
+
+  const setInference = (capability: AiInferenceCapability, patch: Partial<InferenceForm>) =>
+    setInferences((current) => ({ ...current, [capability]: { ...current[capability], ...patch } }));
+  const suggestions = [...new Set([...(models[providerId] ?? []), ...(provider?.kind === 'anthropic' ? ANTHROPIC_SUGGESTIONS : [])])];
 
   function setLink(id: string, patch: Partial<McpLink>) {
     setLinks((all) => {
@@ -186,8 +268,21 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
     });
   }
 
+  /** Insere a variável na posição do cursor do prompt. */
+  function insertVariable(token: string) {
+    const area = promptRef.current;
+    const start = area?.selectionStart ?? systemPrompt.length;
+    const end = area?.selectionEnd ?? systemPrompt.length;
+    setSystemPrompt(systemPrompt.slice(0, start) + token + systemPrompt.slice(end));
+    requestAnimationFrame(() => {
+      area?.focus();
+      area?.setSelectionRange(start + token.length, start + token.length);
+    });
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (scan.unknown.length > 0) return setError(g.unknownVariables(scan.unknown.map((n) => `{{${n}}}`).join(', ')));
     if (isActive && (!providerId || !model.trim())) return setError(g.activeHint);
     if (useForFlows && !isActive) return setError(g.useForFlowsNeedsActive);
     setError(null);
@@ -208,16 +303,22 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
       name: name.trim(),
       description,
       systemPrompt,
+      promptNote: promptChanged || !agent ? promptNote : null,
       providerId: providerId || null,
       model: model.trim(),
       params: nextParams,
-      enabledTools: allTools ? null : [...enabled],
-      requireWriteConfirmation: requireConfirmation,
+      toolKitId: toolKitId || null,
       colorSlot,
       icon: icon.trim(),
       isActive,
       useForFlows,
       mcpServers,
+      inferences: AI_INFERENCE_CAPABILITIES.filter((capability) => inferences[capability].providerId).map((capability) => ({
+        capability,
+        providerId: inferences[capability].providerId,
+        model: inferences[capability].model.trim() || null,
+        voice: capability === 'speech' ? inferences[capability].voice.trim() || null : null,
+      })),
     };
     const saved = await run(
       () => (agent ? api.patch<AiAgentDto>(`/api/admin/ai/agents/${agent.id}`, body) : api.post<AiAgentDto>('/api/admin/ai/agents', body)),
@@ -226,47 +327,30 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
     if (saved) onSaved();
   }
 
-  const toolGroup = (kind: 'read' | 'write') => {
-    const items = toolList.filter((x) => x.kind === kind);
-    if (items.length === 0) return null;
-    const checked = items.filter((x) => enabled.has(x.name)).length;
+  if (agent && view === 'history') {
     return (
-      <div className="admin-ai-tools">
-        <div className="admin-ai-tools-head">
-          <span className="label !mb-0">
-            {kind === 'read' ? g.toolsRead : g.toolsWrite} · {g.toolsCount(checked, items.length)}
-          </span>
-          <button
-            type="button"
-            className="link-action"
-            onClick={() =>
-              setEnabled((current) => {
-                const next = new Set(current);
-                for (const x of items) {
-                  if (checked === items.length) next.delete(x.name);
-                  else next.add(x.name);
-                }
-                return next;
-              })
-            }
-          >
-            {checked === items.length ? g.selectNone : g.selectAll}
-          </button>
-        </div>
-        <div className="admin-ai-checks">
-          {items.map((tool) => (
-            <label key={tool.name} className="check" title={tool.description}>
-              <input type="checkbox" checked={enabled.has(tool.name)} onChange={() => toggleTool(tool.name)} />
-              <span>
-                {tool.title} <span className="mono text-[11px] text-faint">{tool.name}</span>
-                {tool.confirm === 'always' && <span className="text-[11px] text-faint"> · {g.confirmAlways}</span>}
-              </span>
-            </label>
-          ))}
-        </div>
-      </div>
+      <Modal open title={promptT.historyTitle(agent.name)} onClose={onClose} wide>
+        <PromptHistory
+          agent={agent}
+          onBack={() => setView('form')}
+          onRestored={(saved) => {
+            // O prompt restaurado entra no formulário (o que estava sendo editado e não foi salvo é trocado).
+            setAgent(saved);
+            setSystemPrompt(saved.systemPrompt);
+            setPromptNote('');
+            onChanged();
+          }}
+        />
+      </Modal>
     );
-  };
+  }
+  if (agent && view === 'preview') {
+    return (
+      <Modal open title={promptT.previewTitle(agent.name)} onClose={onClose} wide>
+        <PromptPreview agent={agent} dirty={promptChanged} onBack={() => setView('form')} />
+      </Modal>
+    );
+  }
 
   return (
     <Modal open title={agent ? g.edit : g.new} onClose={onClose} wide>
@@ -290,21 +374,82 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
           <Field label={g.description}>
             <input className="field" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={2000} />
           </Field>
-          <Field label={g.systemPrompt} hint={g.systemPromptHint}>
-            <textarea className="field" rows={6} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
+          <div>
+            <div className="mb-1 flex flex-wrap items-center gap-2">
+              <span className="label !mb-0">{g.systemPrompt}</span>
+              {agent?.promptVersion && (
+                <span data-testid="prompt-version">
+                  <Badge tone="outline">{g.promptVersion(agent.promptVersion)}</Badge>
+                </span>
+              )}
+              <span className="flex-1" />
+              {agent && (
+                <>
+                  <Button size="sm" variant="ghost" onClick={() => setView('history')}>
+                    <History /> {g.history}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setView('preview')}>
+                    <Eye /> {g.preview}
+                  </Button>
+                </>
+              )}
+            </div>
+            <textarea
+              ref={promptRef}
+              className="field"
+              rows={6}
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              aria-label={g.systemPrompt}
+            />
+            <p className="hint">{g.systemPromptHint}</p>
+            {scan.unknown.length > 0 && (
+              <p className="notice danger mt-2">{g.unknownVariables(scan.unknown.map((n) => `{{${n}}}`).join(', '))}</p>
+            )}
+            {scan.volatile && (
+              <p className="notice warn mt-2" data-testid="prompt-volatile-warning">
+                {g.volatileWarning}
+              </p>
+            )}
+          </div>
+          <PromptVariables onInsert={insertVariable} />
+          {(promptChanged || !agent) && (
+            <Field label={g.promptNote} hint={g.promptNoteHint}>
+              <input className="field" value={promptNote} onChange={(e) => setPromptNote(e.target.value)} maxLength={500} />
+            </Field>
+          )}
+          <Field label={g.defaultProvider} hint={g.defaultProviderHint}>
+            <select
+              className="field"
+              value={defaultProviderId}
+              onChange={(e) => chooseDefault(e.target.value)}
+              data-testid="agent-default-provider"
+            >
+              <option value="">{g.noProvider}</option>
+              {(providers.data ?? [])
+                .filter((x) => x.id === defaultProviderId || (x.isActive && !x.archivedAt))
+                .map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {x.name}
+                  </option>
+                ))}
+            </select>
           </Field>
           <div className="form-grid cols-2">
-            <Field label={g.provider}>
-              <select className="field" value={providerId} onChange={(e) => setProviderId(e.target.value)}>
+            <Field label={g.textProvider}>
+              <select
+                className="field"
+                value={providerId}
+                onChange={(e) => setProviderId(e.target.value)}
+                data-testid="agent-text-provider"
+              >
                 <option value="">{g.noProvider}</option>
-                {(providers.data ?? [])
-                  .filter((x) => !x.archivedAt || x.id === providerId)
-                  .map((x) => (
-                    <option key={x.id} value={x.id}>
-                      {x.name}
-                      {x.isActive ? '' : ` (${t.agentsUi.admin.inactive})`}
-                    </option>
-                  ))}
+                {withCapability('text', providerId).map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {x.name}
+                    {x.isActive ? '' : ` (${t.agentsUi.admin.inactive})`}
+                  </option>
+                ))}
               </select>
             </Field>
             <Field label={g.model} hint={suggestions.length ? g.modelHint : undefined}>
@@ -314,7 +459,8 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
                 onChange={(e) => setModel(e.target.value)}
                 list={listId}
                 spellCheck={false}
-                placeholder={provider?.kind === 'anthropic' ? 'claude-sonnet-5-5' : ''}
+                placeholder={provider?.defaultModels.text ?? (provider?.kind === 'anthropic' ? 'claude-sonnet-5-5' : '')}
+                data-testid="agent-model"
               />
               <datalist id={listId}>
                 {suggestions.map((m) => (
@@ -323,6 +469,67 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
               </datalist>
             </Field>
           </div>
+
+          <Section title={g.inferences}>
+            <p className="hint !mt-0 mb-2">{g.inferencesHint}</p>
+            <div className="grid gap-2" data-testid="agent-inferences">
+              {AI_INFERENCE_CAPABILITIES.map((capability) => {
+                const current = inferences[capability];
+                const chosen = providers.data?.find((x) => x.id === current.providerId);
+                const inherited =
+                  chosen?.defaultModels[capability] ?? (capability === 'vision' ? chosen?.defaultModels.text : undefined) ?? null;
+                const Icon = CAPABILITY_ICONS[capability];
+                return (
+                  <div key={capability} className="capability-row" data-capability={capability}>
+                    <Field label={t.agents.capabilities[capability]!}>
+                      <select
+                        className="field"
+                        value={current.providerId}
+                        onChange={(e) => setInference(capability, { providerId: e.target.value })}
+                        data-testid={`agent-inference-${capability}`}
+                      >
+                        <option value="">{g.inferenceNone}</option>
+                        {withCapability(capability, current.providerId).map((x) => (
+                          <option key={x.id} value={x.id}>
+                            {x.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    {current.providerId ? (
+                      <Field label={g.inferenceModel}>
+                        <input
+                          className="field field-mono"
+                          value={current.model}
+                          onChange={(e) => setInference(capability, { model: e.target.value })}
+                          placeholder={g.inheritModel(inherited)}
+                          spellCheck={false}
+                        />
+                      </Field>
+                    ) : (
+                      <span className="flex items-center gap-1.5 pb-2 text-xs text-faint">
+                        <Icon size={12} />
+                      </span>
+                    )}
+                    {capability === 'speech' && current.providerId ? (
+                      <Field label={g.inferenceVoice}>
+                        <input
+                          className="field field-mono"
+                          value={current.voice}
+                          onChange={(e) => setInference(capability, { voice: e.target.value })}
+                          placeholder={chosen?.defaultModels.speech_voice ?? 'alloy'}
+                          spellCheck={false}
+                        />
+                      </Field>
+                    ) : (
+                      <span />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <p className="hint">{g.visionHint}</p>
+          </Section>
 
           <Section title={g.params}>
             <div className="form-grid cols-3">
@@ -389,24 +596,19 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
           </Section>
 
           <Section title={g.tools}>
-            <div className="segmented mb-3" role="group" aria-label={g.tools}>
-              <button type="button" className={cx(allTools && 'active')} aria-pressed={allTools} onClick={() => setAllTools(true)}>
-                {g.toolsAll}
-              </button>
-              <button type="button" className={cx(!allTools && 'active')} aria-pressed={!allTools} onClick={() => setAllTools(false)}>
-                {g.toolsSelected}
-              </button>
-            </div>
-            {!allTools && (
-              <>
-                {toolGroup('read')}
-                {toolGroup('write')}
-              </>
-            )}
-            <label className="check mt-2">
-              <input type="checkbox" checked={requireConfirmation} onChange={(e) => setRequireConfirmation(e.target.checked)} />{' '}
-              {g.requireConfirmation}
-            </label>
+            <Field label={g.toolKit} hint={g.toolKitHint}>
+              <select className="field" value={toolKitId} onChange={(e) => setToolKitId(e.target.value)} data-testid="agent-tool-kit">
+                <option value="">{g.toolKitNone}</option>
+                {(kits.data ?? []).map((kit) => (
+                  <option key={kit.id} value={kit.id}>
+                    {kit.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Link className="link-action mt-2 inline-block text-[12px]" to="/admin/ai/tool-kits">
+              {g.toolKitManage}
+            </Link>
           </Section>
 
           <Section title={g.mcpServers}>

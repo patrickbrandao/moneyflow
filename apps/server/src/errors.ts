@@ -8,6 +8,8 @@ export class AppError extends Error {
     public code: string,
     message: string,
     public details?: { path: string; message: string }[],
+    /** Cabeçalhos da resposta (ex.: retry-after no 429). */
+    public headers?: Record<string, string>,
   ) {
     super(message);
   }
@@ -46,6 +48,10 @@ export function findPgError(error: unknown): PgLike | null {
 export function translateDbError(error: unknown): AppError | null {
   const pg = findPgError(error);
   if (!pg) return null;
+  // Flag em uso (spec 024): o banco põe os nomes dos agentes no DETAIL.
+  if (pg.constraint === 'ai_providers_capability_in_use_check' && pg.detail) {
+    return new AppError(422, pg.constraint, t.agents.errors.capabilityInUse(pg.detail));
+  }
   const byConstraint = pg.constraint ? DB_CONSTRAINT_MESSAGES[pg.constraint] : undefined;
   const message = byConstraint ?? DB_CODE_MESSAGES[pg.code];
   if (!message) return null;

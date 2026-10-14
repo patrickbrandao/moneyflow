@@ -35,6 +35,7 @@ import { CategoryLabel, LoadError, Money, SkelRows } from '../domain';
 import { useToast } from '../Toast';
 import { Badge, Button, cx, EmptyRow, Skel, Tabs, type Tone } from '../ui';
 import { CreateModal, MatchModal } from './LineModals';
+import { ReconcileAiPanel } from './ReconcileAiPanel';
 
 const s = t.statements;
 const ai = t.agentsUi.flows;
@@ -273,6 +274,8 @@ export function ImportDetail({
           </button>
         </div>
       )}
+
+      {data && <ReconcileAiPanel importId={importId} canWrite={canWrite} onChanged={changed} />}
 
       {suggesting && (
         <div className="notice info mb-3 flex items-center gap-2" data-testid="ai-suggesting">

@@ -237,6 +237,39 @@ COMMENT ON FUNCTION public.admin_message_destination_token(p_destination_id uuid
 
 
 --
+-- Name: admin_message_destination_webhook_secret(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_message_destination_webhook_secret(p_destination_id uuid, p_actor_user_id uuid) RETURNS text
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  h text;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.users a
+                  WHERE a.id = p_actor_user_id AND a.role = 'admin' AND a.is_active) THEN
+    RAISE EXCEPTION 'admin_message_destination_webhook_secret: actor % is not an active admin', p_actor_user_id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  SELECT d.webhook_secret_hash INTO h FROM public.message_destinations d WHERE d.id = p_destination_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'admin_message_destination_webhook_secret: destination % not found', p_destination_id
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  RETURN h;
+END
+$$;
+
+
+--
+-- Name: FUNCTION admin_message_destination_webhook_secret(p_destination_id uuid, p_actor_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.admin_message_destination_webhook_secret(p_destination_id uuid, p_actor_user_id uuid) IS 'Hash do segredo do webhook (webhook_secret_hash, nulo se nunca ligado) para o export de backup do admin. A importação traz o destino com inbound_enabled = false (o webhook é de outra instância e precisa ser religado, com um segredo novo). Erro 42501 se o ator não é admin ativo e P0002 se o destino não existe.';
+
+
+--
 -- Name: admin_reveal_password(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -270,6 +303,65 @@ $$;
 --
 
 COMMENT ON FUNCTION public.admin_reveal_password(target_user_id uuid, actor_user_id uuid) IS 'Revela a senha de target_user_id se actor_user_id for admin ativo; senão erro 42501. actor_user_id vem da sessão autenticada na aplicação (o banco confia nele).';
+
+
+--
+-- Name: ai_agent_inferences_audit_row(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_inferences_audit_row() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed, coalesce(n ->> 'agent_id', o ->> 'agent_id')::uuid);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_agent_inferences_audit_row(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_agent_inferences_audit_row() IS 'Trigger de auditoria de ai_agent_inferences: grava com record_id = agent_id (a linha não tem id), para as inferências aparecerem no histórico do agente.';
+
+
+--
+-- Name: ai_agent_inferences_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_inferences_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  caps text[];
+BEGIN
+  -- FOR SHARE: espera (e depois relê) uma troca de flags em andamento no provedor.
+  SELECT p.capabilities INTO caps FROM ai_providers p WHERE p.id = NEW.provider_id FOR SHARE;
+  IF FOUND AND NOT (NEW.capability = ANY (caps)) THEN
+    RAISE EXCEPTION 'ai_agent_inferences: provider % does not have the % capability', NEW.provider_id, NEW.capability
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_agent_inferences_provider_capability_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
 
 
 --
@@ -318,6 +410,505 @@ COMMENT ON FUNCTION public.ai_agent_params_valid(p_params jsonb) IS 'true se par
 
 
 --
+-- Name: ai_agent_prompt_versions_apply(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_prompt_versions_apply() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE ai_agents a SET system_prompt = NEW.content
+   WHERE a.id = NEW.agent_id AND a.system_prompt IS DISTINCT FROM NEW.content;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_agent_prompt_versions_apply(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_agent_prompt_versions_apply() IS 'A versão manda: copia o content da versão inserida (a última) para ai_agents.system_prompt.';
+
+
+--
+-- Name: ai_agent_prompt_versions_audit_row(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_prompt_versions_audit_row() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+  IF o IS NOT NULL THEN
+    o := (o - 'content') || jsonb_build_object('content_chars', length(OLD.content));
+  END IF;
+  IF n IS NOT NULL THEN
+    n := (n - 'content') || jsonb_build_object('content_chars', length(NEW.content));
+  END IF;
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_agent_prompt_versions_audit_row(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_agent_prompt_versions_audit_row() IS 'Trigger de auditoria de ai_agent_prompt_versions: grava a linha sem content (só content_chars); o texto do prompt fica na linha de auditoria do ai_agents (system_prompt antes/depois).';
+
+
+--
+-- Name: ai_agent_prompt_versions_before_insert(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_prompt_versions_before_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  next_version integer;
+BEGIN
+  PERFORM 1 FROM ai_agents a WHERE a.id = NEW.agent_id FOR NO KEY UPDATE;
+  IF NOT FOUND THEN
+    NEW.version := coalesce(NEW.version, 1);
+    RETURN NEW;  -- a FK reporta o erro (23503), não o NOT NULL do número.
+  END IF;
+  SELECT coalesce(max(v.version), 0) + 1 INTO next_version
+    FROM ai_agent_prompt_versions v WHERE v.agent_id = NEW.agent_id;
+  IF NEW.version IS NULL THEN
+    NEW.version := next_version;
+  ELSIF NEW.version <> next_version THEN
+    RAISE EXCEPTION 'ai_agent_prompt_versions: next version of agent % is %, got %', NEW.agent_id, next_version,
+      NEW.version
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_agent_prompt_versions_version_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: ai_agent_prompt_versions_guard(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_prompt_versions_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM ai_agents a WHERE a.id = OLD.agent_id) THEN
+      RAISE EXCEPTION 'ai_agent_prompt_versions: version % is immutable (it goes only with the agent)', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_agent_prompt_versions_immutable_check';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF NEW.id <> OLD.id OR NEW.agent_id <> OLD.agent_id OR NEW.version <> OLD.version OR NEW.content <> OLD.content
+     OR NEW.note IS DISTINCT FROM OLD.note
+     OR NEW.restored_from_version_id IS DISTINCT FROM OLD.restored_from_version_id
+     OR NEW.created_at <> OLD.created_at
+     OR (NEW.created_by_user_id IS DISTINCT FROM OLD.created_by_user_id AND NEW.created_by_user_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'ai_agent_prompt_versions: version % is immutable', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_agent_prompt_versions_immutable_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: ai_agents_prompt_version_init(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agents_prompt_version_init() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  INSERT INTO ai_agent_prompt_versions (agent_id, content, created_by_user_id)
+  SELECT a.id, a.system_prompt, a.created_by_user_id
+    FROM ai_agents a
+   WHERE a.id = NEW.id
+     AND NOT EXISTS (SELECT 1 FROM ai_agent_prompt_versions v WHERE v.agent_id = a.id);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_agents_prompt_version_init(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_agents_prompt_version_init() IS 'Constraint trigger adiado (ai_agents_prompt_version_init): no COMMIT (ou em SET CONSTRAINTS … IMMEDIATE), cria a versão 1 do agente inserido com o system_prompt atual, sem nota e com o autor = created_by_user_id, se ele ainda não tem versão. Agente excluído na mesma transação: nada.';
+
+
+--
+-- Name: ai_agents_provider_capability(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agents_provider_capability() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  caps text[];
+BEGIN
+  IF NEW.provider_id IS NOT NULL AND (TG_OP = 'INSERT' OR NEW.provider_id IS DISTINCT FROM OLD.provider_id) THEN
+    SELECT p.capabilities INTO caps FROM ai_providers p WHERE p.id = NEW.provider_id FOR SHARE;
+    IF FOUND AND NOT ('text' = ANY (caps)) THEN
+      RAISE EXCEPTION 'ai_agents: text provider % does not have the text capability', NEW.provider_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_agents_provider_text_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: ai_agents_system_prompt_guard(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agents_system_prompt_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  latest text;
+BEGIN
+  IF NEW.system_prompt IS DISTINCT FROM OLD.system_prompt THEN
+    SELECT v.content INTO latest
+      FROM ai_agent_prompt_versions v WHERE v.agent_id = NEW.id ORDER BY v.version DESC LIMIT 1;
+    IF FOUND AND latest IS DISTINCT FROM NEW.system_prompt THEN
+      RAISE EXCEPTION 'ai_agents: system_prompt of agent % changes only by a new version (ai_agent_prompt_versions)', NEW.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_agents_system_prompt_version_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_agents_system_prompt_guard(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_agents_system_prompt_guard() IS 'Recusa (23514 ai_agents_system_prompt_version_check) UPDATE que deixe system_prompt diferente da última versão. Agente ainda sem versão (no meio da transação que o criou) aceita.';
+
+
+--
+-- Name: ai_attachment_derivatives_guard(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_attachment_derivatives_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF (NEW.attachment_id, NEW.message_id, NEW.block_index, NEW.kind, NEW.provider_id, NEW.model, NEW.voice)
+     IS DISTINCT FROM (OLD.attachment_id, OLD.message_id, OLD.block_index, OLD.kind, OLD.provider_id, OLD.model, OLD.voice) THEN
+    RAISE EXCEPTION 'ai_attachment_derivatives: origin, kind, provider, model and voice of derivative % are immutable', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_attachment_derivatives_immutable_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: ai_attachment_derivatives_release_result(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_attachment_derivatives_release_result() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF OLD.result_attachment_id IS NOT NULL
+     AND (TG_OP = 'DELETE' OR NEW.result_attachment_id IS DISTINCT FROM OLD.result_attachment_id)
+     AND NOT EXISTS (SELECT 1 FROM attachment_links l WHERE l.attachment_id = OLD.result_attachment_id) THEN
+    DELETE FROM attachments a WHERE a.id = OLD.result_attachment_id;
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_attachment_derivatives_release_result(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_attachment_derivatives_release_result() IS 'AFTER UPDATE OF result_attachment_id / DELETE: apaga o áudio gerado antigo se ele não aparece mais em attachment_links (excluir a conversa leva as mensagens, os derivados speech e os áudios gerados).';
+
+
+--
+-- Name: ai_budget_check(uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_budget_check(p_user_id uuid, p_agent_id uuid, p_is_flow boolean) RETURNS TABLE(budget_id uuid, scope text, user_id uuid, agent_id uuid, currency text, monthly_limit_micros bigint, alert_percent integer, month date, spent_micros bigint, unpriced_calls integer, percent numeric, status text)
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT b.id, b.scope, b.user_id, b.agent_id, b.currency, b.monthly_limit_micros, b.alert_percent,
+         st.month, st.spent_micros, st.unpriced_calls, st.percent, st.status
+    FROM ai_budgets b
+   CROSS JOIN LATERAL ai_budget_state(b.scope, b.user_id, b.agent_id, b.currency, b.monthly_limit_micros,
+                                      b.alert_percent, NULL) st
+   WHERE b.is_active
+     AND (b.scope = 'global'
+          OR (b.scope = 'flows' AND coalesce(p_is_flow, false))
+          OR (b.scope = 'user' AND b.user_id = p_user_id)
+          OR (b.scope = 'agent' AND b.agent_id = p_agent_id))
+     AND st.status = 'blocked'
+   ORDER BY array_position(ARRAY['global', 'flows', 'agent', 'user'], b.scope), b.currency, b.id
+$$;
+
+
+--
+-- Name: FUNCTION ai_budget_check(p_user_id uuid, p_agent_id uuid, p_is_flow boolean); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_budget_check(p_user_id uuid, p_agent_id uuid, p_is_flow boolean) IS 'Orçamentos ativos estourados (gasto >= valor no mês corrente de America/Sao_Paulo) que valem para uma execução: global, o do usuário (p_user_id; o uso dos fluxos dele conta), o do agente (p_agent_id) e, com p_is_flow (conversa com purpose <> chat), o flows. Nenhuma linha = pode seguir. A isenção do admin que aciona é da aplicação.';
+
+
+--
+-- Name: ai_budget_state(text, uuid, uuid, text, bigint, integer, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_budget_state(p_scope text, p_user_id uuid, p_agent_id uuid, p_currency text, p_limit_micros bigint, p_alert_percent integer, p_month date) RETURNS TABLE(month date, spent_micros bigint, unpriced_calls integer, percent numeric, status text)
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT m.month, s.spent_micros, s.unpriced_calls,
+         round(s.spent_micros::numeric * 100 / p_limit_micros, 2),
+         CASE WHEN s.spent_micros >= p_limit_micros THEN 'blocked'
+              WHEN s.spent_micros::numeric * 100 >= p_limit_micros::numeric * p_alert_percent THEN 'alert'
+              ELSE 'ok'
+         END
+    FROM (SELECT coalesce(date_trunc('month', p_month::timestamp),
+                          date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo'))::date
+                   AS month) m
+   CROSS JOIN LATERAL ai_budget_usage(p_scope, p_user_id, p_agent_id, p_currency,
+                                      m.month::timestamp AT TIME ZONE 'America/Sao_Paulo',
+                                      (m.month + interval '1 month') AT TIME ZONE 'America/Sao_Paulo') s
+$$;
+
+
+--
+-- Name: FUNCTION ai_budget_state(p_scope text, p_user_id uuid, p_agent_id uuid, p_currency text, p_limit_micros bigint, p_alert_percent integer, p_month date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_budget_state(p_scope text, p_user_id uuid, p_agent_id uuid, p_currency text, p_limit_micros bigint, p_alert_percent integer, p_month date) IS 'Apoio de ai_budget_status/ai_budget_check: mês (1º dia; nulo = o mês corrente em America/Sao_Paulo), gasto, sem preço, percentual (2 casas) e situação: blocked com gasto >= valor, alert com gasto >= valor × aviso ÷ 100, senão ok.';
+
+
+--
+-- Name: ai_budget_status(date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_budget_status(p_month date DEFAULT NULL::date) RETURNS TABLE(budget_id uuid, scope text, user_id uuid, agent_id uuid, currency text, monthly_limit_micros bigint, alert_percent integer, month date, spent_micros bigint, unpriced_calls integer, percent numeric, status text)
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT b.id, b.scope, b.user_id, b.agent_id, b.currency, b.monthly_limit_micros, b.alert_percent,
+         st.month, st.spent_micros, st.unpriced_calls, st.percent, st.status
+    FROM ai_budgets b
+   CROSS JOIN LATERAL ai_budget_state(b.scope, b.user_id, b.agent_id, b.currency, b.monthly_limit_micros,
+                                      b.alert_percent, p_month) st
+   WHERE b.is_active
+   ORDER BY array_position(ARRAY['global', 'flows', 'agent', 'user'], b.scope), b.currency, b.id
+$$;
+
+
+--
+-- Name: FUNCTION ai_budget_status(p_month date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_budget_status(p_month date) IS 'Situação de cada orçamento ativo no mês de p_month (qualquer dia do mês; nulo = o mês corrente em America/Sao_Paulo): gasto em micros na moeda do orçamento (uso sem preço e noutra moeda não contam), chamadas sem preço do escopo (unpriced_calls, para "N chamadas sem preço"), percentual e status ok|alert|blocked. Ordem: global, flows, agent, user.';
+
+
+--
+-- Name: ai_budget_usage(text, uuid, uuid, text, timestamp with time zone, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_budget_usage(p_scope text, p_user_id uuid, p_agent_id uuid, p_currency text, p_from timestamp with time zone, p_to timestamp with time zone) RETURNS TABLE(spent_micros bigint, unpriced_calls integer)
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+  -- Uma consulta por escopo, para cada uma usar o seu índice (created_at; user_id, created_at; agent_id, created_at).
+  CASE p_scope
+    WHEN 'global' THEN
+      RETURN QUERY
+      SELECT coalesce(sum(u.cost_micros) FILTER (WHERE u.currency = p_currency), 0)::bigint,
+             (count(*) FILTER (WHERE u.cost_micros IS NULL))::integer
+        FROM ai_usage u
+       WHERE u.created_at >= p_from AND u.created_at < p_to;
+    WHEN 'user' THEN
+      RETURN QUERY
+      SELECT coalesce(sum(u.cost_micros) FILTER (WHERE u.currency = p_currency), 0)::bigint,
+             (count(*) FILTER (WHERE u.cost_micros IS NULL))::integer
+        FROM ai_usage u
+       WHERE u.user_id = p_user_id AND u.created_at >= p_from AND u.created_at < p_to;
+    WHEN 'agent' THEN
+      RETURN QUERY
+      SELECT coalesce(sum(u.cost_micros) FILTER (WHERE u.currency = p_currency), 0)::bigint,
+             (count(*) FILTER (WHERE u.cost_micros IS NULL))::integer
+        FROM ai_usage u
+       WHERE u.agent_id = p_agent_id AND u.created_at >= p_from AND u.created_at < p_to;
+    WHEN 'flows' THEN
+      RETURN QUERY
+      SELECT coalesce(sum(u.cost_micros) FILTER (WHERE u.currency = p_currency), 0)::bigint,
+             (count(*) FILTER (WHERE u.cost_micros IS NULL))::integer
+        FROM ai_usage u
+        LEFT JOIN ai_conversations c ON c.id = u.conversation_id
+       WHERE u.created_at >= p_from AND u.created_at < p_to
+         AND ai_usage_is_flow(u.purpose, c.purpose);
+    ELSE
+      RAISE EXCEPTION 'ai_budget_usage: unknown scope %', p_scope USING ERRCODE = 'invalid_parameter_value';
+  END CASE;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_budget_usage(p_scope text, p_user_id uuid, p_agent_id uuid, p_currency text, p_from timestamp with time zone, p_to timestamp with time zone); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_budget_usage(p_scope text, p_user_id uuid, p_agent_id uuid, p_currency text, p_from timestamp with time zone, p_to timestamp with time zone) IS 'Apoio de ai_budget_status/ai_budget_check: gasto (soma de cost_micros na moeda informada) e chamadas sem preço (qualquer moeda) do escopo no intervalo [de, até). 22023 com escopo desconhecido.';
+
+
+--
+-- Name: ai_capability_credentials(uuid, text, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_capability_credentials(p_agent_id uuid, p_capability text, p_actor_user_id uuid) RETURNS TABLE(provider_id uuid, kind text, base_url text, api_key text, model text, voice text)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  ag  public.ai_agents;
+  inf public.ai_agent_inferences;
+  p   public.ai_providers;
+BEGIN
+  IF p_capability IS NULL OR p_capability NOT IN ('text', 'vision', 'embeddings', 'transcription', 'speech') THEN
+    RAISE EXCEPTION 'ai_capability_credentials: unknown capability %', p_capability USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.users u WHERE u.id = p_actor_user_id AND u.is_active) THEN
+    RAISE EXCEPTION 'ai_capability_credentials: actor % is not an active user', p_actor_user_id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  SELECT * INTO ag FROM public.ai_agents a WHERE a.id = p_agent_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_capability_credentials: agent % not found', p_agent_id USING ERRCODE = 'no_data_found';
+  END IF;
+  IF NOT ag.is_active OR ag.archived_at IS NOT NULL THEN
+    RAISE EXCEPTION 'ai_capability_credentials: agent % is not active', p_agent_id USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
+  IF p_capability = 'text' THEN
+    SELECT * INTO p FROM public.ai_providers x WHERE x.id = ag.provider_id;
+  ELSE
+    SELECT * INTO inf FROM public.ai_agent_inferences i WHERE i.agent_id = ag.id AND i.capability = p_capability;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'ai_capability_credentials: agent % has no provider for %', p_agent_id, p_capability
+        USING ERRCODE = 'no_data_found';
+    END IF;
+    SELECT * INTO p FROM public.ai_providers x WHERE x.id = inf.provider_id;
+  END IF;
+  IF p.id IS NULL OR NOT p.is_active OR p.archived_at IS NOT NULL OR NOT (p_capability = ANY (p.capabilities)) THEN
+    RAISE EXCEPTION 'ai_capability_credentials: provider % is not active or lacks the % capability', p.id, p_capability
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
+  RETURN QUERY
+  SELECT p.id, p.kind, p.base_url, p.api_key,
+         CASE WHEN p_capability = 'text' THEN ag.model ELSE coalesce(inf.model, p.default_models ->> p_capability) END,
+         CASE WHEN p_capability = 'speech' THEN coalesce(inf.voice, p.default_models ->> 'speech_voice') END;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_capability_credentials(p_agent_id uuid, p_capability text, p_actor_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_capability_credentials(p_agent_id uuid, p_capability text, p_actor_user_id uuid) IS 'Provedor, URL, chave, modelo e voz de uma inferência do agente (text, vision, embeddings, transcription, speech), fora ou dentro de uma execução (transcrição no upload, TTS, embedding da consulta, visão por descrição no runner). Modelo nulo da inferência = default_models do provedor (pode voltar nulo: não configurado); text = provedor e modelo do agente; voz só no speech. Erros: 22023 capacidade desconhecida; 42501 ator não é usuário ativo, agente inativo/arquivado, provedor inativo/arquivado ou sem a flag; P0002 agente inexistente ou sem provedor para a capacidade. O ator vem da sessão autenticada (na execução, o usuário dela).';
+
+
+--
+-- Name: ai_capability_list_valid(text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_capability_list_valid(p_capabilities text[]) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT p_capabilities IS NOT NULL
+     AND coalesce(array_ndims(p_capabilities), 1) = 1
+     AND array_position(p_capabilities, NULL) IS NULL
+     AND p_capabilities <@ ARRAY['text', 'vision', 'embeddings', 'transcription', 'speech']
+     AND (SELECT count(DISTINCT c) FROM unnest(p_capabilities) c) = cardinality(p_capabilities)
+$$;
+
+
+--
+-- Name: FUNCTION ai_capability_list_valid(p_capabilities text[]); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_capability_list_valid(p_capabilities text[]) IS 'true se a lista é um subconjunto, sem nulos nem repetição, de text, vision, embeddings, transcription e speech (lista vazia vale).';
+
+
+--
+-- Name: ai_chat_sessions_consolidate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_chat_sessions_consolidate() RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  extras uuid[];
+BEGIN
+  -- Sem escrita concorrente nas conversas enquanto escolhe a ativa de cada par.
+  LOCK TABLE ai_conversations IN SHARE ROW EXCLUSIVE MODE;
+  SELECT coalesce(array_agg(x.id), '{}') INTO extras
+    FROM (SELECT c.id,
+                 row_number() OVER (PARTITION BY c.user_id, c.agent_id
+                                    ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC, c.id DESC) AS rn
+            FROM ai_conversations c
+           WHERE c.purpose = 'chat' AND c.archived_at IS NULL) x
+   WHERE x.rn > 1;
+  IF cardinality(extras) = 0 THEN
+    RETURN 0;
+  END IF;
+
+  -- Execuções ativas das que serão arquivadas: na fila ou esperando confirmação, canceladas na hora; rodando, com o
+  -- cancelamento pedido (o worker encerra como canceled no próximo heartbeat).
+  UPDATE ai_runs r
+     SET cancel_requested_at = coalesce(r.cancel_requested_at, now()),
+         status = CASE WHEN r.status = 'running' THEN r.status ELSE 'canceled' END
+   WHERE r.conversation_id = ANY (extras)
+     AND r.status IN ('queued', 'running', 'awaiting_confirmation');
+
+  UPDATE ai_conversations c
+     SET archived_at = now(), archived_reason = 'migrated_from_multi'
+   WHERE c.id = ANY (extras);
+  RETURN cardinality(extras);
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_chat_sessions_consolidate(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_chat_sessions_consolidate() IS 'Manutenção da migração 0043 (spec 026), idempotente: para cada (usuário, agente) com mais de uma conversa chat ativa, mantém a de last_message_at mais recente (nulos por último; empate por created_at e id) e arquiva as outras com archived_reason = migrated_from_multi, encerrando as execuções ativas delas (queued e awaiting_confirmation viram canceled; running recebe cancel_requested_at). Nada é apagado. Devolve quantas arquivou. Só o dono do banco.';
+
+
+--
 -- Name: ai_conversation_fork(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -336,6 +927,12 @@ BEGIN
     RAISE EXCEPTION 'ai_conversation_fork: message % not found', p_message_id USING ERRCODE = 'no_data_found';
   END IF;
   SELECT m.seq INTO upto FROM ai_messages m WHERE m.id = p_message_id;
+
+  -- Finaliza a sessão ativa do mesmo (usuário, agente), que pode ser a própria origem. Com execução ativa sem
+  -- cancelamento pedido, ai_conversations_archive_guard recusa (23514).
+  UPDATE ai_conversations c
+     SET archived_at = now(), archived_reason = 'forked'
+   WHERE c.user_id = p_user_id AND c.agent_id = src.agent_id AND c.purpose = 'chat' AND c.archived_at IS NULL;
 
   INSERT INTO ai_conversations (user_id, agent_id, title, title_source, forked_from_conversation_id,
                                 forked_from_message_id, screen_context, purpose)
@@ -358,7 +955,7 @@ $$;
 -- Name: FUNCTION ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text) IS 'Bifurca: cria uma conversa de p_user_id com o mesmo agente, copia as mensagens da origem até p_message_id (inclusive, mesmos seq, sem run_id; anexos religados) e devolve o id. Título = p_title ou o da origem. A cópia é sempre purpose chat (sem a chave purpose no screen_context), mesmo vinda de uma conversa de fluxo. Corte a bifurcação numa mensagem que não deixe tool_use sem tool_result (a aplicação escolhe). P0002 se a mensagem não existe.';
+COMMENT ON FUNCTION public.ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text) IS 'Bifurca: finaliza a sessão chat ativa de p_user_id com o agente da origem (archived_reason = forked; pode ser a própria origem) e cria a sessão nova, que vira a ativa, copiando as mensagens da origem até p_message_id (inclusive, mesmos seq, sem run_id; anexos religados); devolve o id. Título = p_title ou o da origem. A cópia é sempre purpose chat (sem a chave purpose no screen_context), mesmo vinda de uma conversa de fluxo. Corte a bifurcação numa mensagem que não deixe tool_use sem tool_result (a aplicação escolhe). P0002 se a mensagem não existe; 23514 ai_conversations_archive_active_run_check se a sessão ativa tem execução ativa sem cancelamento pedido; 23505 se outra transação criou a ativa do par ao mesmo tempo.';
 
 
 --
@@ -416,6 +1013,38 @@ COMMENT ON FUNCTION public.ai_conversation_search(p_query text, p_user_id uuid, 
 
 
 --
+-- Name: ai_conversations_archive_guard(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_conversations_archive_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN
+    RAISE EXCEPTION 'ai_conversations: session % is finished and cannot become active again (fork it instead)', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_conversations_unarchive_check';
+  END IF;
+  IF OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL
+     AND EXISTS (SELECT 1 FROM ai_runs r
+                  WHERE r.conversation_id = NEW.id
+                    AND r.status IN ('queued', 'running', 'awaiting_confirmation')
+                    AND r.cancel_requested_at IS NULL) THEN
+    RAISE EXCEPTION 'ai_conversations: session % has an active run; request its cancellation before finishing', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_conversations_archive_active_run_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_conversations_archive_guard(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_conversations_archive_guard() IS 'Trigger das sessões chat (spec 026): arquivada não volta a ativa (23514 ai_conversations_unarchive_check); arquivar com execução ativa (queued, running, awaiting_confirmation) só com cancel_requested_at já preenchido (23514 ai_conversations_archive_active_run_check). Conversas de fluxo (purpose <> chat) ficam de fora.';
+
+
+--
 -- Name: ai_conversations_purpose_immutable(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -430,24 +1059,125 @@ $$;
 
 
 --
--- Name: ai_embedding_credentials(); Type: FUNCTION; Schema: public; Owner: -
+-- Name: ai_embedding_credentials(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.ai_embedding_credentials() RETURNS TABLE(provider_id uuid, kind text, base_url text, api_key text, embedding_model text)
-    LANGUAGE sql STABLE SECURITY DEFINER
+CREATE FUNCTION public.ai_embedding_credentials(p_provider_id uuid) RETURNS TABLE(provider_id uuid, kind text, base_url text, api_key text, default_model text)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public', 'pg_temp'
     AS $$
-  SELECT p.id, p.kind, p.base_url, p.api_key, p.embedding_model
-    FROM public.ai_providers p
-   WHERE p.embedding_model IS NOT NULL AND p.is_active
+DECLARE
+  p public.ai_providers;
+BEGIN
+  SELECT * INTO p FROM public.ai_providers x WHERE x.id = p_provider_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_embedding_credentials: provider % not found', p_provider_id USING ERRCODE = 'no_data_found';
+  END IF;
+  IF NOT p.is_active OR p.archived_at IS NOT NULL OR NOT ('embeddings' = ANY (p.capabilities)) THEN
+    RAISE EXCEPTION 'ai_embedding_credentials: provider % is not active or lacks the embeddings capability', p.id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN QUERY SELECT p.id, p.kind, p.base_url, p.api_key, p.default_models ->> 'embeddings';
+END
 $$;
 
 
 --
--- Name: FUNCTION ai_embedding_credentials(); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION ai_embedding_credentials(p_provider_id uuid); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_embedding_credentials() IS 'Worker (indexação e busca semântica): credenciais do provedor de embeddings ativo (0 ou 1 linha). Sem linha = sem embeddings; a busca dos agentes cai para trigram.';
+COMMENT ON FUNCTION public.ai_embedding_credentials(p_provider_id uuid) IS 'Worker (indexação de um par): tipo, URL, chave e modelo padrão de embeddings do provedor. Erro 42501 se o provedor está inativo, arquivado ou sem a flag embeddings; P0002 se não existe. Use o modelo do par, não o padrão, quando forem diferentes.';
+
+
+--
+-- Name: ai_embedding_indexes_purge(interval); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_embedding_indexes_purge(p_idle interval DEFAULT '7 days'::interval) RETURNS bigint
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  n bigint;
+BEGIN
+  IF p_idle IS NULL OR p_idle < interval '1 hour' THEN
+    RAISE EXCEPTION 'ai_embedding_indexes_purge: idle interval must be at least 1 hour'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- Os vetores primeiro (para contar), depois os pares (a FK levaria os vetores de qualquer jeito).
+  WITH gone AS (
+    DELETE FROM ai_embeddings e USING ai_embedding_indexes x
+     WHERE e.provider_id = x.provider_id AND e.model = x.model
+       AND x.last_in_use_at < now() - p_idle
+       AND NOT EXISTS (SELECT 1 FROM ai_embedding_pairs_in_use u WHERE u.provider_id = x.provider_id AND u.model = x.model)
+    RETURNING 1
+  )
+  SELECT count(*) INTO n FROM gone;
+  DELETE FROM ai_embedding_indexes x
+   WHERE x.last_in_use_at < now() - p_idle
+     AND NOT EXISTS (SELECT 1 FROM ai_embedding_pairs_in_use u WHERE u.provider_id = x.provider_id AND u.model = x.model);
+  RETURN n;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_embedding_indexes_purge(p_idle interval); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_embedding_indexes_purge(p_idle interval) IS 'Worker: apaga os pares fora de uso cujo last_in_use_at é mais velho que p_idle (padrão 7 dias), com os vetores, e devolve quantos vetores saíram. Erro 22023 com p_idle nulo ou menor que 1 hora.';
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: ai_embedding_indexes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_embedding_indexes (
+    provider_id uuid NOT NULL,
+    model text NOT NULL,
+    last_in_use_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_embedding_indexes_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text))
+);
+
+
+--
+-- Name: TABLE ai_embedding_indexes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_embedding_indexes IS 'Um índice de embeddings por par (provedor, modelo) (spec 024). O worker registra os pares em uso a cada ciclo (ai_embedding_indexes_touch) e apaga os parados há mais de 7 dias com os vetores (ai_embedding_indexes_purge). Todo vetor pertence a um par registrado (FK; registre antes de gravar). Estado operacional: fora da auditoria e do backup.';
+
+
+--
+-- Name: COLUMN ai_embedding_indexes.last_in_use_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embedding_indexes.last_in_use_at IS 'Última vez em que algum agente ativo usava o par.';
+
+
+--
+-- Name: ai_embedding_indexes_touch(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_embedding_indexes_touch() RETURNS SETOF public.ai_embedding_indexes
+    LANGUAGE sql
+    AS $$
+  INSERT INTO ai_embedding_indexes AS x (provider_id, model, last_in_use_at)
+  SELECT u.provider_id, u.model, now() FROM ai_embedding_pairs_in_use u
+  ON CONFLICT (provider_id, model) DO UPDATE SET last_in_use_at = excluded.last_in_use_at
+  RETURNING x.*
+$$;
+
+
+--
+-- Name: FUNCTION ai_embedding_indexes_touch(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_embedding_indexes_touch() IS 'Worker, a cada ciclo: registra os pares em uso (ai_embedding_pairs_in_use) com last_in_use_at = agora e os devolve (o que indexar). Rode antes de gravar vetores de um par novo (a FK de ai_embeddings exige o par).';
 
 
 --
@@ -511,34 +1241,113 @@ COMMENT ON FUNCTION public.ai_embeddings_purge_orphans() IS 'Apaga os embeddings
 
 
 --
--- Name: ai_embeddings_search(public.vector, text, uuid[], text[], integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: ai_embeddings_search(public.vector, uuid, text, uuid[], text[], integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.ai_embeddings_search(p_query public.vector, p_model text, p_caixa_ids uuid[], p_object_types text[] DEFAULT NULL::text[], p_limit integer DEFAULT 20) RETURNS TABLE(object_type text, object_id uuid, caixa_id uuid, source_text text, distance double precision)
+CREATE FUNCTION public.ai_embeddings_search(p_query public.vector, p_provider_id uuid, p_model text, p_caixa_ids uuid[], p_object_types text[] DEFAULT NULL::text[], p_limit integer DEFAULT 20) RETURNS TABLE(object_type text, object_id uuid, caixa_id uuid, source_text text, distance double precision)
     LANGUAGE plpgsql STABLE
+    SET "hnsw.iterative_scan" TO 'relaxed_order'
     AS $$
 BEGIN
-  IF p_query IS NULL OR p_model IS NULL OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 200 THEN
-    RAISE EXCEPTION 'ai_embeddings_search: query vector, model and limit 1..200 are required'
+  IF p_query IS NULL OR p_provider_id IS NULL OR p_model IS NULL OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 200 THEN
+    RAISE EXCEPTION 'ai_embeddings_search: query vector, provider, model and limit 1..200 are required'
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
+  -- Vários pares no mesmo HNSW: com o filtro depois do índice, a varredura iterativa continua até achar p_limit
+  -- linhas do par; relaxed_order pode devolver fora de ordem, então reordena por fora. O "+ 0" impede o planejador
+  -- (PostgreSQL 17+) de reaproveitar a ordem declarada pela CTE e pular a ordenação.
   RETURN QUERY
-  SELECT e.object_type, e.object_id, e.caixa_id, e.source_text, (e.embedding <=> p_query)::double precision
-    FROM ai_embeddings e
-   WHERE e.model = p_model AND e.embedding IS NOT NULL
-     AND (e.caixa_id IS NULL OR e.caixa_id = ANY (coalesce(p_caixa_ids, '{}')))
-     AND (p_object_types IS NULL OR e.object_type = ANY (p_object_types))
-   ORDER BY e.embedding <=> p_query
-   LIMIT p_limit;
+  WITH nearest AS MATERIALIZED (
+    SELECT e.object_type AS o_type, e.object_id AS o_id, e.caixa_id AS c_id, e.source_text AS s_text,
+           (e.embedding <=> p_query)::double precision AS dist
+      FROM ai_embeddings e
+     WHERE e.provider_id = p_provider_id AND e.model = p_model AND e.embedding IS NOT NULL
+       AND (e.caixa_id IS NULL OR e.caixa_id = ANY (coalesce(p_caixa_ids, '{}')))
+       AND (p_object_types IS NULL OR e.object_type = ANY (p_object_types))
+     ORDER BY e.embedding <=> p_query
+     LIMIT p_limit
+  )
+  SELECT n.o_type, n.o_id, n.c_id, n.s_text, n.dist FROM nearest n ORDER BY n.dist + 0, n.o_type, n.o_id;
 END
 $$;
 
 
 --
--- Name: FUNCTION ai_embeddings_search(p_query public.vector, p_model text, p_caixa_ids uuid[], p_object_types text[], p_limit integer); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION ai_embeddings_search(p_query public.vector, p_provider_id uuid, p_model text, p_caixa_ids uuid[], p_object_types text[], p_limit integer); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_embeddings_search(p_query public.vector, p_model text, p_caixa_ids uuid[], p_object_types text[], p_limit integer) IS 'Vizinhos mais próximos (distância de cosseno, menor = mais parecido) do vetor de consulta, no mesmo modelo, só de objetos globais (caixa_id nulo) ou das caixas listadas (as que o usuário lê), opcionalmente por tipos. Vetores velhos (needs_reindex) ainda entram. Erro 22023 sem vetor/modelo ou com limite fora de 1..200.';
+COMMENT ON FUNCTION public.ai_embeddings_search(p_query public.vector, p_provider_id uuid, p_model text, p_caixa_ids uuid[], p_object_types text[], p_limit integer) IS 'Vizinhos mais próximos (distância de cosseno, menor = mais parecido) do vetor de consulta, no mesmo par (provedor, modelo), só de objetos globais (caixa_id nulo) ou das caixas listadas (as que o usuário lê), opcionalmente por tipos. Roda com hnsw.iterative_scan = relaxed_order (o filtro do par não derruba resultados) e reordena. Vetores velhos (needs_reindex) ainda entram. Erro 22023 sem vetor/provedor/modelo ou com limite fora de 1..200.';
+
+
+--
+-- Name: ai_legacy_tool_registry(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_legacy_tool_registry() RETURNS TABLE(tool_name text, kind text, confirm text)
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT v.tool_name, v.kind, v.confirm
+    FROM (VALUES
+      -- leituras (25)
+      ('search_records', 'read', 'never'),
+      ('semantic_search', 'read', 'never'),
+      ('list_caixas', 'read', 'never'),
+      ('get_caixa', 'read', 'never'),
+      ('list_accounts', 'read', 'never'),
+      ('get_account_statement', 'read', 'never'),
+      ('list_entities', 'read', 'never'),
+      ('list_entity_tags', 'read', 'never'),
+      ('get_entity', 'read', 'never'),
+      ('list_categories', 'read', 'never'),
+      ('list_titles', 'read', 'never'),
+      ('get_title', 'read', 'never'),
+      ('list_transfers', 'read', 'never'),
+      ('get_card', 'read', 'never'),
+      ('get_invoice', 'read', 'never'),
+      ('list_card_purchases', 'read', 'never'),
+      ('calendar', 'read', 'never'),
+      ('report_categories', 'read', 'never'),
+      ('report_entities', 'read', 'never'),
+      ('report_projection', 'read', 'never'),
+      ('flow_graph', 'read', 'never'),
+      ('list_statement_imports', 'read', 'never'),
+      ('get_statement_import', 'read', 'never'),
+      ('list_line_candidates', 'read', 'never'),
+      ('list_message_destinations', 'read', 'never'),
+      -- escritas (24)
+      ('create_entity', 'write', 'agent'),
+      ('update_entity', 'write', 'agent'),
+      ('set_entity_tags', 'write', 'agent'),
+      ('set_entity_favorite', 'write', 'agent'),
+      ('add_pix_key', 'write', 'agent'),
+      ('create_title', 'write', 'agent'),
+      ('update_title', 'write', 'agent'),
+      ('end_series', 'write', 'agent'),
+      ('settle_title', 'write', 'agent'),
+      ('reverse_settlement', 'write', 'agent'),
+      ('create_transfer', 'write', 'agent'),
+      ('create_card_purchase', 'write', 'agent'),
+      ('match_statement_line', 'write', 'agent'),
+      ('match_statement_lines', 'write', 'agent'),
+      ('confirm_statement_lines', 'write', 'agent'),
+      ('unmatch_statement_line', 'write', 'agent'),
+      ('ignore_statement_lines', 'write', 'agent'),
+      ('unignore_statement_lines', 'write', 'agent'),
+      ('create_from_statement_line', 'write', 'agent'),
+      ('create_from_statement_lines', 'write', 'agent'),
+      ('classify_statement_lines', 'write', 'agent'),
+      ('apply_classification_suggestions', 'write', 'agent'),
+      ('send_telegram_message', 'write', 'always'),
+      ('notify_user', 'write', 'never')
+    ) AS v (tool_name, kind, confirm)
+$$;
+
+
+--
+-- Name: FUNCTION ai_legacy_tool_registry(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_legacy_tool_registry() IS 'Retrato FIXO do registro de tools da v0.1.7 (packages/shared/src/agents/tools.ts): 49 tools, 25 read e 24 write, com o confirm de cada uma (never|agent|always). Usado pela migração de enabled_tools/require_write_confirmation para kits (0038) e para a aplicação conferir o retrato contra AGENT_TOOLS. Não acompanha o registro: tools novas não entram aqui.';
 
 
 --
@@ -670,10 +1479,6 @@ END
 $$;
 
 
-SET default_tablespace = '';
-
-SET default_table_access_method = heap;
-
 --
 -- Name: ai_model_prices; Type: TABLE; Schema: public; Owner: -
 --
@@ -690,6 +1495,9 @@ CREATE TABLE public.ai_model_prices (
     valid_from timestamp with time zone DEFAULT now() NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    audio_input_per_minute numeric(14,6),
+    speech_per_million_chars numeric(14,6),
+    CONSTRAINT ai_model_prices_audio_values_check CHECK (((audio_input_per_minute >= (0)::numeric) AND (speech_per_million_chars >= (0)::numeric))),
     CONSTRAINT ai_model_prices_currency_check CHECK ((currency = ANY (ARRAY['USD'::text, 'BRL'::text]))),
     CONSTRAINT ai_model_prices_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
     CONSTRAINT ai_model_prices_values_check CHECK (((input_price_per_million >= (0)::numeric) AND (output_price_per_million >= (0)::numeric) AND (cache_write_price_per_million >= (0)::numeric) AND (cache_read_price_per_million >= (0)::numeric)))
@@ -753,6 +1561,20 @@ COMMENT ON COLUMN public.ai_model_prices.valid_from IS 'Início da vigência des
 
 
 --
+-- Name: COLUMN ai_model_prices.audio_input_per_minute; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_model_prices.audio_input_per_minute IS 'Preço por minuto de áudio transcrito, para os modelos cobrados assim (ex.: whisper-1). Nulo = não cobra por minuto.';
+
+
+--
+-- Name: COLUMN ai_model_prices.speech_per_million_chars; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_model_prices.speech_per_million_chars IS 'Preço por 1 milhão de caracteres convertidos em fala, para os modelos cobrados assim (ex.: tts-1). Nulo = não cobra por caractere.';
+
+
+--
 -- Name: ai_model_price_at(uuid, text, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -771,6 +1593,368 @@ $$;
 --
 
 COMMENT ON FUNCTION public.ai_model_price_at(p_provider_id uuid, p_model text, p_at timestamp with time zone) IS 'Preço vigente do modelo no instante (linha mais recente com valid_from <= p_at); todos os campos nulos se não há preço.';
+
+
+--
+-- Name: ai_provider_default_models_valid(text[], jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_provider_default_models_valid(p_capabilities text[], p_models jsonb) RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $_$
+DECLARE
+  k text;
+  v jsonb;
+BEGIN
+  IF p_models IS NULL OR jsonb_typeof(p_models) <> 'object' THEN
+    RETURN false;
+  END IF;
+  FOR k, v IN SELECT * FROM jsonb_each(p_models) LOOP
+    IF jsonb_typeof(v) <> 'string' THEN
+      RETURN false;
+    END IF;
+    IF k = 'speech_voice' THEN
+      IF NOT ('speech' = ANY (coalesce(p_capabilities, '{}'))) OR v #>> '{}' !~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' THEN
+        RETURN false;
+      END IF;
+    ELSIF k IN ('text', 'vision', 'embeddings', 'transcription', 'speech') THEN
+      IF NOT (k = ANY (coalesce(p_capabilities, '{}'))) OR v #>> '{}' !~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$' THEN
+        RETURN false;
+      END IF;
+    ELSE
+      RETURN false;
+    END IF;
+  END LOOP;
+  RETURN true;
+END
+$_$;
+
+
+--
+-- Name: FUNCTION ai_provider_default_models_valid(p_capabilities text[], p_models jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_provider_default_models_valid(p_capabilities text[], p_models jsonb) IS 'true se default_models é um objeto só com as chaves text, vision, embeddings, transcription, speech (nome de modelo) e speech_voice (nome de voz, até 64), cada uma só com a capacidade ligada (speech_voice com speech). Nenhuma chave é obrigatória aqui; o modelo de texto do Anthropic compatível é exigido por ai_providers_validate.';
+
+
+--
+-- Name: ai_provider_health(integer, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_provider_health(p_days integer DEFAULT 7, p_provider_id uuid DEFAULT NULL::uuid) RETURNS TABLE(provider_id uuid, model text, requests integer, ok integer, errors integer, canceled integer, error_rate numeric, p50_ms integer, p95_ms integer, p50_first_byte_ms integer, p95_first_byte_ms integer, avg_attempts numeric, last_error_at timestamp with time zone)
+    LANGUAGE plpgsql STABLE
+    AS $$
+#variable_conflict use_column
+BEGIN
+  IF p_days IS NULL OR p_days < 1 OR p_days > 365 THEN
+    RAISE EXCEPTION 'ai_provider_health: days must be between 1 and 365' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  RETURN QUERY
+  SELECT r.provider_id,
+         r.model,
+         count(*)::integer,
+         count(*) FILTER (WHERE r.status = 'ok')::integer,
+         count(*) FILTER (WHERE r.status = 'error')::integer,
+         count(*) FILTER (WHERE r.status = 'canceled')::integer,
+         round(count(*) FILTER (WHERE r.status = 'error')::numeric
+               / nullif(count(*) FILTER (WHERE r.status IN ('ok', 'error')), 0), 4),
+         round(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.duration_ms) FILTER (WHERE r.status = 'ok'))::integer,
+         round(percentile_cont(0.95) WITHIN GROUP (ORDER BY r.duration_ms) FILTER (WHERE r.status = 'ok'))::integer,
+         round(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.first_byte_ms) FILTER (WHERE r.status = 'ok'))::integer,
+         round(percentile_cont(0.95) WITHIN GROUP (ORDER BY r.first_byte_ms) FILTER (WHERE r.status = 'ok'))::integer,
+         round(avg(r.attempts), 2),
+         max(r.finished_at) FILTER (WHERE r.status = 'error')
+    FROM ai_requests r
+   WHERE r.status <> 'running'
+     AND r.started_at >= now() - make_interval(days => p_days)
+     AND (p_provider_id IS NULL OR r.provider_id = p_provider_id)
+   GROUP BY r.provider_id, r.model
+   ORDER BY r.provider_id NULLS LAST, r.model NULLS LAST;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_provider_health(p_days integer, p_provider_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_provider_health(p_days integer, p_provider_id uuid) IS 'Saúde por provedor e modelo nos últimos p_days dias (1–365, padrão 7; senão 22023), só requisições terminadas, de um provedor (p_provider_id) ou de todos: requests, ok, errors, canceled; error_rate = erros ÷ (ok + erros), sem as canceladas (nula sem nenhuma); p50/p95 da duração e do primeiro byte das que deram certo (ms); média de tentativas; último erro. provider_id nulo = provedor não salvo ou excluído; model nulo = sem modelo (listar modelos).';
+
+
+--
+-- Name: ai_providers_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_providers_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  all_caps constant text[] := ARRAY['text', 'vision', 'embeddings', 'transcription', 'speech'];
+  removed text[];
+  names   text;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    NEW.capabilities := coalesce(NEW.capabilities,
+                                 CASE WHEN NEW.kind = 'anthropic' THEN ARRAY['text', 'vision'] ELSE all_caps END);
+    NEW.prompt_cache_enabled := coalesce(NEW.prompt_cache_enabled, NEW.base_url IS NULL);
+    NEW.thinking_enabled := coalesce(NEW.thinking_enabled, NEW.base_url IS NULL);
+  END IF;
+
+  -- Ordem canônica (a lista inválida fica como veio, para o CHECK recusar).
+  IF ai_capability_list_valid(NEW.capabilities) THEN
+    NEW.capabilities := ARRAY(SELECT c FROM unnest(all_caps) WITH ORDINALITY x (c, o)
+                               WHERE c = ANY (NEW.capabilities) ORDER BY o);
+  END IF;
+
+  -- Anthropic compatível: modelo de texto padrão obrigatório. Conferido quando algo que o afeta muda, para um
+  -- provedor antigo sem o modelo ainda poder ser ativado, desativado ou arquivado.
+  IF NEW.kind = 'anthropic' AND NEW.base_url IS NOT NULL AND 'text' = ANY (NEW.capabilities)
+     AND NOT (NEW.default_models ? 'text')
+     AND (TG_OP = 'INSERT' OR NEW.kind IS DISTINCT FROM OLD.kind OR NEW.base_url IS DISTINCT FROM OLD.base_url
+          OR NEW.capabilities IS DISTINCT FROM OLD.capabilities OR NEW.default_models IS DISTINCT FROM OLD.default_models) THEN
+    RAISE EXCEPTION 'ai_providers: an Anthropic-compatible provider (base_url) needs a default text model'
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_providers_text_model_check';
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    removed := ARRAY(SELECT unnest(OLD.capabilities) EXCEPT SELECT unnest(coalesce(NEW.capabilities, '{}')));
+    IF cardinality(removed) > 0 THEN
+      SELECT string_agg(DISTINCT x.name, ', ' ORDER BY x.name) INTO names
+        FROM (SELECT a.name FROM ai_agents a
+               WHERE 'text' = ANY (removed) AND a.provider_id = NEW.id
+              UNION ALL
+              SELECT a.name FROM ai_agent_inferences i JOIN ai_agents a ON a.id = i.agent_id
+               WHERE i.provider_id = NEW.id AND i.capability = ANY (removed)) x;
+      IF names IS NOT NULL THEN
+        RAISE EXCEPTION 'ai_providers: capability removed from provider % is in use by agents: %', NEW.id, names
+          USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_providers_capability_in_use_check', DETAIL = names;
+      END IF;
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_providers_validate(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_providers_validate() IS 'BEFORE INSERT/UPDATE de ai_providers: preenche capabilities, prompt_cache_enabled e thinking_enabled omitidos no INSERT (pelo tipo e pela base_url), põe as flags em ordem canônica, exige default_models.text no Anthropic compatível (ai_providers_text_model_check) e recusa tirar uma flag em uso por algum agente, arquivado inclusive (ai_providers_capability_in_use_check; os nomes dos agentes vão no DETAIL).';
+
+
+--
+-- Name: ai_request_attempts_after_insert(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_request_attempts_after_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE ai_requests r
+     SET attempts = (SELECT count(*) FROM ai_request_attempts a WHERE a.request_id = NEW.request_id)
+   WHERE r.id = NEW.request_id;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_request_attempts_after_insert(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_request_attempts_after_insert() IS 'Mantém ai_requests.attempts = número de tentativas gravadas.';
+
+
+--
+-- Name: ai_request_attempts_before_write(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_request_attempts_before_write() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  logging boolean;
+BEGIN
+  IF TG_OP = 'INSERT' OR NEW.response_body IS DISTINCT FROM OLD.response_body THEN
+    SELECT p.log_bodies INTO logging
+      FROM ai_requests r JOIN ai_providers p ON p.id = r.provider_id
+     WHERE r.id = NEW.request_id;
+    IF NOT coalesce(logging, false) THEN
+      NEW.response_body := NULL;
+    END IF;
+  END IF;
+  IF TG_OP = 'INSERT' OR NEW.rate_limit_headers IS DISTINCT FROM OLD.rate_limit_headers THEN
+    NEW.rate_limit_headers := ai_request_headers_redact(NEW.rate_limit_headers);
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_request_attempts_before_write(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_request_attempts_before_write() IS 'Descarta o corpo da resposta de erro sem log_bodies e omite credenciais nos cabeçalhos guardados.';
+
+
+--
+-- Name: ai_request_headers_redact(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_request_headers_redact(p_headers jsonb) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  SELECT CASE
+           WHEN p_headers IS NULL OR jsonb_typeof(p_headers) <> 'object' THEN p_headers
+           ELSE coalesce((SELECT jsonb_object_agg(h.key,
+                                                  CASE WHEN lower(h.key) = ANY (ARRAY['authorization', 'proxy-authorization',
+                                                                                      'x-api-key', 'api-key',
+                                                                                      'openai-organization', 'openai-project',
+                                                                                      'cookie', 'set-cookie'])
+                                                       THEN to_jsonb('[omitido]'::text)
+                                                       ELSE h.value END)
+                            FROM jsonb_each(p_headers) h), '{}'::jsonb)
+         END
+$$;
+
+
+--
+-- Name: FUNCTION ai_request_headers_redact(p_headers jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_request_headers_redact(p_headers jsonb) IS 'Rede de segurança: troca por "[omitido]" o valor dos cabeçalhos de credencial (authorization, proxy-authorization, x-api-key, api-key, openai-organization, openai-project, cookie, set-cookie; sem distinção de maiúsculas). A aplicação omite antes de gravar (inclusive os anthropic-* de credencial); o banco repete nas colunas de cabeçalho.';
+
+
+--
+-- Name: ai_requests_before_write(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_requests_before_write() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  r       ai_runs;
+  cp      text;
+  logging boolean;
+  o       jsonb;
+  n       jsonb;
+  k       text;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    NEW.attempts := 0;
+    IF NEW.run_id IS NOT NULL THEN
+      SELECT * INTO r FROM ai_runs x WHERE x.id = NEW.run_id;
+      IF FOUND THEN
+        NEW.conversation_id := coalesce(NEW.conversation_id, r.conversation_id);
+        NEW.user_id := coalesce(NEW.user_id, r.user_id);
+        NEW.agent_id := coalesce(NEW.agent_id, r.agent_id);
+        NEW.provider_id := coalesce(NEW.provider_id, r.provider_id);
+        NEW.model := coalesce(NEW.model, r.model);
+        IF NEW.conversation_id <> r.conversation_id THEN
+          RAISE EXCEPTION 'ai_requests: run % belongs to another conversation', NEW.run_id
+            USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_requests_links_check';
+        END IF;
+      END IF;
+    END IF;
+    IF NEW.purpose = 'chat' AND NEW.conversation_id IS NOT NULL THEN
+      SELECT c.purpose INTO cp FROM ai_conversations c WHERE c.id = NEW.conversation_id;
+      NEW.purpose := coalesce(cp, NEW.purpose);
+    END IF;
+  END IF;
+
+  -- Cabeçalhos e corpos só com log_bodies (o que chega com a flag desligada é descartado).
+  SELECT p.log_bodies INTO logging FROM ai_providers p WHERE p.id = NEW.provider_id;
+  IF NOT coalesce(logging, false) THEN
+    IF TG_OP = 'INSERT' OR NEW.request_headers IS DISTINCT FROM OLD.request_headers THEN NEW.request_headers := NULL; END IF;
+    IF TG_OP = 'INSERT' OR NEW.request_body IS DISTINCT FROM OLD.request_body THEN NEW.request_body := NULL; END IF;
+    IF TG_OP = 'INSERT' OR NEW.response_headers IS DISTINCT FROM OLD.response_headers THEN NEW.response_headers := NULL; END IF;
+    IF TG_OP = 'INSERT' OR NEW.response_body IS DISTINCT FROM OLD.response_body THEN NEW.response_body := NULL; END IF;
+    IF TG_OP = 'INSERT' OR NEW.response_stream IS DISTINCT FROM OLD.response_stream THEN NEW.response_stream := NULL; END IF;
+  END IF;
+  IF TG_OP = 'INSERT' OR NEW.request_headers IS DISTINCT FROM OLD.request_headers THEN
+    NEW.request_headers := ai_request_headers_redact(NEW.request_headers);
+  END IF;
+  IF TG_OP = 'INSERT' OR NEW.response_headers IS DISTINCT FROM OLD.response_headers THEN
+    NEW.response_headers := ai_request_headers_redact(NEW.response_headers);
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    o := to_jsonb(OLD) - 'duration_ms';
+    n := to_jsonb(NEW) - 'duration_ms';
+    -- As FKs só mudam para nulo (ON DELETE SET NULL).
+    FOREACH k IN ARRAY ARRAY['provider_id', 'agent_id', 'user_id', 'conversation_id', 'run_id'] LOOP
+      IF n -> k IS DISTINCT FROM o -> k AND n ->> k IS NOT NULL THEN
+        RAISE EXCEPTION 'ai_requests: % of request % changes only to null', k, OLD.id
+          USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_requests_immutable_check';
+      END IF;
+    END LOOP;
+    o := o - ARRAY['provider_id', 'agent_id', 'user_id', 'conversation_id', 'run_id', 'attempts', 'updated_at'];
+    n := n - ARRAY['provider_id', 'agent_id', 'user_id', 'conversation_id', 'run_id', 'attempts', 'updated_at'];
+    IF OLD.status = 'running' THEN
+      -- Em andamento: o que identifica a chamada não muda.
+      o := jsonb_build_object('id', o -> 'id', 'operation', o -> 'operation', 'purpose', o -> 'purpose',
+                              'model', o -> 'model', 'method', o -> 'method', 'path', o -> 'path',
+                              'streaming', o -> 'streaming', 'started_at', o -> 'started_at', 'created_at', o -> 'created_at');
+      n := jsonb_build_object('id', n -> 'id', 'operation', n -> 'operation', 'purpose', n -> 'purpose',
+                              'model', n -> 'model', 'method', n -> 'method', 'path', n -> 'path',
+                              'streaming', n -> 'streaming', 'started_at', n -> 'started_at', 'created_at', n -> 'created_at');
+    END IF;
+    IF o IS DISTINCT FROM n THEN
+      RAISE EXCEPTION 'ai_requests: request % is immutable (%)', OLD.id,
+        CASE WHEN OLD.status = 'running' THEN 'identity' ELSE 'finished' END
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_requests_immutable_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_requests_before_write(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_requests_before_write() IS 'INSERT: tentativas = 0, completa os vínculos pela execução (ai_requests_links_check) e chat numa conversa de fluxo vira a finalidade dela. INSERT/UPDATE: descarta cabeçalhos e corpos gravados com log_bodies desligado (ou sem provedor) e omite as credenciais dos cabeçalhos. UPDATE (23514 ai_requests_immutable_check): FKs só viram nulas; em running, id, operação, finalidade, modelo, método, caminho, streaming e início não mudam; terminada, nada muda além das FKs anuladas e do contador de tentativas.';
+
+
+--
+-- Name: ai_requests_purge(integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_requests_purge(p_days integer, p_limit integer DEFAULT 1000) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  n integer;
+BEGIN
+  IF p_days IS NULL OR p_days < 1 THEN
+    RAISE EXCEPTION 'ai_requests_purge: days must be >= 1' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100000 THEN
+    RAISE EXCEPTION 'ai_requests_purge: limit must be between 1 and 100000' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  WITH doomed AS (
+    SELECT r.id FROM public.ai_requests r
+     WHERE r.started_at < clock_timestamp() - make_interval(days => p_days)
+     ORDER BY r.started_at, r.id
+     LIMIT p_limit
+     FOR UPDATE SKIP LOCKED
+  )
+  DELETE FROM public.ai_requests r USING doomed d WHERE r.id = d.id;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_requests_purge(p_days integer, p_limit integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_requests_purge(p_days integer, p_limit integer) IS 'Retenção (spec 023): apaga até p_limit (padrão 1000, máx. 100000) requisições iniciadas há mais de p_days dias, as mais velhas primeiro (com as tentativas, em CASCADE; o ai_usage fica com request_id nulo), e devolve quantas. O worker chama em lotes até devolver menos que o limite; p_days = app_settings ai.request_retention_days ou, sem ele, AI_REQUEST_RETENTION_DAYS. Erro 22023 com dias < 1 ou limite fora da faixa. Pula linhas travadas.';
 
 
 --
@@ -1106,6 +2290,10 @@ BEGIN
   IF NOT p.is_active OR p.archived_at IS NOT NULL THEN
     RAISE EXCEPTION 'ai_run_provider_credentials: provider % is not active', p.id USING ERRCODE = 'insufficient_privilege';
   END IF;
+  IF NOT ('text' = ANY (p.capabilities)) THEN
+    RAISE EXCEPTION 'ai_run_provider_credentials: provider % lacks the text capability', p.id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
   RETURN QUERY SELECT p.id, p.kind, p.base_url, p.api_key, r.model;
 END
 $$;
@@ -1115,7 +2303,7 @@ $$;
 -- Name: FUNCTION ai_run_provider_credentials(p_run_id uuid); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_run_provider_credentials(p_run_id uuid) IS 'Worker: provedor, URL, chave e modelo de uma execução RESERVADA (status running). Erro 42501 em outro status ou com o provedor inativo; P0002 se a execução não existe. Única forma de ler ai_providers.api_key durante o loop.';
+COMMENT ON FUNCTION public.ai_run_provider_credentials(p_run_id uuid) IS 'Worker: provedor, URL, chave e modelo de texto de uma execução RESERVADA (status running). Erro 42501 em outro status ou com o provedor inativo ou sem a flag text; P0002 se a execução não existe. Única forma de ler ai_providers.api_key durante o loop, além de ai_capability_credentials para as outras inferências.';
 
 
 --
@@ -1253,6 +2441,455 @@ $$;
 
 
 --
+-- Name: ai_schedule_next_run(jsonb, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_schedule_next_run(p_schedule jsonb, p_after timestamp with time zone) RETURNS timestamp with time zone
+    LANGUAGE plpgsql STABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  d0 date;
+  d date;
+  t timestamptz;
+BEGIN
+  IF NOT ai_schedule_valid(p_schedule) OR p_after IS NULL THEN
+    RETURN NULL;
+  END IF;
+  d0 := (p_after AT TIME ZONE 'America/Sao_Paulo')::date;
+  FOR i IN 0..62 LOOP
+    d := d0 + i;
+    CONTINUE WHEN NOT ai_schedule_occurs_on(p_schedule, d);
+    t := (d + (p_schedule ->> 'time')::time) AT TIME ZONE 'America/Sao_Paulo';
+    IF t > p_after THEN
+      RETURN t;
+    END IF;
+  END LOOP;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_schedule_next_run(p_schedule jsonb, p_after timestamp with time zone); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_schedule_next_run(p_schedule jsonb, p_after timestamp with time zone) IS 'Próximo disparo da agenda estritamente depois de p_after, no fuso America/Sao_Paulo (dia 31 em mês curto = último dia do mês; "last" = último dia). NULL com agenda inválida.';
+
+
+--
+-- Name: ai_schedule_occurs_on(jsonb, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_schedule_occurs_on(p_schedule jsonb, p_day date) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT CASE p_schedule ->> 'kind'
+           WHEN 'daily' THEN true
+           WHEN 'weekly' THEN (p_schedule -> 'weekdays') @> to_jsonb(extract(isodow FROM p_day)::int)
+           WHEN 'monthly' THEN
+             extract(day FROM p_day)::int
+               = least(CASE WHEN p_schedule -> 'day' = '"last"'::jsonb THEN 31 ELSE (p_schedule ->> 'day')::int END,
+                       extract(day FROM (date_trunc('month', p_day) + interval '1 month - 1 day'))::int)
+           ELSE false
+         END
+$$;
+
+
+--
+-- Name: FUNCTION ai_schedule_occurs_on(p_schedule jsonb, p_day date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_schedule_occurs_on(p_schedule jsonb, p_day date) IS 'Interna: a agenda dispara no dia p_day (diária: todo dia; semanal: dia ISO na lista; mensal: o dia, limitado ao último dia do mês, ou o último dia com "last").';
+
+
+--
+-- Name: ai_schedule_prev_run(jsonb, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_schedule_prev_run(p_schedule jsonb, p_at timestamp with time zone) RETURNS timestamp with time zone
+    LANGUAGE plpgsql STABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  d0 date;
+  d date;
+  t timestamptz;
+BEGIN
+  IF NOT ai_schedule_valid(p_schedule) OR p_at IS NULL THEN
+    RETURN NULL;
+  END IF;
+  d0 := (p_at AT TIME ZONE 'America/Sao_Paulo')::date;
+  FOR i IN 0..62 LOOP
+    d := d0 - i;
+    CONTINUE WHEN NOT ai_schedule_occurs_on(p_schedule, d);
+    t := (d + (p_schedule ->> 'time')::time) AT TIME ZONE 'America/Sao_Paulo';
+    IF t <= p_at THEN
+      RETURN t;
+    END IF;
+  END LOOP;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_schedule_prev_run(p_schedule jsonb, p_at timestamp with time zone); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_schedule_prev_run(p_schedule jsonb, p_at timestamp with time zone) IS 'Último disparo da agenda em p_at ou antes, no fuso America/Sao_Paulo (o "disparo perdido" mais recente). NULL com agenda inválida.';
+
+
+--
+-- Name: ai_schedule_valid(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_schedule_valid(p_schedule jsonb) RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $_$
+DECLARE
+  allowed text[];
+BEGIN
+  IF p_schedule IS NULL OR jsonb_typeof(p_schedule) <> 'object' OR jsonb_typeof(p_schedule -> 'kind') <> 'string' THEN
+    RETURN false;
+  END IF;
+  CASE p_schedule ->> 'kind'
+    WHEN 'daily' THEN allowed := '{kind,time}';
+    WHEN 'weekly' THEN allowed := '{kind,time,weekdays}';
+    WHEN 'monthly' THEN allowed := '{kind,time,day}';
+    ELSE RETURN false;
+  END CASE;
+  IF EXISTS (SELECT 1 FROM jsonb_object_keys(p_schedule) k WHERE k <> ALL (allowed)) OR NOT (p_schedule ?& allowed) THEN
+    RETURN false;
+  END IF;
+  IF jsonb_typeof(p_schedule -> 'time') <> 'string' OR p_schedule ->> 'time' !~ '^([01][0-9]|2[0-3]):[0-5][0-9]$' THEN
+    RETURN false;
+  END IF;
+  IF p_schedule ? 'weekdays' AND (
+       jsonb_typeof(p_schedule -> 'weekdays') <> 'array'
+       OR jsonb_array_length(p_schedule -> 'weekdays') NOT BETWEEN 1 AND 7
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements(p_schedule -> 'weekdays') e
+                   WHERE jsonb_typeof(e) <> 'number' OR e::text !~ '^[1-7]$')
+       OR (SELECT count(DISTINCT e::text) FROM jsonb_array_elements(p_schedule -> 'weekdays') e)
+          <> jsonb_array_length(p_schedule -> 'weekdays')) THEN
+    RETURN false;
+  END IF;
+  IF p_schedule ? 'day' AND NOT (
+       (jsonb_typeof(p_schedule -> 'day') = 'number' AND (p_schedule -> 'day')::text ~ '^[0-9]{1,2}$'
+        AND (p_schedule ->> 'day')::int BETWEEN 1 AND 31)
+       OR p_schedule -> 'day' = '"last"'::jsonb) THEN
+    RETURN false;
+  END IF;
+  RETURN true;
+END
+$_$;
+
+
+--
+-- Name: FUNCTION ai_schedule_valid(p_schedule jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_schedule_valid(p_schedule jsonb) IS 'true se a agenda de uma tarefa agendada (spec 029) é válida: {"kind": "daily", "time": "HH:MM"}, {"kind": "weekly", "time", "weekdays": [1–7 distintos, ISO, 1 = segunda]} ou {"kind": "monthly", "time", "day": 1–31 ou "last"}; só essas chaves, todas obrigatórias. Horário em America/Sao_Paulo.';
+
+
+--
+-- Name: ai_scheduled_task_claim(integer, interval); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_scheduled_task_claim(p_limit integer DEFAULT 10, p_max_delay interval DEFAULT '06:00:00'::interval) RETURNS TABLE(task_run_id uuid, task_id uuid, user_id uuid, agent_id uuid, task_name text, instruction text, scheduled_for timestamp with time zone, trigger_kind text, status text, skip_reason text)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+DECLARE
+  v_now timestamptz := clock_timestamp();
+  t ai_scheduled_tasks;
+  s timestamptz;
+  reason text;
+  rid uuid;
+BEGIN
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 OR p_max_delay IS NULL OR p_max_delay < interval '1 minute' THEN
+    RAISE EXCEPTION 'ai_scheduled_task_claim: limit must be 1..100 and max_delay >= 1 minute'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  FOR t IN SELECT x.* FROM ai_scheduled_tasks x
+            WHERE x.is_active AND x.next_run_at <= v_now
+            ORDER BY x.next_run_at, x.id
+            LIMIT p_limit
+            FOR UPDATE SKIP LOCKED LOOP
+    -- O disparo perdido mais recente (vários perdidos com o worker parado viram um só).
+    s := greatest(t.next_run_at, coalesce(ai_schedule_prev_run(t.schedule, v_now), t.next_run_at));
+    reason := CASE WHEN v_now - s > p_max_delay THEN 'missed_window' ELSE ai_scheduled_task_skip_reason(t) END;
+
+    rid := NULL;
+    INSERT INTO ai_scheduled_task_runs AS r (task_id, scheduled_for, trigger_kind, status, skip_reason)
+    VALUES (t.id, s, 'schedule', CASE WHEN reason IS NULL THEN 'started' ELSE 'skipped' END, reason)
+    ON CONFLICT ON CONSTRAINT ai_scheduled_task_runs_task_scheduled_key DO NOTHING
+    RETURNING r.id INTO rid;
+
+    UPDATE ai_scheduled_tasks x
+       SET next_run_at = ai_schedule_next_run(x.schedule, greatest(v_now, t.next_run_at)),
+           last_run_at = CASE WHEN rid IS NOT NULL AND reason IS NULL THEN v_now ELSE x.last_run_at END
+     WHERE x.id = t.id;
+
+    IF rid IS NOT NULL THEN
+      RETURN QUERY SELECT rid, t.id, t.user_id, t.agent_id, t.name, t.instruction, s, 'schedule'::text,
+                          CASE WHEN reason IS NULL THEN 'started' ELSE 'skipped' END, reason;
+    END IF;
+  END LOOP;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_scheduled_task_claim(p_limit integer, p_max_delay interval); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_scheduled_task_claim(p_limit integer, p_max_delay interval) IS 'Reserva até p_limit tarefas ativas vencidas (next_run_at <= agora) com FOR UPDATE SKIP LOCKED e, para cada uma, grava o disparo do horário previsto mais recente (vários perdidos viram um) e avança next_run_at para depois de agora. O disparo sai skipped com missed_window se o atraso passa de p_max_delay (padrão 6 h), com user_inactive, agent_inactive ou previous_run_active; senão started (last_run_at = agora). Devolve os disparos gravados (started e skipped); um horário já gravado não se repete (único por tarefa e horário). Para cada started, a aplicação cria a sessão (purpose scheduled_task) e a execução, de preferência na mesma transação, e grava conversation_id e run_id; se não puder começar (orçamento, limite, erro), passa o disparo a skipped/failed com o motivo. 22023 com parâmetros inválidos.';
+
+
+--
+-- Name: ai_scheduled_task_run_now(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_scheduled_task_run_now(p_task_id uuid) RETURNS TABLE(task_run_id uuid, task_id uuid, user_id uuid, agent_id uuid, task_name text, instruction text, scheduled_for timestamp with time zone, trigger_kind text, status text, skip_reason text)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+DECLARE
+  t ai_scheduled_tasks;
+  s timestamptz := clock_timestamp();
+  reason text;
+  rid uuid;
+BEGIN
+  SELECT x.* INTO t FROM ai_scheduled_tasks x WHERE x.id = p_task_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_scheduled_task_run_now: task % not found', p_task_id USING ERRCODE = 'no_data_found';
+  END IF;
+  reason := ai_scheduled_task_skip_reason(t);
+
+  INSERT INTO ai_scheduled_task_runs AS r (task_id, scheduled_for, trigger_kind, status, skip_reason)
+  VALUES (t.id, s, 'manual', CASE WHEN reason IS NULL THEN 'started' ELSE 'skipped' END, reason)
+  RETURNING r.id INTO rid;
+  IF reason IS NULL THEN
+    UPDATE ai_scheduled_tasks x SET last_run_at = s WHERE x.id = t.id;
+  END IF;
+
+  RETURN QUERY SELECT rid, t.id, t.user_id, t.agent_id, t.name, t.instruction, s, 'manual'::text,
+                      CASE WHEN reason IS NULL THEN 'started' ELSE 'skipped' END, reason;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_scheduled_task_run_now(p_task_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_scheduled_task_run_now(p_task_id uuid) IS '"Rodar agora": grava um disparo manual (scheduled_for = agora), started ou skipped (user_inactive, agent_inactive, previous_run_active), e o devolve; vale também para tarefa desligada e não muda next_run_at. A aplicação segue como no claim. Quem pode (o dono ou o admin) é regra da aplicação. P0002 se a tarefa não existe.';
+
+
+--
+-- Name: ai_scheduled_task_runs_before_write(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_scheduled_task_runs_before_write() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  owner uuid;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.task_id <> OLD.task_id OR NEW.scheduled_for <> OLD.scheduled_for OR NEW.trigger_kind <> OLD.trigger_kind
+       OR NEW.created_at <> OLD.created_at
+       OR (OLD.conversation_id IS NOT NULL AND NEW.conversation_id IS NOT NULL
+           AND NEW.conversation_id <> OLD.conversation_id)
+       OR (OLD.run_id IS NOT NULL AND NEW.run_id IS NOT NULL AND NEW.run_id <> OLD.run_id) THEN
+      RAISE EXCEPTION 'ai_scheduled_task_runs: task, time, trigger and links of run % are immutable', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_task_runs_immutable_check';
+    END IF;
+    IF OLD.status <> 'started' AND (NEW.status, NEW.skip_reason) IS DISTINCT FROM (OLD.status, OLD.skip_reason) THEN
+      RAISE EXCEPTION 'ai_scheduled_task_runs: run % is % (final)', OLD.id, OLD.status
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_task_runs_status_transition_check';
+    END IF;
+  END IF;
+
+  IF NEW.conversation_id IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.conversation_id IS NULL) THEN
+    SELECT t.user_id INTO owner FROM ai_scheduled_tasks t WHERE t.id = NEW.task_id;
+    IF NOT EXISTS (SELECT 1 FROM ai_conversations c
+                    WHERE c.id = NEW.conversation_id AND c.user_id = owner AND c.purpose = 'scheduled_task') THEN
+      RAISE EXCEPTION 'ai_scheduled_task_runs: conversation % is not a scheduled_task session of the task owner',
+        NEW.conversation_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_task_runs_links_check';
+    END IF;
+  END IF;
+  IF NEW.run_id IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.run_id IS NULL) THEN
+    IF NEW.conversation_id IS NULL
+       OR NOT EXISTS (SELECT 1 FROM ai_runs r WHERE r.id = NEW.run_id AND r.conversation_id = NEW.conversation_id) THEN
+      RAISE EXCEPTION 'ai_scheduled_task_runs: run % does not belong to conversation %', NEW.run_id, NEW.conversation_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_task_runs_links_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: ai_scheduled_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_scheduled_tasks (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    user_id uuid NOT NULL,
+    agent_id uuid NOT NULL,
+    name text NOT NULL,
+    instruction text NOT NULL,
+    schedule jsonb NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    next_run_at timestamp with time zone,
+    last_run_at timestamp with time zone,
+    created_by_user_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_scheduled_tasks_instruction_check CHECK (((btrim(instruction) <> ''::text) AND (length(instruction) <= 20000))),
+    CONSTRAINT ai_scheduled_tasks_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
+    CONSTRAINT ai_scheduled_tasks_next_run_check CHECK ((is_active = (next_run_at IS NOT NULL))),
+    CONSTRAINT ai_scheduled_tasks_schedule_check CHECK (public.ai_schedule_valid(schedule))
+);
+
+
+--
+-- Name: TABLE ai_scheduled_tasks; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_scheduled_tasks IS 'Tarefas agendadas dos agentes (spec 029): a cada disparo, a instrução vai como mensagem do usuário numa sessão própria (purpose scheduled_task), rodando como o dono (user_id) com as permissões dele. No máximo 20 ativas por usuário (ai_scheduled_tasks_active_limit_check). Disparos em ai_scheduled_task_runs; reserva por ai_scheduled_task_claim, "Rodar agora" por ai_scheduled_task_run_now. Auditada (menos next_run_at/last_run_at).';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.user_id IS 'Dono: a tarefa roda como ele. Imutável (ai_scheduled_tasks_user_immutable_check).';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.agent_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.agent_id IS 'Agente que executa. Excluir o agente com tarefas dá 23503 (arquive). Agente inativo ou arquivado: o disparo é skipped com agent_inactive.';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.instruction; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.instruction IS 'Texto enviado como mensagem do usuário a cada disparo (até 20 mil).';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.schedule; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.schedule IS 'Agenda (ai_schedule_valid): {"kind": "daily", "time": "HH:MM"}, {"kind": "weekly", "time", "weekdays": [1–7, ISO]} ou {"kind": "monthly", "time", "day": 1–31 | "last"}. Fuso America/Sao_Paulo; dia que o mês não tem = último dia.';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.is_active; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.is_active IS 'Desligada não dispara e não conta no limite de 20.';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.next_run_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.next_run_at IS 'Próximo disparo, mantido pelo banco (ai_schedule_next_run a partir de agora, ao criar, ativar ou mudar a agenda; avançado pelo claim). Nulo se e somente se desativada.';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.last_run_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.last_run_at IS 'Último disparo que começou (started), agendado ou manual.';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.created_by_user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.created_by_user_id IS 'Quem criou (o dono ou o admin).';
+
+
+--
+-- Name: ai_scheduled_task_skip_reason(public.ai_scheduled_tasks); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_scheduled_task_skip_reason(p_task public.ai_scheduled_tasks) RETURNS text
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT CASE
+           WHEN NOT EXISTS (SELECT 1 FROM users u WHERE u.id = p_task.user_id AND u.is_active) THEN 'user_inactive'
+           WHEN NOT EXISTS (SELECT 1 FROM ai_agents a
+                             WHERE a.id = p_task.agent_id AND a.is_active AND a.archived_at IS NULL) THEN 'agent_inactive'
+           WHEN EXISTS (SELECT 1 FROM ai_scheduled_task_runs r
+                          LEFT JOIN ai_runs ar ON ar.id = r.run_id
+                         WHERE r.task_id = p_task.id AND r.status = 'started'
+                           AND (ar.status IN ('queued', 'running', 'awaiting_confirmation')
+                                -- Disparo recém-reservado cuja execução a aplicação ainda vai criar.
+                                OR (r.run_id IS NULL AND r.conversation_id IS NULL
+                                    AND r.created_at > clock_timestamp() - interval '10 minutes'))) THEN
+             'previous_run_active'
+         END
+$$;
+
+
+--
+-- Name: FUNCTION ai_scheduled_task_skip_reason(p_task public.ai_scheduled_tasks); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_scheduled_task_skip_reason(p_task public.ai_scheduled_tasks) IS 'Interna: motivo para pular um disparo agora, ou NULL: user_inactive (dono desativado), agent_inactive (agente inativo ou arquivado), previous_run_active (um disparo anterior com execução queued/running/awaiting_confirmation, ou started há menos de 10 min ainda sem sessão nem execução).';
+
+
+--
+-- Name: ai_scheduled_tasks_before_write(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_scheduled_tasks_before_write() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.user_id <> OLD.user_id THEN
+    RAISE EXCEPTION 'ai_scheduled_tasks: owner of task % is immutable', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_tasks_user_immutable_check';
+  END IF;
+  IF NOT ai_schedule_valid(NEW.schedule) THEN
+    RAISE EXCEPTION 'ai_scheduled_tasks: invalid schedule %', NEW.schedule
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_tasks_schedule_check';
+  END IF;
+
+  -- No máximo 20 ativas por usuário. A trava por usuário serializa ativações concorrentes do mesmo dono.
+  IF NEW.is_active AND (TG_OP = 'INSERT' OR NOT OLD.is_active) THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended('ai_scheduled_tasks:' || NEW.user_id::text, 0));
+    IF (SELECT count(*) FROM ai_scheduled_tasks x
+         WHERE x.user_id = NEW.user_id AND x.is_active AND x.id <> NEW.id) >= 20 THEN
+      RAISE EXCEPTION 'ai_scheduled_tasks: user % already has 20 active tasks', NEW.user_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_tasks_active_limit_check';
+    END IF;
+  END IF;
+
+  -- Próximo disparo: calculado pelo banco ao criar, ao ativar e ao mudar a agenda; nulo se desativada. O claim o
+  -- avança (sem mudar a agenda), e o valor dele fica.
+  IF NOT NEW.is_active THEN
+    NEW.next_run_at := NULL;
+  ELSIF TG_OP = 'INSERT' OR NOT OLD.is_active OR NEW.schedule IS DISTINCT FROM OLD.schedule
+        OR NEW.next_run_at IS NULL THEN
+    NEW.next_run_at := ai_schedule_next_run(NEW.schedule, now());
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: ai_text_sha256(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1366,6 +3003,94 @@ $$;
 
 
 --
+-- Name: ai_tool_kit_from_legacy(text, text[], boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_tool_kit_from_legacy(p_agent_name text, p_enabled_tools text[], p_require_write_confirmation boolean) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  confirm_writes constant boolean := coalesce(p_require_write_confirmation, true);
+  base     text;
+  kit_name text;
+  suffix   text;
+  n        int := 1;
+  kid      uuid;
+BEGIN
+  IF p_enabled_tools IS NULL AND NOT confirm_writes THEN
+    RETURN NULL;  -- lista nula e flag false: sem kit (poder completo)
+  END IF;
+
+  base := 'Kit – ' || btrim(p_agent_name);
+  kit_name := rtrim(left(base, 120));
+  WHILE EXISTS (SELECT 1 FROM ai_tool_kits k WHERE lower(k.name) = lower(kit_name)) LOOP
+    n := n + 1;
+    suffix := ' (' || n || ')';
+    kit_name := rtrim(left(base, 120 - length(suffix))) || suffix;
+  END LOOP;
+
+  INSERT INTO ai_tool_kits (name, description)
+  VALUES (kit_name, 'Criado na migração para kits (F7) a partir da configuração do agente "' || btrim(p_agent_name) || '".')
+  RETURNING id INTO kid;
+
+  INSERT INTO ai_tool_kit_tools (kit_id, tool_name, mode)
+  SELECT kid, r.tool_name,
+         CASE WHEN r.kind = 'write' AND (r.confirm = 'always' OR (r.confirm = 'agent' AND confirm_writes))
+              THEN 'ask' ELSE 'allow' END
+    FROM ai_legacy_tool_registry() r
+   WHERE p_enabled_tools IS NULL OR r.tool_name = ANY (p_enabled_tools);
+
+  RETURN kid;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_tool_kit_from_legacy(p_agent_name text, p_enabled_tools text[], p_require_write_confirmation boolean); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_tool_kit_from_legacy(p_agent_name text, p_enabled_tools text[], p_require_write_confirmation boolean) IS 'Interna (migração 0038): cria o kit equivalente à configuração antiga de um agente (enabled_tools, require_write_confirmation) e devolve o id, ou NULL se a lista era nula e a flag false (sem kit). Kit "Kit – <nome>" (truncado em 120, sufixo " (n)" se colidir) com as tools da lista que existem no retrato ai_legacy_tool_registry() (todas, se nula): ask nas escritas que pediam confirmação, allow no resto.';
+
+
+--
+-- Name: ai_tool_kit_tools_audit_row(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_tool_kit_tools_audit_row() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed, coalesce(n ->> 'kit_id', o ->> 'kit_id')::uuid);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_tool_kit_tools_audit_row(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_tool_kit_tools_audit_row() IS 'Trigger de auditoria de ai_tool_kit_tools: grava com record_id = kit_id (a linha não tem id), para incluir, remover e trocar o modo de uma tool aparecerem no histórico do kit.';
+
+
+--
 -- Name: ai_tool_list_valid(text[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1385,6 +3110,350 @@ $_$;
 --
 
 COMMENT ON FUNCTION public.ai_tool_list_valid(p_tools text[]) IS 'true se a lista de tools é NULL (= todas) ou tem até 500 nomes distintos, não nulos, no formato de nome de tool do MCP ([A-Za-z0-9_./-], 1–128). Lista vazia = nenhuma tool.';
+
+
+--
+-- Name: ai_attachment_derivatives; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_attachment_derivatives (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    attachment_id uuid,
+    message_id uuid,
+    block_index integer,
+    kind text NOT NULL,
+    provider_id uuid,
+    model text,
+    voice text,
+    content text,
+    result_attachment_id uuid,
+    status text DEFAULT 'pending'::text NOT NULL,
+    error text,
+    attempts smallint DEFAULT 0 NOT NULL,
+    locked_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    lock_token uuid,
+    conversation_id uuid,
+    CONSTRAINT ai_attachment_derivatives_attempts_check CHECK (((attempts >= 0) AND (attempts <= 100))),
+    CONSTRAINT ai_attachment_derivatives_block_index_check CHECK (((block_index >= 0) AND (block_index <= 9999))),
+    CONSTRAINT ai_attachment_derivatives_content_check CHECK ((length(content) <= 5000000)),
+    CONSTRAINT ai_attachment_derivatives_error_check CHECK (((length(error) <= 4000) AND ((status <> 'failed'::text) OR (error IS NOT NULL)))),
+    CONSTRAINT ai_attachment_derivatives_kind_check CHECK ((kind = ANY (ARRAY['description'::text, 'pdf_text'::text, 'transcription'::text, 'speech'::text]))),
+    CONSTRAINT ai_attachment_derivatives_lock_check CHECK ((((status = 'running'::text) = (locked_at IS NOT NULL)) AND ((status = 'running'::text) = (lock_token IS NOT NULL)))),
+    CONSTRAINT ai_attachment_derivatives_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
+    CONSTRAINT ai_attachment_derivatives_origin_check CHECK ((((attachment_id IS NULL) <> (message_id IS NULL)) AND ((message_id IS NULL) = (block_index IS NULL)) AND ((kind = 'speech'::text) = (message_id IS NOT NULL)))),
+    CONSTRAINT ai_attachment_derivatives_provider_check CHECK ((((kind = 'pdf_text'::text) = (provider_id IS NULL)) AND ((kind = 'pdf_text'::text) = (model IS NULL)))),
+    CONSTRAINT ai_attachment_derivatives_result_check CHECK ((((result_attachment_id IS NULL) OR (kind = 'speech'::text)) AND ((status <> 'done'::text) OR
+CASE
+    WHEN (kind = 'speech'::text) THEN (result_attachment_id IS NOT NULL)
+    ELSE (content IS NOT NULL)
+END))),
+    CONSTRAINT ai_attachment_derivatives_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'running'::text, 'done'::text, 'failed'::text]))),
+    CONSTRAINT ai_attachment_derivatives_voice_check CHECK (((voice IS NULL) OR ((kind = 'speech'::text) AND (voice ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'::text))))
+);
+
+
+--
+-- Name: TABLE ai_attachment_derivatives; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_attachment_derivatives IS 'Derivados (cache) de anexos e mensagens dos agentes (specs 024 e 025): description (o provedor de visão descreve o anexo para outro modelo de texto), pdf_text (camada de texto do PDF, extraída no servidor, sem provedor), transcription (áudio→texto) e speech (áudio gerado de uma mensagem). Um por origem, tipo, provedor, modelo e voz (ai_attachment_derivatives_key, NULLS NOT DISTINCT). Some com a origem; o áudio gerado aparece em attachment_links como ai_message_speech e é apagado com o derivado quando não tem outro vínculo. Fora da auditoria e do backup.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.attachment_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.attachment_id IS 'Origem anexo (description, pdf_text, transcription). Exatamente uma origem.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.message_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.message_id IS 'Origem mensagem (só speech), com block_index.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.block_index; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.block_index IS 'Parte da mensagem que virou áudio (0–9999, definida pela aplicação: o bloco de texto ou o trecho dividido no limite do provedor). Só com message_id.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.provider_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.provider_id IS 'Provedor que gerou (nulo só em pdf_text). Excluir o provedor leva o cache.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.model; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.model IS 'Modelo que gerou (nulo só em pdf_text).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.voice; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.voice IS 'Voz do TTS (só speech; opcional).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.content; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.content IS 'Texto gerado (descrição, texto do PDF, transcrição; até 5 milhões de caracteres). Obrigatório em done, menos no speech.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.result_attachment_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.result_attachment_id IS 'Áudio gerado (só speech; obrigatório em done). Entra em attachment_links (ai_message_speech, alvo = a mensagem); trocado ou com o derivado excluído, o anexo antigo é apagado se ficou sem vínculo.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.status IS 'pending (na fila), running (reservado: locked_at), done ou failed (com error).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.attempts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.attempts IS 'Tentativas feitas (0–100), para a fila desistir.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.locked_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.locked_at IS 'Instante da reserva, só em running (reserva velha = worker caiu; ai_transcription_claim a retoma).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.lock_token; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.lock_token IS 'Cerca da reserva, só em running (gerada por ai_transcription_claim; exigida por ai_transcription_credentials, _complete e _fail).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.conversation_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.conversation_id IS 'Conversa em que o derivado foi pedido (a transcrição no upload): o worker atribui uso e requisição ao dono e ao agente dela. Nula = sem atribuição (ou a conversa foi excluída: SET NULL, o cache do anexo fica).';
+
+
+--
+-- Name: ai_transcription_claim(integer, interval, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_transcription_claim(p_limit integer DEFAULT 1, p_stale_after interval DEFAULT '00:10:00'::interval, p_max_attempts integer DEFAULT 3) RETURNS SETOF public.ai_attachment_derivatives
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100
+     OR p_stale_after IS NULL OR p_stale_after < interval '30 seconds'
+     OR p_max_attempts IS NULL OR p_max_attempts NOT BETWEEN 1 AND 100 THEN
+    RAISE EXCEPTION 'ai_transcription_claim: limit must be 1..100, stale_after >= 30 seconds and max_attempts 1..100'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Sem tentativas restantes: reserva abandonada (worker caiu) ou pendente que já gastou o limite vira failed.
+  UPDATE ai_attachment_derivatives d
+     SET status = 'failed', locked_at = NULL, lock_token = NULL,
+         error = CASE WHEN d.status = 'running' THEN 'stale_lock: worker stopped and the transcription has no attempts left'
+                      ELSE 'max_attempts: the transcription has no attempts left' END
+   WHERE d.id IN (SELECT x.id FROM ai_attachment_derivatives x
+                   WHERE x.kind = 'transcription' AND x.attempts >= p_max_attempts
+                     AND (x.status = 'pending'
+                          OR (x.status = 'running' AND x.locked_at < clock_timestamp() - p_stale_after))
+                   FOR UPDATE SKIP LOCKED);
+
+  RETURN QUERY
+  UPDATE ai_attachment_derivatives d
+     SET status = 'running', locked_at = clock_timestamp(), lock_token = gen_random_uuid(),
+         attempts = d.attempts + 1, error = NULL
+   WHERE d.id IN (SELECT x.id FROM ai_attachment_derivatives x
+                   WHERE x.kind = 'transcription' AND x.attempts < p_max_attempts
+                     AND (x.status = 'pending'
+                          OR (x.status = 'running' AND x.locked_at < clock_timestamp() - p_stale_after))
+                   ORDER BY x.created_at, x.id
+                   LIMIT p_limit
+                   FOR UPDATE SKIP LOCKED)
+  RETURNING d.*;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_transcription_claim(p_limit integer, p_stale_after interval, p_max_attempts integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_transcription_claim(p_limit integer, p_stale_after interval, p_max_attempts integer) IS 'Reserva até p_limit transcrições (kind transcription: pending, ou running com reserva mais velha que p_stale_after = worker caiu), em ordem de criação, com FOR UPDATE SKIP LOCKED: status = running, locked_at = agora, lock_token novo, attempts + 1. Sem tentativas restantes (attempts >= p_max_attempts), a reserva velha ou a pendente vira failed com error stale_lock / max_attempts. Rode numa transação curta e faça COMMIT antes de chamar o provedor; guarde id e lock_token. Erro 22023: parâmetros inválidos (limite 1–100, reserva >= 30 s, tentativas 1–100).';
+
+
+--
+-- Name: ai_transcription_complete(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_transcription_complete(p_id uuid, p_lock_token uuid, p_content text) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE ai_attachment_derivatives d
+     SET status = 'done', content = p_content, error = NULL, locked_at = NULL, lock_token = NULL
+   WHERE d.id = p_id AND d.kind = 'transcription' AND d.status = 'running' AND d.lock_token = p_lock_token;
+  RETURN FOUND;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_transcription_complete(p_id uuid, p_lock_token uuid, p_content text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_transcription_complete(p_id uuid, p_lock_token uuid, p_content text) IS 'running → done com o texto (pode ser vazio; até 5 milhões de caracteres). Devolve false se a reserva se perdeu (a linha saiu com o anexo, outra reserva a retomou ou já terminou): descarte o resultado. Erros: 23514 ai_attachment_derivatives_result_check (texto nulo) ou _content_check (texto longo demais).';
+
+
+--
+-- Name: ai_transcription_credentials(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_transcription_credentials(p_id uuid, p_lock_token uuid) RETURNS TABLE(provider_id uuid, kind text, base_url text, api_key text, model text, attachment_id uuid, conversation_id uuid, user_id uuid, agent_id uuid)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  d public.ai_attachment_derivatives;
+  c public.ai_conversations;
+  p public.ai_providers;
+BEGIN
+  SELECT * INTO d FROM public.ai_attachment_derivatives x WHERE x.id = p_id AND x.kind = 'transcription';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_transcription_credentials: transcription % not found', p_id USING ERRCODE = 'no_data_found';
+  END IF;
+  IF d.status <> 'running' OR d.lock_token IS DISTINCT FROM p_lock_token THEN
+    RAISE EXCEPTION 'ai_transcription_credentials: reservation of transcription % was lost', p_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_attachment_derivatives_lock_check';
+  END IF;
+  IF d.conversation_id IS NOT NULL THEN
+    SELECT * INTO c FROM public.ai_conversations x WHERE x.id = d.conversation_id;
+    IF NOT EXISTS (SELECT 1 FROM public.users u WHERE u.id = c.user_id AND u.is_active)
+       OR NOT EXISTS (SELECT 1 FROM public.ai_agents a WHERE a.id = c.agent_id AND a.is_active AND a.archived_at IS NULL) THEN
+      RAISE EXCEPTION 'ai_transcription_credentials: owner or agent of conversation % is not active', c.id
+        USING ERRCODE = 'insufficient_privilege';
+    END IF;
+  END IF;
+  SELECT * INTO p FROM public.ai_providers x WHERE x.id = d.provider_id;
+  IF NOT p.is_active OR p.archived_at IS NOT NULL OR NOT ('transcription' = ANY (p.capabilities)) THEN
+    RAISE EXCEPTION 'ai_transcription_credentials: provider % is not active or lacks the transcription capability', p.id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
+  RETURN QUERY SELECT p.id, p.kind, p.base_url, p.api_key, d.model, d.attachment_id, c.id, c.user_id, c.agent_id;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_transcription_credentials(p_id uuid, p_lock_token uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_transcription_credentials(p_id uuid, p_lock_token uuid) IS 'Provedor, tipo, URL, chave e modelo da transcrição reservada, mais o anexo e a atribuição (conversa, usuário dono e agente dela; nulos sem conversa). Só para quem tem a reserva (lock_token de ai_transcription_claim). Erros: P0002 transcrição inexistente; 23514 ai_attachment_derivatives_lock_check reserva perdida; 42501 provedor inativo, arquivado ou sem a flag transcription, ou dono/agente da conversa inativo (o worker marca failed).';
+
+
+--
+-- Name: ai_transcription_enqueue(uuid, uuid, text, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_transcription_enqueue(p_attachment_id uuid, p_provider_id uuid, p_model text, p_conversation_id uuid DEFAULT NULL::uuid) RETURNS public.ai_attachment_derivatives
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  d ai_attachment_derivatives;
+BEGIN
+  INSERT INTO ai_attachment_derivatives (attachment_id, kind, provider_id, model, conversation_id)
+  VALUES (p_attachment_id, 'transcription', p_provider_id, p_model, p_conversation_id)
+  ON CONFLICT ON CONSTRAINT ai_attachment_derivatives_key DO NOTHING
+  RETURNING * INTO d;
+  IF d.id IS NULL THEN
+    SELECT * INTO d FROM ai_attachment_derivatives x
+     WHERE x.attachment_id = p_attachment_id AND x.kind = 'transcription'
+       AND x.provider_id = p_provider_id AND x.model = p_model;
+  END IF;
+  RETURN d;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_transcription_enqueue(p_attachment_id uuid, p_provider_id uuid, p_model text, p_conversation_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_transcription_enqueue(p_attachment_id uuid, p_provider_id uuid, p_model text, p_conversation_id uuid) IS 'Enfileira a transcrição do anexo com o provedor e o modelo (status pending) e devolve a linha; se já existe uma para o anexo, provedor e modelo, devolve a existente como está (done = cache; failed = use ai_transcription_retry). p_conversation_id atribui o uso. Erros: 23503 anexo, provedor ou conversa inexistente; 23514 ai_attachment_derivatives_provider_check (provedor ou modelo nulo) ou _model_check (formato do modelo).';
+
+
+--
+-- Name: ai_transcription_fail(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_transcription_fail(p_id uuid, p_lock_token uuid, p_error text) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE ai_attachment_derivatives d
+     SET status = 'failed', error = left(coalesce(nullif(btrim(p_error), ''), 'transcription failed'), 4000),
+         locked_at = NULL, lock_token = NULL
+   WHERE d.id = p_id AND d.kind = 'transcription' AND d.status = 'running' AND d.lock_token = p_lock_token;
+  RETURN FOUND;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_transcription_fail(p_id uuid, p_lock_token uuid, p_error text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_transcription_fail(p_id uuid, p_lock_token uuid, p_error text) IS 'running → failed com a mensagem (vazia = "transcription failed"; cortada em 4000). Definitiva: as novas tentativas de HTTP ficam no adaptador (spec 023); voltar à fila é ai_transcription_retry. Devolve false se a reserva se perdeu.';
+
+
+--
+-- Name: ai_transcription_retry(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_transcription_retry(p_id uuid) RETURNS public.ai_attachment_derivatives
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  d ai_attachment_derivatives;
+BEGIN
+  SELECT * INTO d FROM ai_attachment_derivatives x WHERE x.id = p_id AND x.kind = 'transcription' FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_transcription_retry: transcription % not found', p_id USING ERRCODE = 'no_data_found';
+  END IF;
+  IF d.status = 'failed' THEN
+    UPDATE ai_attachment_derivatives x SET status = 'pending', error = NULL, attempts = 0
+     WHERE x.id = p_id RETURNING * INTO d;
+  END IF;
+  RETURN d;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_transcription_retry(p_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_transcription_retry(p_id uuid) IS '"Tentar de novo": failed → pending com as tentativas zeradas e sem erro, e devolve a linha. Em pending, running ou done não muda nada e devolve a linha como está (clique repetido não erra). A permissão é da aplicação. Erro P0002: transcrição inexistente (ou id de outro tipo de derivado).';
 
 
 --
@@ -1465,10 +3534,13 @@ BEGIN
     END IF;
   END IF;
   IF p.id IS NOT NULL THEN
+    -- Preços por milhão (tokens, caracteres) dão micros direto; o minuto de áudio vira micros × 1 000 000 / 60.
     NEW.cost_micros := round(NEW.input_tokens * p.input_price_per_million
                              + NEW.output_tokens * p.output_price_per_million
                              + NEW.cache_write_tokens * coalesce(p.cache_write_price_per_million, p.input_price_per_million)
-                             + NEW.cache_read_tokens * coalesce(p.cache_read_price_per_million, p.input_price_per_million))::bigint;
+                             + NEW.cache_read_tokens * coalesce(p.cache_read_price_per_million, p.input_price_per_million)
+                             + NEW.audio_seconds * coalesce(p.audio_input_per_minute, 0) * 1000000 / 60
+                             + NEW.characters * coalesce(p.speech_per_million_chars, 0))::bigint;
     NEW.currency := p.currency;
   ELSE
     NEW.cost_micros := NULL;
@@ -1483,7 +3555,154 @@ $$;
 -- Name: FUNCTION ai_usage_before_insert(); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_usage_before_insert() IS 'Completa conversa/usuário/agente/provedor/modelo da execução, confere as ligações (ai_usage_links_check), troca purpose chat pela finalidade da conversa quando ela é de fluxo e calcula o custo pelo preço vigente.';
+COMMENT ON FUNCTION public.ai_usage_before_insert() IS 'Completa conversa/usuário/agente/provedor/modelo da execução, confere as ligações (ai_usage_links_check), troca purpose chat pela finalidade da conversa quando ela é de fluxo e calcula o custo pelo preço vigente: tokens, segundos de áudio (audio_input_per_minute) e caracteres de fala (speech_per_million_chars).';
+
+
+--
+-- Name: ai_usage_is_flow(text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_usage_is_flow(p_usage_purpose text, p_conversation_purpose text) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT coalesce(p_conversation_purpose <> 'chat',
+                  p_usage_purpose <> ALL (ARRAY['chat', 'title', 'embedding', 'vision_describe', 'transcription',
+                                                'speech']))
+$$;
+
+
+--
+-- Name: FUNCTION ai_usage_is_flow(p_usage_purpose text, p_conversation_purpose text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_usage_is_flow(p_usage_purpose text, p_conversation_purpose text) IS 'true se o uso é de um fluxo automático (spec 028): a conversa dele tem purpose <> chat; sem conversa (nula ou excluída), a finalidade do uso não é um tipo de chamada (chat, title, embedding, vision_describe, transcription, speech), ou seja, é a finalidade de um fluxo. Finalidades de fluxo novas entram sozinhas; um tipo de chamada novo precisa entrar na lista.';
+
+
+--
+-- Name: ai_usage_request_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_usage_request_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  q ai_requests;
+BEGIN
+  IF NEW.request_id IS NOT NULL THEN
+    SELECT * INTO q FROM ai_requests x WHERE x.id = NEW.request_id;
+    IF FOUND AND (q.provider_id <> NEW.provider_id OR q.run_id <> NEW.run_id) THEN
+      RAISE EXCEPTION 'ai_usage: request % is for another provider or run', NEW.request_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_usage_links_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_usage_request_check(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_usage_request_check() IS 'O uso aponta para uma requisição do mesmo provedor e da mesma execução (quando as duas têm), senão 23514 ai_usage_links_check.';
+
+
+--
+-- Name: ai_usage_top_conversations(date, date, integer, uuid, uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_usage_top_conversations(p_from date, p_to date, p_limit integer DEFAULT 20, p_provider_id uuid DEFAULT NULL::uuid, p_agent_id uuid DEFAULT NULL::uuid, p_user_id uuid DEFAULT NULL::uuid, p_purpose text DEFAULT NULL::text) RETURNS TABLE(rank integer, conversation_id uuid, title text, conversation_purpose text, owner_user_id uuid, conversation_agent_id uuid, archived_at timestamp with time zone, currency text, cost_micros bigint, calls integer, runs integer, input_tokens bigint, output_tokens bigint, cache_write_tokens bigint, cache_read_tokens bigint, audio_seconds numeric, characters bigint, unpriced_calls integer, last_used_at timestamp with time zone)
+    LANGUAGE plpgsql STABLE
+    AS $$
+#variable_conflict use_column
+BEGIN
+  IF p_from IS NULL OR p_to IS NULL OR p_to < p_from OR p_to - p_from > 3660 THEN
+    RAISE EXCEPTION 'ai_usage_top_conversations: invalid period % .. % (up to 3660 days)', p_from, p_to
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 THEN
+    RAISE EXCEPTION 'ai_usage_top_conversations: limit must be between 1 and 100'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  RETURN QUERY
+  WITH u AS (
+    SELECT x.conversation_id, x.currency, x.cost_micros, x.run_id, x.input_tokens, x.output_tokens,
+           x.cache_write_tokens, x.cache_read_tokens, x.audio_seconds, x.characters, x.created_at
+      FROM ai_usage x
+     WHERE x.conversation_id IS NOT NULL
+       AND x.created_at >= p_from::timestamp AT TIME ZONE 'America/Sao_Paulo'
+       AND x.created_at < (p_to + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo'
+       AND (p_provider_id IS NULL OR x.provider_id = p_provider_id)
+       AND (p_agent_id IS NULL OR x.agent_id = p_agent_id)
+       AND (p_user_id IS NULL OR x.user_id = p_user_id)
+       AND (p_purpose IS NULL OR x.purpose = p_purpose)
+  ), unpriced AS (
+    SELECT u.conversation_id, count(*)::integer AS n FROM u WHERE u.cost_micros IS NULL GROUP BY u.conversation_id
+  ), agg AS (
+    SELECT u.conversation_id, u.currency,
+           sum(u.cost_micros)::bigint AS cost_micros,
+           count(*)::integer AS calls,
+           count(DISTINCT u.run_id)::integer AS runs,
+           sum(u.input_tokens)::bigint AS input_tokens,
+           sum(u.output_tokens)::bigint AS output_tokens,
+           sum(u.cache_write_tokens)::bigint AS cache_write_tokens,
+           sum(u.cache_read_tokens)::bigint AS cache_read_tokens,
+           sum(u.audio_seconds) AS audio_seconds,
+           sum(u.characters)::bigint AS characters,
+           max(u.created_at) AS last_used_at
+      FROM u
+     WHERE u.currency IS NOT NULL
+     GROUP BY u.conversation_id, u.currency
+  ), ranked AS (
+    SELECT agg.*, row_number() OVER (PARTITION BY agg.currency
+                                     ORDER BY agg.cost_micros DESC, agg.last_used_at DESC, agg.conversation_id) AS rn
+      FROM agg
+  )
+  SELECT r.rn::integer, r.conversation_id, c.title, c.purpose, c.user_id, c.agent_id, c.archived_at, r.currency,
+         r.cost_micros, r.calls, r.runs, r.input_tokens, r.output_tokens, r.cache_write_tokens, r.cache_read_tokens,
+         r.audio_seconds, r.characters, coalesce(p.n, 0), r.last_used_at
+    FROM ranked r
+    JOIN ai_conversations c ON c.id = r.conversation_id
+    LEFT JOIN unpriced p ON p.conversation_id = r.conversation_id
+   WHERE r.rn <= p_limit
+   ORDER BY r.currency, r.rn;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_usage_top_conversations(p_from date, p_to date, p_limit integer, p_provider_id uuid, p_agent_id uuid, p_user_id uuid, p_purpose text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_usage_top_conversations(p_from date, p_to date, p_limit integer, p_provider_id uuid, p_agent_id uuid, p_user_id uuid, p_purpose text) IS 'Ranking das conversas (sessões e fluxos) por custo no período [p_from, p_to] (datas em America/Sao_Paulo, até 3660 dias) com os filtros opcionais do painel (provedor, agente, usuário, finalidade do uso): as p_limit (1–100, padrão 20) mais caras de cada moeda, rank 1, 2, 3… por moeda; desempate pelo uso mais recente. Só o uso com preço entra no custo e nos totais da linha; unpriced_calls = chamadas sem preço da conversa no período. Uso sem conversa (embeddings ou conversa excluída) fica de fora. 22023 com período ou limite inválidos. O admin vê todas; a aplicação restringe.';
+
+
+--
+-- Name: ai_usage_unlink_missing_requests(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_usage_unlink_missing_requests() RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  n integer;
+BEGIN
+  UPDATE public.ai_usage u SET request_id = NULL
+   WHERE u.request_id IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM public.ai_requests r WHERE r.id = u.request_id);
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_usage_unlink_missing_requests(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_usage_unlink_missing_requests() IS 'Depois de restaurar um dump (que traz ai_usage mas não os dados de ai_requests): anula ai_usage.request_id que aponta para requisição inexistente e devolve quantos. Idempotente.';
 
 
 --
@@ -1553,6 +3772,103 @@ COMMENT ON FUNCTION public.app_schema_version() IS 'Versão do schema = última 
 
 
 --
+-- Name: app_setting_valid(text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.app_setting_valid(p_key text, p_value jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE
+    AS $_$
+  SELECT CASE
+           WHEN p_key = 'ai.request_retention_days' THEN
+             CASE WHEN jsonb_typeof(p_value) = 'number' AND p_value #>> '{}' ~ '^[0-9]{1,3}$'
+                  THEN (p_value #>> '{}')::integer BETWEEN 1 AND 365
+                  ELSE false
+             END
+           WHEN p_key IN ('ai.runs_per_minute', 'ai.flow_runs_per_minute') THEN
+             CASE WHEN jsonb_typeof(p_value) = 'number' AND p_value #>> '{}' ~ '^[0-9]{1,4}$'
+                  THEN (p_value #>> '{}')::integer BETWEEN 1 AND 1000
+                  ELSE false
+             END
+           WHEN p_key = 'telegram.public_base_url' THEN
+             coalesce(jsonb_typeof(p_value) = 'string'
+                      AND length(p_value #>> '{}') <= 500
+                      AND p_value #>> '{}'
+                          ~ '^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._~%!$&()*+,;=:@-]+)*$',
+                      false)
+           ELSE false
+         END
+$_$;
+
+
+--
+-- Name: FUNCTION app_setting_valid(p_key text, p_value jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.app_setting_valid(p_key text, p_value jsonb) IS 'Valida o valor de uma configuração (app_settings_value_check). Chave desconhecida = inválida. Chaves: ai.request_retention_days (número inteiro de 1 a 365); na F14 (spec 028), ai.runs_per_minute e ai.flow_runs_per_minute (número inteiro de 1 a 1000), sempre sem aspas nem casas decimais; na F15 (spec 029), telegram.public_base_url (texto: URL https://host[:porta][/caminho], sem barra no fim, query nem fragmento, até 500; vence PUBLIC_BASE_URL).';
+
+
+--
+-- Name: app_settings_audit_row(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.app_settings_audit_row() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed, md5(coalesce(n ->> 'key', o ->> 'key'))::uuid);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION app_settings_audit_row(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.app_settings_audit_row() IS 'Trigger de auditoria de app_settings: grava com record_id = md5(key)::uuid (a linha não tem id; o histórico de uma chave é WHERE table_name = ''app_settings'' AND record_id = md5(chave)::uuid).';
+
+
+--
+-- Name: app_settings_before_write(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.app_settings_before_write() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $_$
+DECLARE
+  uid text := nullif(current_setting('app.user_id', true), '');
+BEGIN
+  IF uid ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+    NEW.updated_by_user_id := uid::uuid;
+  END IF;
+  RETURN NEW;
+END
+$_$;
+
+
+--
+-- Name: FUNCTION app_settings_before_write(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.app_settings_before_write() IS 'updated_by_user_id = app.user_id da transação, quando definido (um app.user_id malformado fica para a auditoria recusar).';
+
+
+--
 -- Name: attachments_audit_row(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1568,12 +3884,14 @@ BEGIN
   IF TG_OP <> 'INSERT' THEN
     o := jsonb_build_object('id', OLD.id, 'file_name', OLD.file_name, 'mime_type', OLD.mime_type,
                             'size_bytes', OLD.size_bytes, 'sha256', OLD.sha256,
+                            'duration_ms', OLD.duration_ms, 'page_count', OLD.page_count,
                             'uploaded_by_user_id', OLD.uploaded_by_user_id,
                             'created_at', OLD.created_at, 'updated_at', OLD.updated_at);
   END IF;
   IF TG_OP <> 'DELETE' THEN
     n := jsonb_build_object('id', NEW.id, 'file_name', NEW.file_name, 'mime_type', NEW.mime_type,
                             'size_bytes', NEW.size_bytes, 'sha256', NEW.sha256,
+                            'duration_ms', NEW.duration_ms, 'page_count', NEW.page_count,
                             'uploaded_by_user_id', NEW.uploaded_by_user_id,
                             'created_at', NEW.created_at, 'updated_at', NEW.updated_at);
   END IF;
@@ -1618,7 +3936,8 @@ CREATE FUNCTION public.audit_row() RETURNS trigger
     AS $$
 DECLARE
   quiet   text[] := coalesce(string_to_array(nullif(TG_ARGV[0], ''), ','), '{}');
-  secrets constant text[] := ARRAY['password', 'bot_token', 'api_key', 'secret_headers', 'token_hash'];
+  secrets constant text[] := ARRAY['password', 'bot_token', 'api_key', 'secret_headers', 'token_hash',
+                                   'webhook_secret_hash', 'code_hash'];
   o       jsonb;
   n       jsonb;
   changed text[];
@@ -1645,7 +3964,7 @@ $$;
 -- Name: FUNCTION audit_row(); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de auditoria. Remove os segredos (password, bot_token, api_key, secret_headers, token_hash): a troca aparece só em changed_columns, sem o valor. TG_ARGV[0] = colunas que sozinhas não geram linha.';
+COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de auditoria. Remove os segredos (password, bot_token, api_key, secret_headers, token_hash, webhook_secret_hash, code_hash): a troca aparece só em changed_columns, sem o valor. TG_ARGV[0] = colunas que sozinhas não geram linha.';
 
 
 --
@@ -3559,7 +5878,7 @@ CREATE TABLE public.message_outbox (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT message_outbox_attempts_check CHECK ((((max_attempts >= 1) AND (max_attempts <= 20)) AND ((attempts >= 0) AND (attempts <= max_attempts)))),
     CONSTRAINT message_outbox_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
-    CONSTRAINT message_outbox_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'test'::text]))),
+    CONSTRAINT message_outbox_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'test'::text]))),
     CONSTRAINT message_outbox_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
     CONSTRAINT message_outbox_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'sending'::text, 'sent'::text, 'failed'::text, 'canceled'::text]))),
     CONSTRAINT message_outbox_status_fields_check CHECK ((((status = 'sending'::text) = (locked_at IS NOT NULL)) AND ((status = 'sent'::text) = (sent_at IS NOT NULL)) AND ((status <> ALL (ARRAY['failed'::text, 'canceled'::text])) OR (last_error IS NOT NULL))))
@@ -3826,7 +6145,8 @@ BEGIN
     WHEN 'weekly_summary' THEN allowed := '{send_at,weekday}'; required := '{send_at,weekday}';
     WHEN 'card_limit' THEN allowed := '{thresholds_percent}'; required := '{thresholds_percent}';
     WHEN 'reconciliation_divergence' THEN allowed := '{min_difference_cents}'; required := '{}';
-    WHEN 'invoice_closed', 'agent_completed', 'agent_message' THEN allowed := '{}'; required := '{}';
+    WHEN 'invoice_closed', 'agent_completed', 'agent_message', 'ai_budget_alert', 'ai_awaiting_approval' THEN
+      allowed := '{}'; required := '{}';
     WHEN 'contract_notice_deadline', 'contract_ending' THEN
       allowed := '{days_before,send_at}'; required := '{days_before,send_at}'; max_days := 180;
     WHEN 'contract_renewal_pending' THEN allowed := '{send_at,repeat_every_days}'; required := '{send_at}';
@@ -3885,7 +6205,7 @@ $_$;
 -- Name: FUNCTION message_subscription_params_valid(p_event_kind text, p_params jsonb); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.message_subscription_params_valid(p_event_kind text, p_params jsonb) IS 'true se params é válido para o evento (chaves permitidas e obrigatórias, HH:MM, dia ISO, listas de 1–10 inteiros distintos: days_before 0–60 no due_reminder e 0–180 em contract_notice_deadline/contract_ending, thresholds_percent 1–200; repeat_every_days 1–30). Usada no CHECK de message_subscriptions.';
+COMMENT ON FUNCTION public.message_subscription_params_valid(p_event_kind text, p_params jsonb) IS 'true se params é válido para o evento (chaves permitidas e obrigatórias, HH:MM, dia ISO, listas de 1–10 inteiros distintos: days_before 0–60 no due_reminder e 0–180 em contract_notice_deadline/contract_ending, thresholds_percent 1–200; repeat_every_days 1–30; invoice_closed, agent_completed, agent_message, ai_budget_alert e ai_awaiting_approval sem parâmetros). Usada no CHECK de message_subscriptions.';
 
 
 --
@@ -4814,6 +7134,282 @@ $$;
 
 
 --
+-- Name: telegram_inbound_bot_token(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_inbound_bot_token(p_destination_id uuid) RETURNS text
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  d record;
+BEGIN
+  SELECT x.channel, x.is_active, x.archived_at, x.webhook_secret_hash IS NOT NULL AS has_secret, x.bot_token
+    INTO d
+    FROM public.message_destinations x
+   WHERE x.id = p_destination_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'telegram_inbound_bot_token: destination % not found', p_destination_id
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  IF d.channel <> 'telegram' OR NOT d.is_active OR d.archived_at IS NOT NULL OR NOT d.has_secret THEN
+    RAISE EXCEPTION 'telegram_inbound_bot_token: destination % is inactive, archived or has no inbound webhook',
+      p_destination_id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN d.bot_token;
+END
+$$;
+
+
+--
+-- Name: FUNCTION telegram_inbound_bot_token(p_destination_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_inbound_bot_token(p_destination_id uuid) IS 'Leitura do bot token para a ENTRADA do Telegram (spec 029): setWebhook/deleteWebhook, answerCallbackQuery, getFile e download de arquivo, sendChatAction e respostas diretas ao chat privado pareado. Devolve o token só de destino telegram ativo, não arquivado e com webhook_secret_hash (entrada ligada ou já ligada); enxerga o hash gravado na mesma transação. 42501 em qualquer outro caso; P0002 se o destino não existe. O token nunca vai para logs, respostas da API, auditoria, eventos ou tools.';
+
+
+--
+-- Name: telegram_links_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_links_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.destination_id <> OLD.destination_id OR NEW.user_id <> OLD.user_id OR NEW.chat_id <> OLD.chat_id
+     OR NEW.telegram_user_id <> OLD.telegram_user_id THEN
+    RAISE EXCEPTION 'telegram_links: destination, user and chat of link % are immutable (pair again)', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'telegram_links_immutable_check';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
+    RAISE EXCEPTION 'telegram_links: link % is revoked', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'telegram_links_revoked_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: telegram_pairing_code_create(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_pairing_code_create(p_user_id uuid, p_destination_id uuid, p_code text) RETURNS TABLE(id uuid, expires_at timestamp with time zone)
+    LANGUAGE plpgsql
+    AS $_$
+#variable_conflict use_column
+DECLARE
+  c text := upper(btrim(p_code));
+BEGIN
+  IF c IS NULL OR c !~ '^[A-Z0-9]{8}$' THEN
+    RAISE EXCEPTION 'telegram_pairing_code_create: the code must have 8 letters or digits'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  RETURN QUERY
+  INSERT INTO telegram_pairing_codes AS k (user_id, destination_id, code_hash)
+  VALUES (p_user_id, p_destination_id, telegram_secret_hash(c))
+  RETURNING k.id, k.expires_at;
+END
+$_$;
+
+
+--
+-- Name: FUNCTION telegram_pairing_code_create(p_user_id uuid, p_destination_id uuid, p_code text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_pairing_code_create(p_user_id uuid, p_destination_id uuid, p_code text) IS 'Grava um código de pareamento (só o hash do código em maiúsculas), válido por 10 min, e devolve id e expiração. 22023 se o código não tem 8 letras ou dígitos; 23514 telegram_pairing_codes_destination_check se o destino não está ativo com a entrada ligada; 23505 telegram_pairing_codes_code_hash_key se o código já foi emitido (gere outro). Quem pode usar o destino é regra da aplicação.';
+
+
+--
+-- Name: telegram_pairing_codes_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_pairing_codes_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NOT EXISTS (SELECT 1 FROM message_destinations d
+                    WHERE d.id = NEW.destination_id AND d.inbound_enabled AND d.is_active) THEN
+      RAISE EXCEPTION 'telegram_pairing_codes: destination % does not receive messages', NEW.destination_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'telegram_pairing_codes_destination_check';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.user_id <> OLD.user_id OR NEW.destination_id <> OLD.destination_id OR NEW.code_hash <> OLD.code_hash
+     OR NEW.expires_at <> OLD.expires_at OR NEW.created_at <> OLD.created_at
+     OR (OLD.used_at IS NOT NULL AND NEW.used_at IS DISTINCT FROM OLD.used_at)
+     OR (OLD.link_id IS NOT NULL AND NEW.link_id IS NOT NULL AND NEW.link_id <> OLD.link_id) THEN
+    RAISE EXCEPTION 'telegram_pairing_codes: code % is immutable and single-use', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'telegram_pairing_codes_immutable_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: telegram_pairing_consume(uuid, text, bigint, bigint, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_pairing_consume(p_destination_id uuid, p_code text, p_chat_id bigint, p_telegram_user_id bigint, p_username text DEFAULT NULL::text) RETURNS TABLE(link_id uuid, user_id uuid)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+#variable_conflict use_column
+DECLARE
+  k public.telegram_pairing_codes;
+  l public.telegram_links;
+  uname text := nullif(ltrim(btrim(p_username), '@'), '');
+BEGIN
+  IF p_chat_id IS NULL OR p_chat_id <= 0 OR p_telegram_user_id IS NULL OR p_telegram_user_id <= 0 THEN
+    RAISE EXCEPTION 'telegram_pairing_consume: only private chats pair (positive chat and user ids)'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_code IS NULL THEN
+    RETURN;
+  END IF;
+
+  SELECT c.* INTO k
+    FROM public.telegram_pairing_codes c
+    JOIN public.users u ON u.id = c.user_id AND u.is_active
+    JOIN public.message_destinations d ON d.id = c.destination_id AND d.inbound_enabled AND d.is_active
+   WHERE c.code_hash = public.telegram_secret_hash(upper(btrim(p_code)))
+     AND c.destination_id = p_destination_id
+     AND c.used_at IS NULL
+     AND c.expires_at > clock_timestamp()
+     FOR UPDATE OF c;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  -- Quem pareou é o dono do código (o webhook não tem sessão): o ator da auditoria no resto da transação.
+  IF nullif(current_setting('app.user_id', true), '') IS NULL THEN
+    PERFORM set_config('app.user_id', k.user_id::text, true);
+  END IF;
+
+  SELECT x.* INTO l FROM public.telegram_links x
+   WHERE x.destination_id = p_destination_id AND x.chat_id = p_chat_id AND x.revoked_at IS NULL
+     FOR UPDATE;
+  IF FOUND AND l.user_id <> k.user_id THEN
+    -- O chat passa para o dono do código: o vínculo anterior é desfeito.
+    UPDATE public.telegram_links x SET revoked_at = clock_timestamp() WHERE x.id = l.id;
+    l := NULL;
+  END IF;
+
+  IF l.id IS NULL THEN
+    INSERT INTO public.telegram_links AS x (destination_id, user_id, chat_id, telegram_user_id, username)
+    VALUES (p_destination_id, k.user_id, p_chat_id, p_telegram_user_id, uname)
+    RETURNING x.* INTO l;
+  ELSIF l.username IS DISTINCT FROM uname THEN
+    UPDATE public.telegram_links x SET username = uname WHERE x.id = l.id;
+  END IF;
+
+  UPDATE public.telegram_pairing_codes c SET used_at = clock_timestamp(), link_id = l.id WHERE c.id = k.id;
+  RETURN QUERY SELECT l.id, l.user_id;
+END
+$$;
+
+
+--
+-- Name: FUNCTION telegram_pairing_consume(p_destination_id uuid, p_code text, p_chat_id bigint, p_telegram_user_id bigint, p_username text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_pairing_consume(p_destination_id uuid, p_code text, p_chat_id bigint, p_telegram_user_id bigint, p_username text) IS '/start <código>: confere o código (maiúsculas, sem espaços nas pontas) contra os não usados e não expirados do destino, de dono ativo e destino ativo com a entrada ligada; marca o código usado e liga o chat ao dono (se o chat já estava ligado a outro usuário no destino, aquele vínculo é desfeito; se ao mesmo, é mantido). Devolve (link_id, user_id), ou nenhuma linha com código errado, expirado, usado ou de outro destino. Sem app.user_id na transação, define-o como o dono do código (ator da auditoria). 22023 se o chat ou o usuário do Telegram não é positivo (só chats privados pareiam).';
+
+
+--
+-- Name: telegram_secret_hash(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_secret_hash(p_value text) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+    AS $$
+  SELECT encode(sha256(convert_to(p_value, 'UTF8')), 'hex')
+$$;
+
+
+--
+-- Name: FUNCTION telegram_secret_hash(p_value text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_secret_hash(p_value text) IS 'SHA-256 (hex minúsculo) do texto em UTF-8: o formato de message_destinations.webhook_secret_hash e de telegram_pairing_codes.code_hash (igual a createHash(''sha256'').update(valor, ''utf8'').digest(''hex'') no Node).';
+
+
+--
+-- Name: telegram_update_seen(uuid, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_update_seen(p_destination_id uuid, p_update_id bigint) RETURNS boolean
+    LANGUAGE sql
+    AS $$
+  WITH ins AS (
+    INSERT INTO telegram_updates_seen (destination_id, update_id) VALUES (p_destination_id, p_update_id)
+    ON CONFLICT DO NOTHING
+    RETURNING 1
+  )
+  SELECT NOT EXISTS (SELECT 1 FROM ins)
+$$;
+
+
+--
+-- Name: FUNCTION telegram_update_seen(p_destination_id uuid, p_update_id bigint); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_update_seen(p_destination_id uuid, p_update_id bigint) IS 'Marca o update_id do destino como recebido. Devolve false na primeira vez (processe) e true se já tinha sido visto (ignore). Chame na mesma transação que processa a atualização, para uma falha não marcar o que não foi feito.';
+
+
+--
+-- Name: telegram_updates_seen_purge(interval); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_updates_seen_purge(p_keep interval DEFAULT '7 days'::interval) RETURNS bigint
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  n bigint;
+BEGIN
+  IF p_keep IS NULL OR p_keep < interval '1 hour' THEN
+    RAISE EXCEPTION 'telegram_updates_seen_purge: keep must be >= 1 hour' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  DELETE FROM telegram_updates_seen s WHERE s.created_at < clock_timestamp() - p_keep;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END
+$$;
+
+
+--
+-- Name: FUNCTION telegram_updates_seen_purge(p_keep interval); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_updates_seen_purge(p_keep interval) IS 'Apaga os update_id vistos há mais de p_keep (padrão 7 dias; o Telegram desiste de reentregar bem antes) e devolve quantos. 22023 com prazo nulo ou < 1 hora.';
+
+
+--
+-- Name: telegram_webhook_authenticate(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_webhook_authenticate(p_destination_id uuid, p_secret text) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+  SELECT coalesce((SELECT d.webhook_secret_hash = public.telegram_secret_hash(p_secret)
+                     FROM public.message_destinations d
+                    WHERE d.id = p_destination_id AND d.inbound_enabled AND d.is_active AND d.archived_at IS NULL),
+                  false)
+$$;
+
+
+--
+-- Name: FUNCTION telegram_webhook_authenticate(p_destination_id uuid, p_secret text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_webhook_authenticate(p_destination_id uuid, p_secret text) IS 'true se p_secret (o cabeçalho X-Telegram-Bot-Api-Secret-Token, como chegou) confere com o segredo do destino e o destino está ativo, não arquivado e com a entrada ligada; false em qualquer outro caso (destino inexistente, entrada desligada, segredo errado ou nulo). A API responde 401 com false.';
+
+
+--
 -- Name: title_settled_cents(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5205,6 +7801,74 @@ $$;
 
 
 --
+-- Name: user_ai_settings_audit_row(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.user_ai_settings_audit_row() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed, coalesce(n ->> 'user_id', o ->> 'user_id')::uuid);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION user_ai_settings_audit_row(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.user_ai_settings_audit_row() IS 'Trigger de auditoria de user_ai_settings: grava com record_id = user_id (a linha não tem id).';
+
+
+--
+-- Name: user_ai_settings_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.user_ai_settings_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  caixa_kind text;
+BEGIN
+  IF NEW.primary_caixa_id IS NOT NULL
+     AND (TG_OP = 'INSERT' OR NEW.primary_caixa_id IS DISTINCT FROM OLD.primary_caixa_id) THEN
+    SELECT c.kind INTO caixa_kind FROM caixas c WHERE c.id = NEW.primary_caixa_id;
+    IF FOUND AND caixa_kind <> 'general' THEN
+      RAISE EXCEPTION 'user_ai_settings: primary caixa % must be general (got %)', NEW.primary_caixa_id, caixa_kind
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'user_ai_settings_primary_caixa_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION user_ai_settings_validate(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.user_ai_settings_validate() IS 'A caixa principal do usuário é general (o kind da caixa é imutável, então basta checar ao escolher).';
+
+
+--
 -- Name: user_api_tokens_validate(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5269,6 +7933,108 @@ COMMENT ON COLUMN public.agent_mcp_servers.enabled_tools IS 'Tools habilitadas d
 
 
 --
+-- Name: ai_agent_inferences; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_agent_inferences (
+    agent_id uuid NOT NULL,
+    capability text NOT NULL,
+    provider_id uuid NOT NULL,
+    model text,
+    voice text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_agent_inferences_capability_check CHECK ((capability = ANY (ARRAY['vision'::text, 'embeddings'::text, 'transcription'::text, 'speech'::text]))),
+    CONSTRAINT ai_agent_inferences_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
+    CONSTRAINT ai_agent_inferences_voice_check CHECK (((voice IS NULL) OR ((capability = 'speech'::text) AND (voice ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'::text))))
+);
+
+
+--
+-- Name: TABLE ai_agent_inferences; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_agent_inferences IS 'Provedor de cada inferência do agente além do texto (spec 024): vision, embeddings, transcription e speech; uma por agente e capacidade, sem linha = "Nenhum". O texto continua em ai_agents.provider_id/model. O provedor precisa ter a flag (ai_agent_inferences_provider_capability_check); excluir provedor em uso dá 23503. Some com o agente. Auditada com record_id = agent_id (histórico do agente).';
+
+
+--
+-- Name: COLUMN ai_agent_inferences.model; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_inferences.model IS 'Modelo (nulo = o padrão do provedor para a capacidade, default_models).';
+
+
+--
+-- Name: COLUMN ai_agent_inferences.voice; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_inferences.voice IS 'Voz do TTS, só em speech (nula = default_models.speech_voice do provedor).';
+
+
+--
+-- Name: ai_agent_prompt_versions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_agent_prompt_versions (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    agent_id uuid NOT NULL,
+    version integer NOT NULL,
+    content text NOT NULL,
+    note text,
+    created_by_user_id uuid,
+    restored_from_version_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_agent_prompt_versions_content_check CHECK ((length(content) <= 200000)),
+    CONSTRAINT ai_agent_prompt_versions_note_check CHECK ((length(note) <= 500)),
+    CONSTRAINT ai_agent_prompt_versions_restored_self_check CHECK ((restored_from_version_id <> id)),
+    CONSTRAINT ai_agent_prompt_versions_version_check CHECK ((version >= 1))
+);
+
+
+--
+-- Name: TABLE ai_agent_prompt_versions; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_agent_prompt_versions IS 'Versões do prompt de sistema de um agente (spec 022): toda mudança de prompt é uma versão nova (version 1, 2, 3…; omita version e o banco atribui a próxima, travando o agente). A versão manda: o INSERT copia o content para ai_agents.system_prompt. O agente nasce com a versão 1 (ai_agents_prompt_version_init, no COMMIT). Imutáveis; somem só com o agente. A auditoria grava a linha sem o content (com content_chars).';
+
+
+--
+-- Name: COLUMN ai_agent_prompt_versions.version; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_prompt_versions.version IS 'Número da versão no agente, atribuído pelo banco quando omitido; se informado, tem de ser o próximo (max + 1).';
+
+
+--
+-- Name: COLUMN ai_agent_prompt_versions.content; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_prompt_versions.content IS 'Prompt de sistema desta versão (até 200 mil caracteres; pode ser vazio).';
+
+
+--
+-- Name: COLUMN ai_agent_prompt_versions.note; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_prompt_versions.note IS 'Nota opcional da gravação (até 500), ex.: "Restaurada da versão N".';
+
+
+--
+-- Name: COLUMN ai_agent_prompt_versions.created_by_user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_prompt_versions.created_by_user_id IS 'Autor (usuário excluído = nulo). Na versão 1 criada pelo banco, o created_by_user_id do agente.';
+
+
+--
+-- Name: COLUMN ai_agent_prompt_versions.restored_from_version_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_prompt_versions.restored_from_version_id IS 'Versão (do mesmo agente) cujo conteúdo foi restaurado nesta.';
+
+
+--
 -- Name: ai_agents; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5280,8 +8046,6 @@ CREATE TABLE public.ai_agents (
     provider_id uuid,
     model text,
     params jsonb DEFAULT '{}'::jsonb NOT NULL,
-    enabled_tools text[],
-    require_write_confirmation boolean DEFAULT true NOT NULL,
     color_slot smallint DEFAULT 1 NOT NULL,
     icon text,
     is_active boolean DEFAULT true NOT NULL,
@@ -5290,10 +8054,10 @@ CREATE TABLE public.ai_agents (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     use_for_flows boolean DEFAULT false NOT NULL,
+    tool_kit_id uuid,
     CONSTRAINT ai_agents_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
     CONSTRAINT ai_agents_color_slot_check CHECK (((color_slot >= 1) AND (color_slot <= 12))),
     CONSTRAINT ai_agents_description_check CHECK ((length(description) <= 2000)),
-    CONSTRAINT ai_agents_enabled_tools_check CHECK (public.ai_tool_list_valid(enabled_tools)),
     CONSTRAINT ai_agents_icon_check CHECK ((icon ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text)),
     CONSTRAINT ai_agents_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
     CONSTRAINT ai_agents_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
@@ -5315,7 +8079,7 @@ COMMENT ON TABLE public.ai_agents IS 'Agentes de IA, criados só pelo admin (spe
 -- Name: COLUMN ai_agents.system_prompt; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_agents.system_prompt IS 'Prompt de sistema (até 200 mil caracteres).';
+COMMENT ON COLUMN public.ai_agents.system_prompt IS 'Prompt de sistema (até 200 mil caracteres). Espelho da última versão (ai_agent_prompt_versions): muda só criando uma versão (UPDATE direto diferente dela dá 23514 ai_agents_system_prompt_version_check).';
 
 
 --
@@ -5337,20 +8101,6 @@ COMMENT ON COLUMN public.ai_agents.model IS 'Modelo no provedor (nome exato da A
 --
 
 COMMENT ON COLUMN public.ai_agents.params IS 'Parâmetros do modelo validados por ai_agent_params_valid (temperature, max_tokens…).';
-
-
---
--- Name: COLUMN ai_agents.enabled_tools; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_agents.enabled_tools IS 'Tools internas habilitadas (nomes de packages/shared). NULL = todas; {} = nenhuma. As tools de MCP são escolhidas por servidor em agent_mcp_servers.';
-
-
---
--- Name: COLUMN ai_agents.require_write_confirmation; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_agents.require_write_confirmation IS 'true (padrão) = tools de escrita (inclusive "enviar mensagem") pedem confirmação do usuário (ai_tool_confirmations).';
 
 
 --
@@ -5382,6 +8132,97 @@ COMMENT ON COLUMN public.ai_agents.use_for_flows IS 'true = agente que atende os
 
 
 --
+-- Name: COLUMN ai_agents.tool_kit_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agents.tool_kit_id IS 'Kit de ferramentas (spec 021). Nulo = sem kit = poder completo: todas as tools internas em allow, menos as de segredo (sempre ask). Excluir o kit em uso (inclusive por agente arquivado) dá 23503 (ai_agents_tool_kit_id_fkey).';
+
+
+--
+-- Name: ai_budgets; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_budgets (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    scope text NOT NULL,
+    user_id uuid,
+    agent_id uuid,
+    currency text DEFAULT 'USD'::text NOT NULL,
+    monthly_limit_micros bigint NOT NULL,
+    alert_percent integer DEFAULT 80 NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_budgets_alert_percent_check CHECK (((alert_percent >= 1) AND (alert_percent <= 99))),
+    CONSTRAINT ai_budgets_currency_check CHECK ((currency = ANY (ARRAY['USD'::text, 'BRL'::text]))),
+    CONSTRAINT ai_budgets_monthly_limit_micros_check CHECK ((monthly_limit_micros > 0)),
+    CONSTRAINT ai_budgets_scope_check CHECK ((scope = ANY (ARRAY['user'::text, 'agent'::text, 'flows'::text, 'global'::text]))),
+    CONSTRAINT ai_budgets_target_check CHECK (
+CASE scope
+    WHEN 'user'::text THEN ((user_id IS NOT NULL) AND (agent_id IS NULL))
+    WHEN 'agent'::text THEN ((agent_id IS NOT NULL) AND (user_id IS NULL))
+    ELSE ((user_id IS NULL) AND (agent_id IS NULL))
+END)
+);
+
+
+--
+-- Name: TABLE ai_budgets; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_budgets IS 'Orçamento mensal de IA (spec 028). Gasto = soma de ai_usage.cost_micros no mês de America/Sao_Paulo, na moeda do orçamento (uso sem preço e uso noutra moeda não contam), no escopo: user (o uso do usuário, inclusive o dos fluxos que ele acionou), agent (o uso do agente), flows (o uso de conversas com purpose <> chat, ai_usage_is_flow) ou global (todo o uso). No máximo um ativo por (escopo, alvo, moeda): ai_budgets_active_key, 23505. Situação por ai_budget_status(mês); estourados que valem para uma execução por ai_budget_check(usuário, agente, é_fluxo). Auditada.';
+
+
+--
+-- Name: COLUMN ai_budgets.scope; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_budgets.scope IS 'user (user_id obrigatório), agent (agent_id obrigatório), flows ou global (sem alvo): ai_budgets_target_check.';
+
+
+--
+-- Name: COLUMN ai_budgets.user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_budgets.user_id IS 'Usuário coberto (só no escopo user). Some com o usuário (CASCADE).';
+
+
+--
+-- Name: COLUMN ai_budgets.agent_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_budgets.agent_id IS 'Agente coberto (só no escopo agent). Some com o agente (CASCADE).';
+
+
+--
+-- Name: COLUMN ai_budgets.currency; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_budgets.currency IS 'USD ou BRL, a moeda dos preços (ai_model_prices.currency). Só o uso nessa moeda conta.';
+
+
+--
+-- Name: COLUMN ai_budgets.monthly_limit_micros; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_budgets.monthly_limit_micros IS 'Valor do mês em milionésimos da moeda (> 0; ex.: 50000000 = US$ 50). Gasto >= valor = blocked.';
+
+
+--
+-- Name: COLUMN ai_budgets.alert_percent; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_budgets.alert_percent IS 'Percentual de aviso, 1 a 99 (padrão 80). Gasto >= valor × percentual ÷ 100 = alert.';
+
+
+--
+-- Name: COLUMN ai_budgets.is_active; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_budgets.is_active IS 'Desligado, o orçamento não aparece em ai_budget_status nem bloqueia; sai da unicidade.';
+
+
+--
 -- Name: ai_conversations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5391,7 +8232,6 @@ CREATE TABLE public.ai_conversations (
     agent_id uuid NOT NULL,
     title text,
     title_source text DEFAULT 'auto'::text NOT NULL,
-    pinned_at timestamp with time zone,
     archived_at timestamp with time zone,
     forked_from_conversation_id uuid,
     forked_from_message_id uuid,
@@ -5400,8 +8240,11 @@ CREATE TABLE public.ai_conversations (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     purpose text DEFAULT 'chat'::text NOT NULL,
+    archived_reason text,
+    CONSTRAINT ai_conversations_archived_reason_archived_check CHECK (((archived_reason IS NULL) OR (archived_at IS NOT NULL))),
+    CONSTRAINT ai_conversations_archived_reason_check CHECK ((archived_reason = ANY (ARRAY['finished'::text, 'forked'::text, 'migrated_from_multi'::text, 'import_conflict'::text]))),
     CONSTRAINT ai_conversations_fork_check CHECK ((forked_from_conversation_id <> id)),
-    CONSTRAINT ai_conversations_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text]))),
+    CONSTRAINT ai_conversations_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'scheduled_task'::text, 'reconcile_statement'::text]))),
     CONSTRAINT ai_conversations_screen_context_check CHECK ((jsonb_typeof(screen_context) = 'object'::text)),
     CONSTRAINT ai_conversations_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 200))),
     CONSTRAINT ai_conversations_title_source_check CHECK ((title_source = ANY (ARRAY['auto'::text, 'user'::text])))
@@ -5412,7 +8255,7 @@ CREATE TABLE public.ai_conversations (
 -- Name: TABLE ai_conversations; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.ai_conversations IS 'Conversas do usuário com um agente (spec 011): título automático e editável, fixar, arquivar, excluir (apaga mensagens, execuções e eventos; o uso fica em ai_usage), buscar (ai_conversation_search) e bifurcar (ai_conversation_fork). O admin pode ler as de todos (a aplicação aplica). Fora da auditoria.';
+COMMENT ON TABLE public.ai_conversations IS 'Sessões do usuário com um agente (specs 011 e 026): purpose chat é o fio contínuo de (usuário, agente), com no máximo uma sessão ativa (ai_conversations_active_chat_key); finalizar = arquivar (archived_reason), sem volta; continuar de uma finalizada = bifurcar (ai_conversation_fork). Título automático e editável, excluir (apaga mensagens, execuções e eventos; o uso fica em ai_usage), buscar (ai_conversation_search). Conversas de fluxo (purpose <> chat) ficam fora da regra da sessão ativa. O admin pode ler as de todos (a aplicação aplica). Fora da auditoria.';
 
 
 --
@@ -5437,10 +8280,10 @@ COMMENT ON COLUMN public.ai_conversations.title_source IS 'auto (gerado pelo age
 
 
 --
--- Name: COLUMN ai_conversations.pinned_at; Type: COMMENT; Schema: public; Owner: -
+-- Name: COLUMN ai_conversations.archived_at; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_conversations.pinned_at IS 'Fixada desde (nulo = não fixada). Fixadas primeiro, mais recente primeiro.';
+COMMENT ON COLUMN public.ai_conversations.archived_at IS 'Arquivada (finalizada) desde; nula = ativa. Sessão chat: no máximo uma ativa por (user_id, agent_id) (ai_conversations_active_chat_key), não volta a ser ativa e só é arquivada sem execução ativa ou com o cancelamento dela já pedido (ai_conversations_archive_guard).';
 
 
 --
@@ -5475,7 +8318,151 @@ COMMENT ON COLUMN public.ai_conversations.last_message_at IS 'Instante da últim
 -- Name: COLUMN ai_conversations.purpose; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_conversations.purpose IS 'Finalidade, definida no INSERT e imutável: chat (conversa do usuário, padrão) ou o fluxo automático que a criou (document_reading, classify_lines, contract_reading, contract_markdown; mesmo vocabulário de ai_usage.purpose). Conversas de fluxo não entram na lista nem na busca e rodam sem tools. A bifurcação é sempre chat.';
+COMMENT ON COLUMN public.ai_conversations.purpose IS 'Finalidade, definida no INSERT e imutável: chat (sessão do usuário, padrão) ou o fluxo automático que a criou (document_reading, classify_lines, contract_reading, contract_markdown, scheduled_task = um disparo de tarefa agendada, reconcile_statement = conciliação completa de um lote de extrato; mesmo vocabulário de ai_usage.purpose). Conversas de fluxo ficam fora da sessão ativa (ai_conversations_active_chat_key), da lista e da busca; scheduled_task e reconcile_statement rodam com as tools do kit do agente, os demais fluxos sem tools. A bifurcação é sempre chat.';
+
+
+--
+-- Name: COLUMN ai_conversations.archived_reason; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_conversations.archived_reason IS 'Por que a sessão foi finalizada (spec 026): finished (o usuário finalizou), forked (ai_conversation_fork abriu uma sessão nova do mesmo par), migrated_from_multi (a migração 0043 deixou uma ativa por usuário e agente) ou import_conflict (a importação do backup trazia uma segunda ativa para o par). Nula = arquivada antes da F12 ou sem motivo. Só com archived_at preenchido.';
+
+
+--
+-- Name: ai_providers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_providers (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    name text NOT NULL,
+    kind text NOT NULL,
+    base_url text,
+    api_key text,
+    api_key_hint text GENERATED ALWAYS AS (
+CASE
+    WHEN (api_key IS NOT NULL) THEN ('…'::text || "right"(api_key, 4))
+    ELSE NULL::text
+END) STORED,
+    is_active boolean DEFAULT true NOT NULL,
+    created_by_user_id uuid,
+    notes text,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    log_bodies boolean DEFAULT false NOT NULL,
+    capabilities text[] NOT NULL,
+    default_models jsonb DEFAULT '{}'::jsonb NOT NULL,
+    prompt_cache_enabled boolean NOT NULL,
+    thinking_enabled boolean NOT NULL,
+    CONSTRAINT ai_providers_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
+    CONSTRAINT ai_providers_api_key_check CHECK (((api_key ~ '^[[:graph:]]+$'::text) AND ((length(api_key) >= 8) AND (length(api_key) <= 1000)))),
+    CONSTRAINT ai_providers_base_url_check CHECK (((base_url ~ '^https?://[^[:space:]]+$'::text) AND (length(base_url) <= 500))),
+    CONSTRAINT ai_providers_capabilities_check CHECK (public.ai_capability_list_valid(capabilities)),
+    CONSTRAINT ai_providers_capabilities_kind_check CHECK (((kind <> 'anthropic'::text) OR (capabilities <@ ARRAY['text'::text, 'vision'::text]))),
+    CONSTRAINT ai_providers_credentials_check CHECK (((api_key IS NOT NULL) OR (base_url IS NOT NULL))),
+    CONSTRAINT ai_providers_default_models_check CHECK (public.ai_provider_default_models_valid(capabilities, default_models)),
+    CONSTRAINT ai_providers_kind_check CHECK ((kind = ANY (ARRAY['anthropic'::text, 'openai'::text]))),
+    CONSTRAINT ai_providers_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120)))
+);
+
+
+--
+-- Name: TABLE ai_providers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_providers IS 'Provedores de LLM cadastrados pelo admin (specs 011 e 024). kind anthropic (Messages API; com base_url, um compatível) ou openai (Chat Completions, embeddings e áudio; com base_url, um compatível). capabilities diz o que cada um faz e default_models o modelo padrão de cada capacidade. A chave é segredo: moneyflow_app grava mas não lê api_key.';
+
+
+--
+-- Name: COLUMN ai_providers.kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.kind IS 'anthropic (Messages API) ou openai (Chat Completions/Responses; cobre APIs compatíveis via base_url).';
+
+
+--
+-- Name: COLUMN ai_providers.base_url; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.base_url IS 'URL base da API (nulo = a oficial do kind). Ex.: proxy, Azure, Ollama, OpenRouter.';
+
+
+--
+-- Name: COLUMN ai_providers.api_key; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.api_key IS 'SEGREDO: chave da API. moneyflow_app grava mas NÃO lê esta coluna; leitura só por ai_run_provider_credentials, ai_capability_credentials, ai_embedding_credentials e admin_ai_provider_api_key. Nula só com base_url (servidor local sem chave). Nunca vai para o audit_log, respostas da API, logs ou tools de agente. Na edição, campo vazio mantém a atual.';
+
+
+--
+-- Name: COLUMN ai_providers.api_key_hint; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.api_key_hint IS 'Parte pública da chave (…últimos 4 caracteres), gerada pelo banco, para a tela.';
+
+
+--
+-- Name: COLUMN ai_providers.is_active; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.is_active IS 'false = agentes deste provedor não iniciam execuções novas.';
+
+
+--
+-- Name: COLUMN ai_providers.log_bodies; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.log_bodies IS 'Registrar os corpos e cabeçalhos das requisições (spec 023): desligado por padrão; ligado, ai_requests guarda o corpo enviado completo (inclusive o base64 dos anexos), a resposta e o stream bruto, com o conteúdo das conversas e dados financeiros. Desligado, o banco descarta corpos e cabeçalhos que chegarem. Auditada.';
+
+
+--
+-- Name: COLUMN ai_providers.capabilities; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.capabilities IS 'O que o provedor sabe fazer (spec 024): text (texto→texto), vision (imagens e PDF), embeddings, transcription (áudio→texto) e speech (texto→áudio), em ordem canônica. Omitida no INSERT = padrão do tipo (anthropic = text + vision; openai = todas); anthropic só aceita text e vision. Flag em uso por um agente não sai (ai_providers_capability_in_use_check).';
+
+
+--
+-- Name: COLUMN ai_providers.default_models; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.default_models IS 'Modelo padrão por capacidade ligada ({"text": …, "vision": …, "embeddings": …, "transcription": …, "speech": …}) e a voz padrão do TTS (speech_voice). A inferência do agente com modelo nulo herda daqui. Obrigatório só o text do Anthropic compatível (kind anthropic com base_url): o modelo da chamada mínima do teste e a sugestão no agente.';
+
+
+--
+-- Name: COLUMN ai_providers.prompt_cache_enabled; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.prompt_cache_enabled IS 'Messages API: manda cache_control. Omitido no INSERT = true sem base_url, false com ela. Desligado, o adaptador não manda cache_control mesmo que o agente peça.';
+
+
+--
+-- Name: COLUMN ai_providers.thinking_enabled; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.thinking_enabled IS 'Messages API: manda thinking (raciocínio). Omitido no INSERT = true sem base_url, false com ela. Desligado, o adaptador não manda thinking mesmo que o agente peça.';
+
+
+--
+-- Name: ai_embedding_pairs_in_use; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.ai_embedding_pairs_in_use WITH (security_invoker='true') AS
+ SELECT i.provider_id,
+    COALESCE(i.model, (p.default_models ->> 'embeddings'::text)) AS model,
+    (count(*))::integer AS agents
+   FROM ((public.ai_agent_inferences i
+     JOIN public.ai_agents a ON (((a.id = i.agent_id) AND a.is_active AND (a.archived_at IS NULL))))
+     JOIN public.ai_providers p ON (((p.id = i.provider_id) AND p.is_active AND (p.archived_at IS NULL) AND ('embeddings'::text = ANY (p.capabilities)))))
+  WHERE ((i.capability = 'embeddings'::text) AND (COALESCE(i.model, (p.default_models ->> 'embeddings'::text)) IS NOT NULL))
+  GROUP BY i.provider_id, COALESCE(i.model, (p.default_models ->> 'embeddings'::text));
+
+
+--
+-- Name: VIEW ai_embedding_pairs_in_use; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.ai_embedding_pairs_in_use IS 'Pares (provedor, modelo) de embeddings usados por algum agente ativo e não arquivado, com provedor ativo e com a flag; o modelo nulo da inferência herda default_models.embeddings (sem nenhum dos dois, o par não existe).';
 
 
 --
@@ -5496,6 +8483,7 @@ CREATE TABLE public.ai_embeddings (
     needs_reindex boolean GENERATED ALWAYS AS (((embedding IS NULL) OR (embedded_hash IS DISTINCT FROM public.ai_text_sha256(source_text)))) STORED NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    provider_id uuid NOT NULL,
     CONSTRAINT ai_embeddings_embedded_check CHECK ((((embedding IS NULL) = (embedded_hash IS NULL)) AND ((embedding IS NULL) = (embedded_at IS NULL)))),
     CONSTRAINT ai_embeddings_embedded_hash_check CHECK ((embedded_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT ai_embeddings_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
@@ -5508,7 +8496,7 @@ CREATE TABLE public.ai_embeddings (
 -- Name: TABLE ai_embeddings; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.ai_embeddings IS 'Embeddings dos registros para a busca semântica dos agentes (vector(1536), HNSW por cosseno). Um por objeto e modelo. Sem FK para o objeto (polimórfico): ai_embeddings_purge_orphans limpa os de objetos excluídos. Derivado: fora da auditoria. A busca SEMPRE filtra pelas caixas que o usuário lê (caixa_id) e a aplicação revalida o objeto.';
+COMMENT ON TABLE public.ai_embeddings IS 'Embeddings dos registros para a busca semântica dos agentes (vector(1536), HNSW por cosseno). Um por objeto e par (provedor, modelo); todos os pares dividem o mesmo HNSW e a busca filtra pelo par com hnsw.iterative_scan. Sem FK para o objeto (polimórfico): ai_embeddings_purge_orphans limpa os de objetos excluídos. Derivado: fora da auditoria. A busca SEMPRE filtra pelas caixas que o usuário lê (caixa_id) e a aplicação revalida o objeto.';
 
 
 --
@@ -5529,7 +8517,7 @@ COMMENT ON COLUMN public.ai_embeddings.caixa_id IS 'Caixa do objeto, para filtra
 -- Name: COLUMN ai_embeddings.model; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_embeddings.model IS 'Modelo de embeddings (ex.: text-embedding-3-small). Busque sempre com o mesmo modelo do vetor de consulta.';
+COMMENT ON COLUMN public.ai_embeddings.model IS 'Modelo de embeddings (ex.: text-embedding-3-small). Busque sempre com o par (provedor, modelo) do vetor de consulta.';
 
 
 --
@@ -5565,6 +8553,39 @@ COMMENT ON COLUMN public.ai_embeddings.embedded_hash IS 'source_hash do texto us
 --
 
 COMMENT ON COLUMN public.ai_embeddings.needs_reindex IS 'true = falta o vetor ou o texto mudou depois dele (gerado). Fila do worker (índice parcial).';
+
+
+--
+-- Name: COLUMN ai_embeddings.provider_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embeddings.provider_id IS 'Provedor que gera o vetor. O par (provider_id, model) precisa estar em ai_embedding_indexes, e sai com ele.';
+
+
+--
+-- Name: ai_embedding_index_stats; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.ai_embedding_index_stats WITH (security_invoker='true') AS
+ SELECT x.provider_id,
+    x.model,
+    x.last_in_use_at,
+    (EXISTS ( SELECT 1
+           FROM public.ai_embedding_pairs_in_use u
+          WHERE ((u.provider_id = x.provider_id) AND (u.model = x.model)))) AS in_use,
+    (count(e.id))::integer AS vectors,
+    (count(e.id) FILTER (WHERE (NOT e.needs_reindex)))::integer AS indexed,
+    (count(e.id) FILTER (WHERE e.needs_reindex))::integer AS pending
+   FROM (public.ai_embedding_indexes x
+     LEFT JOIN public.ai_embeddings e ON (((e.provider_id = x.provider_id) AND (e.model = x.model))))
+  GROUP BY x.provider_id, x.model, x.last_in_use_at;
+
+
+--
+-- Name: VIEW ai_embedding_index_stats; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.ai_embedding_index_stats IS 'Progresso de cada índice (detalhe do provedor): linhas (vectors), já indexadas com o texto atual (indexed) e na fila (pending), mais se o par está em uso.';
 
 
 --
@@ -5610,10 +8631,14 @@ CREATE TABLE public.ai_usage (
     currency text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    request_id uuid,
+    audio_seconds numeric(12,3) DEFAULT 0 NOT NULL,
+    characters bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT ai_usage_audio_check CHECK (((audio_seconds >= (0)::numeric) AND (characters >= 0))),
     CONSTRAINT ai_usage_cost_check CHECK (((cost_micros >= 0) AND ((cost_micros IS NULL) = (currency IS NULL)) AND ((price_id IS NULL) OR (cost_micros IS NOT NULL)))),
     CONSTRAINT ai_usage_currency_check CHECK ((currency = ANY (ARRAY['USD'::text, 'BRL'::text]))),
     CONSTRAINT ai_usage_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
-    CONSTRAINT ai_usage_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text]))),
+    CONSTRAINT ai_usage_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'scheduled_task'::text, 'reconcile_statement'::text]))),
     CONSTRAINT ai_usage_tokens_check CHECK (((input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)))
 );
 
@@ -5636,7 +8661,7 @@ COMMENT ON COLUMN public.ai_usage.message_id IS 'Mensagem do assistente que a ch
 -- Name: COLUMN ai_usage.purpose; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_usage.purpose IS 'chat (loop do agente), title (título automático), embedding (indexação/busca semântica, sem agente) ou a finalidade de um fluxo automático: document_reading (leitura de documento), classify_lines (sugestões da conciliação), contract_reading (leitura do PDF do contrato) e contract_markdown (PDF do contrato → markdown). Mesmo vocabulário de ai_conversations.purpose; chat numa conversa de fluxo vira a finalidade da conversa.';
+COMMENT ON COLUMN public.ai_usage.purpose IS 'chat (loop do agente), title (título automático), embedding (indexação/busca semântica), vision_describe (descrição de anexo pelo provedor de visão), transcription (áudio→texto), speech (texto→áudio) ou a finalidade de um fluxo automático: document_reading (leitura de documento), classify_lines (sugestões da conciliação), contract_reading (leitura do PDF do contrato), contract_markdown (PDF do contrato → markdown), scheduled_task (tarefa agendada) e reconcile_statement (conciliação completa ao importar). chat numa conversa de fluxo vira a finalidade da conversa.';
 
 
 --
@@ -5672,6 +8697,27 @@ COMMENT ON COLUMN public.ai_usage.price_id IS 'Preço usado (vigente no created_
 --
 
 COMMENT ON COLUMN public.ai_usage.cost_micros IS 'Custo estimado em milionésimos de currency (ex.: 1500000 = US$ 1,50). Nulo sem preço.';
+
+
+--
+-- Name: COLUMN ai_usage.request_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_usage.request_id IS 'Requisição que gerou o uso (spec 023). Purgada a requisição, vira nula; o uso fica. A FK é NOT VALID (as linhas novas são checadas): o dump do backup leva só a estrutura de ai_requests e, validada, a FK derrubaria o pg_restore. Depois de um restore, ai_usage_unlink_missing_requests() anula os vínculos órfãos.';
+
+
+--
+-- Name: COLUMN ai_usage.audio_seconds; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_usage.audio_seconds IS 'Segundos de áudio transcritos (transcription), com milésimos. Entra no custo por audio_input_per_minute.';
+
+
+--
+-- Name: COLUMN ai_usage.characters; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_usage.characters IS 'Caracteres convertidos em fala (speech). Entra no custo por speech_per_million_chars.';
 
 
 --
@@ -5763,84 +8809,282 @@ COMMENT ON COLUMN public.ai_messages.search_tsv IS 'Full-text (português) dos b
 
 
 --
--- Name: ai_providers; Type: TABLE; Schema: public; Owner: -
+-- Name: ai_request_attempts; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.ai_providers (
-    id uuid DEFAULT uuidv7() NOT NULL,
-    name text NOT NULL,
-    kind text NOT NULL,
-    base_url text,
-    api_key text,
-    api_key_hint text GENERATED ALWAYS AS (
-CASE
-    WHEN (api_key IS NOT NULL) THEN ('…'::text || "right"(api_key, 4))
-    ELSE NULL::text
-END) STORED,
-    embedding_model text,
-    is_active boolean DEFAULT true NOT NULL,
-    created_by_user_id uuid,
-    notes text,
-    archived_at timestamp with time zone,
+CREATE TABLE public.ai_request_attempts (
+    request_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    started_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    duration_ms integer,
+    http_status integer,
+    error_type text,
+    error_message text,
+    retry_after_ms integer,
+    rate_limit_headers jsonb,
+    response_body text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT ai_providers_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
-    CONSTRAINT ai_providers_api_key_check CHECK (((api_key ~ '^[[:graph:]]+$'::text) AND ((length(api_key) >= 8) AND (length(api_key) <= 1000)))),
-    CONSTRAINT ai_providers_base_url_check CHECK (((base_url ~ '^https?://[^[:space:]]+$'::text) AND (length(base_url) <= 500))),
-    CONSTRAINT ai_providers_credentials_check CHECK (((api_key IS NOT NULL) OR (base_url IS NOT NULL))),
-    CONSTRAINT ai_providers_embedding_model_check CHECK (((embedding_model IS NULL) OR ((embedding_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text) AND (kind = 'openai'::text)))),
-    CONSTRAINT ai_providers_kind_check CHECK ((kind = ANY (ARRAY['anthropic'::text, 'openai'::text]))),
-    CONSTRAINT ai_providers_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120)))
+    CONSTRAINT ai_request_attempts_attempt_check CHECK (((attempt >= 1) AND (attempt <= 100))),
+    CONSTRAINT ai_request_attempts_duration_check CHECK ((duration_ms >= 0)),
+    CONSTRAINT ai_request_attempts_error_message_check CHECK ((length(error_message) <= 4000)),
+    CONSTRAINT ai_request_attempts_error_type_check CHECK ((error_type ~ '^[a-z][a-z0-9_]{0,59}$'::text)),
+    CONSTRAINT ai_request_attempts_headers_check CHECK ((jsonb_typeof(rate_limit_headers) = 'object'::text)),
+    CONSTRAINT ai_request_attempts_http_status_check CHECK (((http_status >= 100) AND (http_status <= 599))),
+    CONSTRAINT ai_request_attempts_retry_after_check CHECK ((retry_after_ms >= 0))
 );
 
 
 --
--- Name: TABLE ai_providers; Type: COMMENT; Schema: public; Owner: -
+-- Name: TABLE ai_request_attempts; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.ai_providers IS 'Provedores de LLM cadastrados pelo admin (spec 011). kind anthropic (Claude API, padrão) ou openai (OpenAI API e APIs compatíveis, com base_url). A chave é segredo: moneyflow_app grava mas não lê api_key.';
-
-
---
--- Name: COLUMN ai_providers.kind; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_providers.kind IS 'anthropic (Messages API) ou openai (Chat Completions/Responses; cobre APIs compatíveis via base_url).';
+COMMENT ON TABLE public.ai_request_attempts IS 'Tentativas de uma requisição feitas pelo MoneyFlow (spec 023; o retry dos SDKs fica desligado). Somem com a requisição (CASCADE). Inserir uma tentativa atualiza ai_requests.attempts.';
 
 
 --
--- Name: COLUMN ai_providers.base_url; Type: COMMENT; Schema: public; Owner: -
+-- Name: COLUMN ai_request_attempts.attempt; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_providers.base_url IS 'URL base da API (nulo = a oficial do kind). Ex.: proxy, Azure, Ollama, OpenRouter.';
-
-
---
--- Name: COLUMN ai_providers.api_key; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_providers.api_key IS 'SEGREDO: chave da API. moneyflow_app grava mas NÃO lê esta coluna; leitura só por ai_run_provider_credentials, ai_embedding_credentials e admin_ai_provider_api_key. Nula só com base_url (servidor local sem chave). Nunca vai para o audit_log, respostas da API, logs ou tools de agente. Na edição, campo vazio mantém a atual.';
+COMMENT ON COLUMN public.ai_request_attempts.attempt IS 'Número da tentativa (1, 2, 3…).';
 
 
 --
--- Name: COLUMN ai_providers.api_key_hint; Type: COMMENT; Schema: public; Owner: -
+-- Name: COLUMN ai_request_attempts.error_type; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_providers.api_key_hint IS 'Parte pública da chave (…últimos 4 caracteres), gerada pelo banco, para a tela.';
-
-
---
--- Name: COLUMN ai_providers.embedding_model; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_providers.embedding_model IS 'Modelo de embeddings deste provedor (só kind openai; ex.: text-embedding-3-small, 1536 dimensões). Nulo = o provedor não gera embeddings. No máximo um provedor ativo com embeddings; sem nenhum, a busca dos agentes cai para trigram.';
+COMMENT ON COLUMN public.ai_request_attempts.error_type IS 'Tipo do erro em snake_case, definido pela aplicação (ex.: http, rate_limit, overloaded, network, timeout, canceled). Nulo = deu certo.';
 
 
 --
--- Name: COLUMN ai_providers.is_active; Type: COMMENT; Schema: public; Owner: -
+-- Name: COLUMN ai_request_attempts.retry_after_ms; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_providers.is_active IS 'false = agentes deste provedor não iniciam execuções novas.';
+COMMENT ON COLUMN public.ai_request_attempts.retry_after_ms IS 'retry-after informado pelo provedor, em ms (nulo se não veio).';
+
+
+--
+-- Name: COLUMN ai_request_attempts.rate_limit_headers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_request_attempts.rate_limit_headers IS 'Cabeçalhos de rate limit da resposta (objeto nome → valor), sempre, com ou sem log_bodies.';
+
+
+--
+-- Name: COLUMN ai_request_attempts.response_body; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_request_attempts.response_body IS 'Corpo da resposta de erro. Só com log_bodies do provedor da requisição.';
+
+
+--
+-- Name: ai_requests; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_requests (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    provider_id uuid,
+    agent_id uuid,
+    user_id uuid,
+    conversation_id uuid,
+    run_id uuid,
+    operation text NOT NULL,
+    purpose text,
+    model text,
+    method text DEFAULT 'POST'::text NOT NULL,
+    path text NOT NULL,
+    streaming boolean DEFAULT false NOT NULL,
+    status text DEFAULT 'running'::text NOT NULL,
+    http_status integer,
+    error_message text,
+    started_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    finished_at timestamp with time zone,
+    duration_ms integer GENERATED ALWAYS AS ((floor((EXTRACT(epoch FROM (finished_at - started_at)) * (1000)::numeric)))::integer) STORED,
+    first_byte_ms integer,
+    attempts integer DEFAULT 0 NOT NULL,
+    input_tokens bigint DEFAULT 0 NOT NULL,
+    output_tokens bigint DEFAULT 0 NOT NULL,
+    cache_write_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    request_bytes bigint,
+    response_bytes bigint,
+    request_headers jsonb,
+    request_body text,
+    response_headers jsonb,
+    response_body text,
+    response_stream text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_requests_attempts_check CHECK ((attempts >= 0)),
+    CONSTRAINT ai_requests_bytes_check CHECK (((request_bytes >= 0) AND (response_bytes >= 0))),
+    CONSTRAINT ai_requests_error_message_check CHECK (((error_message IS NULL) OR ((length(error_message) <= 4000) AND (status <> 'ok'::text)))),
+    CONSTRAINT ai_requests_finished_check CHECK ((((status = 'running'::text) = (finished_at IS NULL)) AND (finished_at >= started_at))),
+    CONSTRAINT ai_requests_first_byte_check CHECK ((first_byte_ms >= 0)),
+    CONSTRAINT ai_requests_headers_check CHECK (((jsonb_typeof(request_headers) = 'object'::text) AND (jsonb_typeof(response_headers) = 'object'::text))),
+    CONSTRAINT ai_requests_http_status_check CHECK (((http_status >= 100) AND (http_status <= 599))),
+    CONSTRAINT ai_requests_method_check CHECK ((method = ANY (ARRAY['GET'::text, 'POST'::text, 'PUT'::text, 'PATCH'::text, 'DELETE'::text]))),
+    CONSTRAINT ai_requests_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
+    CONSTRAINT ai_requests_operation_check CHECK ((operation = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'test_connection'::text, 'list_models'::text]))),
+    CONSTRAINT ai_requests_path_check CHECK (((path ~ '^[^[:space:]]+$'::text) AND (length(path) <= 2000))),
+    CONSTRAINT ai_requests_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'scheduled_task'::text, 'reconcile_statement'::text]))),
+    CONSTRAINT ai_requests_purpose_null_check CHECK (((purpose IS NULL) = (operation = ANY (ARRAY['test_connection'::text, 'list_models'::text])))),
+    CONSTRAINT ai_requests_status_check CHECK ((status = ANY (ARRAY['running'::text, 'ok'::text, 'error'::text, 'canceled'::text]))),
+    CONSTRAINT ai_requests_tokens_check CHECK (((input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)))
+);
+
+
+--
+-- Name: TABLE ai_requests; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_requests IS 'Requisições ao provedor de IA (spec 023): uma por chamada (inclusive testar conexão e listar modelos). Metadados sempre; cabeçalhos e corpos só com ai_providers.log_bodies. Nasce running (INSERT no início) e termina ok, error ou canceled (UPDATE no fim, fora da transação do negócio); terminada, é imutável. As FKs são ON DELETE SET NULL: a requisição sobrevive até a purga (ai_requests_purge). Fora da auditoria e do backup (no dump, só a estrutura).';
+
+
+--
+-- Name: COLUMN ai_requests.provider_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.provider_id IS 'Provedor chamado. Nulo = testar conexão de um provedor ainda não salvo, ou provedor excluído.';
+
+
+--
+-- Name: COLUMN ai_requests.run_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.run_id IS 'Execução do agente (opcional). Informada, o banco completa conversa, usuário, agente, provedor e modelo nulos a partir dela, e a conversa tem de ser a da execução (ai_requests_links_check).';
+
+
+--
+-- Name: COLUMN ai_requests.operation; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.operation IS 'chat, title, embedding, vision_describe, transcription, speech, test_connection ou list_models.';
+
+
+--
+-- Name: COLUMN ai_requests.purpose; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.purpose IS 'Finalidade, com o vocabulário de ai_usage.purpose; nula só (e sempre) em test_connection e list_models. chat numa conversa de fluxo vira a finalidade dela.';
+
+
+--
+-- Name: COLUMN ai_requests.model; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.model IS 'Modelo pedido (nulo quando a chamada não tem modelo, como listar modelos).';
+
+
+--
+-- Name: COLUMN ai_requests.path; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.path IS 'Caminho chamado, sem o host quando é o base_url do provedor (senão a URL inteira, sem credenciais).';
+
+
+--
+-- Name: COLUMN ai_requests.streaming; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.streaming IS 'A resposta veio em streaming (SSE).';
+
+
+--
+-- Name: COLUMN ai_requests.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.status IS 'running (em andamento) → ok, error ou canceled (finais; a linha fica imutável). Uma running abandonada sai na purga.';
+
+
+--
+-- Name: COLUMN ai_requests.http_status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.http_status IS 'Status HTTP final (o da última tentativa). Nulo em erro de rede ou timeout.';
+
+
+--
+-- Name: COLUMN ai_requests.error_message; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.error_message IS 'Mensagem de erro segura (até 4000, nunca em ok), sem segredos.';
+
+
+--
+-- Name: COLUMN ai_requests.duration_ms; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.duration_ms IS 'Duração total em ms (finished_at − started_at), gerada pelo banco.';
+
+
+--
+-- Name: COLUMN ai_requests.first_byte_ms; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.first_byte_ms IS 'Tempo até o primeiro byte da resposta, em ms, a partir de started_at.';
+
+
+--
+-- Name: COLUMN ai_requests.attempts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.attempts IS 'Número de tentativas (linhas em ai_request_attempts), mantido pelo banco; a aplicação não grava.';
+
+
+--
+-- Name: COLUMN ai_requests.input_tokens; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.input_tokens IS 'Tokens como em ai_usage (entrada sem cache, saída, gravação e leitura de cache).';
+
+
+--
+-- Name: COLUMN ai_requests.request_bytes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.request_bytes IS 'Tamanho do corpo enviado, em bytes (gravável também sem log_bodies).';
+
+
+--
+-- Name: COLUMN ai_requests.response_bytes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.response_bytes IS 'Tamanho da resposta recebida (o stream bruto, no streaming), em bytes.';
+
+
+--
+-- Name: COLUMN ai_requests.request_headers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.request_headers IS 'Cabeçalhos enviados (objeto nome → valor), só com log_bodies; credenciais como "[omitido]" (ai_request_headers_redact).';
+
+
+--
+-- Name: COLUMN ai_requests.request_body; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.request_body IS 'Corpo enviado, completo, inclusive o base64 dos anexos. Só com log_bodies.';
+
+
+--
+-- Name: COLUMN ai_requests.response_headers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.response_headers IS 'Cabeçalhos recebidos, só com log_bodies; credenciais omitidas.';
+
+
+--
+-- Name: COLUMN ai_requests.response_body; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.response_body IS 'Resposta montada (JSON final). Só com log_bodies.';
+
+
+--
+-- Name: COLUMN ai_requests.response_stream; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_requests.response_stream IS 'Stream bruto recebido (texto SSE), no streaming. Só com log_bodies.';
 
 
 --
@@ -5886,6 +9130,77 @@ COMMENT ON COLUMN public.ai_run_events.event_type IS 'Tipo do evento, definido p
 --
 
 COMMENT ON COLUMN public.ai_run_events.payload IS 'Dados do evento (objeto JSON). Nunca chaves, tokens ou senhas.';
+
+
+--
+-- Name: ai_scheduled_task_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_scheduled_task_runs (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    task_id uuid NOT NULL,
+    scheduled_for timestamp with time zone NOT NULL,
+    trigger_kind text DEFAULT 'schedule'::text NOT NULL,
+    status text NOT NULL,
+    skip_reason text,
+    conversation_id uuid,
+    run_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_scheduled_task_runs_reason_check CHECK ((((status = 'started'::text) = (skip_reason IS NULL)) AND ((length(skip_reason) >= 1) AND (length(skip_reason) <= 500)))),
+    CONSTRAINT ai_scheduled_task_runs_run_check CHECK (((status = 'started'::text) OR (run_id IS NULL))),
+    CONSTRAINT ai_scheduled_task_runs_status_check CHECK ((status = ANY (ARRAY['started'::text, 'skipped'::text, 'failed'::text]))),
+    CONSTRAINT ai_scheduled_task_runs_trigger_kind_check CHECK ((trigger_kind = ANY (ARRAY['schedule'::text, 'manual'::text])))
+);
+
+
+--
+-- Name: TABLE ai_scheduled_task_runs; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_scheduled_task_runs IS 'Disparos das tarefas agendadas (spec 029): um por (tarefa, horário previsto) (ai_scheduled_task_runs_task_scheduled_key). Criados por ai_scheduled_task_claim (agendados) e ai_scheduled_task_run_now (manuais) como started ou skipped; a aplicação liga a sessão e a execução que criou, ou passa o started a skipped/failed (com o motivo) se não conseguiu começar. skipped e failed são finais. O resultado da execução está em ai_runs. Fora da auditoria e do backup (histórico operacional, como ai_runs).';
+
+
+--
+-- Name: COLUMN ai_scheduled_task_runs.scheduled_for; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_task_runs.scheduled_for IS 'Horário previsto do disparo (agendado) ou o instante do clique (manual). Imutável.';
+
+
+--
+-- Name: COLUMN ai_scheduled_task_runs.trigger_kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_task_runs.trigger_kind IS 'schedule (pelo worker) ou manual ("Rodar agora").';
+
+
+--
+-- Name: COLUMN ai_scheduled_task_runs.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_task_runs.status IS 'started (começou: a aplicação cria a sessão e a execução), skipped (pulado, com o motivo) ou failed (não conseguiu começar, com o erro). started pode virar skipped/failed enquanto não tem execução; skipped e failed são finais.';
+
+
+--
+-- Name: COLUMN ai_scheduled_task_runs.skip_reason; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_task_runs.skip_reason IS 'Motivo, obrigatório em skipped/failed e nulo em started (até 500). Do banco: missed_window (atraso acima do prazo, 6 h), previous_run_active (execução anterior ativa), user_inactive, agent_inactive. Da aplicação: os dela (ex.: budget_exceeded, rate_limited ou a mensagem de erro).';
+
+
+--
+-- Name: COLUMN ai_scheduled_task_runs.conversation_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_task_runs.conversation_id IS 'Sessão do disparo (purpose scheduled_task, do dono da tarefa: ai_scheduled_task_runs_links_check). Excluir a sessão anula o vínculo e o histórico fica.';
+
+
+--
+-- Name: COLUMN ai_scheduled_task_runs.run_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_task_runs.run_id IS 'Execução do disparo (da conversa acima). Excluída a conversa, vira nula e o histórico fica.';
 
 
 --
@@ -5957,6 +9272,120 @@ COMMENT ON COLUMN public.ai_tool_confirmations.reason IS 'Motivo opcional da rej
 
 
 --
+-- Name: ai_tool_kit_tools; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_tool_kit_tools (
+    kit_id uuid NOT NULL,
+    tool_name text NOT NULL,
+    mode text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_tool_kit_tools_mode_check CHECK ((mode = ANY (ARRAY['allow'::text, 'ask'::text]))),
+    CONSTRAINT ai_tool_kit_tools_tool_name_check CHECK (public.ai_tool_list_valid(ARRAY[tool_name]))
+);
+
+
+--
+-- Name: TABLE ai_tool_kit_tools; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_tool_kit_tools IS 'Tools internas liberadas por um kit (lista de permissões: tool fora do kit não é enviada ao modelo; tool nova do registro não entra sozinha). Some com o kit (CASCADE). Auditada com record_id = kit_id.';
+
+
+--
+-- Name: COLUMN ai_tool_kit_tools.tool_name; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_kit_tools.tool_name IS 'Nome da tool no registro (packages/shared). O banco valida só o formato (o de ai_tool_list_valid); a aplicação valida contra o registro.';
+
+
+--
+-- Name: COLUMN ai_tool_kit_tools.mode; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_kit_tools.mode IS 'allow = executa sem perguntar; ask = mostra o cartão "Aplicar?" com a prévia e espera o usuário. Vale para leituras e escritas; o modo sugerido (leituras e notify_user allow, demais escritas ask) é da aplicação.';
+
+
+--
+-- Name: ai_tool_kits; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_tool_kits (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    name text NOT NULL,
+    description text,
+    created_by_user_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_tool_kits_description_check CHECK ((length(description) <= 2000)),
+    CONSTRAINT ai_tool_kits_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120)))
+);
+
+
+--
+-- Name: TABLE ai_tool_kits; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_tool_kits IS 'Kits de ferramentas dos agentes (spec 021): quais tools internas um agente pode usar e, para cada uma, allow ou ask. Um agente tem no máximo um kit (ai_agents.tool_kit_id); um kit serve a vários. Kit em uso não é excluído (23503); não há arquivamento. Valem só para as tools internas (as de MCP externo seguem agent_mcp_servers).';
+
+
+--
+-- Name: COLUMN ai_tool_kits.name; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_kits.name IS 'Nome (até 120), único sem distinção de maiúsculas (ai_tool_kits_name_key). Chave natural no backup.';
+
+
+--
+-- Name: COLUMN ai_tool_kits.description; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_kits.description IS 'Descrição opcional (até 2000 caracteres).';
+
+
+--
+-- Name: COLUMN ai_tool_kits.created_by_user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_tool_kits.created_by_user_id IS 'Quem criou. Nulo = criado pela migração 0038 ou usuário excluído.';
+
+
+--
+-- Name: ai_usage_daily; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.ai_usage_daily WITH (security_invoker='true') AS
+ SELECT ((created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date AS day,
+    provider_id,
+    model,
+    agent_id,
+    user_id,
+    purpose,
+    currency,
+    (count(*))::integer AS calls,
+    (count(DISTINCT run_id))::integer AS runs,
+    (count(DISTINCT conversation_id))::integer AS conversations,
+    (sum(input_tokens))::bigint AS input_tokens,
+    (sum(output_tokens))::bigint AS output_tokens,
+    (sum(cache_write_tokens))::bigint AS cache_write_tokens,
+    (sum(cache_read_tokens))::bigint AS cache_read_tokens,
+    sum(audio_seconds) AS audio_seconds,
+    (sum(characters))::bigint AS characters,
+    (sum(cost_micros))::bigint AS cost_micros,
+    bool_or((cost_micros IS NULL)) AS has_unpriced
+   FROM public.ai_usage u
+  GROUP BY (((created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date), provider_id, model, agent_id, user_id, purpose, currency;
+
+
+--
+-- Name: VIEW ai_usage_daily; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.ai_usage_daily IS 'Uso por dia (America/Sao_Paulo), provedor, modelo, agente, usuário, finalidade e moeda (spec 028, painel de uso). currency nula = chamadas sem preço (cost_micros nulo). Taxa de acerto do cache = cache_read_tokens ÷ (input_tokens + cache_write_tokens + cache_read_tokens). Filtre por day (índice ai_usage_sp_day_idx).';
+
+
+--
 -- Name: ai_usage_monthly_by_agent; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -5974,7 +9403,9 @@ CREATE VIEW public.ai_usage_monthly_by_agent WITH (security_invoker='true') AS
     (sum(cache_write_tokens))::bigint AS cache_write_tokens,
     (sum(cache_read_tokens))::bigint AS cache_read_tokens,
     (sum(cost_micros))::bigint AS cost_micros,
-    bool_or((cost_micros IS NULL)) AS has_unpriced
+    bool_or((cost_micros IS NULL)) AS has_unpriced,
+    sum(audio_seconds) AS audio_seconds,
+    (sum(characters))::bigint AS characters
    FROM public.ai_usage u
   GROUP BY ((date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text)))::date), agent_id, provider_id, model, currency;
 
@@ -5983,7 +9414,7 @@ CREATE VIEW public.ai_usage_monthly_by_agent WITH (security_invoker='true') AS
 -- Name: VIEW ai_usage_monthly_by_agent; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.ai_usage_monthly_by_agent IS 'Uso por mês (America/Sao_Paulo), agente, provedor, modelo e moeda. agent_id nulo = embeddings (sem agente).';
+COMMENT ON VIEW public.ai_usage_monthly_by_agent IS 'Uso por mês (America/Sao_Paulo), agente, provedor, modelo e moeda, com segundos de áudio e caracteres de fala. agent_id nulo = embeddings (sem agente).';
 
 
 --
@@ -6002,7 +9433,9 @@ CREATE VIEW public.ai_usage_monthly_by_purpose WITH (security_invoker='true') AS
     (sum(cache_write_tokens))::bigint AS cache_write_tokens,
     (sum(cache_read_tokens))::bigint AS cache_read_tokens,
     (sum(cost_micros))::bigint AS cost_micros,
-    bool_or((cost_micros IS NULL)) AS has_unpriced
+    bool_or((cost_micros IS NULL)) AS has_unpriced,
+    sum(audio_seconds) AS audio_seconds,
+    (sum(characters))::bigint AS characters
    FROM public.ai_usage u
   GROUP BY ((date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text)))::date), purpose, currency;
 
@@ -6011,7 +9444,7 @@ CREATE VIEW public.ai_usage_monthly_by_purpose WITH (security_invoker='true') AS
 -- Name: VIEW ai_usage_monthly_by_purpose; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.ai_usage_monthly_by_purpose IS 'Uso por mês (America/Sao_Paulo), finalidade (ai_usage.purpose) e moeda; currency nula = chamadas sem preço.';
+COMMENT ON VIEW public.ai_usage_monthly_by_purpose IS 'Uso por mês (America/Sao_Paulo), finalidade (ai_usage.purpose) e moeda, com segundos de áudio e caracteres de fala; currency nula = chamadas sem preço.';
 
 
 --
@@ -6029,7 +9462,9 @@ CREATE VIEW public.ai_usage_monthly_by_user WITH (security_invoker='true') AS
     (sum(cache_write_tokens))::bigint AS cache_write_tokens,
     (sum(cache_read_tokens))::bigint AS cache_read_tokens,
     (sum(cost_micros))::bigint AS cost_micros,
-    bool_or((cost_micros IS NULL)) AS has_unpriced
+    bool_or((cost_micros IS NULL)) AS has_unpriced,
+    sum(audio_seconds) AS audio_seconds,
+    (sum(characters))::bigint AS characters
    FROM public.ai_usage u
   GROUP BY ((date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text)))::date), user_id, currency;
 
@@ -6038,7 +9473,50 @@ CREATE VIEW public.ai_usage_monthly_by_user WITH (security_invoker='true') AS
 -- Name: VIEW ai_usage_monthly_by_user; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.ai_usage_monthly_by_user IS 'Uso por mês (America/Sao_Paulo), usuário e moeda. user_id nulo = sistema (embeddings) ou usuário excluído.';
+COMMENT ON VIEW public.ai_usage_monthly_by_user IS 'Uso por mês (America/Sao_Paulo), usuário e moeda, com segundos de áudio e caracteres de fala. user_id nulo = sistema (embeddings) ou usuário excluído.';
+
+
+--
+-- Name: app_settings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.app_settings (
+    key text NOT NULL,
+    value jsonb NOT NULL,
+    updated_by_user_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT app_settings_key_check CHECK (((key ~ '^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$'::text) AND (length(key) <= 100))),
+    CONSTRAINT app_settings_value_check CHECK (public.app_setting_valid(key, value))
+);
+
+
+--
+-- Name: TABLE app_settings; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.app_settings IS 'Configurações do sistema gravadas pela tela (spec 023), que vencem a variável de ambiente; sem linha = vale a variável (o DELETE é o "Usar o padrão"). Só o admin grava (regra da aplicação). Auditada com record_id = md5(key)::uuid.';
+
+
+--
+-- Name: COLUMN app_settings.key; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.app_settings.key IS 'Chave no formato area.nome (minúsculas, até 100), validada com o valor por app_setting_valid.';
+
+
+--
+-- Name: COLUMN app_settings.value; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.app_settings.value IS 'Valor em JSON (ex.: 30 para ai.request_retention_days).';
+
+
+--
+-- Name: COLUMN app_settings.updated_by_user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.app_settings.updated_by_user_id IS 'Quem gravou por último: o app.user_id da transação, quando definido (senão o valor informado). Usuário excluído = nulo.';
 
 
 --
@@ -6393,7 +9871,13 @@ UNION ALL
     'contract_document'::text AS target_kind,
     contract_documents.id AS target_id
    FROM public.contract_documents
-  WHERE (contract_documents.attachment_id IS NOT NULL);
+  WHERE (contract_documents.attachment_id IS NOT NULL)
+UNION ALL
+ SELECT ai_attachment_derivatives.result_attachment_id AS attachment_id,
+    'ai_message_speech'::text AS target_kind,
+    ai_attachment_derivatives.message_id AS target_id
+   FROM public.ai_attachment_derivatives
+  WHERE (ai_attachment_derivatives.result_attachment_id IS NOT NULL);
 
 
 --
@@ -6417,8 +9901,12 @@ CREATE TABLE public.attachments (
     uploaded_by_user_id uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    duration_ms integer,
+    page_count integer,
+    CONSTRAINT attachments_duration_ms_check CHECK (((duration_ms IS NULL) OR (((duration_ms >= 1) AND (duration_ms <= 86400000)) AND (mime_type ~ '^(audio|video)/'::text)))),
     CONSTRAINT attachments_file_name_check CHECK (((btrim(file_name) <> ''::text) AND (length(file_name) <= 255) AND (file_name !~ '[/\\[:cntrl:]]'::text))),
     CONSTRAINT attachments_mime_type_check CHECK (((mime_type ~ '^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$'::text) AND (length(mime_type) <= 127))),
+    CONSTRAINT attachments_page_count_check CHECK (((page_count IS NULL) OR (((page_count >= 1) AND (page_count <= 100000)) AND (mime_type = 'application/pdf'::text)))),
     CONSTRAINT attachments_size_check CHECK (((octet_length(content) >= 1) AND (octet_length(content) <= 20971520)))
 );
 
@@ -6463,6 +9951,20 @@ COMMENT ON COLUMN public.attachments.size_bytes IS 'Tamanho em bytes, calculado 
 --
 
 COMMENT ON COLUMN public.attachments.sha256 IS 'SHA-256 do conteúdo em hex minúsculo, calculado pelo banco; serve para achar o mesmo arquivo já enviado.';
+
+
+--
+-- Name: COLUMN attachments.duration_ms; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.attachments.duration_ms IS 'Duração do áudio em milissegundos (1 ms a 24 h; só com mime_type audio/* ou video/*). Opcional, preenchida pela aplicação no upload (spec 025).';
+
+
+--
+-- Name: COLUMN attachments.page_count; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.attachments.page_count IS 'Número de páginas do PDF (1 a 100 mil; só com mime_type application/pdf). Opcional, preenchido pela aplicação no upload (spec 025).';
 
 
 --
@@ -6625,6 +10127,8 @@ CREATE TABLE public.caixas (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    ai_auto_reconcile boolean DEFAULT false NOT NULL,
+    CONSTRAINT caixas_ai_auto_reconcile_check CHECK (((NOT ai_auto_reconcile) OR (kind = 'credit_card'::text))),
     CONSTRAINT caixas_card_fields_check CHECK (
 CASE kind
     WHEN 'general'::text THEN ((default_payer_caixa_id IS NULL) AND (credit_limit_cents IS NULL) AND (closing_day IS NULL) AND (due_day IS NULL) AND (card_last4 IS NULL))
@@ -6703,6 +10207,13 @@ COMMENT ON COLUMN public.caixas.due_day IS 'Cartão: dia de vencimento (1–31).
 --
 
 COMMENT ON COLUMN public.caixas.card_last4 IS 'Cartão: 4 últimos dígitos.';
+
+
+--
+-- Name: COLUMN caixas.ai_auto_reconcile; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.caixas.ai_auto_reconcile IS '"Conciliar com IA ao importar" do cartão (spec 029): o import de extrato da fatura dispara a conciliação completa pelo agente dos fluxos (purpose reconcile_statement). Só em credit_card (caixas_ai_auto_reconcile_check).';
 
 
 --
@@ -8011,7 +11522,11 @@ CREATE TABLE public.mcp_servers (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    instructions_mode text DEFAULT 'ignore'::text NOT NULL,
+    instructions_cache text,
     CONSTRAINT mcp_servers_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
+    CONSTRAINT mcp_servers_instructions_cache_check CHECK ((length(instructions_cache) <= 50000)),
+    CONSTRAINT mcp_servers_instructions_mode_check CHECK ((instructions_mode = ANY (ARRAY['ignore'::text, 'system'::text, 'user'::text]))),
     CONSTRAINT mcp_servers_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
     CONSTRAINT mcp_servers_secret_headers_check CHECK (public.mcp_headers_valid(secret_headers)),
     CONSTRAINT mcp_servers_tools_cache_check CHECK (((tools_cache IS NULL) OR ((jsonb_typeof(tools_cache) = 'array'::text) AND (tools_cached_at IS NOT NULL)))),
@@ -8078,6 +11593,20 @@ COMMENT ON COLUMN public.mcp_servers.tools_error IS 'Erro da última tentativa d
 
 
 --
+-- Name: COLUMN mcp_servers.instructions_mode; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.mcp_servers.instructions_mode IS 'O que fazer com as instructions do servidor (spec 022): ignore (padrão; texto de terceiros), system (no prompt de sistema, sob "Instruções do servidor MCP <nome>") ou user (bloco do papel user no início do histórico enviado, nunca gravado em ai_messages).';
+
+
+--
+-- Name: COLUMN mcp_servers.instructions_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.mcp_servers.instructions_cache IS 'Cache das instructions da resposta do initialize (até 50 mil caracteres), atualizado junto com tools_cache pelo "Atualizar tools". Nulo = o servidor não mandou ou nunca foi listado. Atualizá-lo não gera auditoria.';
+
+
+--
 -- Name: effective_agent_mcp_servers; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -8095,7 +11624,9 @@ CREATE VIEW public.effective_agent_mcp_servers WITH (security_invoker='true') AS
                FROM jsonb_array_elements(s.tools_cache) WITH ORDINALITY x(t, ord)
               WHERE ((x.t ->> 'name'::text) = ANY (l.enabled_tools))), '[]'::jsonb)
         END AS tools,
-    s.tools_cached_at
+    s.tools_cached_at,
+    s.instructions_mode,
+    s.instructions_cache
    FROM ((public.ai_agents a
      JOIN public.mcp_servers s ON ((s.is_active AND (s.archived_at IS NULL))))
      LEFT JOIN public.agent_mcp_servers l ON (((l.agent_id = a.id) AND (l.mcp_server_id = s.id))))
@@ -8106,7 +11637,7 @@ CREATE VIEW public.effective_agent_mcp_servers WITH (security_invoker='true') AS
 -- Name: VIEW effective_agent_mcp_servers; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.effective_agent_mcp_servers IS 'Servidores MCP efetivos de cada agente: os global ativos (sempre) mais os public/private vinculados e ativos. tools = tools_cache filtrado por enabled_tools (NULL = todas). Sem os cabeçalhos.';
+COMMENT ON VIEW public.effective_agent_mcp_servers IS 'Servidores MCP efetivos de cada agente: os global ativos (sempre) mais os public/private vinculados e ativos. tools = tools_cache filtrado por enabled_tools (NULL = todas); instructions_mode e instructions_cache do servidor (a aplicação usa o cache só fora do modo ignore). Sem os cabeçalhos.';
 
 
 --
@@ -8481,7 +12012,9 @@ CREATE TABLE public.financial_accounts (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    ai_auto_reconcile boolean DEFAULT false NOT NULL,
     CONSTRAINT financial_accounts_account_number_check CHECK ((account_number ~ '^[0-9]{1,20}(-[0-9A-Z])?$'::text)),
+    CONSTRAINT financial_accounts_ai_auto_reconcile_check CHECK (((NOT ai_auto_reconcile) OR (kind = ANY (ARRAY['checking'::text, 'savings'::text])))),
     CONSTRAINT financial_accounts_bank_code_check CHECK ((bank_code ~ '^[0-9]{3}$'::text)),
     CONSTRAINT financial_accounts_bank_fields_check CHECK (((kind = ANY (ARRAY['checking'::text, 'savings'::text])) OR ((bank_code IS NULL) AND (ispb IS NULL) AND (branch IS NULL) AND (account_number IS NULL)))),
     CONSTRAINT financial_accounts_branch_check CHECK ((branch ~ '^[0-9]{1,6}(-[0-9A-Z])?$'::text)),
@@ -8518,6 +12051,13 @@ COMMENT ON COLUMN public.financial_accounts.bank_code IS 'COMPE (3 dígitos); da
 --
 
 COMMENT ON COLUMN public.financial_accounts.opening_balance_cents IS 'Saldo inicial em centavos na opening_date (cash não pode ser negativo).';
+
+
+--
+-- Name: COLUMN financial_accounts.ai_auto_reconcile; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.financial_accounts.ai_auto_reconcile IS '"Conciliar com IA ao importar" (spec 029): o import de extrato desta conta dispara a conciliação completa pelo agente dos fluxos (purpose reconcile_statement). Só em checking/savings (financial_accounts_ai_auto_reconcile_check).';
 
 
 --
@@ -8622,13 +12162,18 @@ CREATE TABLE public.message_destinations (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    inbound_enabled boolean DEFAULT false NOT NULL,
+    inbound_agent_id uuid,
+    webhook_secret_hash text,
     CONSTRAINT message_destinations_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
     CONSTRAINT message_destinations_bot_token_check CHECK ((bot_token ~ '^[0-9]{3,20}:[A-Za-z0-9_-]{20,100}$'::text)),
     CONSTRAINT message_destinations_channel_check CHECK ((channel = 'telegram'::text)),
     CONSTRAINT message_destinations_chat_id_check CHECK (((chat_id ~ '^-?[0-9]{1,20}$'::text) OR (chat_id ~ '^@[A-Za-z][A-Za-z0-9_]{3,31}$'::text))),
+    CONSTRAINT message_destinations_inbound_check CHECK (((NOT inbound_enabled) OR (is_active AND (inbound_agent_id IS NOT NULL) AND (webhook_secret_hash IS NOT NULL)))),
     CONSTRAINT message_destinations_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
     CONSTRAINT message_destinations_owner_check CHECK ((num_nonnulls(owner_user_id, owner_caixa_id) <= 1)),
-    CONSTRAINT message_destinations_telegram_check CHECK (((channel <> 'telegram'::text) OR ((bot_token IS NOT NULL) AND (chat_id IS NOT NULL))))
+    CONSTRAINT message_destinations_telegram_check CHECK (((channel <> 'telegram'::text) OR ((bot_token IS NOT NULL) AND (chat_id IS NOT NULL)))),
+    CONSTRAINT message_destinations_webhook_secret_hash_check CHECK ((webhook_secret_hash ~ '^[0-9a-f]{64}$'::text))
 );
 
 
@@ -8689,6 +12234,27 @@ COMMENT ON COLUMN public.message_destinations.is_active IS 'false = não recebe 
 
 
 --
+-- Name: COLUMN message_destinations.inbound_enabled; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.inbound_enabled IS '"Receber mensagens" (spec 029): o bot entrega as mensagens por webhook em /api/telegram/webhook/:id e o agente inbound_agent_id responde. Exige destino ativo, agente e segredo (message_destinations_inbound_check): desativar ou arquivar o destino desliga a entrada na mesma operação (e a aplicação chama deleteWebhook). Um destino com a entrada ligada por bot (message_destinations_inbound_bot_key, 23505). A importação do backup traz false.';
+
+
+--
+-- Name: COLUMN message_destinations.inbound_agent_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.inbound_agent_id IS 'Agente que responde às mensagens recebidas. Excluir o agente em uso dá 23503 (arquive).';
+
+
+--
+-- Name: COLUMN message_destinations.webhook_secret_hash; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.webhook_secret_hash IS 'SEGREDO: SHA-256 (hex, telegram_secret_hash) do secret_token enviado no setWebhook. moneyflow_app grava mas NÃO lê esta coluna; o webhook confere o cabeçalho X-Telegram-Bot-Api-Secret-Token por telegram_webhook_authenticate. Nunca vai para o audit_log; o backup o lê por admin_message_destination_webhook_secret.';
+
+
+--
 -- Name: message_subscription_caixas; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -8720,7 +12286,7 @@ CREATE TABLE public.message_subscriptions (
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT message_subscriptions_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text]))),
+    CONSTRAINT message_subscriptions_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text]))),
     CONSTRAINT message_subscriptions_params_check CHECK (public.message_subscription_params_valid(event_kind, params))
 );
 
@@ -8736,7 +12302,7 @@ COMMENT ON TABLE public.message_subscriptions IS 'Eventos que um destino recebe 
 -- Name: COLUMN message_subscriptions.event_kind; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.message_subscriptions.event_kind IS 'due_reminder (D-N), overdue (atrasados), daily_summary, weekly_summary, invoice_closed (fatura fechada, valor por pagadora), card_limit (limite acima de X%), reconciliation_divergence, agent_completed, agent_message; contratos (spec 020): contract_notice_deadline (D-N do fim do aviso prévio), contract_ending (D-N do fim do ciclo), contract_renewal_pending (ao abrir a tarefa e a cada N dias) e contract_readjustment (na data-base).';
+COMMENT ON COLUMN public.message_subscriptions.event_kind IS 'due_reminder (D-N), overdue (atrasados), daily_summary, weekly_summary, invoice_closed (fatura fechada, valor por pagadora), card_limit (limite acima de X%), reconciliation_divergence, agent_completed, agent_message; contratos (spec 020): contract_notice_deadline (D-N do fim do aviso prévio), contract_ending (D-N do fim do ciclo), contract_renewal_pending (ao abrir a tarefa e a cada N dias) e contract_readjustment (na data-base); ai_budget_alert (spec 028: orçamento de IA cruzou o aviso ou chegou a 100%; sem parâmetros); ai_awaiting_approval (spec 029: uma tarefa agendada ou a conciliação com IA espera aprovação; sem parâmetros).';
 
 
 --
@@ -8813,7 +12379,7 @@ CREATE TABLE public.notifications (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT notifications_data_check CHECK ((jsonb_typeof(data) = 'object'::text)),
     CONSTRAINT notifications_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
-    CONSTRAINT notifications_kind_check CHECK ((kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text]))),
+    CONSTRAINT notifications_kind_check CHECK ((kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text]))),
     CONSTRAINT notifications_link_check CHECK (((link ~ '^/[^/]'::text) OR (link = '/'::text))),
     CONSTRAINT notifications_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 200)))
 );
@@ -8830,7 +12396,7 @@ COMMENT ON TABLE public.notifications IS 'Notificações do sino, por usuário. 
 -- Name: COLUMN notifications.kind; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.notifications.kind IS 'agent_completed, agent_message, mirror_pending, mirror_disputed, invoice_closed, due_reminder, overdue, card_limit, reconciliation_divergence, message_failed, system, contract_notice_deadline, contract_ending, contract_renewal_pending ou contract_readjustment.';
+COMMENT ON COLUMN public.notifications.kind IS 'agent_completed, agent_message, mirror_pending, mirror_disputed, invoice_closed, due_reminder, overdue, card_limit, reconciliation_divergence, message_failed, system, contract_notice_deadline, contract_ending, contract_renewal_pending, contract_readjustment, ai_budget_alert (spec 028; dedup por orçamento, mês e limiar) ou ai_awaiting_approval (spec 029: tarefa agendada ou conciliação com IA esperando aprovação).';
 
 
 --
@@ -9256,6 +12822,135 @@ COMMENT ON VIEW public.statement_import_balances IS 'Por lote: saldo informado p
 
 
 --
+-- Name: telegram_links; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.telegram_links (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    destination_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    chat_id bigint NOT NULL,
+    telegram_user_id bigint NOT NULL,
+    username text,
+    revoked_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT telegram_links_chat_id_check CHECK ((chat_id > 0)),
+    CONSTRAINT telegram_links_telegram_user_id_check CHECK ((telegram_user_id > 0)),
+    CONSTRAINT telegram_links_username_check CHECK ((username ~ '^[A-Za-z0-9_]{1,64}$'::text))
+);
+
+
+--
+-- Name: TABLE telegram_links; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.telegram_links IS 'Pareamento de um chat privado do Telegram com um usuário, por destino com entrada (spec 029). Criado por telegram_pairing_consume (/start <código>). Um ativo por (destino, chat) (telegram_links_active_key); desfazer = revoked_at (irreversível). Auditada e no backup.';
+
+
+--
+-- Name: COLUMN telegram_links.chat_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_links.chat_id IS 'id do chat privado (positivo; grupos e canais não pareiam).';
+
+
+--
+-- Name: COLUMN telegram_links.telegram_user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_links.telegram_user_id IS 'id do usuário do Telegram (no chat privado, igual ao chat_id).';
+
+
+--
+-- Name: COLUMN telegram_links.username; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_links.username IS '@username do Telegram, sem a arroba, quando houver (pode ser atualizado).';
+
+
+--
+-- Name: COLUMN telegram_links.revoked_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_links.revoked_at IS 'Desfeito em (irreversível; nulo = ativo).';
+
+
+--
+-- Name: telegram_pairing_codes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.telegram_pairing_codes (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    user_id uuid NOT NULL,
+    destination_id uuid NOT NULL,
+    code_hash text NOT NULL,
+    expires_at timestamp with time zone DEFAULT (now() + '00:10:00'::interval) NOT NULL,
+    used_at timestamp with time zone,
+    link_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT telegram_pairing_codes_code_hash_check CHECK ((code_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT telegram_pairing_codes_expires_at_check CHECK (((expires_at > created_at) AND (expires_at <= (created_at + '00:10:00'::interval)))),
+    CONSTRAINT telegram_pairing_codes_link_check CHECK (((link_id IS NULL) OR (used_at IS NOT NULL)))
+);
+
+
+--
+-- Name: TABLE telegram_pairing_codes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.telegram_pairing_codes IS 'Códigos de pareamento do Telegram (spec 029): 8 caracteres, válidos por 10 min, de uso único, para um destino com entrada. Só o hash é guardado. Crie por telegram_pairing_code_create e consuma por telegram_pairing_consume. Auditada (sem o hash); fora do backup.';
+
+
+--
+-- Name: COLUMN telegram_pairing_codes.code_hash; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_pairing_codes.code_hash IS 'SHA-256 (hex, telegram_secret_hash) do código em maiúsculas. moneyflow_app grava mas NÃO lê esta coluna. Nunca vai para o audit_log.';
+
+
+--
+-- Name: COLUMN telegram_pairing_codes.expires_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_pairing_codes.expires_at IS 'Expiração: no máximo 10 min depois da criação (padrão).';
+
+
+--
+-- Name: COLUMN telegram_pairing_codes.used_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_pairing_codes.used_at IS 'Usado em (uma vez só; nulo = ainda não usado).';
+
+
+--
+-- Name: COLUMN telegram_pairing_codes.link_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_pairing_codes.link_id IS 'Vínculo criado (ou mantido) com este código.';
+
+
+--
+-- Name: telegram_updates_seen; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.telegram_updates_seen (
+    destination_id uuid NOT NULL,
+    update_id bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT telegram_updates_seen_update_id_check CHECK ((update_id >= 0))
+);
+
+
+--
+-- Name: TABLE telegram_updates_seen; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.telegram_updates_seen IS 'update_id já recebidos por destino (spec 029), para o webhook ignorar a reentrega do Telegram. Marque por telegram_update_seen; purga por telegram_updates_seen_purge (7 dias). Fora da auditoria e do backup.';
+
+
+--
 -- Name: transfers; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -9287,6 +12982,41 @@ COMMENT ON TABLE public.transfers IS 'Transferência entre contas (inclusive de 
 --
 
 COMMENT ON COLUMN public.transfers.settlement_id IS 'Baixa que originou a transferência ("pagar título da caixa B com conta da caixa A"): a perna na conta da baixa (destino se o título é payable, origem se receivable) e o valor = valor em dinheiro da baixa.';
+
+
+--
+-- Name: user_ai_settings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_ai_settings (
+    user_id uuid NOT NULL,
+    instructions text DEFAULT ''::text NOT NULL,
+    primary_caixa_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_ai_settings_instructions_check CHECK ((length(instructions) <= 20000))
+);
+
+
+--
+-- Name: TABLE user_ai_settings; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.user_ai_settings IS 'Configurações de IA de cada usuário (spec 022, Minha conta → IA): instruções para todos os agentes e a caixa principal escolhida. Só o próprio usuário edita; o admin lê (regra da aplicação). Some com o usuário.';
+
+
+--
+-- Name: COLUMN user_ai_settings.instructions; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_ai_settings.instructions IS 'Instruções do usuário (até 20 mil caracteres; vazio = nenhuma). Entram no prompt das conversas, nunca nas de fluxo.';
+
+
+--
+-- Name: COLUMN user_ai_settings.primary_caixa_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_ai_settings.primary_caixa_id IS 'Minha caixa principal: uma caixa general (user_ai_settings_primary_caixa_check). Alimenta o contexto automático e as variáveis {{usuario.caixa_principal}}/{{empresa.titular_principal}}. Que o usuário a lê é checado pela aplicação. Caixa excluída = nulo.';
 
 
 --
@@ -9441,11 +13171,67 @@ ALTER TABLE ONLY public.agent_mcp_servers
 
 
 --
+-- Name: ai_agent_inferences ai_agent_inferences_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_inferences
+    ADD CONSTRAINT ai_agent_inferences_pkey PRIMARY KEY (agent_id, capability);
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_agent_version_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_prompt_versions
+    ADD CONSTRAINT ai_agent_prompt_versions_agent_version_key UNIQUE (agent_id, version);
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_id_agent_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_prompt_versions
+    ADD CONSTRAINT ai_agent_prompt_versions_id_agent_key UNIQUE (id, agent_id);
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_prompt_versions
+    ADD CONSTRAINT ai_agent_prompt_versions_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: ai_agents ai_agents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.ai_agents
     ADD CONSTRAINT ai_agents_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_key UNIQUE NULLS NOT DISTINCT (attachment_id, message_id, block_index, kind, provider_id, model, voice);
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_budgets ai_budgets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_budgets
+    ADD CONSTRAINT ai_budgets_pkey PRIMARY KEY (id);
 
 
 --
@@ -9457,11 +13243,19 @@ ALTER TABLE ONLY public.ai_conversations
 
 
 --
+-- Name: ai_embedding_indexes ai_embedding_indexes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_embedding_indexes
+    ADD CONSTRAINT ai_embedding_indexes_pkey PRIMARY KEY (provider_id, model);
+
+
+--
 -- Name: ai_embeddings ai_embeddings_object_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.ai_embeddings
-    ADD CONSTRAINT ai_embeddings_object_key UNIQUE (object_type, object_id, model);
+    ADD CONSTRAINT ai_embeddings_object_key UNIQUE (object_type, object_id, provider_id, model);
 
 
 --
@@ -9537,6 +13331,22 @@ ALTER TABLE ONLY public.ai_providers
 
 
 --
+-- Name: ai_request_attempts ai_request_attempts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_request_attempts
+    ADD CONSTRAINT ai_request_attempts_pkey PRIMARY KEY (request_id, attempt);
+
+
+--
+-- Name: ai_requests ai_requests_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_requests
+    ADD CONSTRAINT ai_requests_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: ai_run_events ai_run_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -9569,6 +13379,30 @@ ALTER TABLE ONLY public.ai_runs
 
 
 --
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_task_runs
+    ADD CONSTRAINT ai_scheduled_task_runs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_task_scheduled_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_task_runs
+    ADD CONSTRAINT ai_scheduled_task_runs_task_scheduled_key UNIQUE (task_id, scheduled_for);
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_tasks
+    ADD CONSTRAINT ai_scheduled_tasks_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: ai_tool_confirmations ai_tool_confirmations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -9585,11 +13419,35 @@ ALTER TABLE ONLY public.ai_tool_confirmations
 
 
 --
+-- Name: ai_tool_kit_tools ai_tool_kit_tools_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_tool_kit_tools
+    ADD CONSTRAINT ai_tool_kit_tools_pkey PRIMARY KEY (kit_id, tool_name);
+
+
+--
+-- Name: ai_tool_kits ai_tool_kits_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_tool_kits
+    ADD CONSTRAINT ai_tool_kits_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: ai_usage ai_usage_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.ai_usage
     ADD CONSTRAINT ai_usage_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: app_settings app_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.app_settings
+    ADD CONSTRAINT app_settings_pkey PRIMARY KEY (key);
 
 
 --
@@ -10185,6 +14043,38 @@ ALTER TABLE ONLY public.statement_lines
 
 
 --
+-- Name: telegram_links telegram_links_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_links
+    ADD CONSTRAINT telegram_links_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_code_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_pairing_codes
+    ADD CONSTRAINT telegram_pairing_codes_code_hash_key UNIQUE (code_hash);
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_pairing_codes
+    ADD CONSTRAINT telegram_pairing_codes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: telegram_updates_seen telegram_updates_seen_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_updates_seen
+    ADD CONSTRAINT telegram_updates_seen_pkey PRIMARY KEY (destination_id, update_id);
+
+
+--
 -- Name: title_attachments title_attachments_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10222,6 +14112,14 @@ ALTER TABLE ONLY public.transfers
 
 ALTER TABLE ONLY public.transfers
     ADD CONSTRAINT transfers_settlement_id_key UNIQUE (settlement_id);
+
+
+--
+-- Name: user_ai_settings user_ai_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_ai_settings
+    ADD CONSTRAINT user_ai_settings_pkey PRIMARY KEY (user_id);
 
 
 --
@@ -10272,6 +14170,27 @@ CREATE INDEX agent_mcp_servers_mcp_server_id_idx ON public.agent_mcp_servers USI
 
 
 --
+-- Name: ai_agent_inferences_provider_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_agent_inferences_provider_id_idx ON public.ai_agent_inferences USING btree (provider_id);
+
+
+--
+-- Name: ai_agent_prompt_versions_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_agent_prompt_versions_created_by_user_id_idx ON public.ai_agent_prompt_versions USING btree (created_by_user_id);
+
+
+--
+-- Name: ai_agent_prompt_versions_restored_from_version_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_agent_prompt_versions_restored_from_version_id_idx ON public.ai_agent_prompt_versions USING btree (restored_from_version_id);
+
+
+--
 -- Name: ai_agents_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10293,10 +14212,87 @@ CREATE INDEX ai_agents_provider_id_idx ON public.ai_agents USING btree (provider
 
 
 --
+-- Name: ai_agents_tool_kit_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_agents_tool_kit_id_idx ON public.ai_agents USING btree (tool_kit_id);
+
+
+--
 -- Name: ai_agents_use_for_flows_key; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE UNIQUE INDEX ai_agents_use_for_flows_key ON public.ai_agents USING btree ((true)) WHERE use_for_flows;
+
+
+--
+-- Name: ai_attachment_derivatives_conversation_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_attachment_derivatives_conversation_id_idx ON public.ai_attachment_derivatives USING btree (conversation_id);
+
+
+--
+-- Name: ai_attachment_derivatives_message_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_attachment_derivatives_message_id_idx ON public.ai_attachment_derivatives USING btree (message_id, block_index);
+
+
+--
+-- Name: ai_attachment_derivatives_provider_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_attachment_derivatives_provider_id_idx ON public.ai_attachment_derivatives USING btree (provider_id);
+
+
+--
+-- Name: ai_attachment_derivatives_queue_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_attachment_derivatives_queue_idx ON public.ai_attachment_derivatives USING btree (kind, created_at) WHERE (status = ANY (ARRAY['pending'::text, 'running'::text]));
+
+
+--
+-- Name: ai_attachment_derivatives_result_attachment_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_attachment_derivatives_result_attachment_id_idx ON public.ai_attachment_derivatives USING btree (result_attachment_id);
+
+
+--
+-- Name: ai_budgets_active_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ai_budgets_active_key ON public.ai_budgets USING btree (scope, user_id, agent_id, currency) NULLS NOT DISTINCT WHERE is_active;
+
+
+--
+-- Name: ai_budgets_agent_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_budgets_agent_id_idx ON public.ai_budgets USING btree (agent_id);
+
+
+--
+-- Name: ai_budgets_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_budgets_user_id_idx ON public.ai_budgets USING btree (user_id);
+
+
+--
+-- Name: ai_conversations_active_chat_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ai_conversations_active_chat_key ON public.ai_conversations USING btree (user_id, agent_id) WHERE ((purpose = 'chat'::text) AND (archived_at IS NULL));
+
+
+--
+-- Name: INDEX ai_conversations_active_chat_key; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON INDEX public.ai_conversations_active_chat_key IS 'Sessão ativa única (spec 026): no máximo uma conversa chat não arquivada por (usuário, agente). 23505 ao criar a segunda; finalize (arquive) a ativa antes, ou use ai_conversation_fork, que faz isso.';
 
 
 --
@@ -10363,10 +14359,17 @@ CREATE INDEX ai_embeddings_object_idx ON public.ai_embeddings USING btree (objec
 
 
 --
+-- Name: ai_embeddings_pair_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_embeddings_pair_idx ON public.ai_embeddings USING btree (provider_id, model);
+
+
+--
 -- Name: ai_embeddings_reindex_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX ai_embeddings_reindex_idx ON public.ai_embeddings USING btree (model, updated_at) WHERE needs_reindex;
+CREATE INDEX ai_embeddings_reindex_idx ON public.ai_embeddings USING btree (provider_id, model, updated_at) WHERE needs_reindex;
 
 
 --
@@ -10405,17 +14408,52 @@ CREATE INDEX ai_providers_created_by_user_id_idx ON public.ai_providers USING bt
 
 
 --
--- Name: ai_providers_embedding_key; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX ai_providers_embedding_key ON public.ai_providers USING btree ((true)) WHERE ((embedding_model IS NOT NULL) AND is_active);
-
-
---
 -- Name: ai_providers_name_key; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE UNIQUE INDEX ai_providers_name_key ON public.ai_providers USING btree (lower(name));
+
+
+--
+-- Name: ai_requests_agent_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_requests_agent_id_idx ON public.ai_requests USING btree (agent_id, started_at);
+
+
+--
+-- Name: ai_requests_conversation_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_requests_conversation_id_idx ON public.ai_requests USING btree (conversation_id);
+
+
+--
+-- Name: ai_requests_provider_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_requests_provider_id_idx ON public.ai_requests USING btree (provider_id, started_at DESC, id DESC);
+
+
+--
+-- Name: ai_requests_run_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_requests_run_id_idx ON public.ai_requests USING btree (run_id);
+
+
+--
+-- Name: ai_requests_started_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_requests_started_at_idx ON public.ai_requests USING btree (started_at, id);
+
+
+--
+-- Name: ai_requests_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_requests_user_id_idx ON public.ai_requests USING btree (user_id, started_at);
 
 
 --
@@ -10475,6 +14513,48 @@ CREATE INDEX ai_runs_user_id_idx ON public.ai_runs USING btree (user_id, created
 
 
 --
+-- Name: ai_scheduled_task_runs_conversation_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_scheduled_task_runs_conversation_id_idx ON public.ai_scheduled_task_runs USING btree (conversation_id);
+
+
+--
+-- Name: ai_scheduled_task_runs_run_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_scheduled_task_runs_run_id_idx ON public.ai_scheduled_task_runs USING btree (run_id);
+
+
+--
+-- Name: ai_scheduled_tasks_agent_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_scheduled_tasks_agent_id_idx ON public.ai_scheduled_tasks USING btree (agent_id);
+
+
+--
+-- Name: ai_scheduled_tasks_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_scheduled_tasks_created_by_user_id_idx ON public.ai_scheduled_tasks USING btree (created_by_user_id);
+
+
+--
+-- Name: ai_scheduled_tasks_due_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_scheduled_tasks_due_idx ON public.ai_scheduled_tasks USING btree (next_run_at) WHERE is_active;
+
+
+--
+-- Name: ai_scheduled_tasks_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_scheduled_tasks_user_id_idx ON public.ai_scheduled_tasks USING btree (user_id, created_at);
+
+
+--
 -- Name: ai_tool_confirmations_decided_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10486,6 +14566,20 @@ CREATE INDEX ai_tool_confirmations_decided_by_user_id_idx ON public.ai_tool_conf
 --
 
 CREATE INDEX ai_tool_confirmations_pending_idx ON public.ai_tool_confirmations USING btree (run_id) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: ai_tool_kits_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_tool_kits_created_by_user_id_idx ON public.ai_tool_kits USING btree (created_by_user_id);
+
+
+--
+-- Name: ai_tool_kits_name_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ai_tool_kits_name_key ON public.ai_tool_kits USING btree (lower(name));
 
 
 --
@@ -10531,6 +14625,13 @@ CREATE INDEX ai_usage_provider_id_idx ON public.ai_usage USING btree (provider_i
 
 
 --
+-- Name: ai_usage_request_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_usage_request_id_idx ON public.ai_usage USING btree (request_id);
+
+
+--
 -- Name: ai_usage_run_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10538,10 +14639,24 @@ CREATE INDEX ai_usage_run_id_idx ON public.ai_usage USING btree (run_id);
 
 
 --
+-- Name: ai_usage_sp_day_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_usage_sp_day_idx ON public.ai_usage USING btree ((((created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date));
+
+
+--
 -- Name: ai_usage_user_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX ai_usage_user_id_idx ON public.ai_usage USING btree (user_id, created_at);
+
+
+--
+-- Name: app_settings_updated_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX app_settings_updated_by_user_id_idx ON public.app_settings USING btree (updated_by_user_id);
 
 
 --
@@ -11042,6 +15157,20 @@ CREATE INDEX message_destinations_created_by_user_id_idx ON public.message_desti
 
 
 --
+-- Name: message_destinations_inbound_agent_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_destinations_inbound_agent_id_idx ON public.message_destinations USING btree (inbound_agent_id);
+
+
+--
+-- Name: message_destinations_inbound_bot_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX message_destinations_inbound_bot_key ON public.message_destinations USING btree (bot_id) WHERE inbound_enabled;
+
+
+--
 -- Name: message_destinations_name_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11434,6 +15563,55 @@ CREATE INDEX statement_lines_title_id_idx ON public.statement_lines USING btree 
 
 
 --
+-- Name: telegram_links_active_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX telegram_links_active_key ON public.telegram_links USING btree (destination_id, chat_id) WHERE (revoked_at IS NULL);
+
+
+--
+-- Name: telegram_links_destination_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX telegram_links_destination_id_idx ON public.telegram_links USING btree (destination_id);
+
+
+--
+-- Name: telegram_links_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX telegram_links_user_id_idx ON public.telegram_links USING btree (user_id, created_at);
+
+
+--
+-- Name: telegram_pairing_codes_destination_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX telegram_pairing_codes_destination_id_idx ON public.telegram_pairing_codes USING btree (destination_id);
+
+
+--
+-- Name: telegram_pairing_codes_link_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX telegram_pairing_codes_link_id_idx ON public.telegram_pairing_codes USING btree (link_id);
+
+
+--
+-- Name: telegram_pairing_codes_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX telegram_pairing_codes_user_id_idx ON public.telegram_pairing_codes USING btree (user_id, created_at);
+
+
+--
+-- Name: telegram_updates_seen_created_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX telegram_updates_seen_created_at_idx ON public.telegram_updates_seen USING btree (created_at);
+
+
+--
 -- Name: title_attachments_attachment_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11553,6 +15731,13 @@ CREATE INDEX transfers_to_account_id_idx ON public.transfers USING btree (to_acc
 
 
 --
+-- Name: user_ai_settings_primary_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX user_ai_settings_primary_caixa_id_idx ON public.user_ai_settings USING btree (primary_caixa_id);
+
+
+--
 -- Name: user_api_tokens_name_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11581,6 +15766,62 @@ CREATE TRIGGER agent_mcp_servers_set_updated_at BEFORE UPDATE ON public.agent_mc
 
 
 --
+-- Name: ai_agent_inferences ai_agent_inferences_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_inferences_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_agent_inferences FOR EACH ROW EXECUTE FUNCTION public.ai_agent_inferences_audit_row();
+
+
+--
+-- Name: ai_agent_inferences ai_agent_inferences_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_inferences_set_updated_at BEFORE UPDATE ON public.ai_agent_inferences FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_agent_inferences ai_agent_inferences_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_inferences_validate BEFORE INSERT OR UPDATE ON public.ai_agent_inferences FOR EACH ROW EXECUTE FUNCTION public.ai_agent_inferences_validate();
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_apply; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_prompt_versions_apply AFTER INSERT ON public.ai_agent_prompt_versions FOR EACH ROW EXECUTE FUNCTION public.ai_agent_prompt_versions_apply();
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_prompt_versions_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_agent_prompt_versions FOR EACH ROW EXECUTE FUNCTION public.ai_agent_prompt_versions_audit_row();
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_before_insert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_prompt_versions_before_insert BEFORE INSERT ON public.ai_agent_prompt_versions FOR EACH ROW EXECUTE FUNCTION public.ai_agent_prompt_versions_before_insert();
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_prompt_versions_guard BEFORE DELETE OR UPDATE ON public.ai_agent_prompt_versions FOR EACH ROW EXECUTE FUNCTION public.ai_agent_prompt_versions_guard();
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_prompt_versions_set_updated_at BEFORE UPDATE ON public.ai_agent_prompt_versions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
 -- Name: ai_agents ai_agents_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -11588,10 +15829,73 @@ CREATE TRIGGER ai_agents_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_age
 
 
 --
+-- Name: ai_agents ai_agents_prompt_version_init; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER ai_agents_prompt_version_init AFTER INSERT ON public.ai_agents DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.ai_agents_prompt_version_init();
+
+
+--
+-- Name: ai_agents ai_agents_provider_capability; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agents_provider_capability BEFORE INSERT OR UPDATE OF provider_id ON public.ai_agents FOR EACH ROW EXECUTE FUNCTION public.ai_agents_provider_capability();
+
+
+--
 -- Name: ai_agents ai_agents_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER ai_agents_set_updated_at BEFORE UPDATE ON public.ai_agents FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_agents ai_agents_system_prompt_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agents_system_prompt_guard BEFORE UPDATE OF system_prompt ON public.ai_agents FOR EACH ROW EXECUTE FUNCTION public.ai_agents_system_prompt_guard();
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_attachment_derivatives_guard BEFORE UPDATE ON public.ai_attachment_derivatives FOR EACH ROW EXECUTE FUNCTION public.ai_attachment_derivatives_guard();
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_release_result; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_attachment_derivatives_release_result AFTER DELETE OR UPDATE OF result_attachment_id ON public.ai_attachment_derivatives FOR EACH ROW EXECUTE FUNCTION public.ai_attachment_derivatives_release_result();
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_attachment_derivatives_set_updated_at BEFORE UPDATE ON public.ai_attachment_derivatives FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_budgets ai_budgets_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_budgets_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_budgets FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: ai_budgets ai_budgets_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_budgets_set_updated_at BEFORE UPDATE ON public.ai_budgets FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_conversations ai_conversations_archive_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_conversations_archive_guard BEFORE UPDATE OF archived_at ON public.ai_conversations FOR EACH ROW WHEN (((old.purpose = 'chat'::text) AND (old.archived_at IS DISTINCT FROM new.archived_at))) EXECUTE FUNCTION public.ai_conversations_archive_guard();
 
 
 --
@@ -11606,6 +15910,13 @@ CREATE TRIGGER ai_conversations_purpose_immutable BEFORE UPDATE OF purpose ON pu
 --
 
 CREATE TRIGGER ai_conversations_set_updated_at BEFORE UPDATE ON public.ai_conversations FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_embedding_indexes ai_embedding_indexes_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_embedding_indexes_set_updated_at BEFORE UPDATE ON public.ai_embedding_indexes FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -11679,6 +15990,48 @@ CREATE TRIGGER ai_providers_set_updated_at BEFORE UPDATE ON public.ai_providers 
 
 
 --
+-- Name: ai_providers ai_providers_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_providers_validate BEFORE INSERT OR UPDATE ON public.ai_providers FOR EACH ROW EXECUTE FUNCTION public.ai_providers_validate();
+
+
+--
+-- Name: ai_request_attempts ai_request_attempts_after_insert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_request_attempts_after_insert AFTER INSERT ON public.ai_request_attempts FOR EACH ROW EXECUTE FUNCTION public.ai_request_attempts_after_insert();
+
+
+--
+-- Name: ai_request_attempts ai_request_attempts_before_write; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_request_attempts_before_write BEFORE INSERT OR UPDATE ON public.ai_request_attempts FOR EACH ROW EXECUTE FUNCTION public.ai_request_attempts_before_write();
+
+
+--
+-- Name: ai_request_attempts ai_request_attempts_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_request_attempts_set_updated_at BEFORE UPDATE ON public.ai_request_attempts FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_requests ai_requests_before_write; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_requests_before_write BEFORE INSERT OR UPDATE ON public.ai_requests FOR EACH ROW EXECUTE FUNCTION public.ai_requests_before_write();
+
+
+--
+-- Name: ai_requests ai_requests_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_requests_set_updated_at BEFORE UPDATE ON public.ai_requests FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
 -- Name: ai_runs ai_runs_expire_confirmations; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -11700,6 +16053,41 @@ CREATE TRIGGER ai_runs_validate BEFORE INSERT OR UPDATE ON public.ai_runs FOR EA
 
 
 --
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_before_write; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_scheduled_task_runs_before_write BEFORE INSERT OR UPDATE ON public.ai_scheduled_task_runs FOR EACH ROW EXECUTE FUNCTION public.ai_scheduled_task_runs_before_write();
+
+
+--
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_scheduled_task_runs_set_updated_at BEFORE UPDATE ON public.ai_scheduled_task_runs FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_scheduled_tasks_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_scheduled_tasks FOR EACH ROW EXECUTE FUNCTION public.audit_row('next_run_at,last_run_at');
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_before_write; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_scheduled_tasks_before_write BEFORE INSERT OR UPDATE ON public.ai_scheduled_tasks FOR EACH ROW EXECUTE FUNCTION public.ai_scheduled_tasks_before_write();
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_scheduled_tasks_set_updated_at BEFORE UPDATE ON public.ai_scheduled_tasks FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
 -- Name: ai_tool_confirmations ai_tool_confirmations_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -11711,6 +16099,34 @@ CREATE TRIGGER ai_tool_confirmations_set_updated_at BEFORE UPDATE ON public.ai_t
 --
 
 CREATE TRIGGER ai_tool_confirmations_validate BEFORE INSERT OR UPDATE ON public.ai_tool_confirmations FOR EACH ROW EXECUTE FUNCTION public.ai_tool_confirmations_validate();
+
+
+--
+-- Name: ai_tool_kit_tools ai_tool_kit_tools_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_tool_kit_tools_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_tool_kit_tools FOR EACH ROW EXECUTE FUNCTION public.ai_tool_kit_tools_audit_row();
+
+
+--
+-- Name: ai_tool_kit_tools ai_tool_kit_tools_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_tool_kit_tools_set_updated_at BEFORE UPDATE ON public.ai_tool_kit_tools FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_tool_kits ai_tool_kits_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_tool_kits_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_tool_kits FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: ai_tool_kits ai_tool_kits_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_tool_kits_set_updated_at BEFORE UPDATE ON public.ai_tool_kits FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -11728,10 +16144,38 @@ CREATE TRIGGER ai_usage_before_insert BEFORE INSERT ON public.ai_usage FOR EACH 
 
 
 --
+-- Name: ai_usage ai_usage_request_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_usage_request_check BEFORE INSERT ON public.ai_usage FOR EACH ROW EXECUTE FUNCTION public.ai_usage_request_check();
+
+
+--
 -- Name: ai_usage ai_usage_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER ai_usage_set_updated_at BEFORE UPDATE ON public.ai_usage FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: app_settings app_settings_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER app_settings_audit AFTER INSERT OR DELETE OR UPDATE ON public.app_settings FOR EACH ROW EXECUTE FUNCTION public.app_settings_audit_row();
+
+
+--
+-- Name: app_settings app_settings_before_write; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER app_settings_before_write BEFORE INSERT OR UPDATE ON public.app_settings FOR EACH ROW EXECUTE FUNCTION public.app_settings_before_write();
+
+
+--
+-- Name: app_settings app_settings_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER app_settings_set_updated_at BEFORE UPDATE ON public.app_settings FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -12291,7 +16735,7 @@ CREATE TRIGGER financial_accounts_validate_history BEFORE UPDATE OF caixa_id, op
 -- Name: mcp_servers mcp_servers_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER mcp_servers_audit AFTER INSERT OR DELETE OR UPDATE ON public.mcp_servers FOR EACH ROW EXECUTE FUNCTION public.audit_row('tools_cache,tools_cached_at,tools_error');
+CREATE TRIGGER mcp_servers_audit AFTER INSERT OR DELETE OR UPDATE ON public.mcp_servers FOR EACH ROW EXECUTE FUNCTION public.audit_row('tools_cache,tools_cached_at,tools_error,instructions_cache');
 
 
 --
@@ -12624,6 +17068,48 @@ CREATE TRIGGER statement_lines_validate BEFORE INSERT OR UPDATE ON public.statem
 
 
 --
+-- Name: telegram_links telegram_links_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER telegram_links_audit AFTER INSERT OR DELETE OR UPDATE ON public.telegram_links FOR EACH ROW EXECUTE FUNCTION public.audit_row('username');
+
+
+--
+-- Name: telegram_links telegram_links_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER telegram_links_set_updated_at BEFORE UPDATE ON public.telegram_links FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: telegram_links telegram_links_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER telegram_links_validate BEFORE UPDATE ON public.telegram_links FOR EACH ROW EXECUTE FUNCTION public.telegram_links_validate();
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER telegram_pairing_codes_audit AFTER INSERT OR DELETE OR UPDATE ON public.telegram_pairing_codes FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER telegram_pairing_codes_set_updated_at BEFORE UPDATE ON public.telegram_pairing_codes FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER telegram_pairing_codes_validate BEFORE INSERT OR UPDATE ON public.telegram_pairing_codes FOR EACH ROW EXECUTE FUNCTION public.telegram_pairing_codes_validate();
+
+
+--
 -- Name: title_attachments title_attachments_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -12729,6 +17215,27 @@ CREATE TRIGGER transfers_set_updated_at BEFORE UPDATE ON public.transfers FOR EA
 
 
 --
+-- Name: user_ai_settings user_ai_settings_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER user_ai_settings_audit AFTER INSERT OR DELETE OR UPDATE ON public.user_ai_settings FOR EACH ROW EXECUTE FUNCTION public.user_ai_settings_audit_row();
+
+
+--
+-- Name: user_ai_settings user_ai_settings_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER user_ai_settings_set_updated_at BEFORE UPDATE ON public.user_ai_settings FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: user_ai_settings user_ai_settings_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER user_ai_settings_validate BEFORE INSERT OR UPDATE ON public.user_ai_settings FOR EACH ROW EXECUTE FUNCTION public.user_ai_settings_validate();
+
+
+--
 -- Name: user_api_tokens user_api_tokens_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -12787,6 +17294,46 @@ ALTER TABLE ONLY public.agent_mcp_servers
 
 
 --
+-- Name: ai_agent_inferences ai_agent_inferences_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_inferences
+    ADD CONSTRAINT ai_agent_inferences_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.ai_agents(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_agent_inferences ai_agent_inferences_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_inferences
+    ADD CONSTRAINT ai_agent_inferences_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.ai_providers(id);
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_prompt_versions
+    ADD CONSTRAINT ai_agent_prompt_versions_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.ai_agents(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_prompt_versions
+    ADD CONSTRAINT ai_agent_prompt_versions_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_restored_from_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_prompt_versions
+    ADD CONSTRAINT ai_agent_prompt_versions_restored_from_version_id_fkey FOREIGN KEY (restored_from_version_id, agent_id) REFERENCES public.ai_agent_prompt_versions(id, agent_id);
+
+
+--
 -- Name: ai_agents ai_agents_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -12800,6 +17347,70 @@ ALTER TABLE ONLY public.ai_agents
 
 ALTER TABLE ONLY public.ai_agents
     ADD CONSTRAINT ai_agents_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.ai_providers(id);
+
+
+--
+-- Name: ai_agents ai_agents_tool_kit_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agents
+    ADD CONSTRAINT ai_agents_tool_kit_id_fkey FOREIGN KEY (tool_kit_id) REFERENCES public.ai_tool_kits(id);
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_attachment_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_attachment_id_fkey FOREIGN KEY (attachment_id) REFERENCES public.attachments(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.ai_conversations(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_message_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.ai_messages(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.ai_providers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_result_attachment_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_result_attachment_id_fkey FOREIGN KEY (result_attachment_id) REFERENCES public.attachments(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_budgets ai_budgets_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_budgets
+    ADD CONSTRAINT ai_budgets_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.ai_agents(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_budgets ai_budgets_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_budgets
+    ADD CONSTRAINT ai_budgets_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -12827,11 +17438,27 @@ ALTER TABLE ONLY public.ai_conversations
 
 
 --
+-- Name: ai_embedding_indexes ai_embedding_indexes_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_embedding_indexes
+    ADD CONSTRAINT ai_embedding_indexes_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.ai_providers(id) ON DELETE CASCADE;
+
+
+--
 -- Name: ai_embeddings ai_embeddings_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.ai_embeddings
     ADD CONSTRAINT ai_embeddings_caixa_id_fkey FOREIGN KEY (caixa_id) REFERENCES public.caixas(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_embeddings ai_embeddings_index_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_embeddings
+    ADD CONSTRAINT ai_embeddings_index_fkey FOREIGN KEY (provider_id, model) REFERENCES public.ai_embedding_indexes(provider_id, model) ON DELETE CASCADE;
 
 
 --
@@ -12883,6 +17510,54 @@ ALTER TABLE ONLY public.ai_providers
 
 
 --
+-- Name: ai_request_attempts ai_request_attempts_request_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_request_attempts
+    ADD CONSTRAINT ai_request_attempts_request_id_fkey FOREIGN KEY (request_id) REFERENCES public.ai_requests(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_requests ai_requests_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_requests
+    ADD CONSTRAINT ai_requests_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.ai_agents(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_requests ai_requests_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_requests
+    ADD CONSTRAINT ai_requests_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.ai_conversations(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_requests ai_requests_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_requests
+    ADD CONSTRAINT ai_requests_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.ai_providers(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_requests ai_requests_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_requests
+    ADD CONSTRAINT ai_requests_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.ai_runs(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_requests ai_requests_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_requests
+    ADD CONSTRAINT ai_requests_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
 -- Name: ai_run_events ai_run_events_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -12931,6 +17606,54 @@ ALTER TABLE ONLY public.ai_runs
 
 
 --
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_task_runs
+    ADD CONSTRAINT ai_scheduled_task_runs_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.ai_conversations(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_task_runs
+    ADD CONSTRAINT ai_scheduled_task_runs_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.ai_runs(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_task_runs
+    ADD CONSTRAINT ai_scheduled_task_runs_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.ai_scheduled_tasks(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_tasks
+    ADD CONSTRAINT ai_scheduled_tasks_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.ai_agents(id);
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_tasks
+    ADD CONSTRAINT ai_scheduled_tasks_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_tasks
+    ADD CONSTRAINT ai_scheduled_tasks_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: ai_tool_confirmations ai_tool_confirmations_decided_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -12944,6 +17667,22 @@ ALTER TABLE ONLY public.ai_tool_confirmations
 
 ALTER TABLE ONLY public.ai_tool_confirmations
     ADD CONSTRAINT ai_tool_confirmations_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.ai_runs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_tool_kit_tools ai_tool_kit_tools_kit_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_tool_kit_tools
+    ADD CONSTRAINT ai_tool_kit_tools_kit_id_fkey FOREIGN KEY (kit_id) REFERENCES public.ai_tool_kits(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_tool_kits ai_tool_kits_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_tool_kits
+    ADD CONSTRAINT ai_tool_kits_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
 
 
 --
@@ -12987,6 +17726,14 @@ ALTER TABLE ONLY public.ai_usage
 
 
 --
+-- Name: ai_usage ai_usage_request_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_usage
+    ADD CONSTRAINT ai_usage_request_id_fkey FOREIGN KEY (request_id) REFERENCES public.ai_requests(id) ON DELETE SET NULL NOT VALID;
+
+
+--
 -- Name: ai_usage ai_usage_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13000,6 +17747,14 @@ ALTER TABLE ONLY public.ai_usage
 
 ALTER TABLE ONLY public.ai_usage
     ADD CONSTRAINT ai_usage_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: app_settings app_settings_updated_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.app_settings
+    ADD CONSTRAINT app_settings_updated_by_user_id_fkey FOREIGN KEY (updated_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
 
 
 --
@@ -13499,6 +18254,14 @@ ALTER TABLE ONLY public.message_destinations
 
 
 --
+-- Name: message_destinations message_destinations_inbound_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_destinations
+    ADD CONSTRAINT message_destinations_inbound_agent_id_fkey FOREIGN KEY (inbound_agent_id) REFERENCES public.ai_agents(id);
+
+
+--
 -- Name: message_destinations message_destinations_owner_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13875,6 +18638,54 @@ ALTER TABLE ONLY public.statement_lines
 
 
 --
+-- Name: telegram_links telegram_links_destination_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_links
+    ADD CONSTRAINT telegram_links_destination_id_fkey FOREIGN KEY (destination_id) REFERENCES public.message_destinations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: telegram_links telegram_links_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_links
+    ADD CONSTRAINT telegram_links_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_destination_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_pairing_codes
+    ADD CONSTRAINT telegram_pairing_codes_destination_id_fkey FOREIGN KEY (destination_id) REFERENCES public.message_destinations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_link_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_pairing_codes
+    ADD CONSTRAINT telegram_pairing_codes_link_id_fkey FOREIGN KEY (link_id) REFERENCES public.telegram_links(id) ON DELETE SET NULL;
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_pairing_codes
+    ADD CONSTRAINT telegram_pairing_codes_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: telegram_updates_seen telegram_updates_seen_destination_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_updates_seen
+    ADD CONSTRAINT telegram_updates_seen_destination_id_fkey FOREIGN KEY (destination_id) REFERENCES public.message_destinations(id) ON DELETE CASCADE;
+
+
+--
 -- Name: title_attachments title_attachments_attachment_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13992,6 +18803,22 @@ ALTER TABLE ONLY public.transfers
 
 ALTER TABLE ONLY public.transfers
     ADD CONSTRAINT transfers_to_account_id_fkey FOREIGN KEY (to_account_id) REFERENCES public.financial_accounts(id);
+
+
+--
+-- Name: user_ai_settings user_ai_settings_primary_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_ai_settings
+    ADD CONSTRAINT user_ai_settings_primary_caixa_id_fkey FOREIGN KEY (primary_caixa_id) REFERENCES public.caixas(id) ON DELETE SET NULL;
+
+
+--
+-- Name: user_ai_settings user_ai_settings_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_ai_settings
+    ADD CONSTRAINT user_ai_settings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --

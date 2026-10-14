@@ -86,7 +86,7 @@ function decodeWith(bytes: Buffer, encoding: string): string {
   return new TextDecoder(encoding === 'latin1' ? 'latin1' : encoding).decode(bytes);
 }
 
-function mappingOf(row: typeof statementCsvMappings.$inferSelect): CsvMapping {
+function mappingOf(row: InlineCsvMapping): CsvMapping {
   return {
     hasHeader: row.hasHeader,
     skipRows: row.skipRows,
@@ -110,8 +110,20 @@ async function findMapping(db: Executor, target: StatementTarget, mappingId?: st
   return row ?? null;
 }
 
+/** Mapeamento CSV ainda não salvo (prévia da tool import_statement, spec 027). */
+export type InlineCsvMapping = Pick<
+  typeof statementCsvMappings.$inferSelect,
+  'delimiter' | 'encoding' | 'hasHeader' | 'skipRows' | 'dateFormat' | 'decimalSeparator' | 'columns'
+>;
+
 /** Lê o arquivo (OFX ou CSV com o mapeamento) e devolve as linhas no ponto de vista do titular. */
-export async function parseStatementFile(db: Executor, target: StatementTarget, bytes: Buffer, mappingId?: string): Promise<ParsedFile> {
+export async function parseStatementFile(
+  db: Executor,
+  target: StatementTarget,
+  bytes: Buffer,
+  mappingId?: string,
+  inline?: InlineCsvMapping,
+): Promise<ParsedFile> {
   const text = decodeStatementFile(bytes);
   if (looksLikeOfx(text)) {
     let ofx: ReturnType<typeof parseOfx>;
@@ -137,7 +149,7 @@ export async function parseStatementFile(db: Executor, target: StatementTarget, 
     };
   }
 
-  const mapping = await findMapping(db, target, mappingId);
+  const mapping = inline ? { ...inline, id: null } : await findMapping(db, target, mappingId);
   if (!mapping) throw unprocessable(t.errors.csvMappingRequired, 'csv_mapping_required');
   const csvText = decodeWith(bytes, mapping.encoding);
   let applied: ReturnType<typeof applyCsvMapping>;
@@ -183,6 +195,44 @@ export function dedupHashes(lines: Pick<ParsedLine, 'postedOn' | 'amountCents' |
     seen.set(base, ordinal + 1);
     return createHash('sha256').update(`${base}|${ordinal}`).digest('hex');
   });
+}
+
+/**
+ * Prévia de um import (sem gravar): formato, período e quantas linhas são
+ * novas ou já importadas (spec 027, cartão de aprovação do import_statement).
+ */
+export async function previewStatementImport(
+  ctx: ServiceContext,
+  ref: { accountId?: string; cardCaixaId?: string },
+  bytes: Buffer,
+  opts: { mappingId?: string; inline?: InlineCsvMapping },
+) {
+  const target = await resolveTarget(ctx, ref, true);
+  const parsed = await parseStatementFile(ctx.db, target, bytes, opts.mappingId, opts.inline);
+  if (parsed.lines.length === 0) throw unprocessable(t.errors.statementEmpty, 'statement_empty');
+  const hashes = dedupHashes(parsed.lines);
+  const ownerColumn = target.kind === 'account' ? sql`financial_account_id` : sql`card_caixa_id`;
+  const ownerId = target.kind === 'account' ? target.accountId : target.cardId;
+  const existing = await ctx.db.execute<{ dedup_hash: string }>(sql`
+    SELECT dedup_hash FROM statement_lines WHERE ${ownerColumn} = ${ownerId}::uuid
+       AND dedup_hash IN (${sql.join(
+         hashes.map((h) => sql`${h}`),
+         sql`, `,
+       )})`);
+  const known = new Set(existing.rows.map((r) => r.dedup_hash));
+  const dates = parsed.lines.map((l) => l.postedOn).sort();
+  const fresh = parsed.lines.filter((_, i) => !known.has(hashes[i]!));
+  return {
+    target,
+    format: parsed.format,
+    periodStart: [parsed.periodStart, dates[0]].filter(Boolean).sort()[0] ?? null,
+    periodEnd: [parsed.periodEnd, dates.at(-1)].filter(Boolean).sort().at(-1) ?? null,
+    lines: parsed.lines.length,
+    fresh: fresh.length,
+    duplicated: parsed.lines.length - fresh.length,
+    inCents: fresh.filter((l) => l.amountCents > 0).reduce((sum, l) => sum + l.amountCents, 0),
+    outCents: fresh.filter((l) => l.amountCents < 0).reduce((sum, l) => sum + l.amountCents, 0),
+  };
 }
 
 export async function inspectStatement(ctx: ServiceContext, bytes: Buffer): Promise<StatementInspect> {

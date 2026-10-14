@@ -559,31 +559,35 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
   return (
     <ConfirmContext.Provider value={confirm}>
       {children}
-      {pending && (
-        <>
-          <div className="overlay" style={{ zIndex: 58 }} onClick={() => settle(false)} />
-          <div
-            ref={card}
-            className="modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="confirm-title"
-            tabIndex={-1}
-            onKeyDown={trapTab}
-          >
-            <h2 id="confirm-title">{pending.options.title}</h2>
-            {pending.options.description && <p className="d">{pending.options.description}</p>}
-            <div className="actions">
-              <Button variant="ghost" onClick={() => settle(false)} autoFocus>
-                {pending.options.cancelLabel ?? 'Cancelar'}
-              </Button>
-              <Button variant={pending.options.danger ? 'danger' : 'primary'} onClick={() => settle(true)}>
-                {pending.options.confirmLabel ?? 'Confirmar'}
-              </Button>
+      {pending &&
+        // Portal no <body>, acima dos modais: a confirmação pedida de dentro de um modal fica por cima dele.
+        createPortal(
+          <>
+            <div className="overlay" style={{ zIndex: 62 }} onClick={() => settle(false)} />
+            <div
+              ref={card}
+              className="modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="confirm-title"
+              tabIndex={-1}
+              onKeyDown={trapTab}
+              style={{ zIndex: 63 }}
+            >
+              <h2 id="confirm-title">{pending.options.title}</h2>
+              {pending.options.description && <p className="d">{pending.options.description}</p>}
+              <div className="actions">
+                <Button variant="ghost" onClick={() => settle(false)} autoFocus>
+                  {pending.options.cancelLabel ?? 'Cancelar'}
+                </Button>
+                <Button variant={pending.options.danger ? 'danger' : 'primary'} onClick={() => settle(true)}>
+                  {pending.options.confirmLabel ?? 'Confirmar'}
+                </Button>
+              </div>
             </div>
-          </div>
-        </>
-      )}
+          </>,
+          document.body,
+        )}
     </ConfirmContext.Provider>
   );
 }

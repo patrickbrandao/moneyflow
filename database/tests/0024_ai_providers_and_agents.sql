@@ -6,19 +6,19 @@ SELECT * FROM no_plan();
 -- Estrutura
 SELECT has_table(t) FROM unnest(ARRAY['ai_providers', 'ai_model_prices', 'ai_agents']) t;
 SELECT has_function('admin_ai_provider_api_key', ARRAY['uuid', 'uuid']);
-SELECT has_function('ai_embedding_credentials', ARRAY[]::text[]);
+SELECT has_function('ai_embedding_credentials', ARRAY['uuid']);
 SELECT has_function('ai_model_price_at', ARRAY['uuid', 'text', 'timestamp with time zone']);
 SELECT has_function('ai_agent_params_valid', ARRAY['jsonb']);
 SELECT has_function('ai_tool_list_valid', ARRAY['text[]']);
 SELECT fk_ok('ai_agents', 'provider_id', 'ai_providers', 'id');
 SELECT fk_ok('ai_model_prices', 'provider_id', 'ai_providers', 'id');
 SELECT ok((SELECT prosecdef FROM pg_proc WHERE oid = f::regprocedure), f || ' é SECURITY DEFINER')
-  FROM unnest(ARRAY['admin_ai_provider_api_key(uuid, uuid)', 'ai_embedding_credentials()']) f;
+  FROM unnest(ARRAY['admin_ai_provider_api_key(uuid, uuid)', 'ai_embedding_credentials(uuid)']) f;
 SELECT ok(has_function_privilege('moneyflow_app', f, 'EXECUTE'), 'app executa ' || f)
-  FROM unnest(ARRAY['admin_ai_provider_api_key(uuid, uuid)', 'ai_embedding_credentials()',
+  FROM unnest(ARRAY['admin_ai_provider_api_key(uuid, uuid)', 'ai_embedding_credentials(uuid)',
                     'ai_model_price_at(uuid, text, timestamp with time zone)']) f;
 SELECT ok(NOT has_function_privilege('public', f, 'EXECUTE'), 'PUBLIC não executa ' || f)
-  FROM unnest(ARRAY['admin_ai_provider_api_key(uuid, uuid)', 'ai_embedding_credentials()']) f;
+  FROM unnest(ARRAY['admin_ai_provider_api_key(uuid, uuid)', 'ai_embedding_credentials(uuid)']) f;
 
 -- Dados base
 INSERT INTO users (id, username, email, password, role) VALUES
@@ -28,8 +28,9 @@ INSERT INTO users (id, username, email, password, role) VALUES
 -- Provedores --------------------------------------------------------------------------------------------------
 INSERT INTO ai_providers (id, name, kind, api_key) VALUES
   ('00000000-0000-7000-8000-0000000a1001', 'Claude', 'anthropic', 'sk-ant-api03-SEGREDOabcd1234');
-INSERT INTO ai_providers (id, name, kind, api_key, embedding_model) VALUES
-  ('00000000-0000-7000-8000-0000000a1002', 'OpenAI', 'openai', 'sk-proj-SEGREDOwxyz9876', 'text-embedding-3-small');
+-- embedding_model virou default_models.embeddings na 0041 (capacidades; testes em 0041_ai_provider_capabilities.sql).
+INSERT INTO ai_providers (id, name, kind, api_key, default_models) VALUES
+  ('00000000-0000-7000-8000-0000000a1002', 'OpenAI', 'openai', 'sk-proj-SEGREDOwxyz9876', '{"embeddings": "text-embedding-3-small"}');
 INSERT INTO ai_providers (id, name, kind, base_url) VALUES
   ('00000000-0000-7000-8000-0000000a1003', 'Ollama local', 'openai', 'http://ollama:11434/v1');
 
@@ -48,12 +49,10 @@ SELECT throws_ok($$INSERT INTO ai_providers (name, kind, api_key) VALUES ('Espa�
                  'chave sem espaços');
 SELECT throws_ok($$INSERT INTO ai_providers (name, kind, base_url) VALUES ('URL ruim', 'openai', 'ftp://x')$$, '23514', NULL,
                  'base_url http(s)');
-SELECT throws_ok($$INSERT INTO ai_providers (name, kind, api_key, embedding_model) VALUES ('Emb anthropic', 'anthropic', 'abcdefghij', 'x')$$,
+SELECT throws_ok($$INSERT INTO ai_providers (name, kind, api_key, capabilities) VALUES ('Emb anthropic', 'anthropic', 'abcdefghij', '{text,embeddings}')$$,
                  '23514', NULL, 'embeddings só em kind openai');
-SELECT throws_ok($$INSERT INTO ai_providers (name, kind, api_key, embedding_model) VALUES ('Outro emb', 'openai', 'abcdefghij', 'text-embedding-3-small')$$,
-                 '23505', NULL, 'no máximo um provedor de embeddings ativo');
-SELECT lives_ok($$INSERT INTO ai_providers (name, kind, api_key, embedding_model, is_active) VALUES ('Emb inativo', 'openai', 'abcdefghij', 'text-embedding-3-small', false)$$,
-                'um inativo com embeddings pode existir');
+SELECT lives_ok($$INSERT INTO ai_providers (name, kind, api_key, default_models) VALUES ('Outro emb', 'openai', 'abcdefghij', '{"embeddings": "text-embedding-3-small"}')$$,
+                'vários provedores ativos com embeddings (a regra de um só saiu na 0041)');
 SELECT throws_ok($$UPDATE ai_providers SET archived_at = now() WHERE id = '00000000-0000-7000-8000-0000000a1003'$$, '23514', NULL,
                  'arquivado não fica ativo');
 
@@ -73,9 +72,9 @@ SELECT throws_ok($$SELECT admin_ai_provider_api_key('00000000-0000-7000-8000-000
                  '42501', NULL, 'não admin: 42501');
 SELECT throws_ok($$SELECT admin_ai_provider_api_key('00000000-0000-7000-8000-0000000a1fff', '00000000-0000-7000-8000-0000000000a1')$$,
                  'P0002', NULL, 'provedor inexistente: P0002');
-SELECT results_eq($$SELECT provider_id, kind, api_key, embedding_model FROM ai_embedding_credentials()$$,
+SELECT results_eq($$SELECT provider_id, kind, api_key, default_model FROM ai_embedding_credentials('00000000-0000-7000-8000-0000000a1002')$$,
                   $$VALUES ('00000000-0000-7000-8000-0000000a1002'::uuid, 'openai', 'sk-proj-SEGREDOwxyz9876', 'text-embedding-3-small')$$,
-                  'credenciais de embeddings do provedor ativo');
+                  'credenciais de embeddings do provedor');
 
 -- Preços ----------------------------------------------------------------------------------------------------------
 INSERT INTO ai_model_prices (id, provider_id, model, input_price_per_million, output_price_per_million,
@@ -111,12 +110,13 @@ SELECT ok(NOT ai_tool_list_valid('{a,a}'), 'sem repetição');
 SELECT ok(NOT ai_tool_list_valid(ARRAY['a', NULL]), 'sem nulos');
 SELECT ok(NOT ai_tool_list_valid('{"com espaço"}'), 'formato do nome');
 
-INSERT INTO ai_agents (id, name, system_prompt, provider_id, model, params, enabled_tools, color_slot, icon) VALUES
+INSERT INTO ai_agents (id, name, system_prompt, provider_id, model, params, color_slot, icon) VALUES
   ('00000000-0000-7000-8000-0000000a3001', 'Assistente', 'Você ajuda.', '00000000-0000-7000-8000-0000000a1001',
-   'claude-sonnet-4-5', '{"temperature": 0.3}', NULL, 3, 'bot');
-SELECT results_eq($$SELECT is_active, require_write_confirmation, enabled_tools IS NULL FROM ai_agents
+   'claude-sonnet-4-5', '{"temperature": 0.3}', 3, 'bot');
+-- enabled_tools e require_write_confirmation saíram na 0038 (kit de ferramentas; testes em 0038_ai_tool_kits.sql).
+SELECT results_eq($$SELECT is_active, tool_kit_id IS NULL FROM ai_agents
                      WHERE id = '00000000-0000-7000-8000-0000000a3001'$$,
-                  $$VALUES (true, true, true)$$, 'ativo, confirmação de escrita por padrão, todas as tools');
+                  $$VALUES (true, true)$$, 'ativo e, por padrão, sem kit');
 SELECT lives_ok($$INSERT INTO ai_agents (name, is_active) VALUES ('Rascunho', false)$$, 'agente inativo sem provedor');
 SELECT throws_ok($$INSERT INTO ai_agents (name) VALUES ('Sem provedor')$$, '23514', NULL, 'ativo exige provedor e modelo');
 SELECT throws_ok($$INSERT INTO ai_agents (name, provider_id, is_active) VALUES ('Sem modelo', '00000000-0000-7000-8000-0000000a1001', true)$$,
@@ -126,8 +126,6 @@ SELECT throws_ok($$INSERT INTO ai_agents (name, is_active, color_slot) VALUES ('
 SELECT throws_ok($$INSERT INTO ai_agents (name, is_active, icon) VALUES ('Ícone', false, 'Bot')$$, '23514', NULL, 'ícone lucide kebab-case');
 SELECT throws_ok($$INSERT INTO ai_agents (name, is_active, params) VALUES ('Params', false, '{"temperature": 3}')$$, '23514', NULL,
                  'parâmetros validados');
-SELECT throws_ok($$INSERT INTO ai_agents (name, is_active, enabled_tools) VALUES ('Tools', false, '{x,x}')$$, '23514', NULL,
-                 'tools validadas');
 SELECT throws_ok($$UPDATE ai_agents SET archived_at = now() WHERE id = '00000000-0000-7000-8000-0000000a3001'$$, '23514', NULL,
                  'arquivado não fica ativo');
 SELECT throws_ok($$DELETE FROM ai_providers WHERE id = '00000000-0000-7000-8000-0000000a1001'$$, '23503', NULL,

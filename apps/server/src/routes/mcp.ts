@@ -3,7 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { userColumns, users } from '@moneyflow/db';
-import { AGENT_TOOLS, agentTool, t, toolJsonSchema } from '@moneyflow/shared';
+import { AGENT_TOOLS, type AgentToolDef, agentTool, mcpExposed, t, toolJsonSchema } from '@moneyflow/shared';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { TOOL_HANDLERS } from '../agents/tool-handlers';
@@ -21,10 +21,17 @@ import { authenticateApiToken } from '../services/api-tokens';
  * cliente MCP, guiado pelas anotações readOnlyHint/destructiveHint.
  */
 
+/**
+ * O kit não vale aqui (spec 021): todas as tools, menos as só de administrador
+ * para quem não é admin, as de segredo e as que geram arquivo (spec 027). As de
+ * importação recebem o attachmentId de qualquer anexo que o dono do token lê.
+ */
+const offered = (ctx: ServiceContext, tool: AgentToolDef) => mcpExposed(tool, ctx.access.isAdmin);
+
 function mcpServerFor(ctx: ServiceContext) {
   const server = new Server({ name: 'moneyflow', version: '1.0.0' }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: AGENT_TOOLS.map((tool) => ({
+    tools: AGENT_TOOLS.filter((tool) => offered(ctx, tool)).map((tool) => ({
       name: tool.name,
       title: tool.title,
       description: tool.description,
@@ -40,7 +47,8 @@ function mcpServerFor(ctx: ServiceContext) {
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const tool = agentTool(request.params.name);
-    if (!tool) return { content: [{ type: 'text', text: t.agents.errors.toolUnknown(request.params.name) }], isError: true };
+    if (!tool || !offered(ctx, tool))
+      return { content: [{ type: 'text', text: t.agents.errors.toolUnknown(request.params.name) }], isError: true };
     try {
       const input = tool.input.parse(request.params.arguments ?? {});
       const handler = TOOL_HANDLERS[tool.name as keyof typeof TOOL_HANDLERS] as {

@@ -13,7 +13,15 @@ export type Harness = { app: FastifyInstance; db: Database; config: Config; clos
 export async function startApp(env: Record<string, string> = {}, databaseUrl = inject('databaseUrl')): Promise<Harness> {
   const pool = createPool(databaseUrl, 5);
   const db = createDb(pool);
-  const config = loadConfig({ DATABASE_URL: databaseUrl, LOOKUP_TIMEOUT_MS: '1500', LOGIN_RATE_LIMIT: '10000', ...env });
+  // Execuções de IA por minuto (spec 028) folgadas: os testes mandam muitas mensagens com o mesmo usuário.
+  const config = loadConfig({
+    DATABASE_URL: databaseUrl,
+    LOOKUP_TIMEOUT_MS: '1500',
+    LOGIN_RATE_LIMIT: '10000',
+    AI_RUNS_PER_MINUTE: '1000',
+    AI_FLOW_RUNS_PER_MINUTE: '1000',
+    ...env,
+  });
   const app = await buildApp({ db, config, logger: false });
   await app.ready();
   return {
@@ -43,6 +51,8 @@ export function alphaCnpj(): string {
  * importar num sistema limpo). Devolve a conexão como moneyflow_app, ou null
  * sem a conexão do dono (MONEYFLOW_TEST_OWNER_URL no modo de banco externo).
  */
+const freshNames: string[] = [];
+
 export async function freshDatabase(): Promise<string | null> {
   const owner = inject('ownerDatabaseUrl');
   if (!owner) return null;
@@ -51,6 +61,7 @@ export async function freshDatabase(): Promise<string | null> {
   await admin.connect();
   try {
     await admin.query(`CREATE DATABASE ${name}`);
+    freshNames.push(name);
   } finally {
     await admin.end();
   }
@@ -60,6 +71,23 @@ export async function freshDatabase(): Promise<string | null> {
   const appUrl = new URL(inject('databaseUrl'));
   appUrl.pathname = `/${name}`;
   return appUrl.toString();
+}
+
+/**
+ * Apaga os bancos criados por freshDatabase() (chame no afterAll, depois de
+ * fechar os harnesses). Contra um banco externo (MONEYFLOW_TEST_OWNER_URL)
+ * eles sobrariam no servidor; no Testcontainers somem com o container.
+ */
+export async function dropFreshDatabases() {
+  const owner = inject('ownerDatabaseUrl');
+  if (!owner || freshNames.length === 0) return;
+  const admin = new pg.Client({ connectionString: owner });
+  await admin.connect();
+  try {
+    for (const name of freshNames.splice(0)) await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+  } finally {
+    await admin.end();
+  }
 }
 
 /** Cria um usuário direto no banco e devolve o cookie de sessão dele. */
@@ -125,4 +153,45 @@ export async function scenario(_h: Harness, admin: ReturnType<typeof client>) {
     openingDate: '2026-01-01',
   });
   return { tag, expense, income, holderA, holderB, supplier, caixaA, caixaB, accountA, accountB };
+}
+
+/** PDF mínimo válido com uma camada de texto (uma linha por item), para a extração no servidor (spec 024). */
+export function minimalPdf(lines: string[]): Buffer {
+  const esc = (s: string) => s.replace(/[\\()]/g, (c) => `\\${c}`);
+  const stream = `BT /F1 12 Tf 72 720 Td 14 TL ${lines.map((l) => `(${esc(l)}) Tj T*`).join(' ')} ET`;
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+    `<< /Length ${Buffer.byteLength(stream, 'latin1')} >>\nstream\n${stream}\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
+  ];
+  let out = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  objects.forEach((body, i) => {
+    offsets.push(Buffer.byteLength(out, 'latin1'));
+    out += `${i + 1} 0 obj\n${body}\nendobj\n`;
+  });
+  const xref = Buffer.byteLength(out, 'latin1');
+  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`;
+  out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(out, 'latin1');
+}
+
+/** PNG 1×1 (anexo de imagem dos testes). */
+export const TINY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+/**
+ * Sessão nova com o agente (spec 026): finaliza a sessão ativa do par, se
+ * houver (parando a execução), e abre outra. Os testes que querem começar do
+ * zero usam isto; a API recusa uma 2ª sessão ativa do mesmo usuário e agente.
+ */
+export async function newSession(api: ReturnType<typeof client>, agentId: string) {
+  const threads = await api.get<{ agentId: string; active: { id: string } | null }[]>('/api/agents/threads');
+  const active = threads.find((thread) => thread.agentId === agentId)?.active;
+  if (active) await api.post(`/api/conversations/${active.id}/finish`);
+  return api.post('/api/conversations', { agentId });
 }

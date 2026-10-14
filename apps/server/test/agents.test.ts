@@ -2,18 +2,22 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { formatBRL, SseParser } from '@moneyflow/shared';
+import { AGENT_TOOLS, formatBRL, SseParser } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
-import { embeddingCredentials, embedPending, type IndexState, syncEmbeddingSources } from '../src/agents/embeddings';
+import { type IndexState, indexEmbeddings } from '../src/agents/embeddings';
 import { mcpExposedName } from '../src/agents/mcp-client';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
+import { registerInternalTool } from '../src/agents/tools-runtime';
 import { startAgentWorker } from '../src/agents/worker';
+import { translateDbError } from '../src/errors';
+import { withTx } from '../src/services/tx';
 import { type FakeMcp, startFakeMcp } from './fakes/fake-mcp';
-import { client, type Harness, scenario, startApp, uid, userSession } from './helpers';
+import { client, type Harness, newSession, scenario, startApp, uid, userSession } from './helpers';
 
 /*
  * Fase 4 (agentes de IA, spec 011), sem chamar APIs reais: provedor falso
@@ -34,6 +38,24 @@ let admin: ReturnType<typeof client>;
 let adminSession: Awaited<ReturnType<typeof userSession>>;
 let provider: any;
 let agent: any;
+let defaultKit: any;
+
+/** Kit com as tools indicadas (padrão: todas) no modo sugerido de cada uma, salvo `modes`. */
+async function createKit(name: string, names?: string[], modes: Record<string, 'allow' | 'ask'> = {}) {
+  const catalog: any[] = await admin.get('/api/admin/ai/tools');
+  const tools = catalog
+    .filter((tool) => !names || names.includes(tool.name))
+    .map((tool) => ({ name: tool.name, mode: modes[tool.name] ?? tool.suggestedMode }));
+  return admin.post('/api/admin/ai/tool-kits', { name: `${name} ${uid()}`, tools });
+}
+
+/** Nomes das tools enviadas na última chamada de chat ao provedor falso (Anthropic). */
+function lastToolNames(): string[] {
+  const call = llm.calls
+    .filter((c) => c.path === '/v1/messages' && Array.isArray(c.body.tools) && !/Gere um título/.test(JSON.stringify(c.body.system)))
+    .at(-1)!;
+  return call.body.tools.map((tool: any) => tool.name);
+}
 
 /** Roda a fila de execuções no próprio teste (o worker, sem timers). */
 async function drain(stale = '1 hour') {
@@ -73,7 +95,16 @@ beforeAll(async () => {
   h = await startApp();
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
-  provider = await admin.post('/api/admin/ai/providers', { name: `Falso ${uid()}`, kind: 'anthropic', baseUrl: llm.url, apiKey: API_KEY });
+  // Anthropic compatível (base_url): modelo de texto obrigatório; cache e raciocínio ligados à mão (spec 024).
+  provider = await admin.post('/api/admin/ai/providers', {
+    name: `Falso ${uid()}`,
+    kind: 'anthropic',
+    baseUrl: llm.url,
+    apiKey: API_KEY,
+    defaultModels: { text: 'claude-sonnet-5-5' },
+    promptCacheEnabled: true,
+    thinkingEnabled: true,
+  });
   await admin.post('/api/admin/ai/prices', {
     providerId: provider.id,
     model: 'claude-sonnet-5-5',
@@ -81,12 +112,16 @@ beforeAll(async () => {
     outputPricePerMillion: 10,
     cacheReadPricePerMillion: 0.2,
   });
+  // O agente principal usa um kit com todas as tools no modo sugerido (escritas pedem aprovação).
+  defaultKit = await createKit('Padrão dos testes');
   agent = await admin.post('/api/admin/ai/agents', {
     name: `Assistente teste ${uid()}`,
     systemPrompt: 'Você ajuda nos testes.',
-    providerId: provider.id,
+    // O provedor padrão preenche o texto e a visão (o mesmo provedor: anexos direto ao modelo).
+    defaultProviderId: provider.id,
     model: 'claude-sonnet-5-5',
     params: { max_tokens: 2000, max_tool_iterations: 6 },
+    toolKitId: defaultKit.id,
     isActive: true,
   });
 });
@@ -124,11 +159,21 @@ describe('administração', () => {
     await user.post('/api/admin/ai/agents', { name: 'x' }, 403);
   });
 
-  it('agente: tools desconhecidas recusadas, ativo exige provedor e modelo', async () => {
-    await admin.post('/api/admin/ai/agents', { name: `Ruim ${uid()}`, enabledTools: ['nao_existe'] }, 400);
+  it('agente: kit inexistente recusado, ativo exige provedor e modelo; catálogo com categoria e modo sugerido', async () => {
+    await admin.post('/api/admin/ai/agents', { name: `Ruim ${uid()}`, toolKitId: '00000000-0000-7000-8000-000000000000' }, 400);
     await admin.post('/api/admin/ai/agents', { name: `Sem modelo ${uid()}`, isActive: true }, 422);
+    expect(agent).toMatchObject({ toolKitId: defaultKit.id, toolKitName: defaultKit.name });
     const tools = await admin.get('/api/admin/ai/tools');
-    expect(tools.find((t: any) => t.name === 'send_telegram_message')).toMatchObject({ kind: 'write', confirm: 'always' });
+    expect(tools.find((t: any) => t.name === 'send_telegram_message')).toMatchObject({
+      kind: 'write',
+      category: 'messages',
+      suggestedMode: 'ask',
+      destructive: false,
+      adminOnly: false,
+      secret: false,
+    });
+    expect(tools.find((t: any) => t.name === 'notify_user')).toMatchObject({ kind: 'write', suggestedMode: 'allow' });
+    expect(tools.find((t: any) => t.name === 'unmatch_statement_line')).toMatchObject({ category: 'reconciliation', destructive: true });
     const options = await client(h, (await userSession(h)).cookie).get('/api/agents');
     expect(options.some((a: any) => a.id === agent.id)).toBe(true);
   });
@@ -137,7 +182,7 @@ describe('administração', () => {
 describe('execução do agente', () => {
   it('tool de leitura: run completo com streaming, título automático, uso e custo, SSE com Last-Event-ID', async () => {
     const s = await scenario(h, admin);
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const sent = await chat(admin, conversation.id, 'Pode listar caixas?');
     expect(sent.run.status).toBe('queued');
     // Uma execução ativa por conversa.
@@ -180,7 +225,7 @@ describe('execução do agente', () => {
   });
 
   it('escrita com confirmação aprovada: cartão com prévia, aplica como agente na auditoria', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const name = `ACME Agente ${uid()}`;
     const sent = await chat(admin, conversation.id, `criar entidade ${name}`);
     await drain();
@@ -191,7 +236,8 @@ describe('execução do agente', () => {
     expect(card).toMatchObject({ toolName: 'create_entity', status: 'pending' });
     expect(card.preview).toMatchObject({ title: 'Criar entidade', action: 'create' });
     expect(card.preview.rows).toEqual(expect.arrayContaining([{ label: 'Nome', after: name }]));
-    expect((await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).length).toBe(0);
+    // Pelo nome exato: a busca é por semelhança e acharia o "ACME Agente" de uma rodada anterior num banco reaproveitado.
+    expect((await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).filter((e: any) => e.name === name)).toHaveLength(0);
 
     // Outro usuário não decide.
     const other = client(h, (await userSession(h)).cookie);
@@ -201,7 +247,7 @@ describe('execução do agente', () => {
     expect(decided).toEqual({ decided: 1, pending: 0, runStatus: 'queued' });
     await drain();
     expect((await runStatus(sent.run.id)).status).toBe('completed');
-    const created = await admin.get(`/api/entities?q=${encodeURIComponent(name)}`);
+    const created = (await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).filter((e: any) => e.name === name);
     expect(created).toHaveLength(1);
     const audit = await h.db.execute<{ actor_kind: string; agent_run_id: string; user_id: string }>(
       sql`SELECT actor_kind, agent_run_id, user_id FROM audit_log WHERE table_name = 'entities' AND record_id = ${created[0].id}`,
@@ -212,14 +258,14 @@ describe('execução do agente', () => {
   });
 
   it('escrita rejeitada: nada é gravado e o modelo recebe a recusa com o motivo', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const name = `Recusada ${uid()}`;
     const sent = await chat(admin, conversation.id, `criar entidade ${name}`);
     await drain();
     await admin.post(`/api/runs/${sent.run.id}/confirmations`, { decision: 'rejected', reason: 'não quero' });
     await drain();
     expect((await runStatus(sent.run.id)).status).toBe('completed');
-    expect(await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).toHaveLength(0);
+    expect((await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).filter((e: any) => e.name === name)).toHaveLength(0);
     const detail = await admin.get(`/api/conversations/${conversation.id}`);
     const result = detail.messages.find((m: any) => m.role === 'tool').content[0];
     expect(result).toMatchObject({ is_error: true });
@@ -238,7 +284,7 @@ describe('execução do agente', () => {
     const userSess = await userSession(h);
     const user = client(h, userSess.cookie);
     await admin.post(`/api/caixas/${s.caixaA.id}/members`, { userId: userSess.id, role: 'editor' });
-    const conversation = await user.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(user, agent.id);
     await chat(user, conversation.id, 'listar caixas');
     await drain();
     let detail = await user.get(`/api/conversations/${conversation.id}`);
@@ -264,7 +310,7 @@ describe('execução do agente', () => {
   });
 
   it('cancelamento: na fila cancela na hora; rodando, o worker para e fecha como canceled', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const queued = await chat(admin, conversation.id, 'oi');
     const canceled = await admin.post(`/api/runs/${queued.run.id}/cancel`);
     expect(canceled.status).toBe('canceled');
@@ -287,7 +333,7 @@ describe('execução do agente', () => {
   });
 
   it('retomada: reserva abandonada por um worker que caiu é retomada por outro', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const sent = await chat(admin, conversation.id, 'listar caixas');
     const claimed = await h.db.execute<ClaimedRun>(sql`SELECT * FROM ai_run_claim(1, '1 hour')`);
     expect(claimed.rows[0]!.id).toBe(sent.run.id);
@@ -301,7 +347,7 @@ describe('execução do agente', () => {
   });
 
   it('falha do provedor: erro 500 repetido termina como failed com a mensagem', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     llm.queue = Array.from({ length: 12 }, () => ({ status: 400 }));
     const sent = await chat(admin, conversation.id, 'oi');
     await drain();
@@ -309,6 +355,273 @@ describe('execução do agente', () => {
     expect(status.status).toBe('failed');
     expect(status.error).toMatch(/provedor de IA/);
     expect(status.error).not.toContain('SEGREDO');
+  });
+});
+
+describe('kit de ferramentas (spec 021)', () => {
+  /** Agente ativo com o kit dado (null = sem kit). */
+  const kitAgent = (toolKitId: string | null, name = 'Kit') =>
+    admin.post('/api/admin/ai/agents', {
+      name: `${name} ${uid()}`,
+      providerId: provider.id,
+      model: 'claude-sonnet-5-5',
+      params: { max_tokens: 2000, max_tool_iterations: 6 },
+      toolKitId,
+      isActive: true,
+    });
+
+  async function confirmationsOf(runId: string) {
+    const r = await h.db.execute<{ tool_name: string; status: string }>(
+      sql`SELECT tool_name, status FROM ai_tool_confirmations WHERE run_id = ${runId} ORDER BY created_at`,
+    );
+    return r.rows;
+  }
+
+  it('CRUD, duplicar, validação contra o registro, nome único sem distinção de maiúsculas e auditoria', async () => {
+    const name = `Kit CRUD ${uid()}`;
+    const kit = await admin.post('/api/admin/ai/tool-kits', {
+      name,
+      description: 'Teste',
+      tools: [
+        { name: 'create_title', mode: 'ask' },
+        { name: 'list_caixas', mode: 'allow' },
+      ],
+    });
+    // Na ordem do registro (a da tela).
+    expect(kit).toMatchObject({
+      name,
+      description: 'Teste',
+      agents: [],
+      tools: [
+        { name: 'list_caixas', mode: 'allow' },
+        { name: 'create_title', mode: 'ask' },
+      ],
+    });
+    await admin.post('/api/admin/ai/tool-kits', { name: name.toUpperCase() }, 409);
+    await admin.post('/api/admin/ai/tool-kits', { name: `Outro ${uid()}`, tools: [{ name: 'nao_existe', mode: 'allow' }] }, 400);
+    await admin.post('/api/admin/ai/tool-kits', { name: `Outro ${uid()}`, tools: [{ name: 'list_caixas' }] }, 400);
+    await admin.post('/api/admin/ai/tool-kits', { name: `Outro ${uid()}`, tools: [{ name: 'list_caixas', mode: 'nunca' }] }, 400);
+
+    // `tools` substitui o conjunto: sai create_title, list_caixas muda para ask, entra end_series.
+    const edited = await admin.patch(`/api/admin/ai/tool-kits/${kit.id}`, {
+      tools: [
+        { name: 'end_series', mode: 'allow' },
+        { name: 'list_caixas', mode: 'ask' },
+      ],
+    });
+    expect(edited).toMatchObject({ name, description: 'Teste' });
+    expect(edited.tools).toEqual([
+      { name: 'list_caixas', mode: 'ask' },
+      { name: 'end_series', mode: 'allow' },
+    ]);
+    expect((await admin.patch(`/api/admin/ai/tool-kits/${kit.id}`, { description: '' })).description).toBeNull();
+
+    const copy = await admin.post(`/api/admin/ai/tool-kits/${kit.id}/duplicate`);
+    expect(copy).toMatchObject({ name: `Cópia de ${name}`, tools: edited.tools, agents: [] });
+    expect(copy.id).not.toBe(kit.id);
+    const copy2 = await admin.post(`/api/admin/ai/tool-kits/${kit.id}/duplicate`);
+    expect(copy2.name).toBe(`Cópia de ${name} (2)`);
+    const named = await admin.post(`/api/admin/ai/tool-kits/${kit.id}/duplicate`, { name: `Ajustado ${uid()}` });
+    expect(named.tools).toEqual(edited.tools);
+    const list = await admin.get('/api/admin/ai/tool-kits');
+    expect(list.map((k: any) => k.id)).toEqual(expect.arrayContaining([kit.id, copy.id, copy2.id, named.id]));
+
+    // Auditoria: o kit e as tools dele (record_id = kit), com o admin como ator humano.
+    const audit = await h.db.execute<{ table_name: string; action: string; actor_kind: string; user_id: string }>(sql`
+      SELECT table_name, action, actor_kind, user_id FROM audit_log WHERE record_id = ${kit.id} ORDER BY created_at, id`);
+    const kinds = audit.rows.map((r) => `${r.table_name}:${r.action}`);
+    expect(kinds).toEqual(
+      expect.arrayContaining(['ai_tool_kits:insert', 'ai_tool_kit_tools:insert', 'ai_tool_kit_tools:update', 'ai_tool_kit_tools:delete']),
+    );
+    for (const row of audit.rows) expect(row).toMatchObject({ actor_kind: 'human', user_id: adminSession.id });
+
+    // Só o admin administra kits.
+    const user = client(h, (await userSession(h)).cookie);
+    await user.get('/api/admin/ai/tool-kits', 403);
+    await user.post('/api/admin/ai/tool-kits', { name: 'x' }, 403);
+    await user.post(`/api/admin/ai/tool-kits/${kit.id}/duplicate`, {}, 403);
+
+    for (const id of [copy.id, copy2.id, named.id]) expect(await admin.del(`/api/admin/ai/tool-kits/${id}`)).toEqual({ deleted: true });
+    await admin.get(`/api/admin/ai/tool-kits/${copy.id}`, 404);
+  });
+
+  it('o kit em uso (inclusive por agente arquivado) não é excluído: o erro lista os agentes', async () => {
+    const kit = await createKit('Em uso', ['list_caixas']);
+    const active = await kitAgent(kit.id, 'Ativo com kit');
+    const archived = await kitAgent(kit.id, 'Arquivado com kit');
+    await newSession(admin, archived.id);
+    expect(await admin.del(`/api/admin/ai/agents/${archived.id}`)).toMatchObject({ archived: true });
+    expect((await admin.get(`/api/admin/ai/tool-kits/${kit.id}`)).agents).toEqual([
+      { id: active.id, name: active.name, archived: false },
+      { id: archived.id, name: archived.name, archived: true },
+    ]);
+
+    const res = await admin.raw('DELETE', `/api/admin/ai/tool-kits/${kit.id}`);
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.message).toContain(active.name);
+    expect(res.json().error.message).toContain(archived.name);
+
+    await admin.patch(`/api/admin/ai/agents/${active.id}`, { toolKitId: null, isActive: false });
+    expect((await admin.del(`/api/admin/ai/tool-kits/${kit.id}`, 422)).error.message).toContain(archived.name);
+    await admin.patch(`/api/admin/ai/agents/${archived.id}`, { toolKitId: null });
+    expect(await admin.del(`/api/admin/ai/tool-kits/${kit.id}`)).toEqual({ deleted: true });
+  });
+
+  it('fora do kit não chega ao modelo; em allow a escrita roda sem confirmação; em ask a leitura pede confirmação', async () => {
+    const kit = await createKit('Misto', ['list_caixas', 'create_entity'], { list_caixas: 'ask', create_entity: 'allow' });
+    const mixed = await kitAgent(kit.id, 'Misto');
+    const conversation = await newSession(admin, mixed.id);
+
+    // Escrita em allow: executa direto, sem ai_tool_confirmations.
+    const name = `Direto ${uid()}`;
+    const write = await chat(admin, conversation.id, `criar entidade ${name}`);
+    await drain();
+    expect((await runStatus(write.run.id)).status).toBe('completed');
+    expect(await confirmationsOf(write.run.id)).toEqual([]);
+    expect((await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).filter((e: any) => e.name === name)).toHaveLength(1);
+    // Só as tools do kit foram ao modelo, na ordem do registro.
+    expect(lastToolNames()).toEqual(['list_caixas', 'create_entity']);
+
+    // Leitura em ask: pede confirmação.
+    const read = await chat(admin, conversation.id, 'listar caixas');
+    await drain();
+    expect((await runStatus(read.run.id)).status).toBe('awaiting_confirmation');
+    expect(await confirmationsOf(read.run.id)).toEqual([{ tool_name: 'list_caixas', status: 'pending' }]);
+    await admin.post(`/api/runs/${read.run.id}/confirmations`, { decision: 'approved' });
+    await drain();
+    expect((await runStatus(read.run.id)).status).toBe('completed');
+
+    // Tool fora do kit: o modelo não a recebe e, se a chamar mesmo assim, recebe o erro (sem executar).
+    const outside = await chat(admin, conversation.id, `chamar get_entity {"entityId":"${mixed.id}"}`);
+    await drain();
+    expect((await runStatus(outside.run.id)).status).toBe('completed');
+    const detail = await admin.get(`/api/conversations/${conversation.id}`);
+    const result = detail.messages.filter((m: any) => m.role === 'tool').at(-1).content[0];
+    expect(result).toMatchObject({ is_error: true, content: 'Tool desconhecida ou não habilitada: get_entity' });
+    expect(await confirmationsOf(outside.run.id)).toEqual([]);
+  });
+
+  it('sem kit: todas as tools internas, tudo roda direto (inclusive enviar mensagem e escritas)', async () => {
+    const free = await kitAgent(null, 'Sem kit');
+    expect(free).toMatchObject({ toolKitId: null, toolKitName: null });
+    const conversation = await newSession(admin, free.id);
+    const name = `Sem kit ${uid()}`;
+    const sent = await chat(admin, conversation.id, `criar entidade ${name}`);
+    await drain();
+    expect((await runStatus(sent.run.id)).status).toBe('completed');
+    expect(await confirmationsOf(sent.run.id)).toEqual([]);
+    expect((await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).filter((e: any) => e.name === name)).toHaveLength(1);
+    expect(lastToolNames()).toEqual(AGENT_TOOLS.map((tool) => tool.name));
+  });
+
+  it('tool só de admin num kit não é oferecida a quem não é admin; o kit é relido a cada chamada ao modelo', async () => {
+    let switchKitId = '';
+    const unregister = [
+      registerInternalTool(
+        {
+          name: 'test_admin_only',
+          title: 'Tool de admin (teste)',
+          description: 'Só para administradores (registrada no teste).',
+          kind: 'read',
+          category: 'search',
+          suggestedMode: 'allow',
+          adminOnly: true,
+          input: z.object({}),
+        },
+        { run: async () => ({ ok: true }) },
+      ),
+      registerInternalTool(
+        {
+          name: 'test_kit_switch',
+          title: 'Troca o kit (teste)',
+          description: 'Tira list_caixas do kit e libera create_entity (registrada no teste).',
+          kind: 'read',
+          category: 'search',
+          suggestedMode: 'allow',
+          input: z.object({}),
+        },
+        {
+          run: (ctx) =>
+            withTx(ctx, async (tx) => {
+              await tx.execute(sql`DELETE FROM ai_tool_kit_tools WHERE kit_id = ${switchKitId} AND tool_name = 'list_caixas'`);
+              await tx.execute(
+                sql`UPDATE ai_tool_kit_tools SET mode = 'allow' WHERE kit_id = ${switchKitId} AND tool_name = 'create_entity'`,
+              );
+              return { switched: true };
+            }),
+        },
+      ),
+    ];
+    try {
+      const catalog = await admin.get('/api/admin/ai/tools');
+      expect(catalog.find((t: any) => t.name === 'test_admin_only')).toMatchObject({ adminOnly: true, category: 'search' });
+      const kit = await createKit('Admin', ['list_caixas', 'test_admin_only']);
+      const withAdminTool = await kitAgent(kit.id, 'Com tool de admin');
+
+      const adminConversation = await newSession(admin, withAdminTool.id);
+      await chat(admin, adminConversation.id, 'oi');
+      await drain();
+      expect(lastToolNames()).toEqual(['list_caixas', 'test_admin_only']);
+
+      const userSess = await userSession(h);
+      const user = client(h, userSess.cookie);
+      const userConversation = await newSession(user, withAdminTool.id);
+      await chat(user, userConversation.id, 'oi');
+      await drain();
+      expect(lastToolNames()).toEqual(['list_caixas']);
+      const forced = await chat(user, userConversation.id, 'chamar test_admin_only {}');
+      await drain();
+      expect((await runStatus(forced.run.id)).status).toBe('completed');
+      const detail = await user.get(`/api/conversations/${userConversation.id}`);
+      expect(detail.messages.filter((m: any) => m.role === 'tool').at(-1).content[0]).toMatchObject({
+        is_error: true,
+        content: 'Tool desconhecida ou não habilitada: test_admin_only',
+      });
+
+      // Alterar o kit vale na próxima chamada ao modelo, na mesma execução.
+      const switching = await createKit('Troca', ['list_caixas', 'test_kit_switch', 'create_entity']);
+      switchKitId = switching.id;
+      const switcher = await kitAgent(switching.id, 'Troca de kit');
+      const conversation = await newSession(admin, switcher.id);
+      const sent = await chat(admin, conversation.id, 'chamar test_kit_switch {}');
+      const before = llm.calls.length;
+      await drain();
+      expect((await runStatus(sent.run.id)).status).toBe('completed');
+      const calls = llm.calls
+        .slice(before)
+        .filter((c) => c.path === '/v1/messages' && Array.isArray(c.body.tools) && c.body.tools.length > 0)
+        .map((c) => c.body.tools.map((tool: any) => tool.name));
+      // (as tools registradas no teste vêm depois das de AGENT_TOOLS)
+      expect(calls).toEqual([
+        ['list_caixas', 'create_entity', 'test_kit_switch'],
+        ['create_entity', 'test_kit_switch'],
+      ]);
+      expect((await admin.get(`/api/admin/ai/tool-kits/${switching.id}`)).tools).toEqual([
+        { name: 'create_entity', mode: 'allow' },
+        { name: 'test_kit_switch', mode: 'allow' },
+      ]);
+    } finally {
+      for (const off of unregister) off();
+    }
+  });
+
+  it('o retrato da v0.1.7 no banco (migration 0038) está contido no registro, com o mesmo tipo e modo sugerido', async () => {
+    const legacy = await h.db.execute<{ tool_name: string; kind: string; confirm: string }>(
+      sql`SELECT tool_name, kind, confirm FROM ai_legacy_tool_registry()`,
+    );
+    expect(legacy.rows).toHaveLength(49);
+    expect(legacy.rows.filter((r) => r.kind === 'read')).toHaveLength(25);
+    for (const row of legacy.rows) {
+      const tool = AGENT_TOOLS.find((x) => x.name === row.tool_name);
+      expect(tool, row.tool_name).toBeDefined();
+      expect(tool!.kind).toBe(row.kind);
+      // never ⇔ allow; agent/always (pediam confirmação) ⇔ ask.
+      expect(tool!.suggestedMode).toBe(row.confirm === 'never' ? 'allow' : 'ask');
+    }
+    // Tools novas (F13 em diante) não estão no retrato: ele só precisa estar contido no registro.
+    const registry = new Set<string>(AGENT_TOOLS.map((x) => x.name));
+    expect(legacy.rows.every((r) => registry.has(r.tool_name))).toBe(true);
+    expect(AGENT_TOOLS.length).toBeGreaterThan(legacy.rows.length);
   });
 });
 
@@ -320,14 +633,15 @@ describe('provedor OpenAI-compatível', () => {
       baseUrl: `${llm.url}/v1`,
       apiKey: 'sk-openai-SEGREDO-02',
     });
+    const kit = await createKit('Só leitura', ['list_caixas', 'search_records']);
     const gpt = await admin.post('/api/admin/ai/agents', {
       name: `GPT teste ${uid()}`,
       providerId: openai.id,
       model: 'fake-gpt',
       isActive: true,
-      enabledTools: ['list_caixas', 'search_records'],
+      toolKitId: kit.id,
     });
-    const conversation = await admin.post('/api/conversations', { agentId: gpt.id });
+    const conversation = await newSession(admin, gpt.id);
     llm.queue = [{ toolCalls: [{ name: 'list_caixas', input: {} }], usage: { input: 50, output: 5, cacheRead: 30 } }];
     const sent = await chat(admin, conversation.id, 'quais caixas?');
     await drain();
@@ -349,21 +663,32 @@ describe('embeddings', () => {
       kind: 'openai',
       baseUrl: `${llm.url}/v1`,
       apiKey: 'sk-embed-SEGREDO-03',
-      embeddingModel: 'fake-embedding',
+      capabilities: ['embeddings'],
+      defaultModels: { embeddings: 'fake-embedding' },
+    });
+    // O agente usa o texto do provedor Anthropic falso e os embeddings deste (spec 024).
+    const searcher = await admin.post('/api/admin/ai/agents', {
+      name: `Busca ${uid()}`,
+      providerId: provider.id,
+      model: 'claude-sonnet-5-5',
+      toolKitId: defaultKit.id,
+      isActive: true,
+      inferences: [{ capability: 'embeddings', providerId: embedder.id }],
     });
     try {
-      const creds = await embeddingCredentials(h.db);
-      expect(creds).toMatchObject({ providerId: embedder.id, kind: 'openai', model: 'fake-embedding' });
       const name = `Padaria Lua Azul ${uid()}`;
       const entity = await admin.post('/api/entities', { kind: 'company', name });
 
-      // Indexação (o que a manutenção do worker faz): textos-fonte e depois os vetores pendentes.
+      // Indexação (o que a manutenção do worker faz): registra o par, grava os textos-fonte e depois os vetores pendentes.
       const state: IndexState = { since: new Map() };
-      for (let i = 0; i < 100 && (await syncEmbeddingSources(h.db, creds!.model, state)) > 0; i += 1);
-      for (let i = 0; i < 100 && (await embedPending(h.db, creds!)) > 0; i += 1);
+      for (let i = 0; i < 100; i += 1) {
+        const round = await indexEmbeddings(h.db, h.config, state);
+        expect(round.errors).toEqual([]);
+        if (round.sources === 0 && round.embedded === 0) break;
+      }
       const indexed = await h.db.execute<{ source_text: string; needs_reindex: boolean; has_vector: boolean; caixa_id: string | null }>(sql`
         SELECT source_text, needs_reindex, embedding IS NOT NULL AS has_vector, caixa_id FROM ai_embeddings
-         WHERE object_type = 'entity' AND object_id = ${entity.id} AND model = 'fake-embedding'`);
+         WHERE object_type = 'entity' AND object_id = ${entity.id} AND provider_id = ${embedder.id} AND model = 'fake-embedding'`);
       expect(indexed.rows).toEqual([{ source_text: name, needs_reindex: false, has_vector: true, caixa_id: null }]);
       const embedCall = llm.calls.find((c) => c.path === '/v1/embeddings' && c.body.input.includes(name));
       expect(embedCall?.headers.authorization).toBe('Bearer sk-embed-SEGREDO-03');
@@ -374,7 +699,7 @@ describe('embeddings', () => {
       expect(indexUsage.rows[0]!.n).toBeGreaterThan(0);
 
       // A tool semantic_search vetoriza a consulta (uso atribuído ao usuário) e devolve a entidade.
-      const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+      const conversation = await newSession(admin, searcher.id);
       const sent = await chat(
         admin,
         conversation.id,
@@ -397,6 +722,7 @@ describe('embeddings', () => {
       expect(JSON.stringify(await admin.get('/api/admin/ai/providers'))).not.toContain('sk-embed-SEGREDO-03');
     } finally {
       // Os demais testes usam o mesmo banco e esperam a busca por trigram.
+      await admin.patch(`/api/admin/ai/agents/${searcher.id}`, { isActive: false });
       await admin.patch(`/api/admin/ai/providers/${embedder.id}`, { isActive: false });
     }
   });
@@ -421,7 +747,7 @@ describe('MCP', () => {
     expect(patched.headerNames).toEqual(['Authorization', 'X-Extra']);
     expect((await admin.raw('GET', '/api/admin/ai/mcp-servers')).body).not.toContain(MCP_SECRET);
 
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const echo = mcpExposedName(server.name, 'echo');
     await chat(admin, conversation.id, `chamar ${echo} {"text":"oi"}`);
     await drain();
@@ -503,9 +829,9 @@ describe('MCP', () => {
   });
 });
 
-describe('conversas', () => {
-  it('renomear, fixar, arquivar, buscar, bifurcar e excluir (com anexos órfãos)', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+describe('sessões (spec 026)', () => {
+  it('renomear, buscar, bifurcar (finaliza a ativa) e excluir só a finalizada (com anexos órfãos)', async () => {
+    const conversation = await newSession(admin, agent.id);
     const pdf = Buffer.from('%PDF-1.4\n% teste\n');
     const up = await h.app.inject({
       method: 'POST',
@@ -520,7 +846,9 @@ describe('conversas', () => {
     const anthropicCall = llm.calls
       .filter((c) => c.path === '/v1/messages')
       .find((c) => JSON.stringify(c.body.messages).includes('orçamento da reforma'))!;
-    expect(anthropicCall.body.messages[0].content[0]).toMatchObject({ type: 'document', source: { media_type: 'application/pdf' } });
+    // O rótulo com o attachmentId vem antes do arquivo (as tools de importação o recebem, spec 027).
+    expect(anthropicCall.body.messages[0].content[0]).toMatchObject({ type: 'text', text: expect.stringContaining(attachment.id) });
+    expect(anthropicCall.body.messages[0].content[1]).toMatchObject({ type: 'document', source: { media_type: 'application/pdf' } });
 
     // Anexo de mensagem: dono e admin baixam; outro usuário não.
     const other = await userSession(h);
@@ -531,28 +859,136 @@ describe('conversas', () => {
     });
     expect(download.statusCode).toBe(404);
 
-    await admin.patch(`/api/conversations/${conversation.id}`, { title: 'Reforma da casa', pinned: true });
-    let list = await admin.get('/api/conversations');
-    expect(list[0]).toMatchObject({ id: conversation.id, title: 'Reforma da casa', titleSource: 'user' });
+    const renamed = await admin.patch(`/api/conversations/${conversation.id}`, { title: 'Reforma da casa' });
+    expect(renamed).toMatchObject({ id: conversation.id, title: 'Reforma da casa', titleSource: 'user', archivedAt: null });
+    expect(renamed).not.toHaveProperty('pinnedAt');
     const found = await admin.get('/api/conversations?q=reforma');
     expect(found.map((c: any) => c.id)).toContain(conversation.id);
 
+    // Bifurcar da ativa: a cópia vira a ativa e a origem é finalizada (forked).
     const detail = await admin.get(`/api/conversations/${conversation.id}`);
     const fork = await admin.post(`/api/conversations/${conversation.id}/fork`, { messageId: detail.messages.at(-1).id, title: 'Cópia' });
     const forked = await admin.get(`/api/conversations/${fork.id}`);
     expect(forked.messages).toHaveLength(detail.messages.length);
     expect(forked.conversation.forkedFromConversationId).toBe(conversation.id);
-
-    await admin.patch(`/api/conversations/${conversation.id}`, { archived: true });
-    list = await admin.get('/api/conversations');
-    expect(list.map((c: any) => c.id)).not.toContain(conversation.id);
+    const source = (await admin.get(`/api/conversations/${conversation.id}`)).conversation;
+    expect(source).toMatchObject({ archivedReason: 'forked' });
+    expect(source.archivedAt).not.toBeNull();
     expect((await admin.get('/api/conversations?archived=1')).map((c: any) => c.id)).toContain(conversation.id);
+    // A busca cobre as finalizadas também.
+    expect((await admin.get('/api/conversations?q=reforma')).map((c: any) => c.id)).toEqual(
+      expect.arrayContaining([conversation.id, fork.id]),
+    );
 
-    // O anexo continua ligado à bifurcação; excluindo as duas, o arquivo some.
+    // A ativa não se exclui: finalize antes. O anexo continua ligado à bifurcação; excluindo as duas, o arquivo some.
+    await admin.del(`/api/conversations/${fork.id}`, 422);
     await admin.del(`/api/conversations/${conversation.id}`);
     expect((await h.db.execute(sql`SELECT 1 FROM attachments WHERE id = ${attachment.id}`)).rows).toHaveLength(1);
+    await admin.post(`/api/conversations/${fork.id}/finish`);
     await admin.del(`/api/conversations/${fork.id}`);
     expect((await h.db.execute(sql`SELECT 1 FROM attachments WHERE id = ${attachment.id}`)).rows).toHaveLength(0);
+  });
+
+  it('uma ativa por par; mensagem sem ativa cria; finalizar para a execução rodando; o modelo recebe só a ativa', async () => {
+    const owner = await userSession(h);
+    const api = client(h, owner.cookie);
+    // Corrida de duas abas: as duas recebem a mesma sessão ativa.
+    const [first, second] = await Promise.all([
+      api.post(`/api/agents/${agent.id}/sessions`, {}),
+      api.post(`/api/agents/${agent.id}/sessions`, {}),
+    ]);
+    expect(second.id).toBe(first.id);
+    // A 2ª ativa do mesmo par é recusada (23505 traduzido).
+    const dup = await h.app.inject({
+      method: 'POST',
+      url: '/api/conversations',
+      payload: { agentId: agent.id },
+      headers: { cookie: owner.cookie },
+    });
+    expect(dup.statusCode).toBe(409);
+    expect(dup.json().error).toMatchObject({ code: 'ai_conversations_active_chat_key', message: expect.stringMatching(/sessão ativa/) });
+
+    // A mensagem pelo agente entra na ativa.
+    const token = `segredo-da-sessao-${uid()}`;
+    const hello = await api.post(`/api/agents/${agent.id}/messages`, { text: `oi ${token}` });
+    expect(hello).toMatchObject({ created: false, conversation: { id: first.id } });
+    await drain();
+
+    // Finalizar com a execução rodando: o parar é pedido e a sessão é arquivada na hora.
+    const slow = await api.post(`/api/agents/${agent.id}/messages`, { text: 'responda devagar' });
+    const claimed = await h.db.execute<ClaimedRun>(sql`SELECT * FROM ai_run_claim(1, '1 hour')`);
+    expect(claimed.rows[0]!.id).toBe(slow.run.id);
+    const job = processRun({ db: h.db, config: h.config, log }, claimed.rows[0]!);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const finished = await api.post(`/api/conversations/${first.id}/finish`);
+    expect(finished).toMatchObject({ id: first.id, archivedReason: 'finished' });
+    expect(finished.archivedAt).not.toBeNull();
+    expect((await api.get(`/api/runs/${slow.run.id}`)).cancelRequested).toBe(true);
+    await job;
+    expect((await runStatus(slow.run.id)).status).toBe('canceled');
+    // Finalizar de novo não muda nada; a finalizada não recebe mensagem nem volta (23514).
+    expect((await api.post(`/api/conversations/${first.id}/finish`)).archivedAt).toBe(finished.archivedAt);
+    const closed = await h.app.inject({
+      method: 'POST',
+      url: `/api/conversations/${first.id}/messages`,
+      payload: { text: 'ainda aí?' },
+      headers: { cookie: owner.cookie },
+    });
+    expect(closed.statusCode).toBe(409);
+    expect(closed.json().error.code).toBe('session_finished');
+    const unarchive = await h.db
+      .execute(sql`UPDATE ai_conversations SET archived_at = NULL WHERE id = ${first.id}`)
+      .catch((error) => translateDbError(error));
+    expect(unarchive).toMatchObject({ status: 422, message: expect.stringMatching(/Bifurque/) });
+
+    // Sem ativa, a próxima mensagem cria a sessão nova; o modelo não recebe o histórico da finalizada.
+    const before = llm.calls.length;
+    const next = await api.post(`/api/agents/${agent.id}/messages`, { text: 'começo novo' });
+    expect(next.created).toBe(true);
+    expect(next.conversation.id).not.toBe(first.id);
+    await drain();
+    const sent = llm.calls
+      .slice(before)
+      .filter((c) => c.path === '/v1/messages' && JSON.stringify(c.body.messages).includes('começo novo'));
+    expect(sent.length).toBeGreaterThan(0);
+    for (const call of sent) expect(JSON.stringify(call.body)).not.toContain(token);
+
+    // O fio: a ativa, a última atividade e as finalizadas (paginadas, com busca).
+    const threads = await api.get('/api/agents/threads');
+    const thread = threads.find((th: any) => th.agentId === agent.id);
+    expect(thread).toMatchObject({ agentName: agent.name, agentUsable: true, userId: owner.id, finishedCount: 1 });
+    expect(thread.active.id).toBe(next.conversation.id);
+    expect(thread.lastActivityAt).not.toBeNull();
+    const sessions = await api.get(`/api/agents/${agent.id}/sessions`);
+    expect(sessions).toMatchObject({ hasMore: false, items: [{ id: first.id, archivedReason: 'finished' }] });
+    expect((await api.get(`/api/agents/${agent.id}/sessions?q=${token}`)).items.map((c: any) => c.id)).toEqual([first.id]);
+    expect((await api.get(`/api/agents/${agent.id}/sessions?q=inexistente-${uid()}`)).items).toEqual([]);
+    const view = await api.get(`/api/agents/${agent.id}/thread`);
+    expect(view.agent).toMatchObject({ id: agent.id, isActive: true });
+    expect(view.session.conversation.id).toBe(next.conversation.id);
+    expect(view.media).toEqual({ transcription: false, speech: false });
+
+    // Bifurcar da finalizada com a ativa na fila: a ativa é finalizada (forked), a execução cancelada e a cópia vira a ativa.
+    const queued = await api.post(`/api/agents/${agent.id}/messages`, { text: 'na fila' });
+    const firstDetail = await api.get(`/api/conversations/${first.id}`);
+    const copy = await api.post(`/api/conversations/${first.id}/fork`, { messageId: firstDetail.messages.at(-1).id });
+    expect(copy).toMatchObject({ archivedAt: null, forkedFromConversationId: first.id });
+    expect((await runStatus(queued.run.id)).status).toBe('canceled');
+    expect((await api.get(`/api/conversations/${next.conversation.id}`)).conversation.archivedReason).toBe('forked');
+    expect((await api.get(`/api/agents/${agent.id}/thread`)).session.conversation.id).toBe(copy.id);
+    const page = await api.get(`/api/agents/${agent.id}/sessions?limit=1`);
+    expect(page.items.map((c: any) => c.id)).toEqual([next.conversation.id]);
+    expect(page.hasMore).toBe(true);
+
+    // Admin: lê os fios e as sessões dos outros; o usuário comum não.
+    const ofOwner = await admin.get(`/api/agents/threads?userId=${owner.id}`);
+    expect(ofOwner.map((th: any) => [th.agentId, th.userId, th.active?.id])).toEqual([[agent.id, owner.id, copy.id]]);
+    expect((await admin.get('/api/agents/threads?userId=all')).some((th: any) => th.userId === owner.id)).toBe(true);
+    expect((await admin.get(`/api/agents/${agent.id}/sessions?userId=${owner.id}`)).items.length).toBe(2);
+    await api.get(`/api/agents/threads?userId=${adminSession.id}`, 403);
+    await api.get(`/api/agents/${agent.id}/sessions?userId=${adminSession.id}`, 403);
+    // O admin não finaliza nem bifurca a sessão de outro.
+    await admin.post(`/api/conversations/${copy.id}/finish`, {}, 403);
   });
 });
 
@@ -567,14 +1003,14 @@ describe('conciliação pelo agente', () => {
       providerId: provider.id,
       model: 'claude-sonnet-5-5',
       params: { max_tokens: 2000, max_tool_iterations: 6 },
-      requireWriteConfirmation: false,
+      // Sem kit: todas as tools internas, sem aprovação (spec 021).
       isActive: true,
     });
   });
 
   /** Uma chamada de tool pelo agente (o provedor falso pede "chamar <tool> <json>"); devolve o resultado. */
   async function callTool(agentId: string, name: string, input: unknown) {
-    const conversation = await admin.post('/api/conversations', { agentId });
+    const conversation = await newSession(admin, agentId);
     const sent = await chat(admin, conversation.id, `chamar ${name} ${JSON.stringify(input)}`);
     await drain();
     const detail = await admin.get(`/api/conversations/${conversation.id}`);

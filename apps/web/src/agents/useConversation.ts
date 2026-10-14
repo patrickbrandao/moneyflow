@@ -1,9 +1,13 @@
 import type {
+  AgentOptionDto,
+  AgentSendResult,
+  AgentThreadView,
   AiMessageDto,
   AiRunDto,
   AiRunEvent,
-  AttachmentRow,
+  ChatAttachmentDto,
   ConversationDetail,
+  ConversationDto,
   DecideResult,
   ScreenContext,
   SendMessageResult,
@@ -17,10 +21,33 @@ import { isActiveStatus } from './format';
 import { followRun } from './stream';
 
 /*
- * Uma conversa aberta: o histórico (GET /api/conversations/:id) mais o que
- * chega ao vivo pelo SSE da execução ativa (texto parcial, raciocínio, tools
- * em andamento, confirmações, uso e título). Ao terminar, recarrega o detalhe.
+ * Uma sessão aberta: o histórico mais o que chega ao vivo pelo SSE da execução
+ * ativa (texto parcial, raciocínio, tools em andamento, confirmações, uso e
+ * título). Ao terminar, recarrega o detalhe.
+ *
+ * Na janela do agente (spec 026) o alvo é o fio: GET /api/agents/:id/thread
+ * traz a sessão ativa (ou nenhuma), a mensagem vai para o agente (a API cria a
+ * sessão se preciso) e "Finalizar sessão" volta ao fio vazio. Na janela de
+ * leitura o alvo é uma sessão fixa (GET /api/conversations/:id).
  */
+
+export type PaneTarget =
+  | { kind: 'agent'; agentId: string; windowId: string }
+  | { kind: 'session'; conversationId: string; windowId: string };
+
+/** O detalhe da tela: o de uma sessão, ou o fio ainda sem sessão ativa (conversation null). */
+export type PaneDetail = Omit<ConversationDetail, 'conversation'> & { conversation: ConversationDto | null };
+
+const emptyDetail = (media: ConversationDetail['media']): PaneDetail => ({
+  conversation: null,
+  messages: [],
+  activeRun: null,
+  confirmations: [],
+  usage: [],
+  readOnly: false,
+  attachments: [],
+  media,
+});
 
 export type LiveTool = { name: string; title?: string; status: 'running' | 'ok' | 'error'; summary?: string };
 
@@ -45,10 +72,11 @@ function mergeConfirmations(current: ToolConfirmationDto[], incoming: ToolConfir
   return [...map.values()];
 }
 
-export function useConversation(conversationId: string) {
+export function useConversation(target: PaneTarget) {
   const agents = useAgents();
   const { updateMeta, bumpList, screenContext } = agents;
-  const [detail, setDetail] = useState<ConversationDetail | null>(null);
+  const [detail, setDetail] = useState<PaneDetail | null>(null);
+  const [agent, setAgent] = useState<AgentOptionDto | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [run, setRun] = useState<AiRunDto | null>(null);
   const [liveText, setLiveText] = useState('');
@@ -57,6 +85,12 @@ export function useConversation(conversationId: string) {
   const [streamError, setStreamError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const alive = useRef(true);
+  /** Anexos enviados nesta tela (spec 025): entram nos metadados do detalhe ao enviar a mensagem. */
+  const uploaded = useRef(new Map<string, ChatAttachmentDto>());
+  const windowId = target.windowId;
+  const agentId = target.kind === 'agent' ? target.agentId : null;
+  const fixedId = target.kind === 'session' ? target.conversationId : null;
+  const conversationId = detail?.conversation?.id ?? null;
 
   useEffect(() => {
     alive.current = true;
@@ -65,27 +99,65 @@ export function useConversation(conversationId: string) {
     };
   }, []);
 
-  const load = useCallback(async () => {
-    try {
-      const value = await api.get<ConversationDetail>(`/api/conversations/${conversationId}`);
-      if (!alive.current) return;
+  const apply = useCallback(
+    (value: PaneDetail) => {
       setDetail(value);
       setError(null);
       setRun(value.activeRun && isActiveStatus(value.activeRun.status) ? value.activeRun : null);
-      updateMeta({
-        id: conversationId,
-        title: value.conversation.title,
-        agentName: value.conversation.agentName,
-        colorSlot: value.conversation.agentColorSlot,
-      });
+      if (value.conversation) {
+        updateMeta({
+          id: windowId,
+          conversationId: value.conversation.id,
+          title: value.conversation.title,
+          agentName: value.conversation.agentName,
+          colorSlot: value.conversation.agentColorSlot,
+        });
+      } else {
+        updateMeta({ id: windowId, conversationId: null, title: null });
+      }
+    },
+    [windowId, updateMeta],
+  );
+
+  const load = useCallback(async () => {
+    try {
+      if (agentId) {
+        const value = await api.get<AgentThreadView>(`/api/agents/${agentId}/thread`);
+        if (!alive.current) return;
+        setAgent(value.agent);
+        updateMeta({ id: windowId, agentName: value.agent.name, colorSlot: value.agent.colorSlot });
+        apply(value.session ?? emptyDetail(value.media));
+      } else if (fixedId) {
+        const value = await api.get<ConversationDetail>(`/api/conversations/${fixedId}`);
+        if (!alive.current) return;
+        apply(value);
+      }
     } catch (err) {
       if (alive.current) setError(err instanceof ApiError ? err : new ApiError(0, 'unknown', String(err)));
     }
-  }, [conversationId, updateMeta]);
+  }, [agentId, fixedId, windowId, apply, updateMeta]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Na janela do agente: a ativa mudou por fora (bifurcar numa janela de leitura) → relê o fio.
+  const sessionsVersion = agents.sessionsVersion;
+  const seenVersion = useRef(sessionsVersion);
+  useEffect(() => {
+    if (seenVersion.current === sessionsVersion) return;
+    seenVersion.current = sessionsVersion;
+    if (agentId) void load();
+  }, [sessionsVersion, agentId, load]);
+
+  const resetLive = useCallback(() => {
+    setRun(null);
+    setLiveText('');
+    setLiveThinking('');
+    setLiveTools({});
+    setStreamError(null);
+    setReconnecting(false);
+  }, []);
 
   const handleEvent = useCallback(
     (event: AiRunEvent) => {
@@ -127,8 +199,8 @@ export function useConversation(conversationId: string) {
           setRun(event.run);
           break;
         case 'title':
-          setDetail((d) => (d ? { ...d, conversation: { ...d.conversation, title: event.title } } : d));
-          updateMeta({ id: conversationId, title: event.title });
+          setDetail((d) => (d?.conversation ? { ...d, conversation: { ...d.conversation, title: event.title } } : d));
+          updateMeta({ id: windowId, title: event.title });
           bumpList();
           break;
         case 'error':
@@ -140,7 +212,7 @@ export function useConversation(conversationId: string) {
           break;
       }
     },
-    [conversationId, updateMeta, bumpList],
+    [windowId, updateMeta, bumpList],
   );
 
   // Segue o SSE enquanto houver execução ativa.
@@ -169,20 +241,44 @@ export function useConversation(conversationId: string) {
 
   const send = useCallback(
     async (text: string, attachmentIds: string[], context?: ScreenContext) => {
-      const result = await api.post<SendMessageResult>(`/api/conversations/${conversationId}/messages`, {
-        text,
-        attachmentIds,
-        screenContext: context ?? screenContext(),
-      });
+      const body = { text, attachmentIds, screenContext: context ?? screenContext() };
+      // Na janela do agente a mensagem vai para o fio: a API usa a sessão ativa ou cria uma.
+      const result = agentId
+        ? await api.post<AgentSendResult>(`/api/agents/${agentId}/messages`, body)
+        : await api.post<SendMessageResult>(`/api/conversations/${fixedId}/messages`, body);
       setStreamError(null);
       setLiveTools({});
-      setDetail((d) => (d ? { ...d, messages: upsertMessage(d.messages, result.message) } : d));
+      const sent = attachmentIds.map((id) => uploaded.current.get(id)).filter((a): a is ChatAttachmentDto => Boolean(a));
+      const session = agentId ? (result as AgentSendResult).conversation : null;
+      setDetail((d) => {
+        if (!d) return d;
+        // Outra sessão (a ativa mudou noutra aba, ou o fio estava vazio): começa dela.
+        const base = session && d.conversation?.id !== session.id ? { ...emptyDetail(d.media), conversation: session } : d;
+        return {
+          ...base,
+          conversation: session ?? base.conversation,
+          messages: upsertMessage(base.messages, result.message),
+          attachments: [...base.attachments.filter((a) => !attachmentIds.includes(a.id)), ...sent],
+        };
+      });
+      if (session) updateMeta({ id: windowId, conversationId: session.id, title: session.title });
       setRun(result.run);
       bumpList();
       return result;
     },
-    [conversationId, screenContext, bumpList],
+    [agentId, fixedId, windowId, screenContext, bumpList, updateMeta],
   );
+
+  /** Finalizar sessão (spec 026): a API para a execução e arquiva; a janela volta ao fio vazio. */
+  const finish = useCallback(async () => {
+    if (!conversationId) return null;
+    const finished = await api.post<ConversationDto>(`/api/conversations/${conversationId}/finish`);
+    resetLive();
+    setDetail((d) => (d ? emptyDetail(d.media) : d));
+    updateMeta({ id: windowId, conversationId: null, title: null });
+    bumpList();
+    return finished;
+  }, [conversationId, windowId, resetLive, updateMeta, bumpList]);
 
   const cancel = useCallback(async () => {
     if (!run) return;
@@ -191,7 +287,13 @@ export function useConversation(conversationId: string) {
   }, [run]);
 
   const decide = useCallback(
-    async (decision: 'approved' | 'rejected', ids?: string[], reason?: string) => {
+    async (
+      decision: 'approved' | 'rejected',
+      ids?: string[],
+      reason?: string,
+      /** Segredos digitados no cartão (spec 027): id da confirmação → campo → valor; nunca guardados aqui. */
+      secrets?: Record<string, Record<string, string>>,
+    ) => {
       const pending = detail?.confirmations.filter((c) => c.status === 'pending') ?? [];
       const targetRun = pending[0]?.runId ?? run?.id;
       if (!targetRun) return null;
@@ -199,6 +301,7 @@ export function useConversation(conversationId: string) {
         decision,
         ...(ids ? { ids } : {}),
         ...(reason ? { reason } : {}),
+        ...(decision === 'approved' && secrets && Object.keys(secrets).length > 0 ? { secrets } : {}),
       });
       const decidedIds = new Set(ids ?? pending.map((c) => c.id));
       setDetail((d) =>
@@ -219,13 +322,34 @@ export function useConversation(conversationId: string) {
     [detail, run],
   );
 
+  // Upload do chat: no áudio, a duração medida pelo navegador vai junto (spec 025). No fio ainda
+  // sem sessão, o anexo abre a sessão ativa antes (o upload é sempre de uma sessão).
   const attach = useCallback(
-    (file: File) => upload<AttachmentRow>(`/api/conversations/${conversationId}/attachments`, file),
-    [conversationId],
+    async (file: File, durationMs?: number | null) => {
+      let id = conversationId ?? fixedId;
+      if (!id && agentId) {
+        const session = await api.post<ConversationDto>(`/api/agents/${agentId}/sessions`, { screenContext: screenContext() });
+        id = session.id;
+        setDetail((d) => (d && !d.conversation ? { ...d, conversation: session } : d));
+        updateMeta({ id: windowId, conversationId: session.id, title: session.title });
+        bumpList();
+      }
+      const row = await upload<ChatAttachmentDto>(
+        `/api/conversations/${id}/attachments`,
+        file,
+        durationMs ? { durationMs: Math.round(durationMs) } : undefined,
+      );
+      uploaded.current.set(row.id, row);
+      return row;
+    },
+    [conversationId, fixedId, agentId, windowId, screenContext, updateMeta, bumpList],
   );
 
   return {
+    target,
     detail,
+    agent,
+    conversationId,
     error,
     run,
     busy: Boolean(run && isActiveStatus(run.status)),
@@ -236,6 +360,7 @@ export function useConversation(conversationId: string) {
     reconnecting,
     reload: load,
     send,
+    finish,
     cancel,
     decide,
     attach,

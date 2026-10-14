@@ -3,10 +3,12 @@ import {
   AlertTriangle,
   Bell,
   Bot,
+  BotMessageSquare,
   CalendarClock,
   CheckCheck,
   CreditCard,
   FileClock,
+  Gauge,
   GitCompareArrows,
   Info,
   Repeat2,
@@ -33,6 +35,8 @@ const ICONS: Record<NotificationKind, ReactNode> = {
   contract_ending: <FileClock className="ic info" />,
   contract_renewal_pending: <Repeat2 className="ic" />,
   contract_readjustment: <CalendarClock className="ic info" />,
+  ai_budget_alert: <Gauge className="ic" />,
+  ai_awaiting_approval: <BotMessageSquare className="ic" />,
 };
 
 /**

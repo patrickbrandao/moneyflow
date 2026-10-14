@@ -5,7 +5,7 @@ import { formatCnpj } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { strFromU8, unzipSync } from 'fflate';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { alphaCnpj, client, freshDatabase, type Harness, login, scenario, startApp, uid, userSession } from './helpers';
+import { alphaCnpj, client, dropFreshDatabases, freshDatabase, type Harness, login, scenario, startApp, uid, userSession } from './helpers';
 
 /*
  * Backup e restauração (spec 019): exportação com segredos, importação com
@@ -17,7 +17,11 @@ let h: Harness;
 beforeAll(async () => {
   h = await startApp();
 });
-afterAll(() => h.close());
+afterAll(async () => {
+  await h.close();
+  // Os bancos novos dos testes abaixo não ficam no servidor (banco externo).
+  await dropFreshDatabases();
+});
 
 type Report = {
   dryRun: boolean;
@@ -188,6 +192,79 @@ describe('backup: recursos num sistema novo', () => {
     expect(prices.some((p: any) => p.providerId === provider.id && p.model === 'gpt-x')).toBe(true);
   });
 
+  it('capacidades e inferências vão no arquivo (sem os caches); arquivo antigo (embedding_model) migra como a 0041 (spec 024)', async () => {
+    if (skip) return;
+    const api = client(b, adminB.cookie);
+    const provider = await api.post('/api/admin/ai/providers', {
+      name: `Capacidades ${uid()}`,
+      kind: 'openai',
+      apiKey: `sk-${uid()}`,
+      capabilities: ['text', 'vision', 'embeddings'],
+      defaultModels: { text: 'gpt-x', embeddings: 'emb-x' },
+    });
+    const agent = await api.post('/api/admin/ai/agents', { name: `Inferências ${uid()}`, defaultProviderId: provider.id, model: 'gpt-x' });
+    const full = await b.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminB.cookie } });
+    expect(full.statusCode, full.body.slice(0, 300)).toBe(200);
+    const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+    const providerRow = json.tables.ai_providers.find((p: any) => p.id === provider.id);
+    expect(providerRow).toMatchObject({
+      capabilities: ['text', 'vision', 'embeddings'],
+      default_models: { text: 'gpt-x', embeddings: 'emb-x' },
+    });
+    expect(providerRow.embedding_model).toBeUndefined();
+    const inferences = json.tables.ai_agent_inferences.filter((i: any) => i.agent_id === agent.id);
+    expect(inferences.map((i: any) => i.capability).sort()).toEqual(['embeddings', 'vision']);
+    expect(json.tables.ai_attachment_derivatives).toBeUndefined();
+    expect(json.tables.ai_embedding_indexes).toBeUndefined();
+    // Reimportar: as inferências já cadastradas ficam.
+    const again = await importFile(b, adminB.cookie, 'full', {
+      ...json,
+      tables: { ai_providers: [providerRow], ai_agent_inferences: inferences },
+    });
+    expect(failures(again)).toEqual([]);
+    expect(sum(again, 'ai_agent_inferences').imported).toBe(0);
+
+    // Arquivo antigo: provedores sem as colunas novas, com embedding_model; agentes sem inferências.
+    const { capabilities: _c, default_models: _d, prompt_cache_enabled: _p, thinking_enabled: _t, ...legacy } = providerRow;
+    const embedder = { ...legacy, id: randomUUID(), name: `Antigo emb ${uid()}`, embedding_model: 'emb-antigo' };
+    const compat = {
+      ...legacy,
+      id: randomUUID(),
+      name: `Antigo compatível ${uid()}`,
+      kind: 'anthropic',
+      base_url: 'http://127.0.0.1:9',
+      api_key: null,
+      embedding_model: null,
+    };
+    const orphan = { ...compat, id: randomUUID(), name: `Antigo sem modelo ${uid()}` };
+    const agentRow = json.tables.ai_agents.find((a: any) => a.id === agent.id);
+    const oldAgent = { ...agentRow, id: randomUUID(), name: `Agente antigo ${uid()}`, provider_id: compat.id, model: 'claude-antigo' };
+    const report = await importFile(b, adminB.cookie, 'full', {
+      ...json,
+      tables: { ai_providers: [embedder, compat, orphan], ai_agents: [oldAgent] },
+      references: {},
+    });
+    // O compatível sem agente no arquivo não tem modelo de texto: volta como conflito, com o motivo.
+    expect(failures(report).map((i) => i.id)).toEqual([orphan.id]);
+    expect(failures(report)[0]!.reason).toContain('modelo de texto padrão');
+    const providers = await api.get('/api/admin/ai/providers');
+    expect(providers.find((p: any) => p.id === embedder.id)).toMatchObject({
+      capabilities: ['text', 'vision', 'embeddings', 'transcription', 'speech'],
+      defaultModels: { embeddings: 'emb-antigo' },
+    });
+    expect(providers.find((p: any) => p.id === compat.id)).toMatchObject({
+      capabilities: ['text', 'vision'],
+      defaultModels: { text: 'claude-antigo' },
+      promptCacheEnabled: false,
+      thinkingEnabled: false,
+    });
+    const agents = await api.get('/api/admin/ai/agents');
+    expect(agents.find((a: any) => a.id === oldAgent.id).inferences.map((i: any) => [i.capability, i.providerId])).toEqual([
+      ['vision', compat.id],
+      ['embeddings', embedder.id],
+    ]);
+  });
+
   it('agente dos fluxos entra sem a marca se já há um marcado; conversa de backup antigo ganha a finalidade do screen_context', async () => {
     if (skip) return;
     const api = client(b, adminB.cookie);
@@ -247,6 +324,347 @@ describe('backup: recursos num sistema novo', () => {
     expect(failures(await importFile(b, adminB.cookie, 'full', second.file))).toEqual([]);
     const after = await api.get('/api/admin/ai/agents');
     expect(after.filter((a: any) => a.useForFlows).map((a: any) => a.id)).toEqual([second.agentId]);
+  });
+
+  it('sessão ativa única (spec 026): a importada que traria uma 2ª ativa do par entra finalizada; no arquivo antigo fica a mais recente', async () => {
+    if (skip) return;
+    const api = client(b, adminB.cookie);
+    const provider = await api.post('/api/admin/ai/providers', {
+      name: `Provedor sessões ${uid()}`,
+      kind: 'openai',
+      apiKey: `sk-${uid()}`,
+    });
+    const base = { systemPrompt: 'Sessões.', providerId: provider.id, model: 'gpt-x', isActive: true };
+    const withActive = await api.post('/api/admin/ai/agents', { ...base, name: `Com ativa ${uid()}` });
+    const withoutActive = await api.post('/api/admin/ai/agents', { ...base, name: `Sem ativa ${uid()}` });
+    // No banco: a sessão ativa do admin com o 1º agente.
+    const current = await api.post(`/api/agents/${withActive.id}/sessions`, {});
+
+    const full = await b.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminB.cookie } });
+    const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+    // Arquivo de antes da 0043: várias ativas do mesmo par e o pinned_at que saiu.
+    const row = (agentId: string, lastMessageAt: string | null) => ({
+      id: randomUUID(),
+      user_id: adminB.id,
+      agent_id: agentId,
+      title: `Importada ${uid()}`,
+      title_source: 'user',
+      pinned_at: null,
+      archived_at: null,
+      last_message_at: lastMessageAt,
+      created_at: '2026-01-01T12:00:00Z',
+    });
+    const conflicting = [row(withActive.id, '2026-05-01T12:00:00Z'), row(withActive.id, null)];
+    const [older, newest, empty] = [
+      row(withoutActive.id, '2026-02-01T12:00:00Z'),
+      row(withoutActive.id, '2026-06-01T12:00:00Z'),
+      row(withoutActive.id, null),
+    ];
+    const file = { ...json, tables: { ai_conversations: [...conflicting, older, newest, empty] }, references: {} };
+
+    const report = await importFile(b, adminB.cookie, 'full', file);
+    expect(failures(report)).toEqual([]);
+    expect(sum(report, 'ai_conversations').imported).toBe(5);
+    const states = await b.db.execute<{ id: string; archived: boolean; archived_reason: string | null }>(sql`
+      SELECT id, archived_at IS NOT NULL AS archived, archived_reason FROM ai_conversations
+       WHERE id = ANY (${`{${[current.id, ...conflicting.map((c) => c.id), older!.id, newest!.id, empty!.id].join(',')}}`}::uuid[])`);
+    const state = new Map(states.rows.map((r) => [r.id, r.archived ? r.archived_reason : 'active']));
+    // O banco já tinha a ativa do 1º agente: as importadas entram finalizadas.
+    expect(state.get(current.id)).toBe('active');
+    for (const c of conflicting) expect(state.get(c.id)).toBe('import_conflict');
+    // Sem ativa no banco: fica ativa a de mensagem mais recente; as outras, finalizadas.
+    expect(state.get(newest!.id)).toBe('active');
+    expect(state.get(older!.id)).toBe('import_conflict');
+    expect(state.get(empty!.id)).toBe('import_conflict');
+    const threads = await api.get('/api/agents/threads');
+    expect(threads.find((th: any) => th.agentId === withoutActive.id).active.id).toBe(newest!.id);
+    expect(threads.find((th: any) => th.agentId === withoutActive.id).finishedCount).toBe(2);
+  });
+
+  it('kits de ferramentas: ida e volta com as tools e o agente apontando pelo nome; arquivo antigo (enabled_tools) vira kit', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const a = client(h, adminA.cookie);
+    const bApi = client(b, adminB.cookie);
+    const tag = uid();
+    const kit = await a.post('/api/admin/ai/tool-kits', {
+      name: `Kit backup ${tag}`,
+      description: 'Ida e volta',
+      tools: [
+        { name: 'list_caixas', mode: 'allow' },
+        { name: 'create_title', mode: 'ask' },
+      ],
+    });
+    const agent = await a.post('/api/admin/ai/agents', { name: `Agente kit ${tag}`, toolKitId: kit.id });
+
+    const full = await h.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminA.cookie } });
+    expect(full.statusCode, full.body.slice(0, 300)).toBe(200);
+    const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+    const kitRow = json.tables.ai_tool_kits.find((r: any) => r.id === kit.id);
+    const toolRows = json.tables.ai_tool_kit_tools.filter((r: any) => r.kit_id === kit.id);
+    const agentRow = json.tables.ai_agents.find((r: any) => r.id === agent.id);
+    expect(kitRow).toMatchObject({ name: kit.name, description: 'Ida e volta' });
+    expect(toolRows.map((r: any) => `${r.tool_name}:${r.mode}`).sort()).toEqual(['create_title:ask', 'list_caixas:allow']);
+    expect(agentRow.tool_kit_id).toBe(kit.id);
+    const fileOf = (tables: Record<string, unknown[]>) => ({ ...json, tables, references: {} });
+
+    const file = fileOf({ ai_tool_kits: [kitRow], ai_tool_kit_tools: toolRows, ai_agents: [agentRow] });
+    const report = await importFile(b, adminB.cookie, 'full', file);
+    expect(failures(report)).toEqual([]);
+    expect(sum(report, 'ai_tool_kits').imported).toBe(1);
+    expect(sum(report, 'ai_tool_kit_tools').imported).toBe(2);
+    expect(sum(report, 'ai_agents').imported).toBe(1);
+    const imported = await bApi.get(`/api/admin/ai/tool-kits/${kit.id}`);
+    expect(imported).toMatchObject({ name: kit.name, tools: kit.tools, agents: [{ id: agent.id, name: agent.name, archived: false }] });
+    // Reimportar não duplica: o kit e as tools (sem id) já existem.
+    const again = await importFile(b, adminB.cookie, 'full', file);
+    expect(failures(again)).toEqual([]);
+    expect(sum(again, 'ai_tool_kits').existing).toBe(1);
+    expect(sum(again, 'ai_tool_kit_tools').imported).toBe(0);
+
+    // Outro id com o mesmo nome (outra caixa de letras) é o mesmo kit: o agente do arquivo aponta para o daqui.
+    const otherKit = randomUUID();
+    const otherAgent = randomUUID();
+    const byName = await importFile(
+      b,
+      adminB.cookie,
+      'full',
+      fileOf({
+        ai_tool_kits: [{ ...kitRow, id: otherKit, name: kit.name.toUpperCase() }],
+        ai_tool_kit_tools: [{ ...toolRows[0], kit_id: otherKit, tool_name: 'end_series', mode: 'ask' }],
+        ai_agents: [{ ...agentRow, id: otherAgent, name: `Outro agente ${tag}`, tool_kit_id: otherKit }],
+      }),
+    );
+    expect(failures(byName)).toEqual([]);
+    expect(issuesOf(byName, 'ai_tool_kits')[0]?.reason).toMatch(/nome/);
+    // As tools do kit do arquivo não entram no kit que já existia.
+    expect(sum(byName, 'ai_tool_kit_tools').skipped).toBe(1);
+    expect((await bApi.get('/api/admin/ai/agents')).find((x: any) => x.id === otherAgent).toolKitId).toBe(kit.id);
+    expect((await bApi.get(`/api/admin/ai/tool-kits/${kit.id}`)).tools).toEqual(kit.tools);
+
+    // Arquivo de antes do kit (v0.1.7): enabled_tools/require_write_confirmation viram kit pela regra da migration 0038.
+    const { tool_kit_id: _kit, ...legacyBase } = agentRow;
+    const legacy = (name: string, enabled: string[] | null, confirm: boolean) => ({
+      ...legacyBase,
+      id: randomUUID(),
+      name: `${name} ${tag}`,
+      enabled_tools: enabled,
+      require_write_confirmation: confirm,
+    });
+    const listed = legacy('Lista', ['list_caixas', 'create_title', 'send_telegram_message', 'nao_existe'], false);
+    const confirming = legacy('Confirma', null, true);
+    const free = legacy('Livre', null, false);
+    const legacyReport = await importFile(b, adminB.cookie, 'full', fileOf({ ai_agents: [listed, confirming, free] }));
+    expect(failures(legacyReport)).toEqual([]);
+    expect(sum(legacyReport, 'ai_agents').imported).toBe(3);
+    expect(sum(legacyReport, 'ai_tool_kits').imported).toBe(2);
+    const agents = await bApi.get('/api/admin/ai/agents');
+    const kitOf = async (id: string) => {
+      const row = agents.find((x: any) => x.id === id);
+      return row.toolKitId ? bApi.get(`/api/admin/ai/tool-kits/${row.toolKitId}`) : null;
+    };
+    const listedKit = await kitOf(listed.id);
+    expect(listedKit.name).toBe(`Kit – ${listed.name}`);
+    expect(listedKit.tools).toEqual([
+      { name: 'list_caixas', mode: 'allow' },
+      { name: 'create_title', mode: 'allow' },
+      { name: 'send_telegram_message', mode: 'ask' },
+    ]);
+    const confirmingKit = await kitOf(confirming.id);
+    expect(confirmingKit.tools).toHaveLength(49);
+    const catalog = await bApi.get('/api/admin/ai/tools');
+    for (const tool of confirmingKit.tools) {
+      expect(tool.mode, tool.name).toBe(catalog.find((x: any) => x.name === tool.name).suggestedMode);
+    }
+    expect(await kitOf(free.id)).toBeNull();
+  });
+
+  it('orçamentos de IA (spec 028): vão e voltam no JSON completo; reimportar não duplica; ativo repetido volta como conflito', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const a = client(h, adminA.cookie);
+    const agent = await a.post('/api/admin/ai/agents', { name: `Agente orçamento ${uid()}` });
+    const created = [
+      await a.post('/api/admin/ai/budgets', { scope: 'agent', agentId: agent.id, monthlyLimit: 25, alertPercent: 60 }),
+      await a.post('/api/admin/ai/budgets', { scope: 'flows', monthlyLimit: 7, isActive: false }),
+    ];
+    try {
+      const full = await h.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminA.cookie } });
+      expect(full.statusCode, full.body.slice(0, 300)).toBe(200);
+      const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+      const ids = created.map((x: any) => x.id);
+      const rows = json.tables.ai_budgets.filter((r: any) => ids.includes(r.id));
+      expect(rows.map((r: any) => [r.scope, r.monthly_limit_micros, r.is_active])).toEqual([
+        ['agent', 25_000_000, true],
+        ['flows', 7_000_000, false],
+      ]);
+      const agentRow = json.tables.ai_agents.find((r: any) => r.id === agent.id);
+      const file = { ...json, tables: { ai_agents: [agentRow], ai_budgets: rows }, references: {} };
+
+      const report = await importFile(b, adminB.cookie, 'full', file);
+      expect(failures(report)).toEqual([]);
+      expect(sum(report, 'ai_budgets').imported).toBe(2);
+      const listed = await client(b, adminB.cookie).get('/api/admin/ai/budgets');
+      expect(listed.find((x: any) => x.id === created[0].id)).toMatchObject({
+        scope: 'agent',
+        agentId: agent.id,
+        alertPercent: 60,
+        isActive: true,
+      });
+      const again = await importFile(b, adminB.cookie, 'full', file);
+      expect(failures(again)).toEqual([]);
+      expect(sum(again, 'ai_budgets').existing).toBe(2);
+
+      // Outro orçamento ativo do mesmo escopo, alvo e moeda: não entra e volta com o motivo.
+      const clash = await importFile(b, adminB.cookie, 'full', {
+        ...file,
+        tables: { ai_budgets: [{ ...rows[0], id: randomUUID() }] },
+      });
+      expect(sum(clash, 'ai_budgets').imported).toBe(0);
+      expect(issuesOf(clash, 'ai_budgets')[0]?.reason).toMatch(/orçamento ativo/);
+    } finally {
+      for (const x of created) await a.del(`/api/admin/ai/budgets/${x.id}`);
+    }
+  });
+
+  it('fluxos autônomos (spec 029): destino com os dois segredos entra com a entrada desligada; tarefas e pareamentos vão; códigos e disparos não', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const a = client(h, adminA.cookie);
+    const owner = await userSession(h);
+    const agent = await a.post('/api/admin/ai/agents', { name: `Agente F15 backup ${uid()}` });
+    const bot = `${600000 + Math.floor(Math.random() * 300000)}:AAFbackup${uid().replace(/[^A-Za-z0-9]/g, '')}xx${uid().replace(/[^A-Za-z0-9]/g, '')}`;
+    const destination = await client(h, owner.cookie).post('/api/message-destinations', {
+      name: `Entrada ${uid()}`,
+      botToken: bot,
+      chatId: '-1001112223',
+    });
+    const hash = createHash('sha256').update(`segredo-${uid()}`, 'utf8').digest('hex');
+    // A entrada ligada direto no banco (o setWebhook é testado com a Bot API falsa em autonomous.test.ts).
+    await h.db.execute(sql`
+      UPDATE message_destinations SET inbound_enabled = true, inbound_agent_id = ${agent.id}, webhook_secret_hash = ${hash}
+       WHERE id = ${destination.id}`);
+    const link = await h.db.execute<{ id: string }>(sql`
+      INSERT INTO telegram_links (destination_id, user_id, chat_id, telegram_user_id, username)
+      VALUES (${destination.id}, ${owner.id}, 777000111, 777000111, 'backup_f15') RETURNING id`);
+    await h.db.execute(sql`
+      INSERT INTO telegram_pairing_codes (user_id, destination_id, code_hash)
+      VALUES (${owner.id}, ${destination.id}, ${createHash('sha256').update(uid(), 'utf8').digest('hex')})`);
+    // O agente sem provedor está inativo: a tarefa entra direto no banco (a tela só oferece agentes ativos).
+    const inserted = await h.db.execute<{ id: string }>(sql`
+      INSERT INTO ai_scheduled_tasks (user_id, agent_id, name, instruction, schedule, created_by_user_id)
+      VALUES (${owner.id}, ${agent.id}, 'Tarefa do backup', 'Olá', '{"kind": "monthly", "time": "07:00", "day": 31}', ${adminA.id})
+      RETURNING id`);
+    const task = { id: inserted.rows[0]!.id, schedule: { kind: 'monthly', time: '07:00', day: 31 } };
+    const full = await h.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminA.cookie } });
+    expect(full.statusCode, full.body.slice(0, 300)).toBe(200);
+    const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+    const destinationRow = json.tables.message_destinations.find((r: any) => r.id === destination.id);
+    expect(destinationRow).toMatchObject({ bot_token: bot, webhook_secret_hash: hash, inbound_enabled: true, inbound_agent_id: agent.id });
+    expect(json.tables.telegram_links.find((r: any) => r.id === link.rows[0]!.id)).toMatchObject({ chat_id: 777000111 });
+    expect(json.tables.ai_scheduled_tasks.find((r: any) => r.id === task.id)).toMatchObject({ schedule: task.schedule });
+    expect(json.tables.telegram_pairing_codes).toBeUndefined();
+    expect(json.tables.ai_scheduled_task_runs).toBeUndefined();
+    expect(json.tables.telegram_updates_seen).toBeUndefined();
+
+    const ownerRow = json.tables.users.find((r: any) => r.id === owner.id);
+    const file = {
+      ...json,
+      tables: {
+        users: [ownerRow],
+        ai_agents: [json.tables.ai_agents.find((r: any) => r.id === agent.id)],
+        message_destinations: [destinationRow],
+        telegram_links: json.tables.telegram_links.filter((r: any) => r.id === link.rows[0]!.id),
+        ai_scheduled_tasks: json.tables.ai_scheduled_tasks.filter((r: any) => r.id === task.id),
+      },
+      references: {},
+    };
+    const report = await importFile(b, adminB.cookie, 'full', file);
+    expect(failures(report)).toEqual([]);
+    const imported = await b.db.execute<{ inbound_enabled: boolean; inbound_agent_id: string }>(
+      sql`SELECT inbound_enabled, inbound_agent_id FROM message_destinations WHERE id = ${destination.id}`,
+    );
+    expect(imported.rows[0]).toEqual({ inbound_enabled: false, inbound_agent_id: agent.id });
+    const secret = await b.db.execute<{ v: string }>(
+      sql`SELECT admin_message_destination_webhook_secret(${destination.id}::uuid, ${adminB.id}::uuid) AS v`,
+    );
+    expect(secret.rows[0]!.v).toBe(hash);
+    const tasks = await b.db.execute<{ next_run_at: unknown; user_id: string }>(
+      sql`SELECT next_run_at, user_id FROM ai_scheduled_tasks WHERE id = ${task.id}`,
+    );
+    expect(tasks.rows[0]!.user_id).toBe(owner.id);
+    expect(tasks.rows[0]!.next_run_at).not.toBeNull();
+    expect((await b.db.execute(sql`SELECT 1 FROM telegram_links WHERE id = ${link.rows[0]!.id}`)).rows).toHaveLength(1);
+    await h.db.execute(sql`DELETE FROM ai_scheduled_tasks WHERE id = ${task.id}`);
+  });
+
+  it('prompt (spec 022): as versões do agente vão e voltam com números, notas e a restauração; arquivo sem versões ganha a 1', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const a = client(h, adminA.cookie);
+    const bApi = client(b, adminB.cookie);
+    const tag = uid();
+    const agent = await a.post('/api/admin/ai/agents', { name: `Versões ${tag}`, systemPrompt: 'v1 do prompt', promptNote: 'criação' });
+    await a.patch(`/api/admin/ai/agents/${agent.id}`, { systemPrompt: 'v2 do prompt', promptNote: 'ajuste' });
+    const first = (await a.get(`/api/admin/ai/agents/${agent.id}/prompt-versions`)).at(-1);
+    await a.post(`/api/admin/ai/agents/${agent.id}/prompt-versions/${first.id}/restore`);
+    const original = await a.get(`/api/admin/ai/agents/${agent.id}/prompt-versions`);
+    expect(original.map((v: any) => v.version)).toEqual([3, 2, 1]);
+
+    const full = await h.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminA.cookie } });
+    expect(full.statusCode, full.body.slice(0, 300)).toBe(200);
+    const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+    const agentRow = json.tables.ai_agents.find((r: any) => r.id === agent.id);
+    const versionRows = json.tables.ai_agent_prompt_versions.filter((r: any) => r.agent_id === agent.id);
+    expect(versionRows).toHaveLength(3);
+    const fileOf = (tables: Record<string, unknown[]>) => ({ ...json, tables, references: {} });
+
+    const report = await importFile(b, adminB.cookie, 'full', fileOf({ ai_agents: [agentRow], ai_agent_prompt_versions: versionRows }));
+    expect(failures(report)).toEqual([]);
+    expect(sum(report, 'ai_agent_prompt_versions').imported).toBe(3);
+    const imported = await bApi.get(`/api/admin/ai/agents/${agent.id}/prompt-versions`);
+    expect(imported.map((v: any) => [v.id, v.version, v.content, v.note, v.restoredFromVersionId])).toEqual(
+      original.map((v: any) => [v.id, v.version, v.content, v.note, v.restoredFromVersionId]),
+    );
+    expect((await bApi.get('/api/admin/ai/agents')).find((x: any) => x.id === agent.id)).toMatchObject({
+      systemPrompt: 'v1 do prompt',
+      promptVersion: 3,
+    });
+    // Reimportar: o agente já existe aqui e fica com o histórico dele.
+    const again = await importFile(b, adminB.cookie, 'full', fileOf({ ai_agents: [agentRow], ai_agent_prompt_versions: versionRows }));
+    expect(failures(again)).toEqual([]);
+    expect(sum(again, 'ai_agent_prompt_versions').imported).toBe(0);
+
+    // Arquivo de antes das versões (v0.1.7): o banco cria a versão 1 com o prompt do agente.
+    const legacy = { ...agentRow, id: randomUUID(), name: `Sem versões ${tag}`, system_prompt: 'prompt antigo' };
+    const legacyReport = await importFile(b, adminB.cookie, 'full', fileOf({ ai_agents: [legacy] }));
+    expect(failures(legacyReport)).toEqual([]);
+    const legacyVersions = await bApi.get(`/api/admin/ai/agents/${legacy.id}/prompt-versions`);
+    expect(legacyVersions.map((v: any) => [v.version, v.content])).toEqual([[1, 'prompt antigo']]);
+  });
+
+  it('as instruções de IA do usuário vão no recurso usuários; a caixa principal ausente vira nula', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const a = client(h, adminA.cookie);
+    const s = await scenario(h, a);
+    const someone = await userSession(h);
+    await a.put(`/api/users/${someone.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
+    await client(h, someone.cookie).put('/api/account/ai', { instructions: 'Minhas instruções de backup', primaryCaixaId: s.caixaA.id });
+
+    const file = await exportJson(h, adminA.cookie, 'users');
+    expect(file.tables.user_ai_settings.find((r: any) => r.user_id === someone.id)).toMatchObject({
+      instructions: 'Minhas instruções de backup',
+      primary_caixa_id: s.caixaA.id,
+    });
+    const report = await importFile(b, adminB.cookie, 'users', file);
+    expect(issuesOf(report, 'user_ai_settings', 'failed')).toEqual([]);
+    expect(await client(b, adminB.cookie).get(`/api/users/${someone.id}/ai`)).toMatchObject({
+      instructions: 'Minhas instruções de backup',
+      primaryCaixaId: null,
+    });
+    const again = await importFile(b, adminB.cookie, 'users', file);
+    expect(sum(again, 'user_ai_settings').imported).toBe(0);
   });
 
   it('caixas exigem o titular; entidades casam pelo documento e conflitos de chave PIX voltam com o motivo', async () => {

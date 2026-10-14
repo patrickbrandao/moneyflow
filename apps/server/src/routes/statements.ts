@@ -7,13 +7,20 @@ import {
   lineCreateInput,
   lineIdsInput,
   lineMatchInput,
+  reconcileAiAutoInput,
   ruleListQuery,
   statementImportQuery,
   statementTargetQuery,
 } from '@moneyflow/shared';
 import type { FastifyInstance } from 'fastify';
 import { param, parse, type Req } from '../http';
-import { suggestImportClassifications } from '../services/ai-flows';
+import {
+  autoReconcileEnabled,
+  reconcileAiState,
+  reconcileImportWithAi,
+  setReconcileAuto,
+  suggestImportClassifications,
+} from '../services/ai-flows';
 import { assertUpload } from '../services/attachments';
 import * as rec from '../services/reconciliation';
 import * as statements from '../services/statements';
@@ -32,13 +39,28 @@ export async function statementRoutes(app: FastifyInstance) {
       mime: r.headers['content-type'] ?? '',
       content: assertUpload(r.body),
     });
-    // Linhas sem regra recebem sugestão do agente dos fluxos (spec 009/011), em segundo plano no worker.
+    // "Conciliar com IA ao importar" ligado na conta/cartão (spec 029): a conciliação completa vai à fila do worker.
+    // Desligado: as linhas sem regra recebem sugestão do agente dos fluxos (spec 009/011), em segundo plano.
+    const auto = await autoReconcileEnabled(r.ctx, result.id).catch(() => false);
+    if (auto) {
+      const aiReconcile = await reconcileImportWithAi(r.ctx, result.id, { auto: true }).catch((error) => {
+        r.log.warn({ err: error }, 'conciliação: conciliação com IA não enfileirada');
+        return null;
+      });
+      return { ...result, aiReconcile };
+    }
     const aiSuggestion = await suggestImportClassifications(r.ctx, result.id, { auto: true }).catch((error) => {
       r.log.warn({ err: error }, 'conciliação: sugestão do agente não enfileirada');
       return null;
     });
     return { ...result, aiSuggestion };
   });
+  // Conciliação completa com IA (spec 029): estado, "Conciliar com IA" e o interruptor da conta/cartão.
+  app.get('/api/statement-imports/:id/reconcile-ai', (r: Req) => reconcileAiState(r.ctx, id(r)));
+  app.post('/api/statement-imports/:id/reconcile-ai', (r: Req) => reconcileImportWithAi(r.ctx, id(r)));
+  app.put('/api/statement-imports/:id/reconcile-ai/auto', (r: Req) =>
+    setReconcileAuto(r.ctx, id(r), parse(reconcileAiAutoInput, r.body).enabled),
+  );
   app.get('/api/statement-imports/:id', (r: Req) => statements.getImport(r.ctx, id(r)));
   app.delete('/api/statement-imports/:id', (r: Req) => statements.deleteImport(r.ctx, id(r)));
   app.post('/api/statement-imports/:id/rematch', (r: Req) => statements.rematchImport(r.ctx, id(r)));

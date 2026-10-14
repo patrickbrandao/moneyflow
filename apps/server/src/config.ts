@@ -25,6 +25,10 @@ export type Config = {
   messageIntervalMs: number;
   /** URL pública do console, para os links nas mensagens (vazia = mensagens sem link). */
   publicUrl: string | null;
+  /** URL pública HTTPS da API para o webhook do Telegram (spec 029); app_settings telegram.public_base_url vence. */
+  publicBaseUrl: string | null;
+  /** Intervalo do laço das tarefas agendadas dos agentes (spec 029), em ms. */
+  agentTaskIntervalMs: number;
   /** Horário (HH:MM, São Paulo) dos avisos diários do sino (vencem hoje, atrasados). */
   notifyAt: string;
   /** Agentes (spec 011): intervalo de busca de execuções na fila, em ms. */
@@ -35,6 +39,18 @@ export type Config = {
   agentMaintenanceMs: number;
   /** Espera máxima da leitura de documento por IA, em ms. */
   aiDocumentTimeoutMs: number;
+  /** Requisições ao provedor (spec 023): tentativas do próprio MoneyFlow por chamada (padrão 3). */
+  aiRequestMaxAttempts: number;
+  /** Base do backoff entre as tentativas, em ms (1 s, 2 s, 4 s…; menor nos testes). */
+  aiRequestBackoffMs: number;
+  /** Retenção padrão das requisições, em dias (app_settings ai.request_retention_days vence). */
+  aiRequestRetentionDays: number;
+  /** Limite por minuto (spec 028): execuções de IA por usuário nas sessões (app_settings ai.runs_per_minute vence). */
+  aiRunsPerMinute: number;
+  /** Execuções por minuto por usuário nos fluxos automáticos (app_settings ai.flow_runs_per_minute vence). */
+  aiFlowRunsPerMinute: number;
+  /** Chat multimídia (spec 025): espera máxima da execução pelas transcrições pendentes da mensagem, em ms. */
+  aiTranscriptionTimeoutMs: number;
   /** Backup (spec 019): conexão do dono do banco, só para pg_dump/pg_restore; null = dump e restauração desligados. */
   ownerDatabaseUrl: string | null;
   /** Pasta dos binários do cliente PostgreSQL (pg_dump, pg_restore); vazia = PATH. */
@@ -75,13 +91,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     telegramTimeoutMs: Number(env.TELEGRAM_TIMEOUT_MS ?? 10_000),
     messageIntervalMs: Number(env.MESSAGE_INTERVAL_MS ?? 30_000),
     publicUrl: env.APP_URL ? env.APP_URL.replace(/\/+$/, '') : null,
+    publicBaseUrl: env.PUBLIC_BASE_URL?.trim() ? env.PUBLIC_BASE_URL.trim().replace(/\/+$/, '') : null,
+    agentTaskIntervalMs: clampInt(env.AGENT_TASK_INTERVAL_MS, 30_000, 1000, 3_600_000),
     notifyAt: /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(env.NOTIFY_AT ?? '') ? env.NOTIFY_AT! : '08:00',
     agentPollMs: Number(env.AGENT_POLL_MS ?? 1000),
     agentConcurrency: Math.max(1, Number(env.AGENT_CONCURRENCY ?? 4)),
     agentMaintenanceMs: Number(env.AGENT_MAINTENANCE_MS ?? 5 * 60 * 1000),
     aiDocumentTimeoutMs: Number(env.AI_DOCUMENT_TIMEOUT_MS ?? 120_000),
+    aiRequestMaxAttempts: clampInt(env.AI_REQUEST_MAX_ATTEMPTS, 3, 1, 10),
+    aiRequestBackoffMs: clampInt(env.AI_REQUEST_BACKOFF_MS, 1000, 0, 60_000),
+    aiRequestRetentionDays: clampInt(env.AI_REQUEST_RETENTION_DAYS, 30, 1, 365),
+    aiRunsPerMinute: clampInt(env.AI_RUNS_PER_MINUTE, 10, 1, 1000),
+    aiFlowRunsPerMinute: clampInt(env.AI_FLOW_RUNS_PER_MINUTE, 30, 1, 1000),
+    aiTranscriptionTimeoutMs: clampInt(env.AI_TRANSCRIPTION_TIMEOUT_MS, 120_000, 0, 600_000),
     ownerDatabaseUrl: env.DATABASE_OWNER_URL?.trim() || null,
     pgBinDir: env.PG_BIN_DIR?.trim() || null,
     backupMaxUploadBytes: Math.max(1, Number(env.BACKUP_MAX_UPLOAD_MB ?? 512)) * 1024 * 1024,
   };
+}
+
+/** Inteiro da variável, dentro da faixa (vazia ou inválida = o padrão). */
+function clampInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const n = Number(raw);
+  if (raw === undefined || raw.trim() === '' || !Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
 }

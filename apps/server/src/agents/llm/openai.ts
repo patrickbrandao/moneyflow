@@ -1,5 +1,14 @@
-import type { AssistantBlock, NeutralMessage } from '@moneyflow/shared';
-import OpenAI from 'openai';
+import {
+  type AiRequestOperation,
+  type AiUsagePurpose,
+  type AssistantBlock,
+  EMBEDDING_DIMENSIONS,
+  type NeutralMessage,
+  t,
+} from '@moneyflow/shared';
+import OpenAI, { toFile } from 'openai';
+import { attachmentLabel } from './attachment-label';
+import { failureOutcome, type RequestLogBase, RequestRecorder } from './request-log';
 import { type LlmClient, type LlmCredentials, LlmError, type LlmRequest, type LlmStopReason } from './types';
 
 /*
@@ -23,7 +32,8 @@ function stopReason(reason: string | null | undefined): LlmStopReason {
 }
 
 async function toMessages(request: LlmRequest): Promise<ChatMessage[]> {
-  const system = request.systemVolatile ? `${request.system}\n\n${request.systemVolatile}` : request.system;
+  // Mesma ordem das partes da Anthropic (spec 022), sem marcas de cache.
+  const system = [request.system, request.systemUser, request.systemVolatile].filter(Boolean).join('\n\n');
   const out: ChatMessage[] = [{ role: 'system', content: system }];
   for (const message of request.messages as NeutralMessage[]) {
     if (message.role === 'user') {
@@ -34,7 +44,10 @@ async function toMessages(request: LlmRequest): Promise<ChatMessage[]> {
           continue;
         }
         const file = await request.loadAttachment(block.attachment_id);
+        // O id do anexo vai ao modelo (as tools de importação o recebem, spec 027).
+        parts.push({ type: 'text', text: attachmentLabel(block, file) });
         if (!file) parts.push({ type: 'text', text: `[anexo ${block.attachment_id} indisponível]` });
+        else if ('text' in file) parts.push({ type: 'text', text: file.text });
         else if (IMAGE_TYPES.has(file.mime))
           parts.push({ type: 'image_url', image_url: { url: `data:${file.mime};base64,${file.data.toString('base64')}` } });
         else if (file.mime === 'application/pdf')
@@ -42,7 +55,7 @@ async function toMessages(request: LlmRequest): Promise<ChatMessage[]> {
             type: 'file',
             file: { filename: file.fileName, file_data: `data:application/pdf;base64,${file.data.toString('base64')}` },
           });
-        else if (file.mime.startsWith('text/') || /json|xml|csv/.test(file.mime))
+        else if (file.mime.startsWith('text/') || /json|xml|csv|ofx/.test(file.mime))
           parts.push({ type: 'text', text: `Arquivo ${file.fileName}:\n${file.data.toString('utf8')}` });
         else parts.push({ type: 'text', text: `[anexo ${file.fileName} (${file.mime}) em formato não suportado]` });
       }
@@ -69,21 +82,34 @@ async function toMessages(request: LlmRequest): Promise<ChatMessage[]> {
   return out;
 }
 
-export function openaiClient(credentials: LlmCredentials): LlmClient {
-  const client = new OpenAI({
+/** Cliente do SDK com o fetch do invólucro (spec 023): as tentativas são dele, não do SDK. */
+function openClient(credentials: LlmCredentials, recorder: RequestRecorder, timeout = 10 * 60 * 1000) {
+  return new OpenAI({
     apiKey: credentials.apiKey ?? 'sem-chave',
     baseURL: credentials.baseUrl ?? undefined,
-    maxRetries: 2,
-    timeout: 10 * 60 * 1000,
+    maxRetries: 0,
+    timeout,
+    fetch: recorder.fetch,
   });
+}
 
-  const wrap = (error: unknown): never => {
-    if (error instanceof OpenAI.APIError) {
-      const status = typeof error.status === 'number' ? error.status : null;
-      throw new LlmError(String(error.message).slice(0, 500), status, status === null || status === 429 || status >= 500);
-    }
-    throw error;
-  };
+/** Erro do SDK → LlmError (ou o abort, como veio); queda no meio do stream volta a execução à fila. */
+function wrapError(error: unknown, signal?: AbortSignal): never {
+  if (error instanceof OpenAI.APIError && !(error instanceof OpenAI.APIUserAbortError)) {
+    const status = typeof error.status === 'number' ? error.status : null;
+    throw new LlmError(
+      String(error.message).slice(0, 500),
+      status,
+      status === null || status === 408 || status === 409 || status === 429 || status >= 500,
+    );
+  }
+  if (signal?.aborted || (error as { name?: string })?.name === 'AbortError') throw error;
+  throw new LlmError(String(error instanceof Error ? error.message : error).slice(0, 500), null, true);
+}
+
+export function openaiClient(credentials: LlmCredentials, log: RequestLogBase = {}): LlmClient {
+  const recorderFor = (operation: AiRequestOperation, purpose: AiUsagePurpose | null, model: string | null) =>
+    new RequestRecorder({ ...log, baseUrl: credentials.baseUrl }, { operation, purpose, model });
 
   return {
     kind: 'openai',
@@ -113,6 +139,8 @@ export function openaiClient(credentials: LlmCredentials): LlmClient {
       let model = request.model;
       const calls = new Map<number, { id: string; name: string; args: string }>();
       const usage = { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 };
+      const recorder = recorderFor(request.operation ?? 'chat', request.purpose ?? 'chat', request.model);
+      const client = openClient(credentials, recorder);
       try {
         const stream = await client.chat.completions.create(body, { signal: request.signal });
         for await (const chunk of stream) {
@@ -142,7 +170,8 @@ export function openaiClient(credentials: LlmCredentials): LlmClient {
           }
         }
       } catch (error) {
-        return wrap(error);
+        await recorder.finish(failureOutcome(error, request.signal));
+        return wrapError(error, request.signal);
       }
 
       const content: AssistantBlock[] = [];
@@ -159,39 +188,145 @@ export function openaiClient(credentials: LlmCredentials): LlmClient {
         index += 1;
         content.push({ type: 'tool_use', id: call.id || `call_${Date.now()}_${index}`, name: call.name, input });
       }
-      return { content, stopReason: calls.size > 0 ? 'tool_use' : stopReason(finish), model, usage };
+      const result = { content, stopReason: calls.size > 0 ? ('tool_use' as const) : stopReason(finish), model, usage };
+      // Resposta montada (JSON final) para o registro com log_bodies.
+      const requestId = await recorder.finish({ status: 'ok', usage, responseBody: { model, finish_reason: finish, content } });
+      return { ...result, requestId };
     },
-    async listModels() {
+    async listModels(operation = 'list_models') {
+      const recorder = recorderFor(operation, null, null);
+      const client = openClient(credentials, recorder);
       try {
         const ids: string[] = [];
         for await (const model of client.models.list()) ids.push(model.id);
+        await recorder.finish({ status: 'ok' });
         return ids.sort();
       } catch (error) {
-        return wrap(error);
+        await recorder.finish(failureOutcome(error));
+        return wrapError(error);
       }
     },
   };
 }
 
-/** Embeddings (1536 dimensões, o tamanho fixo de ai_embeddings). */
-export async function embedTexts(
+/** Erro de uma chamada avulsa (embeddings, áudio) → LlmError. */
+function wrapCallError(error: unknown, signal?: AbortSignal): never {
+  if (error instanceof LlmError) throw error;
+  return wrapError(error, signal);
+}
+
+/**
+ * Embeddings (spec 024): vetores de 1536 dimensões, o tamanho fixo de
+ * ai_embeddings. Nos text-embedding-3-* o MoneyFlow pede `dimensions: 1536`;
+ * um modelo que devolve outra dimensão é recusado com LlmError (o teste da
+ * flag mostra "o modelo precisa produzir 1536 dimensões").
+ */
+export async function embed(
   credentials: LlmCredentials,
   model: string,
   texts: string[],
-): Promise<{ vectors: number[][]; tokens: number }> {
-  const client = new OpenAI({ apiKey: credentials.apiKey ?? 'sem-chave', baseURL: credentials.baseUrl ?? undefined, maxRetries: 2 });
+  log: RequestLogBase = {},
+  operation: AiRequestOperation = 'embedding',
+): Promise<{ vectors: number[][]; tokens: number; requestId: string | null }> {
+  const recorder = new RequestRecorder({ ...log, baseUrl: credentials.baseUrl }, { operation, purpose: 'embedding', model });
+  const client = openClient(credentials, recorder, 2 * 60 * 1000);
+  let response: OpenAI.Embeddings.CreateEmbeddingResponse;
   try {
-    const response = await client.embeddings.create({
+    response = await client.embeddings.create({
       model,
       input: texts,
-      ...(/text-embedding-3/.test(model) ? { dimensions: 1536 } : {}),
+      ...(/text-embedding-3/.test(model) ? { dimensions: EMBEDDING_DIMENSIONS } : {}),
     });
-    return {
-      vectors: response.data.sort((a, b) => a.index - b.index).map((d) => d.embedding as number[]),
-      tokens: response.usage?.prompt_tokens ?? 0,
-    };
   } catch (error) {
-    if (error instanceof OpenAI.APIError) throw new LlmError(String(error.message).slice(0, 500), error.status ?? null, true);
-    throw error;
+    await recorder.finish(failureOutcome(error));
+    return wrapCallError(error);
   }
+  const tokens = response.usage?.prompt_tokens ?? 0;
+  const requestId = await recorder.finish({
+    status: 'ok',
+    usage: { inputTokens: tokens, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 },
+  });
+  const vectors = [...response.data].sort((a, b) => a.index - b.index).map((d) => d.embedding as number[]);
+  const wrong = vectors.find((v) => v.length !== EMBEDDING_DIMENSIONS);
+  if (wrong) throw new LlmError(t.agents.errors.embeddingDimensions(wrong.length), null, false);
+  return { vectors, tokens, requestId };
+}
+
+export type TranscribeResult = {
+  text: string;
+  /** Duração do áudio (s), quando o provedor informa (cobrança por minuto). */
+  audioSeconds: number | null;
+  usage: { inputTokens: number; outputTokens: number };
+  requestId: string | null;
+};
+
+/**
+ * Áudio→texto (spec 024; usado pela 025): POST /audio/transcriptions com o
+ * arquivo em multipart. Com log_bodies, o registro guarda o corpo inteiro,
+ * com o áudio em base64; sem ele, só os metadados.
+ */
+export async function transcribe(
+  credentials: LlmCredentials,
+  model: string,
+  audio: { fileName: string; mime: string; data: Buffer },
+  log: RequestLogBase = {},
+  opts: { operation?: AiRequestOperation; language?: string; signal?: AbortSignal } = {},
+): Promise<TranscribeResult> {
+  const recorder = new RequestRecorder(
+    { ...log, baseUrl: credentials.baseUrl },
+    { operation: opts.operation ?? 'transcription', purpose: 'transcription', model },
+  );
+  const client = openClient(credentials, recorder, 5 * 60 * 1000);
+  let response: OpenAI.Audio.Transcription;
+  try {
+    response = await client.audio.transcriptions.create(
+      {
+        file: await toFile(audio.data, audio.fileName, { type: audio.mime }),
+        model,
+        response_format: 'json',
+        ...(opts.language ? { language: opts.language } : {}),
+      },
+      { signal: opts.signal },
+    );
+  } catch (error) {
+    await recorder.finish(failureOutcome(error, opts.signal));
+    return wrapCallError(error, opts.signal);
+  }
+  const raw = response as OpenAI.Audio.Transcription & { duration?: number };
+  const usage = raw.usage;
+  const tokens =
+    usage?.type === 'tokens'
+      ? { inputTokens: usage.input_tokens ?? 0, outputTokens: usage.output_tokens ?? 0 }
+      : { inputTokens: 0, outputTokens: 0 };
+  const audioSeconds = usage?.type === 'duration' ? usage.seconds : typeof raw.duration === 'number' ? raw.duration : null;
+  const requestId = await recorder.finish({ status: 'ok', usage: { ...tokens, cacheWriteTokens: 0, cacheReadTokens: 0 } });
+  return { text: String(raw.text ?? ''), audioSeconds, usage: tokens, requestId };
+}
+
+/** Texto→áudio (spec 024; usado pela 025): POST /audio/speech, mp3. O uso é por caractere (characters). */
+export async function speak(
+  credentials: LlmCredentials,
+  model: string,
+  voice: string,
+  text: string,
+  log: RequestLogBase = {},
+  opts: { operation?: AiRequestOperation; signal?: AbortSignal } = {},
+): Promise<{ audio: Buffer; mime: string; characters: number; requestId: string | null }> {
+  const recorder = new RequestRecorder(
+    { ...log, baseUrl: credentials.baseUrl },
+    { operation: opts.operation ?? 'speech', purpose: 'speech', model },
+  );
+  const client = openClient(credentials, recorder, 5 * 60 * 1000);
+  let audio: Buffer;
+  let mime: string;
+  try {
+    const response = await client.audio.speech.create({ model, voice, input: text, response_format: 'mp3' }, { signal: opts.signal });
+    mime = response.headers.get('content-type')?.split(';')[0]?.trim() || 'audio/mpeg';
+    audio = Buffer.from(await response.arrayBuffer());
+  } catch (error) {
+    await recorder.finish(failureOutcome(error, opts.signal));
+    return wrapCallError(error, opts.signal);
+  }
+  const requestId = await recorder.finish({ status: 'ok' });
+  return { audio, mime, characters: [...text].length, requestId };
 }

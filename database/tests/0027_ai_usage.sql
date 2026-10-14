@@ -13,18 +13,19 @@ SELECT ok(has_table_privilege('moneyflow_app', 'ai_usage', 'INSERT'), 'app grava
 -- Dados base
 INSERT INTO users (id, username, email, password, role) VALUES
   ('00000000-0000-7000-8000-0000000000a2', 'bia', 'bia@example.com', 'segredo', 'user');
-INSERT INTO ai_providers (id, name, kind, api_key, embedding_model) VALUES
-  ('00000000-0000-7000-8000-0000000a1001', 'Claude', 'anthropic', 'sk-ant-api03-abcdefgh', NULL),
-  ('00000000-0000-7000-8000-0000000a1002', 'OpenAI', 'openai', 'sk-proj-abcdefgh', 'text-embedding-3-small');
+INSERT INTO ai_providers (id, name, kind, api_key, default_models) VALUES
+  ('00000000-0000-7000-8000-0000000a1001', 'Claude', 'anthropic', 'sk-ant-api03-abcdefgh', '{}'),
+  ('00000000-0000-7000-8000-0000000a1002', 'OpenAI', 'openai', 'sk-proj-abcdefgh', '{"embeddings": "text-embedding-3-small"}');
 INSERT INTO ai_model_prices (id, provider_id, model, input_price_per_million, output_price_per_million,
                              cache_write_price_per_million, cache_read_price_per_million, valid_from) VALUES
   ('00000000-0000-7000-8000-0000000a2001', '00000000-0000-7000-8000-0000000a1001', 'claude-sonnet-4-5', 3, 15, 3.75, 0.30, '2026-01-01'),
   ('00000000-0000-7000-8000-0000000a2002', '00000000-0000-7000-8000-0000000a1002', 'text-embedding-3-small', 0.02, 0, NULL, NULL, '2026-01-01');
 INSERT INTO ai_agents (id, name, provider_id, model) VALUES
   ('00000000-0000-7000-8000-0000000a3001', 'Assistente', '00000000-0000-7000-8000-0000000a1001', 'claude-sonnet-4-5');
-INSERT INTO ai_conversations (id, user_id, agent_id) VALUES
-  ('00000000-0000-7000-8000-0000000b0001', '00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001'),
-  ('00000000-0000-7000-8000-0000000b0002', '00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001');
+-- b0002 é uma sessão finalizada do mesmo par (uma ativa por usuário e agente desde a 0043).
+INSERT INTO ai_conversations (id, user_id, agent_id, archived_at) VALUES
+  ('00000000-0000-7000-8000-0000000b0001', '00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001', NULL),
+  ('00000000-0000-7000-8000-0000000b0002', '00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001', now());
 INSERT INTO ai_runs (id, conversation_id, user_id, agent_id) VALUES
   ('00000000-0000-7000-8000-0000000b2001', '00000000-0000-7000-8000-0000000b0001', '00000000-0000-7000-8000-0000000000a2',
    '00000000-0000-7000-8000-0000000a3001');

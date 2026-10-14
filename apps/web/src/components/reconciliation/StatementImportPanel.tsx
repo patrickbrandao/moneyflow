@@ -7,6 +7,7 @@ import { useAction, useApi } from '../../lib/hooks';
 import { useParamState, useSetParams } from '../../lib/params';
 import { attachmentUrl } from '../../lib/upload';
 import { LoadError, SkelRows } from '../domain';
+import { useToast } from '../Toast';
 import { Badge, Button, cx, EmptyRow, useConfirm } from '../ui';
 import { BalanceCompare, ImportDetail, type SuggestionRun } from './ImportDetail';
 import { ImportModal, type StatementTarget } from './ImportModal';
@@ -35,6 +36,7 @@ export function StatementImportPanel({
   const [importId, setImportId] = useParamState('import');
   const setParams = useSetParams();
   const [importing, setImporting] = useState<{ file: File | null } | null>(null);
+  const toast = useToast();
   // A sugestão do agente enfileirada pelo import que acabou de abrir (só para esse lote).
   const [suggestion, setSuggestion] = useState<(SuggestionRun & { importId: string }) | null>(null);
   const [over, setOver] = useState(false);
@@ -195,6 +197,8 @@ export function StatementImportPanel({
             changed();
             const ai = detail.aiSuggestion;
             setSuggestion(ai?.queued && ai.runId ? { importId: detail.id, runId: ai.runId, lines: ai.lines } : null);
+            // Sugestão pulada (spec 028): orçamento de IA atingido ou limite por minuto.
+            if (ai?.skippedReason) toast.error(ai.skippedReason);
             setImportId(detail.id);
           }}
         />
