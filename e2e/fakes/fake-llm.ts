@@ -10,7 +10,9 @@ import type { AddressInfo } from 'node:net';
  * /v1/audio/speech) para os SDKs oficiais, apontados por base_url. Nenhuma API
  * real é chamada. Um modelo de embeddings com "768" no nome devolve 768
  * dimensões (o teste da flag recusa); a transcrição devolve "transcrição de
- * teste (<n> bytes)" e duration; a fala, bytes de um "mp3" falso.
+ * teste (<n> bytes)" e duration (ou o que estiver em `audioQueue`: texto,
+ * atraso ou erro HTTP); a fala, bytes de um "mp3" falso, ou um WAV de verdade
+ * (silêncio que o navegador toca) com `speechFormat = 'wav'`.
  *
  * O "cérebro" padrão é determinístico, guiado pelo texto do usuário:
  *  - "listar caixas"            → chama a tool list_caixas
@@ -56,11 +58,18 @@ export type NeutralView = {
 
 export type FakeCall = { api: 'anthropic' | 'openai'; path: string; headers: Record<string, string | string[] | undefined>; body: any };
 
+/** Resposta enfileirada da transcrição (spec 025): texto, atraso ou falha HTTP. */
+export type FakeAudioReply = { text?: string; delayMs?: number; status?: number };
+
 export type FakeLlm = {
   url: string;
   port: number;
   calls: FakeCall[];
   queue: FakeReply[];
+  /** Próximas respostas de /v1/audio/transcriptions (vazia = a padrão). */
+  audioQueue: FakeAudioReply[];
+  /** Formato da fala: 'mp3' (bytes falsos) ou 'wav' (silêncio tocável). */
+  speechFormat: 'mp3' | 'wav';
   brain: (view: NeutralView) => FakeReply;
   close: () => Promise<void>;
 };
@@ -335,6 +344,27 @@ export function fakeEmbedding(text: string): number[] {
   return out.slice(0, 1536);
 }
 
+/** WAV PCM mono de 8 kHz e 8 bits, em silêncio, com a duração pedida (tocável pelo navegador). */
+export function silentWav(ms: number): Buffer {
+  const rate = 8000;
+  const samples = Math.max(1, Math.round((rate * ms) / 1000));
+  const out = Buffer.alloc(44 + samples, 0x80);
+  out.write('RIFF', 0, 'ascii');
+  out.writeUInt32LE(36 + samples, 4);
+  out.write('WAVE', 8, 'ascii');
+  out.write('fmt ', 12, 'ascii');
+  out.writeUInt32LE(16, 16);
+  out.writeUInt16LE(1, 20);
+  out.writeUInt16LE(1, 22);
+  out.writeUInt32LE(rate, 24);
+  out.writeUInt32LE(rate, 28);
+  out.writeUInt16LE(1, 32);
+  out.writeUInt16LE(8, 34);
+  out.write('data', 36, 'ascii');
+  out.writeUInt32LE(samples, 40);
+  return out;
+}
+
 /** Campos de um multipart/form-data (arquivos viram { fileName, contentType, bytes }). */
 function parseMultipart(raw: Buffer, contentType: string): Record<string, unknown> {
   const boundary = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
@@ -376,6 +406,8 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
     port: 0,
     calls: [],
     queue: [],
+    audioQueue: [],
+    speechFormat: 'mp3',
     brain: defaultBrain,
     close: async () => {},
   };
@@ -430,13 +462,21 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
       if (req.method === 'POST' && path === '/v1/audio/transcriptions') {
         fake.calls.push({ api: 'openai', path, headers: req.headers, body });
         const file = body.file as { bytes?: number } | undefined;
+        const reply = fake.audioQueue.shift() ?? {};
+        if (reply.delayMs) await sleep(reply.delayMs);
+        if (reply.status && reply.status >= 400) return json(reply.status, { error: { message: 'falha simulada na transcrição' } });
         return json(200, {
-          text: `transcrição de teste (${file?.bytes ?? 0} bytes)`,
+          text: reply.text ?? `transcrição de teste (${file?.bytes ?? 0} bytes)`,
           usage: { type: 'duration', seconds: 1.5 },
         });
       }
       if (req.method === 'POST' && path === '/v1/audio/speech') {
         fake.calls.push({ api: 'openai', path, headers: req.headers, body });
+        if (fake.speechFormat === 'wav') {
+          res.writeHead(200, { 'content-type': 'audio/wav' });
+          res.end(silentWav(4000));
+          return;
+        }
         res.writeHead(200, { 'content-type': 'audio/mpeg' });
         res.end(Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xfb, 0x90, 0x00]));
         return;

@@ -24,6 +24,8 @@ x-app: &app
     # Requisições ao provedor de IA (spec 023): tentativas por chamada e a retenção padrão (dias), na API e no worker.
     AI_REQUEST_MAX_ATTEMPTS: ${AI_REQUEST_MAX_ATTEMPTS:-3}
     AI_REQUEST_RETENTION_DAYS: ${AI_REQUEST_RETENTION_DAYS:-30}
+    # Chat multimídia (spec 025): espera da execução pelas transcrições pendentes (ms).
+    AI_TRANSCRIPTION_TIMEOUT_MS: ${AI_TRANSCRIPTION_TIMEOUT_MS:-120000}
   # host.docker.internal também no Linux (a Bot API falsa dos e2e roda no host).
   extra_hosts:
     - "host.docker.internal:host-gateway"

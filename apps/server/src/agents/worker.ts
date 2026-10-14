@@ -5,6 +5,7 @@ import type { Config } from '../config';
 import { requestRetentionDays } from '../services/ai-requests';
 import { type IndexState, indexEmbeddings, purgeEmbeddingIndexes } from './embeddings';
 import { type ClaimedRun, processRun } from './runner';
+import { claimTranscriptions, processTranscription } from './transcriptions';
 
 /*
  * Laço dos agentes no worker (spec 011): reserva execuções (ai_run_claim, SKIP
@@ -14,8 +15,12 @@ import { type ClaimedRun, processRun } from './runner';
  * embeddings órfãos, a purga das requisições ao provedor (spec 023: prazo do
  * banco ou de AI_REQUEST_RETENTION_DAYS, em lotes) e os embeddings (spec
  * 024): a indexação de cada par (provedor, modelo) em uso por algum agente
- * ativo e a purga dos pares parados há mais de 7 dias.
+ * ativo e a purga dos pares parados há mais de 7 dias. No mesmo ritmo da
+ * fila de execuções, a fila das transcrições (spec 025: ai_transcription_claim,
+ * até TRANSCRIPTION_CONCURRENCY ao mesmo tempo).
  */
+
+const TRANSCRIPTION_CONCURRENCY = 2;
 
 const PURGE_BATCH = 1000;
 
@@ -65,8 +70,37 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
       claiming = false;
     }
   };
-  const pollTimer = setInterval(() => void claim(), pollMs);
+  const transcribing = new Set<Promise<void>>();
+  let claimingTranscriptions = false;
+  const claimTranscription = async () => {
+    if (stopped || claimingTranscriptions || transcribing.size >= TRANSCRIPTION_CONCURRENCY) return;
+    claimingTranscriptions = true;
+    try {
+      while (!stopped && transcribing.size < TRANSCRIPTION_CONCURRENCY) {
+        const [item] = await claimTranscriptions(db, 1);
+        if (!item) break;
+        const job = processTranscription({ db, config, log }, item)
+          .then((outcome) => log.info({ transcriptionId: item.id, outcome }, 'transcrição: processada'))
+          .catch((error) => log.error({ err: error, transcriptionId: item.id }, 'transcrição: erro inesperado'))
+          .finally(() => {
+            transcribing.delete(job);
+            void claimTranscription();
+          });
+        transcribing.add(job);
+      }
+    } catch (error) {
+      log.error({ err: error }, 'transcrição: falha ao reservar');
+    } finally {
+      claimingTranscriptions = false;
+    }
+  };
+
+  const pollTimer = setInterval(() => {
+    void claim();
+    void claimTranscription();
+  }, pollMs);
   void claim();
+  void claimTranscription();
 
   const indexState: IndexState = { since: new Map() };
   let maintaining = false;
@@ -99,6 +133,6 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
     stopped = true;
     clearInterval(pollTimer);
     clearInterval(maintenanceTimer);
-    await Promise.allSettled([...active]);
+    await Promise.allSettled([...active, ...transcribing]);
   };
 }

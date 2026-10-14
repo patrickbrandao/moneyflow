@@ -85,7 +85,6 @@ export const usersRelations = relations(users, ({ many }) => ({
   sessions: many(sessions),
   caixaMembers: many(caixaMembers),
   aiAgents: many(aiAgents),
-  attachments: many(attachments),
   statementImports: many(statementImports),
   classificationRules: many(classificationRules),
   aiConversations: many(aiConversations),
@@ -104,6 +103,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   userApiTokens: many(userApiTokens),
   aiUsages: many(aiUsage),
   aiRequests: many(aiRequests),
+  attachments: many(attachments),
   mcpServers: many(mcpServers),
   messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
@@ -444,10 +444,6 @@ export const titleAttachmentsRelations = relations(titleAttachments, ({ one }) =
 
 export const attachmentsRelations = relations(attachments, ({ one, many }) => ({
   titleAttachments: many(titleAttachments),
-  user: one(users, {
-    fields: [attachments.uploadedByUserId],
-    references: [users.id],
-  }),
   settlementAttachments: many(settlementAttachments),
   movementAttachments: many(movementAttachments),
   entityAttachments: many(entityAttachments),
@@ -455,6 +451,10 @@ export const attachmentsRelations = relations(attachments, ({ one, many }) => ({
   cardPurchaseAttachments: many(cardPurchaseAttachments),
   statementImports: many(statementImports),
   aiMessageAttachments: many(aiMessageAttachments),
+  user: one(users, {
+    fields: [attachments.uploadedByUserId],
+    references: [users.id],
+  }),
   aiAttachmentDerivatives_attachmentId: many(aiAttachmentDerivatives, {
     relationName: 'aiAttachmentDerivatives_attachmentId_attachments_id',
   }),
@@ -776,6 +776,7 @@ export const aiConversationsRelations = relations(aiConversations, ({ one, many 
   }),
   aiUsages: many(aiUsage),
   aiRequests: many(aiRequests),
+  aiAttachmentDerivatives: many(aiAttachmentDerivatives),
 }));
 
 export const aiMessagesRelations = relations(aiMessages, ({ one, many }) => ({
@@ -1130,6 +1131,10 @@ export const aiAttachmentDerivativesRelations = relations(aiAttachmentDerivative
     fields: [aiAttachmentDerivatives.attachmentId],
     references: [attachments.id],
     relationName: 'aiAttachmentDerivatives_attachmentId_attachments_id',
+  }),
+  aiConversation: one(aiConversations, {
+    fields: [aiAttachmentDerivatives.conversationId],
+    references: [aiConversations.id],
   }),
   aiMessage: one(aiMessages, {
     fields: [aiAttachmentDerivatives.messageId],

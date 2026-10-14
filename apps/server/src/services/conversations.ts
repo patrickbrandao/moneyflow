@@ -10,6 +10,7 @@ import {
   type conversationListQuery,
   type conversationUpdateInput,
   type DecideResult,
+  isImageMime,
   type messageSendInput,
   type SendMessageResult,
   t,
@@ -18,7 +19,6 @@ import { type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { FlowPurpose } from '../agents/flows';
 import { visionMode } from '../agents/inferences';
-import { isImageMime } from '../agents/run-attachments';
 import {
   appendEvent,
   conversationUsage,
@@ -36,7 +36,7 @@ import {
 } from '../agents/store';
 import type { ServiceContext } from '../context';
 import { AppError, findPgError, forbidden, notFound, unprocessable } from '../errors';
-import { assertUpload, storeAttachment } from './attachments';
+import { chatAttachments, mediaCapabilities, messageAttachmentIds } from './chat-media';
 import { withTx } from './tx';
 import { iso } from './util';
 
@@ -204,6 +204,7 @@ export async function getConversation(ctx: ServiceContext, id: string): Promise<
     messages.filter((m) => m.role === 'assistant').map((m) => m.id),
   );
   const active = row.active_run_id ? await loadRun(ctx.db, row.active_run_id) : null;
+  const attachments = await chatAttachments(ctx.db, messageAttachmentIds(messages.filter((m) => m.role === 'user')));
   return {
     conversation: toDto(row),
     messages: messages.map((m) => messageDto(m, usage.get(m.id) ?? [])),
@@ -211,6 +212,8 @@ export async function getConversation(ctx: ServiceContext, id: string): Promise<
     confirmations: await loadConversationConfirmations(ctx.db, id, active?.id ?? null),
     usage: await conversationUsage(ctx.db, id),
     readOnly: row.user_id !== ctx.access.actor.id,
+    attachments,
+    media: await mediaCapabilities(ctx.db, row.agent_id),
   };
 }
 
@@ -268,26 +271,6 @@ export async function assertReadsImages(db: Executor, agentId: string, mimes: st
   if ((await visionMode(db, agentId, agent.rows[0]?.provider_id ?? null)) === 'none') {
     throw unprocessable(t.agents.errors.agentNoVision, 'agent_no_vision');
   }
-}
-
-export async function uploadMessageAttachment(ctx: ServiceContext, id: string, file: { name: string; mime: string; content: unknown }) {
-  const conversation = await loadConversation(ctx, id, 'own');
-  await assertReadsImages(ctx.db, conversation.agent_id, [file.mime]);
-  const content = assertUpload(file.content);
-  const attachmentId = await withTx(ctx, (tx) => storeAttachment(tx, ctx, { name: file.name, mime: file.mime, content }));
-  const result = await ctx.db.execute<Record<string, unknown>>(sql`
-    SELECT a.id, a.file_name, a.mime_type, a.size_bytes, a.sha256, u.username AS uploaded_by, a.created_at
-      FROM attachments a LEFT JOIN users u ON u.id = a.uploaded_by_user_id WHERE a.id = ${attachmentId}`);
-  const r = result.rows[0]!;
-  return {
-    id: r.id as string,
-    fileName: r.file_name as string,
-    mimeType: r.mime_type as string,
-    sizeBytes: Number(r.size_bytes),
-    sha256: r.sha256 as string,
-    uploadedBy: (r.uploaded_by as string) ?? null,
-    createdAt: iso(r.created_at)!,
-  };
 }
 
 /** Anexos citados numa mensagem: enviados pelo próprio usuário e ainda soltos ou já desta conversa. */

@@ -1,5 +1,5 @@
 import type { Database } from '@moneyflow/db';
-import { blocksText, type NeutralMessage, t } from '@moneyflow/shared';
+import { blocksText, formatDuration, isAudioMime, isImageMime, type NeutralMessage, t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config';
@@ -20,12 +20,24 @@ import { extractPdfText } from './pdf-text';
  * Os derivados são gravados em transações curtas, nunca durante a chamada.
  */
 
-const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const PDF = 'application/pdf';
 
-export const isImageMime = (mime: string) => IMAGE_TYPES.has(mime);
+type FileRow = { fileName: string; mime: string; data: Buffer; durationMs: number | null };
 
-type FileRow = { fileName: string; mime: string; data: Buffer };
+/** Espera entre as consultas da transcrição pendente. */
+const TRANSCRIPTION_POLL_MS = 500;
+
+function sleep(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
 
 export type RunAttachmentsDeps = { db: Database; config: Config; log: FastifyBaseLogger };
 export type RunAttachmentsScope = {
@@ -72,20 +84,34 @@ export class RunAttachments {
   }
 
   private async file(attachmentId: string): Promise<FileRow | null> {
-    const result = await this.deps.db.execute<{ file_name: string; mime_type: string; content: Buffer }>(sql`
-      SELECT a.file_name, a.mime_type, a.content
+    // O áudio nunca vai ao modelo de texto (spec 025): o conteúdo dele nem sai do banco.
+    const result = await this.deps.db.execute<{
+      file_name: string;
+      mime_type: string;
+      content: Buffer | null;
+      duration_ms: number | null;
+    }>(sql`
+      SELECT a.file_name, a.mime_type, CASE WHEN a.mime_type LIKE 'audio/%' THEN NULL ELSE a.content END AS content, a.duration_ms
         FROM attachments a
         JOIN ai_message_attachments ma ON ma.attachment_id = a.id
         JOIN ai_messages m ON m.id = ma.message_id
        WHERE a.id = ${attachmentId} AND m.conversation_id = ${this.scope.conversationId}
        LIMIT 1`);
     const row = result.rows[0];
-    return row ? { fileName: row.file_name, mime: row.mime_type, data: Buffer.from(row.content) } : null;
+    return row
+      ? {
+          fileName: row.file_name,
+          mime: row.mime_type,
+          data: row.content ? Buffer.from(row.content) : Buffer.alloc(0),
+          durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+        }
+      : null;
   }
 
   private async resolve(attachmentId: string): Promise<LlmAttachment | null> {
     const file = await this.file(attachmentId);
     if (!file) return null;
+    if (isAudioMime(file.mime)) return this.audio(attachmentId, file);
     const image = isImageMime(file.mime);
     if (!image && file.mime !== PDF) return file;
     const mode = await this.visionMode();
@@ -106,6 +132,56 @@ export class RunAttachments {
       mime: file.mime,
       text: text ? t.agents.attachments.pdfText(file.fileName, text) : t.agents.attachments.pdfNoText(file.fileName),
     };
+  }
+
+  /** Áudio → a transcrição (spec 025): `[Áudio "nome" (m:ss) — transcrição]: …`, ou "sem transcrição". */
+  private async audio(attachmentId: string, file: FileRow): Promise<LlmAttachment> {
+    const transcript = await this.waitTranscription(attachmentId);
+    const text =
+      transcript === null
+        ? t.agents.attachments.audioNoTranscript(file.fileName)
+        : t.agents.attachments.audioTranscript(
+            file.fileName,
+            file.durationMs ? formatDuration(file.durationMs) : null,
+            transcript.trim() || '—',
+          );
+    return { fileName: file.fileName, mime: file.mime, text };
+  }
+
+  /**
+   * A transcrição mais recente do anexo, de qualquer provedor (o agente pode
+   * ter trocado de inferência): pendente ou em andamento, espera até
+   * AI_TRANSCRIPTION_TIMEOUT_MS. Sem nenhuma (o agente passou a converter
+   * áudio depois do upload), enfileira uma. null = falhou, esgotou a espera
+   * ou o agente não converte áudio.
+   */
+  private async waitTranscription(attachmentId: string): Promise<string | null> {
+    const { db, config } = this.deps;
+    const deadline = Date.now() + config.aiTranscriptionTimeoutMs;
+    let enqueued = false;
+    for (;;) {
+      this.scope.signal?.throwIfAborted();
+      const result = await db.execute<{ status: string; content: string | null }>(sql`
+        SELECT status, content FROM ai_attachment_derivatives
+         WHERE attachment_id = ${attachmentId} AND kind = 'transcription'
+         ORDER BY created_at DESC, id DESC LIMIT 1`);
+      const row = result.rows[0];
+      if (!row) {
+        if (enqueued) return null;
+        enqueued = true;
+        const creds = await inferenceCredentials(db, this.scope.agentId, 'transcription', this.scope.userId);
+        if (!creds?.model) return null;
+        await db.execute(sql`
+          SELECT id FROM ai_transcription_enqueue(${attachmentId}::uuid, ${creds.providerId}::uuid, ${creds.model},
+                                                  ${this.scope.conversationId}::uuid)`);
+        continue;
+      }
+      if (row.status === 'done') return row.content ?? '';
+      if (row.status === 'failed') return null;
+      const left = deadline - Date.now();
+      if (left <= 0) return null;
+      await sleep(Math.min(TRANSCRIPTION_POLL_MS, left), this.scope.signal);
+    }
   }
 
   /** Descrição pelo provedor de visão (uma vez por anexo e modelo); null se a visão deixou de estar disponível. */

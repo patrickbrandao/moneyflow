@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type APIRequestContext, expect, type Page, type Request, request, test } from '@playwright/test';
-import { defaultBrain, type FakeLlm, startFakeLlm } from '../fakes/fake-llm';
+import { defaultBrain, type FakeLlm, silentWav, startFakeLlm } from '../fakes/fake-llm';
 import { ADMIN_STATE, baseURL, loginAsAdmin } from '../support/session';
 
 /*
@@ -21,7 +21,11 @@ import { ADMIN_STATE, baseURL, loginAsAdmin } from '../support/session';
  *    o Editar do detalhe e a retenção (banco vence a variável; "Usar o padrão");
  *  - as capacidades (spec 024): cadastrar um provedor OpenAI-compatível falso
  *    com todas as flags, testar flag a flag e criar um agente que herda tudo
- *    pelo "Provedor padrão".
+ *    pelo "Provedor padrão";
+ *  - o chat multimídia (spec 025): anexar um áudio e ver a transcrição, tocar
+ *    e trocar a velocidade para 2x, o modo áudio tocando uma resposta, as
+ *    prévias de imagem (ampliar e navegar) e de PDF, o markdown bruto/renderizado
+ *    e a gravação pelo microfone (o fake media stream do Chromium).
  *
  * O provedor falso (Anthropic Messages API) sobe aqui na porta E2E_LLM_PORT
  * (padrão 18082). O worker da pilha o alcança em E2E_LLM_BASE (padrão
@@ -29,6 +33,12 @@ import { ADMIN_STATE, baseURL, loginAsAdmin } from '../support/session';
  * uma API de IA de verdade. O admin usa a sessão aberta no global-setup (o
  * /api/auth/login tem limite por minuto); só o outro usuário faz login aqui.
  */
+
+// Microfone falso do Chromium (gravação da spec 025), já com a permissão concedida.
+test.use({
+  launchOptions: { args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] },
+  permissions: ['microphone'],
+});
 
 const llmPort = Number(process.env.E2E_LLM_PORT ?? 18082);
 const llmBase = process.env.E2E_LLM_BASE ?? `http://host.docker.internal:${llmPort}`;
@@ -675,4 +685,221 @@ test('capacidades: provedor OpenAI-compatível falso com todas as flags e um age
   await expect(page.getByTestId('provider-embedding-indexes')).toBeVisible();
   await adminApi.patch(`/api/admin/ai/agents/${saved.id}`, { data: { isActive: false } });
   await adminApi.patch(`/api/admin/ai/providers/${created.id}`, { data: { isActive: false } });
+});
+
+/* ---------------- chat multimídia (spec 025) ---------------- */
+
+/** PDF mínimo de uma página com texto. */
+function minimalPdf(lines: string[]): Buffer {
+  const esc = (s: string) => s.replace(/[\\()]/g, (c) => `\\${c}`);
+  const stream = `BT /F1 12 Tf 72 720 Td 14 TL ${lines.map((l) => `(${esc(l)}) Tj T*`).join(' ')} ET`;
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+    `<< /Length ${Buffer.byteLength(stream, 'latin1')} >>\nstream\n${stream}\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
+  ];
+  let out = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  objects.forEach((body, i) => {
+    offsets.push(Buffer.byteLength(out, 'latin1'));
+    out += `${i + 1} 0 obj\n${body}\nendobj\n`;
+  });
+  const xref = Buffer.byteLength(out, 'latin1');
+  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`;
+  out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(out, 'latin1');
+}
+
+/** PNG 1×1 de uma cor (anexo de imagem). */
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+
+test.describe('chat multimídia (spec 025)', () => {
+  let mediaProvider: { id: string };
+  let mediaAgent: { id: string; name: string };
+
+  test.beforeAll(async () => {
+    // OpenAI compatível falso com todas as flags: áudio→texto (transcrição) e texto→áudio (fala).
+    mediaProvider = await postJson(adminApi, '/api/admin/ai/providers', {
+      name: `E2E mídia ${tag}`,
+      kind: 'openai',
+      baseUrl: `${llmBase}/v1`,
+      apiKey: 'sk-e2e-media-fake',
+      defaultModels: { text: 'fake-gpt', transcription: 'fake-whisper', speech: 'fake-tts', speech_voice: 'alloy' },
+    });
+    mediaAgent = await postJson(adminApi, '/api/admin/ai/agents', {
+      name: `E2E Agente mídia ${tag}`,
+      defaultProviderId: mediaProvider.id,
+      model: 'fake-gpt',
+      isActive: true,
+      colorSlot: 6,
+    });
+    extraAgents.push(mediaAgent.id);
+  });
+
+  test.afterAll(async () => {
+    if (mediaProvider) await adminApi.patch(`/api/admin/ai/providers/${mediaProvider.id}`, { data: { isActive: false } });
+  });
+
+  test.beforeEach(() => {
+    llm.audioQueue = [];
+    llm.speechFormat = 'wav';
+  });
+
+  test('áudio: anexar, ver a transcrição, tocar em 2x e o modo áudio tocando uma resposta', async ({ page }) => {
+    await enter(page);
+    const win = await newConversation(page, mediaAgent.name);
+    // Sem o modo áudio ligado, nenhuma mensagem tem play.
+    await expect(win.getByTestId('agent-audio-mode')).toHaveAttribute('aria-pressed', 'false');
+
+    llm.audioQueue.push({ text: 'Lembrete: pagar a conta de luz na sexta.', delayMs: 1500 });
+    await win.locator('input[type="file"]').setInputFiles({ name: 'recado.wav', mimeType: 'audio/wav', buffer: silentWav(6000) });
+    const chip = win.getByTestId('composer-attachment').filter({ hasText: 'recado.wav' });
+    await expect(chip).toBeVisible();
+    // O compositor mostra "Transcrevendo…" e deixa enviar mesmo assim.
+    await expect(chip.getByTestId('transcription-status')).toHaveAttribute('data-status', /pending|running|done/);
+    await say(win, 'ouça o recado');
+
+    const audio = win.getByTestId('audio-attachment');
+    await expect(audio).toBeVisible();
+    await expect(audio.getByTestId('transcription')).toHaveAttribute('data-status', 'done', { timeout: 30_000 });
+    await expect(audio.getByTestId('transcription')).toContainText('Lembrete: pagar a conta de luz na sexta.');
+    await expect(audio.getByTestId('audio-time')).toContainText('0:06');
+    // O modelo recebeu a transcrição, nunca o áudio.
+    await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Olá! Sou o agente de teste.' })).toBeVisible({
+      timeout: 30_000,
+    });
+    const chat = llm.calls.find((c) => c.path === '/v1/chat/completions' && JSON.stringify(c.body).includes('ouça o recado'))!;
+    expect(JSON.stringify(chat.body.messages)).toContain('— transcrição]: Lembrete: pagar a conta de luz na sexta.');
+
+    // Tocar e trocar a velocidade para 2x (lembrada no navegador).
+    const player = audio.getByTestId('audio-player');
+    await player.getByTestId('audio-toggle').click();
+    await expect(player).toHaveAttribute('data-playing', 'true');
+    await player.getByTestId('audio-rate').selectOption('2');
+    await expect(player).toHaveAttribute('data-rate', '2');
+    expect(await player.locator('audio').evaluate((el) => (el as unknown as { playbackRate: number }).playbackRate)).toBe(2);
+    expect(await page.evaluate(() => localStorage.getItem('moneyflow:audio-rate'))).toBe('2');
+    await player.getByTestId('audio-toggle').click();
+    await expect(player).toHaveAttribute('data-playing', 'false');
+
+    // Modo áudio: o fone liga; cada mensagem de texto ganha o play; clicar gera e toca a fala (uma vez).
+    await win.getByTestId('agent-audio-mode').click();
+    await expect(win.getByTestId('agent-audio-mode')).toHaveAttribute('aria-pressed', 'true');
+    const answer = win.getByTestId('agent-message-assistant').filter({ hasText: 'Olá! Sou o agente de teste.' }).last();
+    const speechCalls = () => llm.calls.filter((c) => c.path === '/v1/audio/speech').length;
+    const before = speechCalls();
+    await answer.getByTestId('agent-listen').click();
+    const speech = answer.getByTestId('speech-player');
+    await expect(speech).toBeVisible({ timeout: 30_000 });
+    await expect(speech).toHaveAttribute('data-playing', 'true');
+    // A velocidade lembrada vale para o próximo áudio.
+    await expect(speech).toHaveAttribute('data-rate', '2');
+    expect(speechCalls()).toBe(before + 1);
+    expect(llm.calls.filter((c) => c.path === '/v1/audio/speech').at(-1)!.body).toMatchObject({ input: 'Olá! Sou o agente de teste.' });
+    // Tocar um pausa o outro.
+    await player.getByTestId('audio-toggle').click();
+    await expect(player).toHaveAttribute('data-playing', 'true');
+    await expect(speech).toHaveAttribute('data-playing', 'false');
+    await player.getByTestId('audio-toggle').click();
+  });
+
+  test('prévias: imagem ampliada com navegação, PDF no visualizador e markdown bruto/renderizado', async ({ page }) => {
+    await enter(page);
+    const win = await newConversation(page, mediaAgent.name);
+    const input = win.locator('input[type="file"]');
+    await input.setInputFiles([
+      { name: 'foto-1.png', mimeType: 'image/png', buffer: PNG },
+      { name: 'foto-2.png', mimeType: 'image/png', buffer: PNG },
+    ]);
+    await input.setInputFiles({
+      name: 'contrato.pdf',
+      mimeType: 'application/pdf',
+      buffer: minimalPdf(['Contrato de teste', 'Clausula 1']),
+    });
+    await input.setInputFiles({
+      name: 'notas.md',
+      mimeType: '',
+      buffer: Buffer.from('# Notas da reunião\n\n- item **um**\n- item dois\n', 'utf8'),
+    });
+    await expect(win.getByTestId('composer-attachment')).toHaveCount(4);
+    await say(win, 'veja os anexos');
+    await expect(win.getByTestId('agent-message-assistant').last()).toBeVisible({ timeout: 30_000 });
+
+    // Imagem: miniatura → ampliada, navegação entre as imagens da conversa e "baixar".
+    const thumbs = win.getByTestId('image-thumb');
+    await expect(thumbs).toHaveCount(2);
+    await thumbs.first().click();
+    const lightbox = page.getByTestId('image-lightbox');
+    await expect(lightbox).toBeVisible();
+    await expect(lightbox).toContainText('1 de 2');
+    // Os uploads correm em paralelo: a ordem das duas imagens pode variar.
+    const first = (await lightbox.getByTestId('lightbox-image').getAttribute('alt')) ?? '';
+    expect(['foto-1.png', 'foto-2.png']).toContain(first);
+    await lightbox.getByRole('button', { name: 'Próxima' }).click();
+    await expect(lightbox).toContainText('2 de 2');
+    await expect(lightbox.getByTestId('lightbox-image')).not.toHaveAttribute('alt', first);
+    await page.keyboard.press('ArrowRight');
+    await expect(lightbox).toContainText('1 de 2');
+    await expect(lightbox.getByTestId('lightbox-download')).toHaveAttribute('href', /\/api\/attachments\/.+\/download$/);
+    await page.keyboard.press('Escape');
+    await expect(lightbox).toHaveCount(0);
+
+    // PDF: cartão com as páginas; abre no visualizador pdf.js.
+    const pdf = win.getByTestId('pdf-card');
+    await expect(pdf).toContainText('contrato.pdf');
+    await expect(pdf).toContainText('1 página');
+    await pdf.click();
+    const viewer = page.getByTestId('pdf-dialog');
+    await expect(viewer.locator('.pdf-viewer')).toBeVisible();
+    await expect(viewer).toContainText('Página 1 de 1', { timeout: 15_000 });
+    await viewer.getByRole('button', { name: 'Fechar' }).click();
+    await expect(viewer).toHaveCount(0);
+
+    // Markdown: início do texto no cartão; renderizado e bruto no diálogo.
+    const md = win.getByTestId('markdown-card');
+    await expect(md).toContainText('Notas da reunião');
+    await md.click();
+    const doc = page.getByTestId('markdown-dialog');
+    await expect(doc.getByTestId('markdown-document')).toHaveAttribute('data-mode', 'rendered');
+    await expect(doc.locator('.agent-md h1')).toHaveText('Notas da reunião');
+    await doc.getByRole('tab', { name: 'Bruto' }).click();
+    await expect(doc.getByTestId('markdown-document')).toHaveAttribute('data-mode', 'raw');
+    await expect(doc.locator('pre')).toContainText('# Notas da reunião');
+    await expect(doc.locator('pre')).toContainText('- item **um**');
+    await doc.getByRole('tab', { name: 'Renderizado' }).click();
+    await expect(doc.locator('.agent-md strong')).toHaveText('um');
+    await page.keyboard.press('Escape');
+    await expect(doc).toHaveCount(0);
+  });
+
+  test('gravação pelo microfone (fake media stream): ouvir, descartar, regravar e anexar com transcrição', async ({ page }) => {
+    await enter(page);
+    const win = await newConversation(page, mediaAgent.name);
+    llm.audioQueue.push({ text: 'Mensagem gravada pelo microfone.' });
+
+    await win.getByTestId('agent-record').click();
+    await expect(win.getByTestId('agent-recording')).toBeVisible();
+    await expect(win.getByTestId('agent-recording')).toContainText('/ 10:00');
+    await page.waitForTimeout(1200);
+    await win.getByTestId('agent-record-stop').click();
+    const review = win.getByTestId('agent-record-review');
+    await expect(review).toBeVisible();
+    await expect(review.getByTestId('agent-record-player')).toBeVisible();
+    // Descartar volta ao início; gravar de novo e anexar.
+    await review.getByTestId('agent-record-discard').click();
+    await expect(review).toHaveCount(0);
+    await win.getByTestId('agent-record').click();
+    await expect(win.getByTestId('agent-recording')).toBeVisible();
+    await page.waitForTimeout(1200);
+    await win.getByTestId('agent-record-stop').click();
+    await win.getByTestId('agent-record-use').click();
+    const chip = win.getByTestId('composer-attachment').filter({ hasText: 'gravacao-' });
+    await expect(chip).toBeVisible();
+    await say(win, 'transcreva a gravação');
+    const audio = win.getByTestId('audio-attachment');
+    await expect(audio.getByTestId('transcription')).toContainText('Mensagem gravada pelo microfone.', { timeout: 30_000 });
+    await expect(audio.getByTestId('audio-time')).toContainText(/ 0:0[1-2]/);
+  });
 });

@@ -724,39 +724,6 @@ END)`,
   ],
 );
 
-export const attachments = pgTable(
-  'attachments',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    fileName: text('file_name').notNull(),
-    mimeType: text('mime_type').notNull(),
-    content: bytea('content').notNull(),
-    sizeBytes: integer('size_bytes').notNull().generatedAlwaysAs(sql`octet_length(content)`),
-    sha256: text().notNull().generatedAlwaysAs(sql`encode(sha256(content), 'hex'::text)`),
-    uploadedByUserId: uuid('uploaded_by_user_id'),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('attachments_sha256_idx').using('btree', table.sha256.asc().nullsLast().op('text_ops')),
-    index('attachments_uploaded_by_user_id_idx').using('btree', table.uploadedByUserId.asc().nullsLast().op('uuid_ops')),
-    foreignKey({
-      columns: [table.uploadedByUserId],
-      foreignColumns: [users.id],
-      name: 'attachments_uploaded_by_user_id_fkey',
-    }).onDelete('set null'),
-    check(
-      'attachments_file_name_check',
-      sql`(btrim(file_name) <> ''::text) AND (length(file_name) <= 255) AND (file_name !~ '[/\\[:cntrl:]]'::text)`,
-    ),
-    check(
-      'attachments_mime_type_check',
-      sql`(mime_type ~ '^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$'::text) AND (length(mime_type) <= 127)`,
-    ),
-    check('attachments_size_check', sql`(octet_length(content) >= 1) AND (octet_length(content) <= 20971520)`),
-  ],
-);
-
 export const settlementAttachments = pgTable(
   'settlement_attachments',
   {
@@ -2345,6 +2312,49 @@ export const aiRequests = pgTable(
   ],
 );
 
+export const attachments = pgTable(
+  'attachments',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    fileName: text('file_name').notNull(),
+    mimeType: text('mime_type').notNull(),
+    content: bytea('content').notNull(),
+    sizeBytes: integer('size_bytes').notNull().generatedAlwaysAs(sql`octet_length(content)`),
+    sha256: text().notNull().generatedAlwaysAs(sql`encode(sha256(content), 'hex'::text)`),
+    uploadedByUserId: uuid('uploaded_by_user_id'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    durationMs: integer('duration_ms'),
+    pageCount: integer('page_count'),
+  },
+  (table) => [
+    index('attachments_sha256_idx').using('btree', table.sha256.asc().nullsLast().op('text_ops')),
+    index('attachments_uploaded_by_user_id_idx').using('btree', table.uploadedByUserId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.uploadedByUserId],
+      foreignColumns: [users.id],
+      name: 'attachments_uploaded_by_user_id_fkey',
+    }).onDelete('set null'),
+    check(
+      'attachments_duration_ms_check',
+      sql`(duration_ms IS NULL) OR (((duration_ms >= 1) AND (duration_ms <= 86400000)) AND (mime_type ~ '^(audio|video)/'::text))`,
+    ),
+    check(
+      'attachments_file_name_check',
+      sql`(btrim(file_name) <> ''::text) AND (length(file_name) <= 255) AND (file_name !~ '[/\\[:cntrl:]]'::text)`,
+    ),
+    check(
+      'attachments_mime_type_check',
+      sql`(mime_type ~ '^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$'::text) AND (length(mime_type) <= 127)`,
+    ),
+    check(
+      'attachments_page_count_check',
+      sql`(page_count IS NULL) OR (((page_count >= 1) AND (page_count <= 100000)) AND (mime_type = 'application/pdf'::text))`,
+    ),
+    check('attachments_size_check', sql`(octet_length(content) >= 1) AND (octet_length(content) <= 20971520)`),
+  ],
+);
+
 export const mcpServers = pgTable(
   'mcp_servers',
   {
@@ -2852,8 +2862,11 @@ export const aiAttachmentDerivatives = pgTable(
     lockedAt: timestamp('locked_at', { withTimezone: true, mode: 'string' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    lockToken: uuid('lock_token'),
+    conversationId: uuid('conversation_id'),
   },
   (table) => [
+    index('ai_attachment_derivatives_conversation_id_idx').using('btree', table.conversationId.asc().nullsLast().op('uuid_ops')),
     index('ai_attachment_derivatives_message_id_idx').using(
       'btree',
       table.messageId.asc().nullsLast().op('int4_ops'),
@@ -2869,6 +2882,11 @@ export const aiAttachmentDerivatives = pgTable(
       foreignColumns: [attachments.id],
       name: 'ai_attachment_derivatives_attachment_id_fkey',
     }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.conversationId],
+      foreignColumns: [aiConversations.id],
+      name: 'ai_attachment_derivatives_conversation_id_fkey',
+    }).onDelete('set null'),
     foreignKey({
       columns: [table.messageId],
       foreignColumns: [aiMessages.id],
@@ -2901,7 +2919,10 @@ export const aiAttachmentDerivatives = pgTable(
       'ai_attachment_derivatives_kind_check',
       sql`kind = ANY (ARRAY['description'::text, 'pdf_text'::text, 'transcription'::text, 'speech'::text])`,
     ),
-    check('ai_attachment_derivatives_lock_check', sql`(status = 'running'::text) = (locked_at IS NOT NULL)`),
+    check(
+      'ai_attachment_derivatives_lock_check',
+      sql`((status = 'running'::text) = (locked_at IS NOT NULL)) AND ((status = 'running'::text) = (lock_token IS NOT NULL))`,
+    ),
     check('ai_attachment_derivatives_model_check', sql`model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text`),
     check(
       'ai_attachment_derivatives_origin_check',

@@ -1,6 +1,7 @@
 export * from './blocks';
 export * from './inferences';
 export * from './json-schema';
+export * from './media';
 export * from './preview';
 export * from './prompt-vars';
 export * from './requests';

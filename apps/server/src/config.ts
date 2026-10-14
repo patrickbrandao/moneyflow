@@ -41,6 +41,8 @@ export type Config = {
   aiRequestBackoffMs: number;
   /** Retenção padrão das requisições, em dias (app_settings ai.request_retention_days vence). */
   aiRequestRetentionDays: number;
+  /** Chat multimídia (spec 025): espera máxima da execução pelas transcrições pendentes da mensagem, em ms. */
+  aiTranscriptionTimeoutMs: number;
   /** Backup (spec 019): conexão do dono do banco, só para pg_dump/pg_restore; null = dump e restauração desligados. */
   ownerDatabaseUrl: string | null;
   /** Pasta dos binários do cliente PostgreSQL (pg_dump, pg_restore); vazia = PATH. */
@@ -89,6 +91,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     aiRequestMaxAttempts: clampInt(env.AI_REQUEST_MAX_ATTEMPTS, 3, 1, 10),
     aiRequestBackoffMs: clampInt(env.AI_REQUEST_BACKOFF_MS, 1000, 0, 60_000),
     aiRequestRetentionDays: clampInt(env.AI_REQUEST_RETENTION_DAYS, 30, 1, 365),
+    aiTranscriptionTimeoutMs: clampInt(env.AI_TRANSCRIPTION_TIMEOUT_MS, 120_000, 0, 600_000),
     ownerDatabaseUrl: env.DATABASE_OWNER_URL?.trim() || null,
     pgBinDir: env.PG_BIN_DIR?.trim() || null,
     backupMaxUploadBytes: Math.max(1, Number(env.BACKUP_MAX_UPLOAD_MB ?? 512)) * 1024 * 1024,

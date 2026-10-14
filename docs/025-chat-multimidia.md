@@ -32,7 +32,7 @@ O chat dos agentes passa a mostrar e tocar o que é anexado, a gravar áudio e a
   - o compositor mostra "Transcrevendo…" e deixa enviar mesmo assim;
   - a execução espera as transcrições pendentes da mensagem antes de chamar o modelo, até `AI_TRANSCRIPTION_TIMEOUT_MS` (120 s).
 - **Exibição**: só leitura, **sem edição**. O texto fica anexado ao áudio (derivado `transcription`, [024](024-capacidades-dos-provedores.md)), aparece sob o player e recolhe quando passa de 6 linhas.
-- **O que o modelo recebe**: `[Áudio "nome" (m:ss) — transcrição]: <texto>`.
+- **O que o modelo recebe**: `[Áudio "nome" (m:ss) — transcrição]: <texto>` (sem a duração, sem o `(m:ss)`).
 - **Falhas**:
   - a falha mostra "Falha na transcrição" com o botão "Tentar de novo", e o modelo recebe `[Áudio "nome" sem transcrição]`;
   - num agente sem áudio→texto, o áudio anexado fica como arquivo, com o aviso "sem transcrição: o agente não converte áudio".
@@ -59,31 +59,45 @@ O chat dos agentes passa a mostrar e tocar o que é anexado, a gravar áudio e a
 
 ## Banco (dba)
 - A tabela de derivados (inclusive a origem por mensagem do áudio gerado e a fila da transcrição) e as finalidades vêm da [024](024-capacidades-dos-provedores.md).
-- **Duração**: `attachments` (o anexo, que existe desde o upload) ganha `duration_ms` (áudio) e `page_count` (PDF), opcionais, preenchidos pela aplicação.
+- **Duração e páginas**: `attachments` (o anexo, que existe desde o upload) ganha `duration_ms` (áudio) e `page_count` (PDF), opcionais, preenchidos pela aplicação. O banco exige o tipo: a duração só com `mime_type` `audio/*` ou `video/*` (1 ms a 24 h; o Safari às vezes grava `video/mp4`), as páginas só com `application/pdf` (1 a 100 mil). Por isso a aplicação normaliza o tipo antes de gravar: com `application/octet-stream`, a duração seria recusada (`attachments_duration_ms_check` e `attachments_page_count_check`, traduzidos).
+- **Atribuição**: o derivado tem `conversation_id` (a conversa em que a transcrição foi pedida, `ON DELETE SET NULL`). É dela que o worker tira o usuário e o agente do uso e da requisição; excluir a conversa deixa o cache do anexo.
+- **Fila da transcrição** (migration 0042), só no `kind = 'transcription'`:
+  - `ai_transcription_enqueue(anexo, provedor, modelo, conversa)` insere `pending` ou devolve a linha que já existe para o anexo, o provedor e o modelo (`done` = cache);
+  - `ai_transcription_claim(limite, reserva_velha = 10 min, tentativas = 3)` reserva com `FOR UPDATE SKIP LOCKED` (`running`, `locked_at`, `lock_token` novo, tentativas + 1) e retoma a reserva mais velha que o prazo (o worker caiu); sem tentativas restantes, a linha vira `failed`;
+  - `ai_transcription_credentials(id, lock_token)` dá a chave só a quem tem a reserva (`42501` = provedor, dono ou agente inativo; `23514` = reserva perdida);
+  - `ai_transcription_complete` e `ai_transcription_fail` exigem a cerca (`false` = reserva perdida: o resultado é descartado);
+  - a **falha é definitiva**: as novas tentativas de HTTP já ficaram no adaptador ([023](023-requisicoes-ao-provedor.md)). Voltar à fila é só pelo "Tentar de novo";
+  - `ai_transcription_retry(id)` ("Tentar de novo") volta `failed` → `pending` com as **tentativas zeradas** e sem erro; nos outros estados não muda nada (`P0002` = inexistente, 404).
+- **Áudio gerado**: o derivado `speech` (mensagem + `block_index`, provedor, modelo e voz) com o áudio em `result_attachment_id`, sem fila; o áudio entra em `attachment_links` como `ai_message_speech` e sai com a conversa.
 
 ## Aplicação (app)
 - **API**:
-  - o upload da conversa enfileira a transcrição;
-  - `GET /api/attachments/:id/derivatives`;
-  - `POST /api/attachments/:id/transcribe` (tentar de novo);
-  - `POST /api/conversations/:id/messages/:messageId/speech` (gera ou devolve o áudio);
-  - `GET` do anexo com `Range`, para o player poder buscar.
-- **Worker**: a fila de transcrições (claim com SKIP LOCKED na tabela de derivados `pending`) e a espera no runner.
-- **Web**:
-  - `AudioPlayer`, `AudioRecorder`, `ImageLightbox` e `AttachmentPreview` em `apps/web/src/agents/`;
-  - o `PdfViewer` vem dos contratos;
-  - textos em `i18n/areas/agents-ui.ts`.
+  - `POST /api/conversations/:id/attachments` (o upload da conversa): o tipo é normalizado (sinônimos como `audio/x-m4a` viram o canônico; sem tipo, `application/octet-stream` ou `text/plain` de um `.md`, vale a extensão; `video/webm`/`video/mp4` da gravação viram `audio/*`). A duração vem do navegador (`durationMs` na query, medida pelo gravador ou pelos metadados do arquivo) ou, no WAV, do cabeçalho; as páginas do PDF saem do pdf.js no servidor. Com a inferência `transcription` do agente (`ai_capability_credentials`; modelo nulo = não configurada), enfileira a transcrição na mesma transação. Devolve o anexo com a duração, as páginas e a transcrição;
+  - `GET /api/conversations/:id` traz os metadados dos anexos das mensagens (`attachments`, com a transcrição mais recente de cada áudio) e o que o agente converte (`media.transcription`, `media.speech`);
+  - `GET /api/attachments/:id/derivatives`: transcrição e descrição (o texto do PDF fica de fora), para quem lê o anexo;
+  - `POST /api/attachments/:id/transcribe` (tentar de novo): só o dono da conversa (o admin lendo recebe 403). Com a mesma inferência, `ai_transcription_retry`; se o agente agora usa outro provedor ou modelo, é outra transcrição (enfileirada);
+  - `POST /api/conversations/:id/messages/:messageId/speech` (gera ou devolve o áudio): `{ parts: [{ blockIndex, attachmentId, characters }] }`, um anexo por trecho, na ordem. A voz é a da inferência (ou `default_models.speech_voice`; sem nenhuma, `alloy`). O admin lendo a conversa de outro usuário ouve só o que o dono já gerou; pedir uma fala ainda não gerada dá 403 (somente leitura). Agente sem texto→áudio: 422 `agent_no_speech`; mensagem sem texto: 422;
+  - `GET /api/attachments/:id/download` com `Range` (`bytes=a-b`, `a-` e `-n`: 206 com `Content-Range`; fora do arquivo: 416; sempre `Accept-Ranges: bytes`), para o player poder buscar. O conteúdo vem inteiro do banco a cada pedido (bytea, até 20 MB).
+- **Worker**: a fila de transcrições no laço dos agentes (`agents/transcriptions.ts`, até 2 ao mesmo tempo, no ritmo de `AGENT_POLL_MS`): reserva numa transação curta, lê as credenciais com a cerca, chama o provedor pelo invólucro de requisições (idioma `pt`), grava o uso (`transcription`, `audio_seconds`, `request_id`, usuário, agente e conversa da derivada) e conclui na mesma transação; a duração que o navegador não informou vem do provedor.
+- **Espera no runner** (`RunAttachments`): para cada áudio da mensagem, a transcrição **mais recente do anexo, de qualquer provedor** (o agente pode ter trocado de inferência), esperando a `pending`/`running` até `AI_TRANSCRIPTION_TIMEOUT_MS` (padrão 120 s; cancelar corta a espera). Sem nenhuma e com áudio→texto no agente (ele ganhou a capacidade depois do upload), a execução enfileira uma. O conteúdo do áudio nem sai do banco: o modelo recebe a transcrição ou `[Áudio "nome" sem transcrição]`.
+- **Web** (`apps/web/src/agents/`):
+  - `AudioPlayer` (velocidade compartilhada entre os players e um tocando por vez), `AudioRecorder` (`useAudioRecorder`, o botão e a faixa de revisão), `ImageLightbox` (e a camada `MediaDialog` das prévias) e `AttachmentPreview` (as prévias, a transcrição acompanhada enquanto está na fila e o play do modo áudio);
+  - `MarkdownDocument` em `Markdown.tsx` (renderizado / bruto);
+  - o `PdfViewer` (e o `loadPdf`, também da miniatura) vem dos contratos;
+  - o modo áudio fica em `audioMode` da janela, no estado da UI dos agentes (`localStorage`);
+  - textos em `i18n/areas/agents-ui.ts` (`media`).
 
 ## Testes
-- **Integração** (provedor falso com transcrição e TTS):
+- **Integração** (`apps/server/test/chat-media.test.ts`, provedor falso com transcrição e TTS):
   - o upload de áudio gera o derivado `transcription`;
   - a execução espera a transcrição pendente;
   - o modelo recebe o texto e não o áudio;
   - a falha marca `failed`, e o "tentar de novo" funciona;
   - o TTS gera uma vez e reaproveita;
   - o markdown vira texto falado;
-  - o agente sem áudio→texto não transcreve.
-- **e2e**:
+  - o agente sem áudio→texto não transcreve;
+  - a espera esgotada (o modelo recebe "sem transcrição"), as páginas do PDF, o `Range` do download e o admin lendo em somente leitura.
+- **e2e** (`e2e/tests/agentes.spec.ts`, "chat multimídia"):
   - anexar um áudio e ver a transcrição;
   - tocar e trocar a velocidade para 2x;
   - ligar o modo áudio e tocar uma resposta;

@@ -1,8 +1,11 @@
 import {
   type AiBlock,
   type AiMessageDto,
+  type ChatAttachmentDto,
   type ConversationDetail,
   formatDateTime,
+  isAudioMime,
+  isImageMime,
   type PreviewRow,
   type ToolConfirmationDto,
   type ToolResultBlock,
@@ -41,7 +44,9 @@ import { MAX_ATTACHMENT_BYTES } from '../components/attachments/AttachmentsPanel
 import { LoadError } from '../components/domain';
 import { useToast } from '../components/Toast';
 import { Badge, Button, cx, Skel } from '../components/ui';
-import { attachmentUrl } from '../lib/upload';
+import { useAgents } from './AgentsProvider';
+import { AttachmentPreview, MediaProvider, SpeechButton, TranscriptionBadge } from './AttachmentPreview';
+import { RecordButton, RecorderPanel, useAudioRecorder } from './AudioRecorder';
 import { agentColor, toolLabel, usageLine } from './format';
 import { Markdown } from './Markdown';
 import { hasRecord, readRecord, recordMarkdown } from './records';
@@ -62,6 +67,22 @@ export function ConversationPane({ conversationId, header }: { conversationId: s
   const state = useConversation(conversationId);
   const { detail, error } = state;
   const readOnly = detail?.readOnly ?? false;
+  // Modo áudio (spec 025): por janela, só com texto→áudio no agente.
+  const audioMode = Boolean(useAgents().state.windows.find((w) => w.id === conversationId)?.audioMode && detail?.media.speech);
+  const images = useMemo(() => {
+    const list: { id: string; fileName: string }[] = [];
+    const meta = new Map(detail?.attachments.map((a) => [a.id, a]) ?? []);
+    for (const message of detail?.messages ?? []) {
+      if (message.role !== 'user') continue;
+      for (const block of message.content) {
+        if (block.type !== 'attachment') continue;
+        const mime = meta.get(block.attachment_id)?.mimeType ?? block.mime_type ?? '';
+        if (isImageMime(mime) && !list.some((i) => i.id === block.attachment_id))
+          list.push({ id: block.attachment_id, fileName: block.file_name ?? block.attachment_id });
+      }
+    }
+    return list;
+  }, [detail?.messages, detail?.attachments]);
   const [dragging, setDragging] = useState(false);
   const composer = useRef<ComposerHandle | null>(null);
 
@@ -113,9 +134,17 @@ export function ConversationPane({ conversationId, header }: { conversationId: s
       ) : (
         <>
           {readOnly && <div className="agent-readonly">{u.window.readOnly}</div>}
-          <Messages state={state} detail={detail} />
-          {!readOnly && <Confirmations state={state} detail={detail} />}
-          {!readOnly && <Composer ref={composer} state={state} />}
+          <MediaProvider
+            conversationId={conversationId}
+            readOnly={readOnly}
+            transcribes={detail.media.transcription}
+            attachments={detail.attachments}
+            images={images}
+          >
+            <Messages state={state} detail={detail} audioMode={audioMode} />
+            {!readOnly && <Confirmations state={state} detail={detail} />}
+            {!readOnly && <Composer ref={composer} state={state} transcribes={detail.media.transcription} />}
+          </MediaProvider>
           <Footer state={state} detail={detail} />
         </>
       )}
@@ -128,7 +157,7 @@ export function ConversationPane({ conversationId, header }: { conversationId: s
 
 type ToolOutcome = { content: string; isError: boolean };
 
-function Messages({ state, detail }: { state: ConversationState; detail: ConversationDetail }) {
+function Messages({ state, detail, audioMode }: { state: ConversationState; detail: ConversationDetail; audioMode: boolean }) {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const results = useMemo(() => {
@@ -174,6 +203,7 @@ function Messages({ state, detail }: { state: ConversationState; detail: Convers
           confirmations={confirmationsByTool}
           liveTools={state.liveTools}
           active={state.busy}
+          audioMode={audioMode}
         />
       ))}
       {state.busy && (state.liveThinking || state.liveText) && (
@@ -215,26 +245,32 @@ function MessageView({
   confirmations,
   liveTools,
   active,
+  audioMode,
 }: {
   message: AiMessageDto;
   results: Map<string, ToolOutcome>;
   confirmations: Map<string, ToolConfirmationDto>;
   liveTools: Record<string, LiveTool>;
   active: boolean;
+  audioMode: boolean;
 }) {
+  const hasText = message.content.some((b) => b.type === 'text' && b.text.trim() !== '');
   if (message.role === 'user') {
     return (
-      <div className="agent-msg user">
+      <div className="agent-msg user" data-testid="agent-message-user">
         {message.content.map((block, index) => (
           <UserBlock key={index} block={block} />
         ))}
-        <span className="agent-time">{formatDateTime(message.createdAt)}</span>
+        <span className="agent-time">
+          {audioMode && hasText && <SpeechButton messageId={message.id} />}
+          {formatDateTime(message.createdAt)}
+        </span>
       </div>
     );
   }
-  const hasText = message.content.some((b) => b.type === 'text' && b.text.trim() !== '');
   return (
     <div className="agent-msg assistant" {...(hasText ? { 'data-testid': 'agent-message-assistant' } : {})}>
+      {audioMode && hasText && !active && <SpeechButton messageId={message.id} />}
       {message.content.map((block, index) => {
         switch (block.type) {
           case 'text':
@@ -268,13 +304,7 @@ function MessageView({
 
 function UserBlock({ block }: { block: AiBlock }) {
   if (block.type === 'text') return block.text.trim() ? <Markdown text={block.text} /> : null;
-  if (block.type === 'attachment') {
-    return (
-      <a className="agent-chip" href={attachmentUrl(block.attachment_id)} title={u.chat.download}>
-        <Paperclip /> <span className="truncate">{block.file_name ?? block.attachment_id}</span>
-      </a>
-    );
-  }
+  if (block.type === 'attachment') return <AttachmentPreview block={block} />;
   return null;
 }
 
@@ -476,9 +506,28 @@ function PreviewRows({ rows }: { rows: PreviewRow[] }) {
 
 type ComposerHandle = { insert: (text: string) => void; attachFile: (file: File) => void };
 
-function Composer({ state, ref }: { state: ConversationState; ref: Ref<ComposerHandle> }) {
+/** Duração de um arquivo de áudio pelo navegador (metadados), até 3 s; null se não souber. */
+function probeDuration(file: File): Promise<number | null> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const el = new Audio();
+    const done = (value: number | null) => {
+      clearTimeout(timer);
+      el.src = '';
+      URL.revokeObjectURL(url);
+      resolve(value);
+    };
+    const timer = setTimeout(() => done(null), 3000);
+    el.preload = 'metadata';
+    el.onloadedmetadata = () => done(Number.isFinite(el.duration) && el.duration > 0 ? Math.round(el.duration * 1000) : null);
+    el.onerror = () => done(null);
+    el.src = url;
+  });
+}
+
+function Composer({ state, ref, transcribes }: { state: ConversationState; ref: Ref<ComposerHandle>; transcribes: boolean }) {
   const [text, setText] = useState('');
-  const [attachments, setAttachments] = useState<{ id: string; fileName: string }[]>([]);
+  const [attachments, setAttachments] = useState<ChatAttachmentDto[]>([]);
   const [uploading, setUploading] = useState(0);
   const [sending, setSending] = useState(false);
   const area = useRef<HTMLTextAreaElement>(null);
@@ -487,15 +536,16 @@ function Composer({ state, ref }: { state: ConversationState; ref: Ref<ComposerH
   const disabled = state.busy || sending;
 
   const attachFile = useCallback(
-    async (file: File) => {
+    async (file: File, knownDurationMs?: number) => {
       if (file.size > MAX_ATTACHMENT_BYTES) {
         toast.error(u.chat.attachmentTooLarge);
         return;
       }
       setUploading((n) => n + 1);
       try {
-        const row = await state.attach(file);
-        setAttachments((list) => [...list, { id: row.id, fileName: row.fileName }]);
+        const durationMs = knownDurationMs ?? (isAudioMime(file.type) ? await probeDuration(file) : null);
+        const row = await state.attach(file, durationMs);
+        setAttachments((list) => [...list, row]);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : String(error));
       } finally {
@@ -524,6 +574,9 @@ function Composer({ state, ref }: { state: ConversationState; ref: Ref<ComposerH
   }, []);
 
   useImperativeHandle(ref, () => ({ insert, attachFile: (file) => void attachFile(file) }), [insert, attachFile]);
+
+  // Gravação pelo microfone (spec 025): só com áudio→texto no agente; o áudio vira um anexo como os outros.
+  const recorder = useAudioRecorder(useCallback((file: File, durationMs: number) => void attachFile(file, durationMs), [attachFile]));
 
   // Cresce com o texto até um limite (e recalcula quando a largura muda: painel, redimensionar).
   const fit = useCallback(() => {
@@ -574,11 +627,13 @@ function Composer({ state, ref }: { state: ConversationState; ref: Ref<ComposerH
 
   return (
     <div className="agent-composer">
+      {transcribes && <RecorderPanel recorder={recorder} />}
       {(attachments.length > 0 || uploading > 0) && (
         <div className="agent-chips">
           {attachments.map((a) => (
-            <span key={a.id} className="agent-chip">
+            <span key={a.id} className="agent-chip" data-testid="composer-attachment">
               <Paperclip /> <span className="truncate">{a.fileName}</span>
+              {isAudioMime(a.mimeType) && <TranscriptionBadge attachmentId={a.id} initial={a.transcription} />}
               <button
                 type="button"
                 aria-label={u.chat.removeAttachment(a.fileName)}
@@ -629,6 +684,7 @@ function Composer({ state, ref }: { state: ConversationState; ref: Ref<ComposerH
           >
             <Paperclip />
           </button>
+          {transcribes && <RecordButton recorder={recorder} disabled={disabled} />}
           {state.busy ? (
             <button
               type="button"

@@ -1,5 +1,5 @@
 import { type ConversationDetail, t } from '@moneyflow/shared';
-import { Archive, ArchiveRestore, GitBranch, Minus, MoreHorizontal, PanelRight, Pencil, Pin, PinOff, X } from 'lucide-react';
+import { Archive, ArchiveRestore, GitBranch, Headphones, Minus, MoreHorizontal, PanelRight, Pencil, Pin, PinOff, X } from 'lucide-react';
 import { type ReactNode, type PointerEvent as ReactPointerEvent, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { cx, Menu, MenuItem } from '../components/ui';
@@ -14,7 +14,8 @@ const isNarrow = () => typeof window !== 'undefined' && window.matchMedia(NARROW
 /**
  * Cabeçalho de uma conversa (janela ou painel): cor do agente, título e os
  * botões. O menu "…" tem renomear, fixar, bifurcar e arquivar (não aparece
- * em modo somente leitura).
+ * em modo somente leitura). O fone liga o modo áudio da janela (spec 025),
+ * só quando o agente converte texto em áudio.
  */
 export function PaneHeader({
   win,
@@ -30,6 +31,8 @@ export function PaneHeader({
   const conversation = detail?.conversation;
   const title = conversation?.title ?? win.title ?? u.list.untitled;
   const { actions, modal } = useConversationActions();
+  const agents = useAgents();
+  const audioMode = Boolean(win.audioMode);
   return (
     <div className="agent-head" onPointerDown={onPointerDown}>
       <AgentDot slot={conversation?.agentColorSlot ?? win.colorSlot} />
@@ -67,6 +70,19 @@ export function PaneHeader({
             {conversation.archivedAt ? u.actions.unarchive : u.actions.archive}
           </MenuItem>
         </Menu>
+      )}
+      {detail?.media.speech && (
+        <button
+          type="button"
+          className={cx('icon-btn', audioMode && 'is-on')}
+          title={audioMode ? u.media.audioModeOn : u.media.audioModeOff}
+          aria-label={audioMode ? u.media.audioModeOn : u.media.audioModeOff}
+          aria-pressed={audioMode}
+          onClick={() => agents.setAudioMode(win.id, !audioMode)}
+          data-testid="agent-audio-mode"
+        >
+          <Headphones />
+        </button>
       )}
       {buttons}
       {modal}

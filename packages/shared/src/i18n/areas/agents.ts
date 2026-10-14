@@ -36,6 +36,11 @@ export const agentsStrings = {
       `Esta capacidade está em uso e não pode ser desmarcada. Agentes que a usam: ${agents}. Troque o provedor deles antes.`,
     inferenceProvider: (capability: string) => `Escolha um provedor ativo com a capacidade "${capability}".`,
     agentNoVision: 'Este agente não lê imagens.',
+    agentNoSpeech: 'Este agente não converte texto em áudio.',
+    agentNoTranscription: 'Este agente não converte áudio em texto.',
+    speechNoText: 'Esta mensagem não tem texto para ouvir.',
+    transcriptionNotFound: 'Este anexo não tem transcrição.',
+    notAudio: 'Este anexo não é um áudio.',
     embeddingDimensions: (got: number) => `O modelo precisa produzir 1536 dimensões (devolveu ${got}).`,
   },
   /** Capacidades dos provedores (spec 024), em ordem canônica. */
@@ -53,6 +58,10 @@ export const agentsStrings = {
     pdfText: (name: string, text: string) => `[PDF "${name}" — camada de texto]:\n${text}`,
     pdfNoText: (name: string) => `[PDF "${name}"]: PDF sem texto e o agente não tem visão.`,
     imageUnreadable: (name: string) => `[Imagem "${name}"]: este agente não lê imagens.`,
+    /** O áudio nunca vai ao modelo de texto, só a transcrição (spec 025). */
+    audioTranscript: (name: string, duration: string | null, text: string) =>
+      `[Áudio "${name}"${duration ? ` (${duration})` : ''} — transcrição]: ${text}`,
+    audioNoTranscript: (name: string) => `[Áudio "${name}" sem transcrição]`,
     describePrompt:
       'Descreva o anexo para outro modelo que não consegue vê-lo. Transcreva todo o texto legível (valores, datas, nomes, documentos, códigos) e descreva o que não é texto (tabelas, gráficos, fotos) de forma objetiva. Responda só com a descrição, em português.',
   },

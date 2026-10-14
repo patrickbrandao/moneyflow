@@ -34,6 +34,7 @@ import { suggestImportClassifications } from '../services/ai-flows';
 import * as requests from '../services/ai-requests';
 import * as aiSettings from '../services/ai-settings';
 import * as tokens from '../services/api-tokens';
+import * as chatMedia from '../services/chat-media';
 import * as conversations from '../services/conversations';
 import { decideSuggestions } from '../services/reconciliation';
 import { contentDisposition, UPLOAD_BODY_LIMIT } from './attachments';
@@ -65,14 +66,21 @@ export async function agentRoutes(app: FastifyInstance) {
   app.patch('/api/conversations/:id', (r: Req) => conversations.updateConversation(r.ctx, id(r), parse(conversationUpdateInput, r.body)));
   app.delete('/api/conversations/:id', (r: Req) => conversations.deleteConversation(r.ctx, id(r)));
   app.post('/api/conversations/:id/fork', (r: Req) => conversations.forkConversation(r.ctx, id(r), parse(conversationForkInput, r.body)));
+  // Upload do chat (spec 025): o arquivo cru no corpo; fileName e, no áudio, durationMs (do navegador) na query.
   app.post('/api/conversations/:id/attachments', { bodyLimit: UPLOAD_BODY_LIMIT, config: { rawUpload: true } }, (r: Req) =>
-    conversations.uploadMessageAttachment(r.ctx, id(r), {
+    chatMedia.uploadChatAttachment(r.ctx, id(r), {
       name: String(r.query.fileName ?? 'arquivo'),
       mime: r.headers['content-type'] ?? '',
       content: r.body,
+      durationMs: r.query.durationMs,
     }),
   );
   app.post('/api/conversations/:id/messages', (r: Req) => conversations.sendMessage(r.ctx, id(r), parse(messageSendInput, r.body)));
+  // Modo áudio (spec 025): gera (ou devolve o já gerado) o áudio da mensagem.
+  app.post('/api/conversations/:id/messages/:messageId/speech', (r: Req) => chatMedia.messageSpeech(r.ctx, id(r), param(r, 'messageId')));
+  // Derivados de um anexo (transcrição, descrição) e o "tentar de novo" da transcrição.
+  app.get('/api/attachments/:id/derivatives', (r: Req) => chatMedia.listDerivatives(r.ctx, id(r)));
+  app.post('/api/attachments/:id/transcribe', (r: Req) => chatMedia.retryTranscription(r.ctx, id(r)));
 
   /* ---------------- execuções ---------------- */
   app.get('/api/runs/:id', (r: Req) => conversations.getRun(r.ctx, id(r)));

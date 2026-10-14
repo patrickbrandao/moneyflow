@@ -151,6 +151,61 @@ export const agentsUiStrings = {
     label: 'Agente ancorado',
   },
 
+  /* ---------------- chat multimídia (spec 025) ---------------- */
+  media: {
+    openImage: (name: string) => `Ampliar ${name}`,
+    image: 'Imagem',
+    imageOf: (n: number, total: number) => `${n} de ${total}`,
+    previous: 'Anterior',
+    next: 'Próxima',
+    close: 'Fechar',
+    download: 'Baixar',
+    openPdf: (name: string) => `Abrir ${name}`,
+    pages: (n: number) => (n === 1 ? '1 página' : `${n} páginas`),
+    pdf: 'PDF',
+    markdown: 'Markdown',
+    openMarkdown: (name: string) => `Abrir ${name}`,
+    rendered: 'Renderizado',
+    raw: 'Bruto',
+    markdownLoading: 'Carregando…',
+    markdownError: 'Não foi possível abrir o arquivo.',
+    /* player */
+    play: 'Tocar',
+    pause: 'Pausar',
+    seek: 'Posição do áudio',
+    speed: 'Velocidade',
+    speedOption: (rate: number) => `${String(rate).replace('.', ',')}x`,
+    audioError: 'Não foi possível tocar o áudio.',
+    /* transcrição */
+    transcribing: 'Transcrevendo…',
+    transcriptionFailed: 'Falha na transcrição',
+    retry: 'Tentar de novo',
+    noTranscription: 'sem transcrição: o agente não converte áudio',
+    transcription: 'Transcrição',
+    showMore: 'Mostrar tudo',
+    showLess: 'Recolher',
+    emptyTranscription: '(sem fala reconhecida)',
+    /* gravação */
+    record: 'Gravar áudio',
+    recording: 'Gravando',
+    stopRecording: 'Parar a gravação',
+    recordingWarn: 'Falta 1 minuto: a gravação para sozinha aos 10 minutos.',
+    recordingLimit: 'A gravação chegou a 10 minutos e parou.',
+    discard: 'Descartar',
+    rerecord: 'Gravar de novo',
+    useRecording: 'Anexar o áudio',
+    recordingName: (stamp: string) => `gravacao-${stamp}`,
+    micDenied:
+      'O navegador bloqueou o microfone. Libere o acesso ao microfone para este site (no ícone do cadeado ou nas permissões da barra de endereço) e tente de novo.',
+    micUnavailable: 'Nenhum microfone disponível neste navegador.',
+    recorderUnsupported: 'Este navegador não grava áudio.',
+    /* modo áudio */
+    audioModeOn: 'Desligar o modo áudio',
+    audioModeOff: 'Ligar o modo áudio (ouvir as mensagens)',
+    listen: 'Ouvir a mensagem',
+    generating: 'Gerando o áudio…',
+  },
+
   /* ---------------- administração (/admin/ai) ---------------- */
   admin: {
     nav: 'IA e agentes',

@@ -77,3 +77,17 @@ export async function extractPdfText(data: Buffer): Promise<string> {
     await task.destroy();
   }
 }
+
+/** Número de páginas do PDF (spec 025: attachments.page_count); null se o pdf.js não abrir o arquivo. */
+export async function pdfPageCount(data: Buffer): Promise<number | null> {
+  const lib = await pdfjs();
+  const task = lib.getDocument({ data: new Uint8Array(data), useSystemFonts: false, disableFontFace: true, verbosity: 0 });
+  try {
+    const doc = await task.promise;
+    return doc.numPages > 0 ? doc.numPages : null;
+  } catch {
+    return null;
+  } finally {
+    await task.destroy();
+  }
+}

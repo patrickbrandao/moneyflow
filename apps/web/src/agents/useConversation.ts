@@ -2,7 +2,7 @@ import type {
   AiMessageDto,
   AiRunDto,
   AiRunEvent,
-  AttachmentRow,
+  ChatAttachmentDto,
   ConversationDetail,
   DecideResult,
   ScreenContext,
@@ -57,6 +57,8 @@ export function useConversation(conversationId: string) {
   const [streamError, setStreamError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const alive = useRef(true);
+  /** Anexos enviados nesta tela (spec 025): entram nos metadados do detalhe ao enviar a mensagem. */
+  const uploaded = useRef(new Map<string, ChatAttachmentDto>());
 
   useEffect(() => {
     alive.current = true;
@@ -176,7 +178,16 @@ export function useConversation(conversationId: string) {
       });
       setStreamError(null);
       setLiveTools({});
-      setDetail((d) => (d ? { ...d, messages: upsertMessage(d.messages, result.message) } : d));
+      const sent = attachmentIds.map((id) => uploaded.current.get(id)).filter((a): a is ChatAttachmentDto => Boolean(a));
+      setDetail((d) =>
+        d
+          ? {
+              ...d,
+              messages: upsertMessage(d.messages, result.message),
+              attachments: [...d.attachments.filter((a) => !attachmentIds.includes(a.id)), ...sent],
+            }
+          : d,
+      );
       setRun(result.run);
       bumpList();
       return result;
@@ -219,8 +230,17 @@ export function useConversation(conversationId: string) {
     [detail, run],
   );
 
+  // Upload do chat: no áudio, a duração medida pelo navegador vai junto (spec 025).
   const attach = useCallback(
-    (file: File) => upload<AttachmentRow>(`/api/conversations/${conversationId}/attachments`, file),
+    async (file: File, durationMs?: number | null) => {
+      const row = await upload<ChatAttachmentDto>(
+        `/api/conversations/${conversationId}/attachments`,
+        file,
+        durationMs ? { durationMs: Math.round(durationMs) } : undefined,
+      );
+      uploaded.current.set(row.id, row);
+      return row;
+    },
     [conversationId],
   );
 

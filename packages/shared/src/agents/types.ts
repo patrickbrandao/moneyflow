@@ -340,6 +340,57 @@ export type ConversationDetail = {
   usage: UsageTotals[];
   /** true = quem vê não é o dono (admin lendo): sem enviar, decidir ou cancelar. */
   readOnly: boolean;
+  /** Metadados dos anexos das mensagens (spec 025): duração, páginas e a transcrição do áudio. */
+  attachments: ChatAttachmentDto[];
+  /** O que o agente converte (spec 025): áudio→texto (microfone, transcrição) e texto→áudio (modo áudio). */
+  media: { transcription: boolean; speech: boolean };
+};
+
+/* ---------------- chat multimídia (spec 025) ---------------- */
+
+export type DerivativeStatus = 'pending' | 'running' | 'done' | 'failed';
+
+/** Transcrição de um áudio (derivado transcription mais recente do anexo, de qualquer provedor). */
+export type TranscriptionDto = {
+  id: string;
+  status: DerivativeStatus;
+  text: string | null;
+  error: string | null;
+  model: string;
+  updatedAt: string;
+};
+
+/** Anexo de uma mensagem do chat (o upload da conversa também devolve este formato). */
+export type ChatAttachmentDto = {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  durationMs: number | null;
+  pageCount: number | null;
+  createdAt: string;
+  /** Só áudio: null = sem transcrição (o agente não converte áudio). */
+  transcription: TranscriptionDto | null;
+};
+
+/** GET /api/attachments/:id/derivatives: o que foi gerado a partir do anexo (o conteúdo da camada de texto do PDF fica de fora). */
+export type AttachmentDerivativeDto = {
+  id: string;
+  kind: 'description' | 'pdf_text' | 'transcription';
+  status: DerivativeStatus;
+  content: string | null;
+  error: string | null;
+  providerId: string | null;
+  model: string | null;
+  attempts: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** POST /api/conversations/:id/messages/:messageId/speech: o áudio da mensagem, um anexo por trecho, na ordem. */
+export type MessageSpeechDto = {
+  messageId: string;
+  parts: { blockIndex: number; attachmentId: string; characters: number }[];
 };
 
 export type SendMessageResult = { message: AiMessageDto; run: AiRunDto };

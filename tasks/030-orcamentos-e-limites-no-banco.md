@@ -16,6 +16,8 @@ Lacuna entre o código atual (v0.1.7) e a spec [028](../docs/028-limites-e-uso.m
 
 Ordem: Depois da F13; depois vem a 031. A spec é a fonte da verdade: decisões que mudarem durante a execução atualizam a spec (e a [016](../docs/016-banco-de-dados.md), quando for banco) na mesma mudança.
 
+Acréscimo (2026-10-14, pendência das 023/025): as visões mensais de uso (`ai_usage_monthly_*`) e a nova `ai_usage_daily` devem somar também `audio_seconds` e `characters`.
+
 ## Como reproduzir
 Não se aplica (recurso novo). Critério de pronto: os testes listados na seção "Testes" da spec [028](../docs/028-limites-e-uso.md) que cabem a esta tarefa passam, junto com `pnpm lint`, `pnpm typecheck` e `pnpm test` (e `make -C database test` no banco).
 

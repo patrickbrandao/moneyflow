@@ -147,6 +147,8 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   attachments_mime_type_check: 'Tipo de arquivo inválido.',
   attachments_size_check: 'O arquivo precisa ter entre 1 byte e 20 MB.',
   attachments_content_immutable_check: 'O conteúdo de um anexo não muda: envie um arquivo novo.',
+  attachments_duration_ms_check: 'Duração inválida: só um áudio tem duração, entre 1 ms e 24 horas.',
+  attachments_page_count_check: 'Número de páginas inválido: só um PDF tem páginas, entre 1 e 100 mil.',
   title_attachments_key: 'Esse arquivo já está anexado.',
   settlement_attachments_key: 'Esse arquivo já está anexado.',
   movement_attachments_key: 'Esse arquivo já está anexado.',

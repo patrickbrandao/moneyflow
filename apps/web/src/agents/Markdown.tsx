@@ -1,7 +1,10 @@
+import { t } from '@moneyflow/shared';
 import DOMPurify from 'dompurify';
+import { Code, Eye } from 'lucide-react';
 import { marked } from 'marked';
-import { type MouseEvent, memo, useMemo } from 'react';
+import { type MouseEvent, memo, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Tabs } from '../components/ui';
 
 /*
  * Markdown seguro do assistente: marked → DOMPurify.sanitize. Links abrem em
@@ -56,3 +59,31 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
   // biome-ignore lint/security/noDangerouslySetInnerHtml: HTML saneado pelo DOMPurify logo acima.
   return <div className="agent-md" onClick={(event) => internalClick(event, navigate)} dangerouslySetInnerHTML={{ __html: html }} />;
 });
+
+/**
+ * Documento markdown (anexo .md do chat, spec 025): o conteúdo renderizado
+ * pelo mesmo markdown seguro, com a alternância renderizado / bruto.
+ */
+export function MarkdownDocument({ text }: { text: string }) {
+  const [view, setView] = useState<'rendered' | 'raw'>('rendered');
+  const m = t.agentsUi.media;
+  return (
+    <div className="md-doc" data-testid="markdown-document" data-mode={view}>
+      <Tabs
+        value={view}
+        onChange={(key) => setView(key as 'rendered' | 'raw')}
+        items={[
+          { key: 'rendered', label: m.rendered, icon: <Eye /> },
+          { key: 'raw', label: m.raw, icon: <Code /> },
+        ]}
+      />
+      {view === 'raw' ? (
+        <pre className="md-doc-raw">{text}</pre>
+      ) : (
+        <div className="md-doc-rendered">
+          <Markdown text={text} />
+        </div>
+      )}
+    </div>
+  );
+}

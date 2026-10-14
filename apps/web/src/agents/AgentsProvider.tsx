@@ -24,6 +24,8 @@ export type AgentWindow = {
   h: number;
   z: number;
   minimized: boolean;
+  /** Modo áudio (spec 025): play nas mensagens de texto. Desligado por padrão, por janela. */
+  audioMode?: boolean;
 };
 
 type UiState = {
@@ -52,6 +54,7 @@ type AgentsApi = {
   undock: (id: string) => void;
   setPanelWidth: (width: number) => void;
   setPanelCollapsed: (collapsed: boolean) => void;
+  setAudioMode: (id: string, on: boolean) => void;
   updateMeta: (meta: WindowMeta) => void;
   /** Cria a conversa (com o contexto da tela) e abre a janela. */
   createConversation: (agentId: string) => Promise<ConversationDto>;
@@ -245,6 +248,11 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
   );
   const setPanelCollapsed = useCallback((collapsed: boolean) => update((s) => ({ ...s, panelCollapsed: collapsed })), [update]);
 
+  const setAudioMode = useCallback(
+    (id: string, on: boolean) => update((s) => ({ ...s, windows: s.windows.map((w) => (w.id === id ? { ...w, audioMode: on } : w)) })),
+    [update],
+  );
+
   const updateMeta = useCallback<AgentsApi['updateMeta']>(
     (meta) =>
       update((s) => {
@@ -314,6 +322,7 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
       undock,
       setPanelWidth,
       setPanelCollapsed,
+      setAudioMode,
       updateMeta,
       createConversation,
       registerScreen,
@@ -333,6 +342,7 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
       undock,
       setPanelWidth,
       setPanelCollapsed,
+      setAudioMode,
       updateMeta,
       createConversation,
       registerScreen,

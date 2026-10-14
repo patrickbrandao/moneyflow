@@ -3,7 +3,7 @@ import { ChevronLeft, ChevronRight, Download, ZoomIn, ZoomOut } from 'lucide-rea
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '../ui';
 
-type PdfDocument = {
+export type PdfDocument = {
   numPages: number;
   getPage: (n: number) => Promise<{
     getViewport: (o: { scale: number }) => { width: number; height: number };
@@ -16,7 +16,7 @@ type PdfDocument = {
 };
 
 /** pdf.js sob demanda (não pesa no bundle inicial), com o worker servido pelo Vite. */
-async function loadPdf(url: string): Promise<PdfDocument> {
+export async function loadPdf(url: string): Promise<PdfDocument> {
   const [pdfjs, worker] = await Promise.all([import('pdfjs-dist'), import('pdfjs-dist/build/pdf.worker.min.mjs?url')]);
   pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
   // Só o canvas da página (somente leitura): sem a camada de formulários nem o scripting do PDF.
@@ -26,7 +26,7 @@ async function loadPdf(url: string): Promise<PdfDocument> {
 
 const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 
-/** Visualizador somente leitura (paginação e zoom) do PDF de um contrato (spec 020). */
+/** Visualizador somente leitura (paginação e zoom) do PDF de um contrato (spec 020) e dos anexos do chat (spec 025). */
 export function PdfViewer({ url, downloadUrl }: { url: string; downloadUrl: string }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [doc, setDoc] = useState<PdfDocument | null>(null);
