@@ -14,7 +14,7 @@ Perfis de ferramentas dos agentes de IA. O kit diz quais tools internas do Money
 - **Tools novas** do registro (F13 e seguintes) **não entram sozinhas** num kit, que funciona como lista de permissões. Elas aparecem na tela como "não incluída".
 - O kit vale só para as tools **internas**. Os servidores MCP externos continuam vinculados ao agente ([011](011-agentes-de-ia.md), seção MCP), com a regra de confirmação deles: as tools contam como escrita e pedem confirmação, salvo `readOnlyHint`.
 - O kit **não amplia permissões**. A tool continua passando por `Access` com as permissões de quem aciona o agente, e as tools só de administrador ([027](027-tools-de-controle-total.md)) nunca são oferecidas ao modelo quando quem aciona não é admin, mesmo que estejam no kit. O campo `adminOnly` do registro e esse filtro entram já na F7; como ainda não há tool de admin real, o teste usa uma tool registrada só no teste.
-- O kit não se aplica ao servidor `/mcp` próprio: os tokens pessoais continuam expondo todas as tools. Ele também não se aplica aos fluxos automáticos, que rodam sem tools até a [029](029-fluxos-autonomos.md).
+- O kit não se aplica ao servidor `/mcp` próprio: os tokens pessoais continuam expondo todas as tools, menos as só de administrador (para quem não é admin), as de segredo e as que geram arquivo ([027](027-tools-de-controle-total.md)). Ele também não se aplica aos fluxos automáticos, que rodam sem tools até a [029](029-fluxos-autonomos.md).
 - **Excluir**: só o kit sem agentes ligados (inclusive os arquivados). O kit em uso mostra os agentes que o usam. Não há arquivamento.
 - O kit é **auditado** como o resto da configuração da IA.
 - O backup do admin ([019](019-backup-e-restauracao.md)) exporta e importa os kits. O agente aponta para o kit pelo nome (chave natural). Um arquivo de antes do kit (v0.1.7, agente com `enabled_tools`/`require_write_confirmation`) é convertido na importação pela mesma regra da migração (abaixo), com o retrato `ai_legacy_tool_registry()`: o agente novo ganha o kit "Kit – <nome>" no próprio arquivo, ou fica sem kit; um agente que já existe no banco (mesmo id ou nome) fica como está.
@@ -25,15 +25,18 @@ O registro (`packages/shared/src/agents/tools.ts`) ganha o campo `category` em c
 | Categoria | Tools |
 |---|---|
 | Busca e consulta | `search_records`, `semantic_search`, `calendar` |
-| Caixas e contas | `list_caixas`, `get_caixa`, `list_accounts`, `get_account_statement`, `list_transfers`, `create_transfer` |
+| Caixas e contas | `list_caixas`, `get_caixa`, `list_accounts`, `get_account_statement`, `list_transfers`, `create_transfer`, `delete_transfer`, `create_caixa`, `update_caixa`, `archive_caixa` (admin), `create_account`, `update_account`, `archive_account`, `create_adjustment` |
 | Entidades | `list_entities`, `list_entity_tags`, `get_entity`, `create_entity`, `update_entity`, `set_entity_tags`, `set_entity_favorite`, `add_pix_key` |
-| Títulos e baixas | `list_categories`, `list_titles`, `get_title`, `create_title`, `update_title`, `end_series`, `settle_title`, `reverse_settlement` |
-| Cartão de crédito | `get_card`, `get_invoice`, `list_card_purchases`, `create_card_purchase` |
+| Títulos e baixas | `list_titles`, `get_title`, `create_title`, `update_title`, `end_series`, `settle_title`, `reverse_settlement`, `cancel_title`, `archive_title`, `delete_title`, `accept_mirror`, `dispute_mirror` |
+| Cartão de crédito | `get_card`, `get_invoice`, `list_card_purchases`, `create_card_purchase`, `close_invoice`, `pay_invoice`, `reopen_invoice`, `create_card_charge`, `refund_card_purchase` |
+| Contratos | `list_contracts`, `get_contract`, `create_contract`, `update_contract`, `activate_contract`, `add_contract_amendment`, `terminate_contract`, `decide_contract_renewal`, `get_contract_document`, `save_contract_markdown`, `convert_contract_pdf` |
 | Conciliação | `list_statement_imports`, `get_statement_import`, `list_line_candidates`, `match_statement_line`, `match_statement_lines`, `confirm_statement_lines`, `unmatch_statement_line`, `ignore_statement_lines`, `unignore_statement_lines`, `create_from_statement_line`, `create_from_statement_lines`, `classify_statement_lines`, `apply_classification_suggestions` |
+| Importação | `import_statement`, `import_nfe`, `read_document`, `parse_payment_code`, `attach_file` |
+| Categorias e regras | `list_categories`, `create_category` (admin), `update_category` (admin), `archive_category` (admin), `list_classification_rules`, `create_classification_rule`, `update_classification_rule`, `archive_classification_rule` |
 | Relatórios e canvas | `report_categories`, `report_entities`, `report_projection`, `flow_graph` |
 | Mensagens e avisos | `list_message_destinations`, `send_telegram_message`, `notify_user` |
 
-A [027](027-tools-de-controle-total.md) acrescenta as categorias Contratos, Importação, Categorias e regras, Configuração de IA, Usuários e permissões, Backup, e Fechamento e auditoria.
+As tools do lote F13a ([027](027-tools-de-controle-total.md)) entraram nas categorias acima, com as novas Contratos, Importação e Categorias e regras (`list_categories` saiu de Títulos e baixas para Categorias e regras). O lote F13b acrescenta as categorias Configuração de IA, Usuários e permissões (com os tokens pessoais), Backup, e Fechamento e auditoria.
 
 ## Banco (dba)
 - `ai_tool_kits`: `id`, `name`, `description`, `created_by_user_id`, `created_at` e `updated_at`.

@@ -17,6 +17,8 @@ import { ADMIN_STATE, baseURL, loginAsAdmin } from '../support/session';
  *    aprovadas e descartadas em lote na tela;
  *  - o kit de ferramentas (spec 021): criar marcando a categoria Conciliação,
  *    pôr uma escrita em ask, ligar ao agente e ver o cartão de aprovação;
+ *  - as tools de controle total (spec 027): anexar um OFX na conversa, pedir
+ *    "importe e concilie" e aprovar o import e o lote de lançamentos;
  *  - o prompt do agente (spec 022): editar, ver o histórico e o diff, restaurar,
  *    as variáveis e o "Ver prompt montado"; e Minha conta → IA;
  *  - as requisições ao provedor (spec 023): um 429 seguido de 200 na conversa,
@@ -511,6 +513,86 @@ test('kit de ferramentas: marcar a Conciliação, pôr uma escrita em ask, ligar
   // O kit em uso mostra o agente na lista.
   await page.goto('/admin/ai/tool-kits');
   await expect(page.getByRole('row').filter({ hasText: kitName })).toContainText(kitAgent.name);
+});
+
+test('controle total (spec 027): anexar um OFX na conversa e pedir "importe e concilie"', async ({ page }) => {
+  const api = adminApi;
+  const holder = await postJson(api, '/api/entities', { kind: 'company', name: `E2E F13a Titular ${tag}` });
+  const caixa = await postJson(api, '/api/caixas', { name: `E2E F13a Caixa ${tag}`, holderEntityId: holder.id, isPrimary: true });
+  const account = await postJson(api, `/api/caixas/${caixa.id}/accounts`, {
+    kind: 'checking',
+    name: `Conta F13a ${tag}`,
+    bankCode: '077',
+    openingBalanceCents: 0,
+    openingDate: '2026-01-01',
+  });
+
+  // Provedor falso roteirizado: importa o anexo (o id vem no rótulo do anexo), lança as linhas novas e responde.
+  const previous = llm.brain;
+  llm.brain = (view) => {
+    if (view.lastRole === 'user' && /importe e concilie/i.test(view.lastText)) {
+      const attachmentId = /attachmentId ([0-9a-f-]{36})/.exec(view.lastText)?.[1];
+      return {
+        text: 'Vou importar o extrato.',
+        toolCalls: [{ name: 'import_statement', input: { attachmentId, accountId: account.id } }],
+      };
+    }
+    if (view.lastRole === 'tool' && !view.lastToolResults[0]?.isError) {
+      try {
+        const result = JSON.parse(view.lastToolResults[0]!.content);
+        if (Array.isArray(result.lines) && result.financialAccountId === account.id) {
+          const items = result.lines
+            .filter((l: { status: string }) => l.status === 'new')
+            .map((l: { id: string }) => ({ lineId: l.id, mode: 'adjustment' }));
+          return { text: `Conciliando ${items.length} linha(s).`, toolCalls: [{ name: 'create_from_statement_lines', input: { items } }] };
+        }
+        if (typeof result.created === 'number' && Array.isArray(result.failed)) {
+          return { text: `Extrato importado e conciliado: ${result.created} linha(s) lançada(s).` };
+        }
+      } catch {
+        // resultado que não é JSON: segue o cérebro padrão
+      }
+    }
+    return previous(view);
+  };
+  try {
+    await enter(page);
+    const win = await freshSession(page);
+    await win.locator('input[type="file"]').setInputFiles(join(FIXTURES, 'extrato-ofx2.ofx'));
+    await expect(win.getByTestId('composer-attachment').filter({ hasText: 'extrato-ofx2.ofx' })).toBeVisible();
+    await say(win, 'importe e concilie');
+
+    // 1º cartão: a prévia do import (arquivo, conta e linhas novas).
+    const card = win.getByTestId('agent-confirmation');
+    await expect(card).toBeVisible({ timeout: 30_000 });
+    await expect(card).toContainText('Importar extrato');
+    await expect(card).toContainText('extrato-ofx2.ofx');
+    await expect(card).toContainText(`Conta F13a ${tag}`);
+    await card.getByTestId('agent-approve').first().click();
+
+    // 2º cartão: o lote de lançamentos a partir das linhas.
+    await expect(win.getByTestId('agent-confirmation').filter({ hasText: 'Lançar linhas do extrato' })).toBeVisible({ timeout: 30_000 });
+    await win
+      .getByTestId('agent-confirmation')
+      .filter({ hasText: 'Lançar linhas do extrato' })
+      .getByTestId('agent-approve')
+      .first()
+      .click();
+    await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Extrato importado e conciliado' })).toBeVisible({
+      timeout: 30_000,
+    });
+
+    // O extrato entrou na conta com todas as linhas conciliadas, pelo agente.
+    const imports: { id: string }[] = await (await api.get(`/api/statement-imports?accountId=${account.id}`)).json();
+    expect(imports).toHaveLength(1);
+    const detail = await (await api.get(`/api/statement-imports/${imports[0]!.id}`)).json();
+    expect(detail.lines.length).toBeGreaterThan(0);
+    expect(detail.lines.every((l: { status: string }) => l.status === 'matched')).toBe(true);
+    await page.goto(`/caixas/${caixa.id}/reconciliation`);
+    await expect(page.getByText('extrato-ofx2.ofx').first()).toBeVisible();
+  } finally {
+    llm.brain = previous;
+  }
 });
 
 test('fluxos: "Usar nos fluxos automáticos" no admin; sugestões da conciliação aprovadas e descartadas em lote', async ({ page }) => {

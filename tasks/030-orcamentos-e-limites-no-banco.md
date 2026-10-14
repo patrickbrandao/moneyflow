@@ -18,6 +18,8 @@ Ordem: Depois da F13; depois vem a 031. A spec é a fonte da verdade: decisões 
 
 Acréscimo (2026-10-14, pendência das 023/025): as visões mensais de uso (`ai_usage_monthly_*`) e a nova `ai_usage_daily` devem somar também `audio_seconds` e `characters`.
 
+Acréscimo (2026-10-14, pendência das 028/029): o kit "Padrão" de `database/seeds/dev.sql` deve incluir todas as tools do registro (`packages/shared/src/agents/tools*.ts`, inclusive as das F13a/F13b) no modo sugerido de cada uma (`suggestedMode`), sem as de segredo, que ficam sempre `ask`.
+
 ## Como reproduzir
 Não se aplica (recurso novo). Critério de pronto: os testes listados na seção "Testes" da spec [028](../docs/028-limites-e-uso.md) que cabem a esta tarefa passam, junto com `pnpm lint`, `pnpm typecheck` e `pnpm test` (e `make -C database test` no banco).
 

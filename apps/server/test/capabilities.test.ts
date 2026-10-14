@@ -389,7 +389,9 @@ describe('visão: direta, por descrição, camada de texto do PDF e recusa', () 
     const marker = `direta ${uid()}`;
     await ask(agent.id, marker, [{ name: 'foto.png', mime: 'image/png', data: TINY_PNG }]);
     const content = messagesCall(marker).body.messages[0].content;
-    expect(content[0]).toMatchObject({ type: 'image', source: { media_type: 'image/png' } });
+    // Antes de cada anexo, o rótulo com o attachmentId (spec 027).
+    expect(content[0]).toMatchObject({ type: 'text', text: expect.stringMatching(/^\[Anexo "foto\.png" \(image\/png\) — attachmentId /) });
+    expect(content[1]).toMatchObject({ type: 'image', source: { media_type: 'image/png' } });
   });
 
   it('visão em outro provedor: descreve uma vez só (derivado em cache) e o texto vai ao modelo de texto', async () => {
@@ -405,8 +407,8 @@ describe('visão: direta, por descrição, camada de texto do PDF e recusa', () 
     expect(describes().length).toBe(before + 1);
     expect(describes().at(-1)!.body.model).toBe('fake-gpt');
     const sent = messagesCall(marker).body.messages[0].content;
-    expect(sent[0]).toMatchObject({ type: 'text' });
-    expect(sent[0].text).toBe('[Imagem "boleto.png" — descrição]: Descrição de teste: boleto de R$ 123,45 com vencimento em 10/05/2030.');
+    expect(sent[1]).toMatchObject({ type: 'text' });
+    expect(sent[1].text).toBe('[Imagem "boleto.png" — descrição]: Descrição de teste: boleto de R$ 123,45 com vencimento em 10/05/2030.');
     expect(JSON.stringify(messagesCall(marker).body)).not.toContain('"image"');
 
     // A segunda mensagem da conversa reaproveita a descrição.
@@ -452,9 +454,10 @@ describe('visão: direta, por descrição, camada de texto do PDF e recusa', () 
       { name: 'escaneado.pdf', mime: 'application/pdf', data: Buffer.from('%PDF-1.4\n% sem texto\n') },
     ]);
     const content = messagesCall(marker).body.messages[0].content;
-    expect(content.map((b: any) => b.type)).toEqual(['text', 'text', 'text']);
-    expect(content[0].text).toBe('[PDF "conta.pdf" — camada de texto]:\nConta de luz\nTotal R$ 88,90 vence 15/06');
-    expect(content[1].text).toBe('[PDF "escaneado.pdf"]: PDF sem texto e o agente não tem visão.');
+    expect(content.map((b: any) => b.type)).toEqual(['text', 'text', 'text', 'text', 'text']);
+    expect(content[0].text).toBe(`[Anexo "conta.pdf" (application/pdf) — attachmentId ${attachmentIds[0]}]`);
+    expect(content[1].text).toBe('[PDF "conta.pdf" — camada de texto]:\nConta de luz\nTotal R$ 88,90 vence 15/06');
+    expect(content[3].text).toBe('[PDF "escaneado.pdf"]: PDF sem texto e o agente não tem visão.');
     const derivatives = await h.db.execute<{ kind: string; provider_id: string | null; content: string }>(sql`
       SELECT kind, provider_id, content FROM ai_attachment_derivatives WHERE attachment_id = ${attachmentIds[0]}`);
     expect(derivatives.rows).toEqual([{ kind: 'pdf_text', provider_id: null, content: 'Conta de luz\nTotal R$ 88,90 vence 15/06' }]);

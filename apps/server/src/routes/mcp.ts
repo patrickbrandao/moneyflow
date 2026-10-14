@@ -3,7 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { userColumns, users } from '@moneyflow/db';
-import { AGENT_TOOLS, type AgentToolDef, agentTool, t, toolJsonSchema } from '@moneyflow/shared';
+import { AGENT_TOOLS, type AgentToolDef, agentTool, mcpExposed, t, toolJsonSchema } from '@moneyflow/shared';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { TOOL_HANDLERS } from '../agents/tool-handlers';
@@ -21,8 +21,12 @@ import { authenticateApiToken } from '../services/api-tokens';
  * cliente MCP, guiado pelas anotações readOnlyHint/destructiveHint.
  */
 
-/** O kit não vale aqui (spec 021): todas as tools, menos as só de administrador para quem não é admin. */
-const offered = (ctx: ServiceContext, tool: AgentToolDef) => !tool.adminOnly || ctx.access.isAdmin;
+/**
+ * O kit não vale aqui (spec 021): todas as tools, menos as só de administrador
+ * para quem não é admin, as de segredo e as que geram arquivo (spec 027). As de
+ * importação recebem o attachmentId de qualquer anexo que o dono do token lê.
+ */
+const offered = (ctx: ServiceContext, tool: AgentToolDef) => mcpExposed(tool, ctx.access.isAdmin);
 
 function mcpServerFor(ctx: ServiceContext) {
   const server = new Server({ name: 'moneyflow', version: '1.0.0' }, { capabilities: { tools: {} } });

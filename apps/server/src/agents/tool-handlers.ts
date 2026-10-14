@@ -1,13 +1,11 @@
 import {
   type AgentToolInput,
-  type AgentToolName,
   diffDays,
   diffRows,
   formatBRL,
   formatDate,
   type PreviewField,
   type PreviewRow,
-  type ToolPreview,
   t,
   todayIso,
 } from '@moneyflow/shared';
@@ -32,6 +30,8 @@ import * as statements from '../services/statements';
 import * as titles from '../services/titles';
 import * as transfers from '../services/transfers';
 import { semanticSearch } from './search';
+import { OPERATION_HANDLERS } from './tool-handlers-operation';
+import { type Handlers, nameOf, withNames } from './tool-helpers';
 
 /*
  * Execução das tools internas (definidas em @moneyflow/shared, AGENT_TOOLS)
@@ -42,55 +42,9 @@ import { semanticSearch } from './search';
  * de algo que vai falhar).
  */
 
-export type ToolCallMeta = { toolUseId: string; runId: string | null };
+/* Tipos e nomes para as prévias em ./tool-helpers; o lote F13a (spec 027) em ./tool-handlers-operation. */
 
-type Handler<N extends AgentToolName> = {
-  run: (ctx: ServiceContext, input: AgentToolInput<N>, meta: ToolCallMeta) => Promise<unknown>;
-  preview?: (ctx: ServiceContext, input: AgentToolInput<N>) => Promise<ToolPreview>;
-};
-
-type Handlers = { [N in AgentToolName]: Handler<N> };
-
-/* ---------------- nomes para as prévias (respeitando a permissão) ---------------- */
-
-async function nameOf(ctx: ServiceContext, kind: 'entity' | 'caixa' | 'category' | 'account', id: string | null | undefined) {
-  if (!id) return null;
-  if (kind === 'entity') {
-    const r = await ctx.db.execute<{ name: string }>(sql`SELECT name FROM entities WHERE id = ${id}`);
-    return r.rows[0]?.name ?? id;
-  }
-  if (kind === 'category') {
-    const r = await ctx.db.execute<{ name: string; kind: string }>(sql`SELECT name, kind FROM categories WHERE id = ${id}`);
-    return r.rows[0]?.name ?? id;
-  }
-  if (kind === 'caixa') {
-    if (!ctx.access.canRead(id)) return id;
-    const r = await ctx.db.execute<{ name: string }>(sql`SELECT name FROM caixas WHERE id = ${id}`);
-    return r.rows[0]?.name ?? id;
-  }
-  const r = await ctx.db.execute<{ name: string; caixa_id: string; caixa_name: string }>(
-    sql`SELECT a.name, a.caixa_id, c.name AS caixa_name FROM financial_accounts a JOIN caixas c ON c.id = a.caixa_id WHERE a.id = ${id}`,
-  );
-  const row = r.rows[0];
-  if (!row || !ctx.access.canRead(row.caixa_id)) return id;
-  return `${row.name} (${row.caixa_name})`;
-}
-
-const named = (ctx: ServiceContext, kind: 'entity' | 'caixa' | 'category' | 'account') => async (value: unknown) =>
-  (await nameOf(ctx, kind, value as string)) ?? '';
-
-/** Troca ids por nomes antes do diff (os campos de nome viram texto). */
-async function withNames(
-  ctx: ServiceContext,
-  values: Record<string, unknown>,
-  map: Record<string, 'entity' | 'caixa' | 'category' | 'account'>,
-) {
-  const out = { ...values };
-  for (const [key, kind] of Object.entries(map)) {
-    if (out[key] !== undefined && out[key] !== null) out[key] = await named(ctx, kind)(out[key]);
-  }
-  return out;
-}
+export type { ToolCallMeta } from './tool-helpers';
 
 const DIRECTION_LABEL = (v: unknown) => (v === 'payable' ? 'A pagar' : v === 'receivable' ? 'A receber' : String(v));
 
@@ -211,6 +165,7 @@ const toolEntityFilter = (i: { tagIds?: string[]; tagMode: 'any' | 'all'; favori
 /* ---------------- handlers ---------------- */
 
 export const TOOL_HANDLERS: Handlers = {
+  ...OPERATION_HANDLERS,
   search_records: { run: (ctx, i) => search(ctx, i.query, i.limit) },
   semantic_search: { run: (ctx, i) => semanticSearch(ctx, i.query, i.types ?? null, i.limit) },
   list_caixas: { run: (ctx, i) => caixas.listCaixas(ctx, { archived: i.archived }) },

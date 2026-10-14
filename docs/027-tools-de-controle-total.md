@@ -15,44 +15,49 @@ Os agentes passam a ter **controle completo** do MoneyFlow: tudo o que se faz pe
   - no `/mcp` e no Telegram não há cartão: as tools de segredo não são expostas no `/mcp` e, no Telegram, a aprovação delas responde "abra o console para digitar o segredo";
   - **limite conhecido**: um segredo digitado pelo usuário no texto livre da mensagem vai ao provedor como texto. A tela de chat avisa "Chaves e senhas: o agente vai pedir no cartão de aprovação".
 - **Destrutivas**: estornar, excluir, rescindir, reabrir mês, revogar e importar backup sobre dados existentes têm `destructive: true` (selo na tela do kit e `destructiveHint` no MCP), com o modo sugerido `ask`.
-- **Anexos da conversa como entrada**: as tools de importação recebem o `attachmentId` de um anexo da sessão. O handler confere que o anexo pertence a uma mensagem da sessão da execução, ou a algo que o usuário lê.
-- **Arquivos gerados** (export de backup, CSV, PDF de relatório) viram anexo de uma mensagem do agente na sessão. O resultado da tool traz só id, nome e tamanho, nunca o conteúdo.
-- **No `/mcp`** (sem sessão): as tools de importação aceitam o `attachmentId` de qualquer anexo que o dono do token lê; as que geram arquivo não são expostas.
+- **Anexos da conversa como entrada**: as tools de importação recebem o `attachmentId` de um anexo da sessão.
+  - Numa execução, o handler aceita só um anexo de mensagem da sessão da execução (a conversa do run). Um anexo de outra sessão, mesmo do próprio usuário, é recusado com "O anexo não é desta sessão".
+  - O modelo conhece o id pelo rótulo que vai antes de cada anexo da mensagem: `[Anexo "nome" (tipo) — attachmentId …]`. OFX, CSV e XML vão ao modelo como texto.
+  - Peças: `toolAttachment` em `apps/server/src/agents/tool-helpers.ts`.
+- **Arquivos gerados** (export de backup, CSV, PDF de relatório) viram anexo de uma mensagem do agente na sessão. O resultado da tool traz só id, nome e tamanho, nunca o conteúdo. O registro marca essas tools com `producesFile`; a primeira chega no lote F13b (nenhuma tool do F13a gera arquivo).
+- **No `/mcp`** (sem sessão): as tools de importação aceitam o `attachmentId` de qualquer anexo que o dono do token lê (senão, "Registro não encontrado"); as que geram arquivo (`producesFile`) e as de segredo não são expostas (`mcpExposed` no shared).
+- **Tools que chamam a IA** (`read_document`, `convert_contract_pdf`): rodam o fluxo do agente dos fluxos como hoje (conversa arquivada e execução própria, com o uso dela) e esperam o resultado até `AI_DOCUMENT_TIMEOUT_MS`. A execução aninhada precisa de outra vaga do worker: com `AGENT_CONCURRENCY` 1, ela só roda depois do prazo e a tool devolve o erro de leitura.
 
 ## Tools novas por categoria
 Os nomes são indicativos; o executor fecha os schemas a partir das rotas existentes.
 
 **Contratos** ([020](020-contratos.md)):
 - `list_contracts`, `get_contract` (ciclos, parcelas, documentos, tarefa de renovação);
-- `create_contract` (rascunho), `update_contract`, `activate_contract` (gera as parcelas), `add_contract_amendment`, `terminate_contract` (destrutiva), `decide_contract_renewal` (aprovar/recusar);
-- `get_contract_document` (o markdown atual ou uma versão), `save_contract_markdown` (versão nova), `convert_contract_pdf` (PDF → markdown por IA).
+- `create_contract` (sempre rascunho: a tool não tem o `activate` da API), `update_contract` (vigente: só a configuração livre; a prévia recusa o resto), `activate_contract` (gera as parcelas; a prévia lista o calendário), `add_contract_amendment` e `terminate_contract` (destrutiva), com a prévia pelo `dryRun` do serviço, `decide_contract_renewal` (`approve` com o próximo ciclo em `renewal`, prévia pelo `dryRun`; `decline` exige a tarefa aberta);
+- `get_contract_document` (o markdown atual ou uma versão, com a lista de versões), `save_contract_markdown` (com `documentId`, uma versão nova, com o diff de linhas na prévia; com `contractId` e `title`, um documento markdown novo; autor `agent` e a execução na versão), `convert_contract_pdf` (PDF → markdown por IA).
 
 **Importação** (a partir de anexo):
-- `import_statement`: OFX/CSV para uma conta ou cartão, com o mapeamento CSV salvo ou informado; devolve o lote e as linhas novas;
-- `import_nfe`: XML → título, com a prévia do título;
+- `import_statement`: OFX/CSV para uma conta ou cartão, com o mapeamento CSV salvo (`mappingId`; omitido = o padrão) ou informado (`csvMapping`, salvo na conta antes do import); devolve o lote e as linhas. A prévia lê o arquivo sem gravar (formato, período, linhas novas e repetidas, entradas e saídas) e recusa o arquivo todo repetido. Diferente da tela, não dispara a sugestão de classificação do agente dos fluxos: o próprio agente classifica;
+- `import_nfe`: grava a NF-e como a tela (emitente vira entidade, nota, itens e XML) e devolve o título sugerido (`suggestedTitle`: entidade, valor, competência, vencimento da 1ª duplicata e `nfeDocumentId`); o título é criado depois com `create_title`, com a própria prévia. A prévia mostra a nota (emitente novo ou cadastrado, valor, itens, duplicatas);
 - `read_document`: boleto, comprovante ou nota → os dados de [010](010-entrada-de-titulos.md), sem gravar;
-- `parse_payment_code`: linha digitável ou PIX copia-e-cola → dados;
-- `attach_file`: liga um anexo da sessão a um título, contrato ou outro registro.
+- `parse_payment_code`: linha digitável ou PIX copia-e-cola → dados (o PIX acha a entidade pela chave, sem criar);
+- `attach_file`: liga um anexo da sessão a um título, baixa, movimento, compra de cartão ou entidade (a mesma checagem do upload); em `contract`, vira um documento do contrato (PDF, ou markdown a partir de um `.md`).
 
 **Cartão de crédito** ([007](007-cartao-de-credito.md)):
-- `close_invoice` (por pagadora);
-- `pay_invoice` (total, parcial ou antecipado, com conta, data e encargos);
+- `close_invoice` (um título por pagadora; a prévia mostra o total de cada uma);
+- `pay_invoice` (total, parcial ou antecipado, com conta, data e encargos): fatura fechada vai ao pagamento (o resto rola, com os encargos); fatura aberta, ao antecipado (valor e conta obrigatórios, sem encargos);
 - `reopen_invoice` (destrutiva);
 - `create_card_charge` (encargo do emissor) e `refund_card_purchase` (estorno).
 
 **Caixas e contas**:
-- `create_caixa`, `update_caixa`, `archive_caixa`;
+- `create_caixa`, `update_caixa`, `archive_caixa` (admin, como a rota);
 - `create_account`, `update_account`, `archive_account`;
-- `create_adjustment` (movimento avulso).
+- `create_adjustment` (movimento avulso);
+- `archive_caixa` e `archive_account` usam o "excluir" da tela: com uso, arquivam; sem nenhum uso, excluem. Por isso são destrutivas.
 
 **Títulos e baixas**:
-- `cancel_title`, `archive_title`, `delete_title` (destrutiva);
+- `cancel_title`, `archive_title` (só arquiva o par, sem apagar nem cancelar; serviço `archiveTitle`), `delete_title` (destrutiva; o "excluir" da tela, com `scope` nas séries);
 - `accept_mirror` / `dispute_mirror`;
-- `delete_transfer` (destrutiva).
+- `delete_transfer` (destrutiva; na categoria Caixas e contas, junto de `create_transfer`).
 
 **Categorias e regras**:
-- `create_category`, `update_category`, `archive_category`;
-- `list_classification_rules`, `create_classification_rule`, `update_classification_rule`, `delete_classification_rule`.
+- `create_category`, `update_category`, `archive_category` (admin, como a rota; `archive_category` exclui a categoria sem uso, destrutiva); `list_categories` passa para esta categoria;
+- `list_classification_rules`, `create_classification_rule`, `update_classification_rule`, `archive_classification_rule` (a regra é arquivada, como na tela; a regra global exige admin).
 
 **Entidades** (lote F13b): `create_entity_tag`, `update_entity_tag`, `archive_entity_tag` (admin). Revoga a regra de [011](011-agentes-de-ia.md) de que as tags ficam fora dos agentes.
 
@@ -87,16 +92,16 @@ Os nomes são indicativos; o executor fecha os schemas a partir das rotas existe
 **Tokens pessoais** (categoria Usuários e permissões): `list_api_tokens` e `revoke_api_token` (destrutiva). Criar token fica **fora**, porque o valor apareceria ao modelo.
 
 ## Entrega em lotes
-- **F13a**: Contratos, Importação, Cartão, Caixas e contas, Títulos, Categorias e regras.
+- **F13a** (entregue, tarefa 028): Contratos, Importação, Cartão, Caixas e contas, Títulos, Categorias e regras.
 - **F13b**: Configuração de IA, Usuários (com tokens), Backup, Fechamento e auditoria, Mensagens, tags de entidade.
 
 Cada lote atualiza a tabela de categorias da [021](021-kit-de-ferramentas.md) e a lista de tools da [011](011-agentes-de-ia.md).
 
 ## Banco (dba)
-Não há tabela nova. Se algum serviço precisar de uma função nova, como `close_month` ou `reopen_month`, que já existem, o app abre uma tarefa para o dba.
+Não há tabela nova. Se algum serviço precisar de uma função nova, como `close_month` ou `reopen_month`, que já existem, o app abre uma tarefa para o dba. O lote F13a não precisou de nenhuma.
 
 ## Testes
-- **Integração**: cada tool com o provedor falso cobre:
+- **Integração** (`apps/server/test/agent-tools.test.ts` no F13a): cada tool com o provedor falso cobre:
   - a prévia;
   - a execução;
   - a permissão negada para quem não pode (viewer, não admin);

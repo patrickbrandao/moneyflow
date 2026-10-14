@@ -19,6 +19,10 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   pdf: PDF_MIME,
   md: MARKDOWN_MIME,
   markdown: MARKDOWN_MIME,
+  // Arquivos de importação (spec 027): extrato e NF-e vão ao modelo como texto.
+  ofx: 'application/x-ofx',
+  csv: 'text/csv',
+  xml: 'application/xml',
   mp3: 'audio/mpeg',
   m4a: 'audio/mp4',
   mp4: 'audio/mp4',

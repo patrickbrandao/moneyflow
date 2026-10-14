@@ -605,7 +605,7 @@ describe('kit de ferramentas (spec 021)', () => {
     }
   });
 
-  it('o retrato da v0.1.7 no banco (migration 0038) bate com o registro: mesmas tools, tipo e modo sugerido', async () => {
+  it('o retrato da v0.1.7 no banco (migration 0038) está contido no registro, com o mesmo tipo e modo sugerido', async () => {
     const legacy = await h.db.execute<{ tool_name: string; kind: string; confirm: string }>(
       sql`SELECT tool_name, kind, confirm FROM ai_legacy_tool_registry()`,
     );
@@ -618,8 +618,10 @@ describe('kit de ferramentas (spec 021)', () => {
       // never ⇔ allow; agent/always (pediam confirmação) ⇔ ask.
       expect(tool!.suggestedMode).toBe(row.confirm === 'never' ? 'allow' : 'ask');
     }
-    // Tools novas (F13 em diante) não estão no retrato; até lá, o registro é o retrato.
-    expect(new Set(AGENT_TOOLS.map((x) => x.name))).toEqual(new Set(legacy.rows.map((r) => r.tool_name)));
+    // Tools novas (F13 em diante) não estão no retrato: ele só precisa estar contido no registro.
+    const registry = new Set<string>(AGENT_TOOLS.map((x) => x.name));
+    expect(legacy.rows.every((r) => registry.has(r.tool_name))).toBe(true);
+    expect(AGENT_TOOLS.length).toBeGreaterThan(legacy.rows.length);
   });
 });
 
@@ -844,7 +846,9 @@ describe('sessões (spec 026)', () => {
     const anthropicCall = llm.calls
       .filter((c) => c.path === '/v1/messages')
       .find((c) => JSON.stringify(c.body.messages).includes('orçamento da reforma'))!;
-    expect(anthropicCall.body.messages[0].content[0]).toMatchObject({ type: 'document', source: { media_type: 'application/pdf' } });
+    // O rótulo com o attachmentId vem antes do arquivo (as tools de importação o recebem, spec 027).
+    expect(anthropicCall.body.messages[0].content[0]).toMatchObject({ type: 'text', text: expect.stringContaining(attachment.id) });
+    expect(anthropicCall.body.messages[0].content[1]).toMatchObject({ type: 'document', source: { media_type: 'application/pdf' } });
 
     // Anexo de mensagem: dono e admin baixam; outro usuário não.
     const other = await userSession(h);

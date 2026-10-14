@@ -6,7 +6,6 @@ import {
   entityCreateInput,
   entityUpdateInput,
   id,
-  isoDate,
   lineCreateInput,
   pixKeyInput,
   settlementCreateInput,
@@ -16,6 +15,8 @@ import {
   titleUpdateInput,
   transferCreateInput,
 } from '../schemas';
+import { type AgentToolDef, type AgentToolMode, date, define, limit, optionalDate } from './tool-def';
+import { OPERATION_TOOLS } from './tools-operation';
 
 /*
  * Registro único das tools dos agentes (specs 011 e 021): nome, título e
@@ -35,44 +36,15 @@ import {
  * os mesmos serviços e a mesma autorização da API, como o usuário que acionou.
  */
 
-export type AgentToolKind = 'read' | 'write';
+export {
+  AGENT_TOOL_CATEGORIES,
+  AGENT_TOOL_MODES,
+  type AgentToolCategory,
+  type AgentToolDef,
+  type AgentToolKind,
+  type AgentToolMode,
+} from './tool-def';
 
-/** allow = executa sem perguntar; ask = mostra o cartão "Aplicar?" e espera o usuário. */
-export const AGENT_TOOL_MODES = ['allow', 'ask'] as const;
-export type AgentToolMode = (typeof AGENT_TOOL_MODES)[number];
-
-/** Categorias fixas, na ordem da tela (nomes em t.agents.toolCategories). */
-export const AGENT_TOOL_CATEGORIES = ['search', 'caixas', 'entities', 'titles', 'cards', 'reconciliation', 'reports', 'messages'] as const;
-export type AgentToolCategory = (typeof AGENT_TOOL_CATEGORIES)[number];
-
-export type AgentToolDef<S extends z.ZodType = z.ZodType> = {
-  name: string;
-  title: string;
-  description: string;
-  kind: AgentToolKind;
-  category: AgentToolCategory;
-  /** Modo usado quando a tool é marcada num kit. */
-  suggestedMode: AgentToolMode;
-  /** Escrita que apaga/desfaz algo (anotação destructiveHint no MCP). */
-  destructive?: boolean;
-  /** Só administrador: fora da lista quando quem aciona não é admin (mesmo no kit). */
-  adminOnly?: boolean;
-  /** Campos de segredo da entrada (digitados no cartão de aprovação): a tool é sempre ask. */
-  secrets?: readonly string[];
-  input: S;
-};
-
-const define = <const N extends string, S extends z.ZodType>(
-  def: Omit<AgentToolDef<S>, 'suggestedMode' | 'name'> & { name: N; suggestedMode?: AgentToolMode },
-): AgentToolDef<S> & { name: N } => ({
-  suggestedMode: def.kind === 'read' ? 'allow' : 'ask',
-  ...def,
-});
-
-const date = isoDate.describe('Data no formato AAAA-MM-DD.');
-const optionalDate = date.optional();
-const limit = (max: number, fallback: number) =>
-  z.number().int().min(1).max(max).default(fallback).describe(`Máximo de itens (padrão ${fallback}).`);
 const caixaIds = z.array(id).max(200).optional().describe('Caixas (ids); omitido = todas as que o usuário vê.');
 const lineIds = z.array(id).min(1).max(500);
 /** Filtro de entidades por tags e favoritas (spec 003/014): o mesmo da listagem e dos relatórios. */
@@ -184,7 +156,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'list_categories',
-    category: 'titles',
+    category: 'categories',
     title: 'Listar categorias',
     description: 'Plano de categorias (receitas e despesas), em árvore.',
     kind: 'read',
@@ -554,6 +526,9 @@ export const AGENT_TOOLS = [
       link: z.string().max(500).optional(),
     }),
   }),
+
+  /* ---------------- controle total, lote F13a (spec 027) ---------------- */
+  ...OPERATION_TOOLS,
 ] as const satisfies readonly AgentToolDef[];
 
 export type AgentToolName = (typeof AGENT_TOOLS)[number]['name'];
@@ -593,4 +568,16 @@ export function kitTools<T extends Pick<AgentToolDef, 'name' | 'secrets' | 'admi
     offered.push({ tool, mode: effectiveToolMode(tool, kit ? kit.get(tool.name)! : null) });
   }
   return offered;
+}
+
+/**
+ * Tools do servidor /mcp próprio (specs 021 e 027): o kit não vale lá, mas as
+ * só de administrador saem para quem não é admin, e as de segredo (não há
+ * cartão para digitá-lo) e as que geram arquivo (não há sessão para anexá-lo)
+ * nunca são expostas.
+ */
+export function mcpExposed(tool: Pick<AgentToolDef, 'adminOnly' | 'secrets' | 'producesFile'>, isAdmin: boolean): boolean {
+  if (tool.adminOnly && !isAdmin) return false;
+  if (tool.secrets && tool.secrets.length > 0) return false;
+  return !tool.producesFile;
 }

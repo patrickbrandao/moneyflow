@@ -14,7 +14,9 @@ import {
   formatSse,
   isValidBlock,
   kitTools,
+  mcpExposed,
   type NeutralMessage,
+  OPERATION_TOOLS,
   previewText,
   SseParser,
   t,
@@ -67,6 +69,69 @@ describe('registro de tools', () => {
     expect(names(kitTools(registry, new Map(), true))).toEqual([]);
     expect(effectiveToolMode(agentTool('create_title')!, null)).toBe('allow');
     expect(effectiveToolMode(agentTool('list_caixas')!, 'ask')).toBe('ask');
+  });
+
+  it('lote F13a (spec 027): categorias novas, destrutivas, só de admin e o /mcp sem segredo nem arquivo gerado', () => {
+    const names = (list: readonly { name: string }[]) => list.map((tool) => tool.name).sort();
+    expect(OPERATION_TOOLS.every((tool) => AGENT_TOOLS.some((x) => x.name === tool.name))).toBe(true);
+    expect(names(AGENT_TOOLS.filter((tool) => tool.category === 'contracts'))).toEqual(
+      [
+        'list_contracts',
+        'get_contract',
+        'create_contract',
+        'update_contract',
+        'activate_contract',
+        'add_contract_amendment',
+        'terminate_contract',
+        'decide_contract_renewal',
+        'get_contract_document',
+        'save_contract_markdown',
+        'convert_contract_pdf',
+      ].sort(),
+    );
+    expect(names(AGENT_TOOLS.filter((tool) => tool.category === 'imports'))).toEqual(
+      ['import_statement', 'import_nfe', 'read_document', 'parse_payment_code', 'attach_file'].sort(),
+    );
+    expect(names(AGENT_TOOLS.filter((tool) => tool.category === 'categories'))).toEqual(
+      [
+        'list_categories',
+        'create_category',
+        'update_category',
+        'archive_category',
+        'list_classification_rules',
+        'create_classification_rule',
+        'update_classification_rule',
+        'archive_classification_rule',
+      ].sort(),
+    );
+    expect(names(OPERATION_TOOLS.filter((tool) => 'adminOnly' in tool && tool.adminOnly))).toEqual(
+      ['archive_caixa', 'create_category', 'update_category', 'archive_category'].sort(),
+    );
+    expect(names(OPERATION_TOOLS.filter((tool) => 'destructive' in tool && tool.destructive))).toEqual(
+      [
+        'terminate_contract',
+        'reopen_invoice',
+        'archive_caixa',
+        'archive_account',
+        'delete_title',
+        'delete_transfer',
+        'archive_category',
+      ].sort(),
+    );
+    // Contrato pelo agente: sempre rascunho (o campo activate não existe na tool).
+    expect(Object.keys(toolJsonSchema(agentTool('create_contract')!).properties as object)).not.toContain('activate');
+    // Importação: exatamente um alvo, e o mapeamento salvo ou informado (não os dois).
+    const importInput = agentTool('import_statement')!.input;
+    const attachmentId = '0192d8e4-0000-7000-8000-000000000001';
+    expect(() => importInput.parse({ attachmentId })).toThrow();
+    expect(importInput.parse({ attachmentId, accountId: attachmentId })).toMatchObject({ accountId: attachmentId });
+    expect(() => agentTool('decide_contract_renewal')!.input.parse({ contractId: attachmentId, decision: 'approve' })).toThrow();
+    // /mcp: só admin vê as de admin; segredo e arquivo gerado nunca.
+    expect(mcpExposed({ adminOnly: true }, false)).toBe(false);
+    expect(mcpExposed({ adminOnly: true }, true)).toBe(true);
+    expect(mcpExposed({ secrets: ['apiKey'] }, true)).toBe(false);
+    expect(mcpExposed({ producesFile: true }, true)).toBe(false);
+    expect(mcpExposed(agentTool('import_statement')!, false)).toBe(true);
   });
 
   it('a entrada valida com o mesmo schema da API (defaults e transforms)', () => {

@@ -22,7 +22,7 @@ const dueDay = z.number().int().min(1).max(31);
 const dueMonthOffset = z.number().int().min(0).max(CONTRACT_MAX_DUE_OFFSET);
 const periodicity = z.enum(CONTRACT_PERIODICITIES);
 
-const durationFitsPeriod = (
+export const durationFitsPeriod = (
   value: { durationMonths?: number; periodicity?: (typeof CONTRACT_PERIODICITIES)[number] },
   ctx: z.RefinementCtx,
 ) => {
@@ -56,25 +56,26 @@ const terms = {
   dueMonthOffset,
 };
 
-export const contractCreateInput = z
-  .object({
-    caixaId: id,
-    entityId: id,
-    direction: z.enum(DIRECTIONS),
-    categoryId: id,
-    ...settings,
-    autoRenew: settings.autoRenew.default(false),
-    noticeDays: settings.noticeDays.default(30),
-    renewalLeadDays: settings.renewalLeadDays.default(60),
-    reminderEveryDays: settings.reminderEveryDays.default(7),
-    readjustmentIndex: settings.readjustmentIndex.default('none'),
-    ...terms,
-    /** Caixa do espelho: omitido = caixa principal da entidade (se houver); null = sem espelho. */
-    mirrorCaixaId: id.nullish(),
-    /** Ativar já na criação (gera as parcelas). */
-    activate: z.boolean().default(false),
-  })
-  .superRefine(durationFitsPeriod);
+/** Campos do cadastro (sem a checagem duração × periodicidade, que entra no contractCreateInput). */
+export const contractCreateFields = z.object({
+  caixaId: id,
+  entityId: id,
+  direction: z.enum(DIRECTIONS),
+  categoryId: id,
+  ...settings,
+  autoRenew: settings.autoRenew.default(false),
+  noticeDays: settings.noticeDays.default(30),
+  renewalLeadDays: settings.renewalLeadDays.default(60),
+  reminderEveryDays: settings.reminderEveryDays.default(7),
+  readjustmentIndex: settings.readjustmentIndex.default('none'),
+  ...terms,
+  /** Caixa do espelho: omitido = caixa principal da entidade (se houver); null = sem espelho. */
+  mirrorCaixaId: id.nullish(),
+  /** Ativar já na criação (gera as parcelas). */
+  activate: z.boolean().default(false),
+});
+
+export const contractCreateInput = contractCreateFields.superRefine(durationFitsPeriod);
 
 export const contractUpdateInput = z
   .object({

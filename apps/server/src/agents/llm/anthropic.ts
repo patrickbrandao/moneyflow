@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { AiRequestOperation, AiUsagePurpose, AssistantBlock, NeutralMessage } from '@moneyflow/shared';
+import { attachmentLabel } from './attachment-label';
 import { failureOutcome, type RequestLogBase, RequestRecorder } from './request-log';
 import { type LlmClient, type LlmCredentials, LlmError, type LlmRequest, type LlmStopReason } from './types';
 
@@ -57,6 +58,8 @@ async function toParams(request: LlmRequest): Promise<Anthropic.MessageParam[]> 
           continue;
         }
         const file = await request.loadAttachment(block.attachment_id);
+        // O id do anexo vai ao modelo (as tools de importação o recebem, spec 027).
+        blocks.push({ type: 'text', text: attachmentLabel(block, file) });
         if (!file) {
           blocks.push({ type: 'text', text: `[anexo ${block.attachment_id} indisponível]` });
         } else if ('text' in file) {
@@ -72,7 +75,7 @@ async function toParams(request: LlmRequest): Promise<Anthropic.MessageParam[]> 
             source: { type: 'base64', media_type: 'application/pdf', data: file.data.toString('base64') },
             title: file.fileName,
           });
-        } else if (file.mime.startsWith('text/') || /json|xml|csv/.test(file.mime)) {
+        } else if (file.mime.startsWith('text/') || /json|xml|csv|ofx/.test(file.mime)) {
           blocks.push({
             type: 'document',
             source: { type: 'text', media_type: 'text/plain', data: file.data.toString('utf8') },

@@ -14,6 +14,11 @@ export const agentsStrings = {
     providerMissing: 'Nenhum agente de IA ativo está configurado. Peça ao administrador para configurar um provedor e um agente.',
     providerError: (message: string) => `O provedor de IA respondeu com erro: ${message}`,
     toolUnknown: (name: string) => `Tool desconhecida ou não habilitada: ${name}`,
+    attachmentNotInSession: 'O anexo não é desta sessão: use um arquivo enviado nesta conversa.',
+    invoiceAdvanceFields: 'Fatura aberta: o pagamento antecipado precisa de valor maior que zero e da conta (financialAccountId).',
+    invoiceAdvanceCharges: 'Encargos (charges) só entram no pagamento parcial de uma fatura fechada.',
+    alreadyArchived: 'O registro já está arquivado.',
+    titleAlreadyCanceled: 'O título já está cancelado.',
     toolInvalidInput: (detail: string) => `Entrada inválida para a tool: ${detail}`,
     confirmationRejected: (reason: string | null) =>
       reason ? `O usuário recusou esta ação. Motivo: ${reason}` : 'O usuário recusou esta ação.',
@@ -56,6 +61,8 @@ export const agentsStrings = {
   } as Record<string, string>,
   /** Como um anexo chega ao modelo de texto quando o agente não o lê direto (spec 024). */
   attachments: {
+    /** Rótulo antes de cada anexo enviado ao modelo: o id serve às tools que recebem anexo (spec 027). */
+    label: (name: string, mime: string, id: string) => `[Anexo "${name}" (${mime}) — attachmentId ${id}]`,
     imageDescription: (name: string, text: string) => `[Imagem "${name}" — descrição]: ${text}`,
     documentDescription: (name: string, text: string) => `[PDF "${name}" — conteúdo extraído]: ${text}`,
     pdfText: (name: string, text: string) => `[PDF "${name}" — camada de texto]:\n${text}`,
@@ -78,7 +85,10 @@ export const agentsStrings = {
     entities: 'Entidades',
     titles: 'Títulos e baixas',
     cards: 'Cartão de crédito',
+    contracts: 'Contratos',
     reconciliation: 'Conciliação',
+    imports: 'Importação',
+    categories: 'Categorias e regras',
     reports: 'Relatórios e canvas',
     messages: 'Mensagens e avisos',
   } as Record<string, string>,

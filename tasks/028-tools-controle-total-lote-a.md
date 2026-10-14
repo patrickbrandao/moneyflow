@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: usuario
 autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-10-14
-commit:
+commit: (sem commit: fica na branch spec/f7-agentes-ia para o principal commitar)
 ---
 
 # Tools de controle total, lote F13a (operação)
@@ -56,3 +56,33 @@ Specs revisadas em 2026-10-14: os "pontos para a revisão da spec" foram resolvi
 3. (027 × 021) A 021 não lista a categoria das tools de tokens (`list_api_tokens`, `revoke_api_token`). Recomendação: "Usuários e permissões".
 
 ## Resolução (executor)
+Executor: app, 2026-10-14.
+
+**Tools criadas (41)**, em `packages/shared/src/agents/tools-operation.ts` e `apps/server/src/agents/tool-handlers-operation.ts`, sobre os mesmos serviços das rotas (com `Access`), todas as escritas com prévia:
+- **Contratos** (categoria nova): `list_contracts`, `get_contract`, `create_contract` (sempre rascunho), `update_contract`, `activate_contract`, `add_contract_amendment`, `terminate_contract` (destrutiva), `decide_contract_renewal`, `get_contract_document`, `save_contract_markdown`, `convert_contract_pdf`. Aditivo, rescisão e renovação usam o `dryRun` do serviço na prévia.
+- **Importação** (categoria nova): `import_statement` (OFX/CSV, mapeamento salvo ou informado), `import_nfe` (devolve `suggestedTitle`; o título sai por `create_title`), `read_document`, `parse_payment_code`, `attach_file` (título, baixa, movimento, compra, entidade ou contrato).
+- **Cartão**: `close_invoice`, `pay_invoice` (fechada = pagamento total/parcial com encargos; aberta = antecipado), `reopen_invoice` (destrutiva), `create_card_charge`, `refund_card_purchase`.
+- **Caixas e contas**: `create_caixa`, `update_caixa`, `archive_caixa` (admin, destrutiva), `create_account`, `update_account`, `archive_account` (destrutiva), `create_adjustment`, `delete_transfer` (destrutiva).
+- **Títulos**: `cancel_title`, `archive_title` (serviço novo `archiveTitle`), `delete_title` (destrutiva), `accept_mirror`, `dispute_mirror`.
+- **Categorias e regras** (categoria nova; `list_categories` mudou para ela): `create_category`, `update_category`, `archive_category` (as três admin; a última destrutiva), `list_classification_rules`, `create_classification_rule`, `update_classification_rule`, `archive_classification_rule` (nome fechado assim porque o serviço arquiva).
+
+**Decisões (atualizadas na 027, 021, 011 e no INDEX)**
+- Anexo como entrada: numa execução, só anexo de mensagem da sessão da execução (`toolAttachment` em `tool-helpers.ts`); outra sessão, mesmo do próprio usuário, é recusada. No `/mcp`, qualquer anexo que o dono do token lê (`assertReadable`).
+- O modelo recebe o id do anexo pelo rótulo `[Anexo "nome" (tipo) — attachmentId …]`, posto antes de cada anexo nos dois adaptadores (`llm/attachment-label.ts`). `.ofx`, `.csv` e `.xml` ganharam tipo no chat e vão ao modelo como texto.
+- `/mcp`: `mcpExposed` (shared) tira as só de admin (para não admin), as de segredo e as que geram arquivo. O registro ganhou `producesFile`; nenhuma tool do F13a gera arquivo, então o mecanismo de "arquivo vira anexo de mensagem do agente" fica para o F13b, com a primeira tool que precisar.
+- `import_statement` não dispara a sugestão de classificação do agente dos fluxos (a rota dispara): o próprio agente classifica.
+- `read_document` e `convert_contract_pdf` rodam o fluxo do agente dos fluxos aninhado e esperam até `AI_DOCUMENT_TIMEOUT_MS`; precisam de outra vaga do worker (com `AGENT_CONCURRENCY` 1, só falham por prazo). O uso fica na execução do fluxo.
+- `archive_caixa`, `archive_account` e `archive_category` usam o "excluir" da tela (sem uso, excluem): por isso são destrutivas.
+- Versões de markdown gravadas pelo agente ficam com `author_kind = agent` e a execução (`createMarkdownDocument` e `appendVersion`).
+- Nenhuma função nova no banco.
+
+**Outras mudanças**: tipos do registro em `tool-def.ts`; `contractCreateFields`/`durationFitsPeriod` exportados; `previewStatementImport` e o mapeamento CSV em memória em `statements.ts`; `linkExistingAttachment`/`assertAttachTarget` em `attachments.ts`; `writableContractDocument` em `contract-documents.ts`. O teste do retrato `ai_legacy_tool_registry()` passou a exigir só que as 49 estejam contidas no registro.
+
+**Testes**: `apps/server/test/agent-tools.test.ts` (12 casos, provedor falso): prévia, execução (com o ator agent na auditoria), permissão negada para o viewer, tools de admin ausentes para não admin, anexo de outra sessão recusado (import, leitura e anexar), CSV com mapeamento informado, conversão do PDF com o worker de verdade e o `/mcp` (anexo próprio aceito, alheio recusado, anotações). Unitários do registro em `packages/shared/test/agents.test.ts`. e2e: "anexar um OFX na conversa e pedir 'importe e concilie'" em `e2e/tests/agentes.spec.ts`. Ajustados `agents.test.ts` e `capabilities.test.ts` ao rótulo do anexo.
+
+**Verificação**: `pnpm lint`, `pnpm typecheck`, `pnpm test` (Testcontainers: 133 unitários e 176 de integração) e `pnpm build` passaram; `agentes.spec.ts` passou inteiro (16) contra a pilha, que foi parada no fim. Contra o banco local reaproveitado (`moneyflow_test`), três testes antigos falham por dados de rodadas anteriores (embeddings por par, NF-e já importada, séries); com o banco novo do Testcontainers passam.
+
+**Pendências**
+- Seed de dev (dba): o kit "Padrão" de `database/seeds/dev.sql` monta as tools a partir de `ai_legacy_tool_registry()`, então não traz as 41 novas. Se quiser que o "Padrão" continue com "todas as ferramentas", o dba precisa acrescentar as do F13a no modo sugerido (leituras em `allow`: `list_contracts`, `get_contract`, `get_contract_document`, `read_document`, `parse_payment_code`, `list_classification_rules`; o resto em `ask`).
+- F13b: o mecanismo de arquivo gerado (anexo de mensagem do agente) e as categorias de administração.
+

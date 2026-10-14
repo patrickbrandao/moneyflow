@@ -7,6 +7,7 @@ import {
   t,
 } from '@moneyflow/shared';
 import OpenAI, { toFile } from 'openai';
+import { attachmentLabel } from './attachment-label';
 import { failureOutcome, type RequestLogBase, RequestRecorder } from './request-log';
 import { type LlmClient, type LlmCredentials, LlmError, type LlmRequest, type LlmStopReason } from './types';
 
@@ -43,6 +44,8 @@ async function toMessages(request: LlmRequest): Promise<ChatMessage[]> {
           continue;
         }
         const file = await request.loadAttachment(block.attachment_id);
+        // O id do anexo vai ao modelo (as tools de importação o recebem, spec 027).
+        parts.push({ type: 'text', text: attachmentLabel(block, file) });
         if (!file) parts.push({ type: 'text', text: `[anexo ${block.attachment_id} indisponível]` });
         else if ('text' in file) parts.push({ type: 'text', text: file.text });
         else if (IMAGE_TYPES.has(file.mime))
@@ -52,7 +55,7 @@ async function toMessages(request: LlmRequest): Promise<ChatMessage[]> {
             type: 'file',
             file: { filename: file.fileName, file_data: `data:application/pdf;base64,${file.data.toString('base64')}` },
           });
-        else if (file.mime.startsWith('text/') || /json|xml|csv/.test(file.mime))
+        else if (file.mime.startsWith('text/') || /json|xml|csv|ofx/.test(file.mime))
           parts.push({ type: 'text', text: `Arquivo ${file.fileName}:\n${file.data.toString('utf8')}` });
         else parts.push({ type: 'text', text: `[anexo ${file.fileName} (${file.mime}) em formato não suportado]` });
       }

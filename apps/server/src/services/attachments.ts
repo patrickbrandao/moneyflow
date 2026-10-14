@@ -148,6 +148,28 @@ export async function uploadAttachment(
   return toRow(result.rows[0]!);
 }
 
+/**
+ * Liga um anexo já gravado (o arquivo de uma mensagem do agente, spec 027) a
+ * um registro, com a mesma checagem do upload (escrita no alvo). Quem chama
+ * confere antes que o anexo pode ser usado (sessão da execução ou legível).
+ */
+export async function linkExistingAttachment(
+  ctx: ServiceContext,
+  attachmentId: string,
+  query: { target: AttachmentTarget; targetId: string },
+): Promise<AttachmentRow> {
+  await assertTarget(ctx, query.target, query.targetId, true);
+  await withTx(ctx, (tx) => linkAttachment(tx, query.target, query.targetId, attachmentId));
+  const result = await ctx.db.execute(sql`${rowSql} WHERE a.id = ${attachmentId}`);
+  if (!result.rows[0]) throw notFound();
+  return toRow(result.rows[0]);
+}
+
+/** Confere (sem gravar) que o usuário pode anexar arquivos ao alvo (prévia das tools). */
+export async function assertAttachTarget(ctx: ServiceContext, target: AttachmentTarget, targetId: string) {
+  await assertTarget(ctx, target, targetId, true);
+}
+
 export async function listAttachments(
   ctx: ServiceContext,
   query: { target: AttachmentTarget; targetId: string },

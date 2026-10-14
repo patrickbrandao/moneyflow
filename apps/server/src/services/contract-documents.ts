@@ -105,6 +105,12 @@ export async function canReadContractDocument(ctx: ServiceContext, documentId: s
   }
 }
 
+/** Documento que o usuário pode alterar, com o conteúdo atual do markdown (prévias das tools, spec 027). */
+export async function writableContractDocument(ctx: ServiceContext, id: string) {
+  const { doc } = await documentAccess(ctx, id, true);
+  return { ...doc, content: doc.format === 'markdown' ? await currentContent(ctx.db, id) : null };
+}
+
 export async function getContractDocument(ctx: ServiceContext, id: string): Promise<ContractDocumentDto> {
   const { doc } = await documentAccess(ctx, id, false);
   const { contractId: _c, ...dto } = doc;
@@ -232,9 +238,12 @@ export async function createMarkdownDocument(
 ): Promise<ContractDocumentDto> {
   const contract = await loadContract(ctx.db, contractId);
   ctx.access.assertWrite(contract.caixaId);
-  const id = await withTx(ctx, (tx) =>
-    insertMarkdownDocument(ctx, tx, contractId, input, input.content, { authorKind: 'human', note: input.note }),
-  );
+  // Pelo agente (tool save_contract_markdown, spec 027), a versão 1 fica com o autor agente e a execução.
+  const source: MarkdownSource =
+    ctx.actorKind === 'agent'
+      ? { authorKind: 'agent', aiRunId: ctx.agentRunId ?? null, note: input.note }
+      : { authorKind: 'human', note: input.note };
+  const id = await withTx(ctx, (tx) => insertMarkdownDocument(ctx, tx, contractId, input, input.content, source));
   return getContractDocument(ctx, id);
 }
 
@@ -269,8 +278,9 @@ async function appendVersion(
   extra: { note: string | null; restoredFrom?: string | null },
 ): Promise<number> {
   const inserted = await tx.execute<{ id: string; version: number }>(sql`
-    INSERT INTO contract_document_versions (document_id, content, note, author_kind, author_user_id, restored_from_version_id)
-    VALUES (${documentId}, ${content}, ${extra.note}, ${ctx.actorKind ?? 'human'}, ${ctx.access.actor.id}, ${extra.restoredFrom ?? null})
+    INSERT INTO contract_document_versions (document_id, content, note, author_kind, author_user_id, restored_from_version_id, ai_run_id)
+    VALUES (${documentId}, ${content}, ${extra.note}, ${ctx.actorKind ?? 'human'}, ${ctx.access.actor.id}, ${extra.restoredFrom ?? null},
+            ${ctx.actorKind === 'agent' ? (ctx.agentRunId ?? null) : null})
     RETURNING id, version`);
   const row = inserted.rows[0]!;
   await tx.execute(sql`UPDATE contract_documents SET current_version_id = ${row.id} WHERE id = ${documentId}`);
