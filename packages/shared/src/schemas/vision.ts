@@ -101,6 +101,7 @@ export const MESSAGE_EVENT_KINDS = [
   'contract_renewal_pending',
   'contract_readjustment',
   'ai_budget_alert',
+  'ai_awaiting_approval',
 ] as const;
 
 const hhmm = z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9]$/, E.invalidTime);
@@ -127,6 +128,7 @@ export const messageParamsSchemas = {
   contract_renewal_pending: z.strictObject({ send_at: hhmm, repeat_every_days: z.number().int().min(1).max(30).optional() }),
   contract_readjustment: z.strictObject({ send_at: hhmm }),
   ai_budget_alert: z.strictObject({}),
+  ai_awaiting_approval: z.strictObject({}),
 } satisfies Record<(typeof MESSAGE_EVENT_KINDS)[number], z.ZodType>;
 
 /** Parâmetros padrão de cada evento ao assinar. */
@@ -145,6 +147,7 @@ export const DEFAULT_MESSAGE_PARAMS: Record<(typeof MESSAGE_EVENT_KINDS)[number]
   contract_renewal_pending: { send_at: '08:00', repeat_every_days: 7 },
   contract_readjustment: { send_at: '08:00' },
   ai_budget_alert: {},
+  ai_awaiting_approval: {},
 };
 
 /** Token do bot: <id numérico>:<chave>. */
@@ -183,6 +186,9 @@ export const destinationUpdateInput = z.object({
   chatId: chatId.optional(),
   isActive: z.boolean().optional(),
   notes: optionalText().optional(),
+  /** "Receber mensagens" (spec 029): liga o webhook com o agente que responde. */
+  inboundEnabled: z.boolean().optional(),
+  inboundAgentId: id.nullish(),
 });
 
 export const subscriptionInput = z

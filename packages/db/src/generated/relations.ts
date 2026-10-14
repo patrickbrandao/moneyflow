@@ -13,9 +13,9 @@ import {
   aiAgents,
   aiProviders,
   aiToolKits,
-  financialAccounts,
   caixaHiddenCategories,
   categories,
+  financialAccounts,
   settlements,
   titles,
   transfers,
@@ -39,12 +39,12 @@ import {
   statementLines,
   periodClosings,
   canvasNodePositions,
-  messageDestinations,
   aiRuns,
   aiConversations,
   aiMessages,
   messageSubscriptionCaixas,
   messageSubscriptions,
+  messageDestinations,
   aiMessageAttachments,
   aiRunEvents,
   aiToolConfirmations,
@@ -61,6 +61,10 @@ import {
   recurrenceRules,
   messageOutbox,
   notifications,
+  aiScheduledTasks,
+  aiScheduledTaskRuns,
+  telegramPairingCodes,
+  telegramLinks,
   userAiSettings,
   aiAgentPromptVersions,
   aiAttachmentDerivatives,
@@ -68,6 +72,7 @@ import {
   contractDocumentVersions,
   contractAmendments,
   contractRenewalTasks,
+  telegramUpdatesSeen,
   entityTagLinks,
   entityTags,
   aiToolKitTools,
@@ -90,26 +95,34 @@ export const usersRelations = relations(users, ({ many }) => ({
   classificationRules: many(classificationRules),
   periodClosings: many(periodClosings),
   canvasNodePositions: many(canvasNodePositions),
+  aiRuns: many(aiRuns),
+  aiToolConfirmations: many(aiToolConfirmations),
+  aiToolKits: many(aiToolKits),
+  appSettings: many(appSettings),
+  userApiTokens: many(userApiTokens),
+  attachments: many(attachments),
+  mcpServers: many(mcpServers),
+  aiUsages: many(aiUsage),
+  aiRequests: many(aiRequests),
+  aiBudgets: many(aiBudgets),
+  messageOutboxes: many(messageOutbox),
+  notifications: many(notifications),
+  aiProviders: many(aiProviders),
+  aiScheduledTasks_createdByUserId: many(aiScheduledTasks, {
+    relationName: 'aiScheduledTasks_createdByUserId_users_id',
+  }),
+  aiScheduledTasks_userId: many(aiScheduledTasks, {
+    relationName: 'aiScheduledTasks_userId_users_id',
+  }),
+  aiConversations: many(aiConversations),
   messageDestinations_createdByUserId: many(messageDestinations, {
     relationName: 'messageDestinations_createdByUserId_users_id',
   }),
   messageDestinations_ownerUserId: many(messageDestinations, {
     relationName: 'messageDestinations_ownerUserId_users_id',
   }),
-  aiRuns: many(aiRuns),
-  aiToolConfirmations: many(aiToolConfirmations),
-  aiToolKits: many(aiToolKits),
-  appSettings: many(appSettings),
-  userApiTokens: many(userApiTokens),
-  aiUsages: many(aiUsage),
-  aiRequests: many(aiRequests),
-  attachments: many(attachments),
-  mcpServers: many(mcpServers),
-  aiBudgets: many(aiBudgets),
-  messageOutboxes: many(messageOutbox),
-  notifications: many(notifications),
-  aiProviders: many(aiProviders),
-  aiConversations: many(aiConversations),
+  telegramPairingCodes: many(telegramPairingCodes),
+  telegramLinks: many(telegramLinks),
   userAiSettings: many(userAiSettings),
   aiAgentPromptVersions: many(aiAgentPromptVersions),
   contracts: many(contracts),
@@ -188,7 +201,19 @@ export const entityLinksRelations = relations(entityLinks, ({ one }) => ({
   }),
 }));
 
+export const caixaMembersRelations = relations(caixaMembers, ({ one }) => ({
+  caixa: one(caixas, {
+    fields: [caixaMembers.caixaId],
+    references: [caixas.id],
+  }),
+  user: one(users, {
+    fields: [caixaMembers.userId],
+    references: [users.id],
+  }),
+}));
+
 export const caixasRelations = relations(caixas, ({ one, many }) => ({
+  caixaMembers: many(caixaMembers),
   caixa: one(caixas, {
     fields: [caixas.defaultPayerCaixaId],
     references: [caixas.id],
@@ -201,8 +226,6 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
     fields: [caixas.holderEntityId],
     references: [entities.id],
   }),
-  caixaMembers: many(caixaMembers),
-  financialAccounts: many(financialAccounts),
   caixaHiddenCategories: many(caixaHiddenCategories),
   cardInvoices: many(cardInvoices),
   cardPurchases_cardCaixaId: many(cardPurchases, {
@@ -217,7 +240,6 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
   classificationRules: many(classificationRules),
   statementLines: many(statementLines),
   periodClosings: many(periodClosings),
-  messageDestinations: many(messageDestinations),
   messageSubscriptionCaixas: many(messageSubscriptionCaixas),
   aiEmbeddings: many(aiEmbeddings),
   titles_caixaId: many(titles, {
@@ -228,23 +250,14 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
   }),
   messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
+  financialAccounts: many(financialAccounts),
+  messageDestinations: many(messageDestinations),
   userAiSettings: many(userAiSettings),
   contracts_caixaId: many(contracts, {
     relationName: 'contracts_caixaId_caixas_id',
   }),
   contracts_counterpartyCaixaId: many(contracts, {
     relationName: 'contracts_counterpartyCaixaId_caixas_id',
-  }),
-}));
-
-export const caixaMembersRelations = relations(caixaMembers, ({ one }) => ({
-  caixa: one(caixas, {
-    fields: [caixaMembers.caixaId],
-    references: [caixas.id],
-  }),
-  user: one(users, {
-    fields: [caixaMembers.userId],
-    references: [users.id],
   }),
 }));
 
@@ -266,7 +279,9 @@ export const aiAgentsRelations = relations(aiAgents, ({ one, many }) => ({
   aiUsages: many(aiUsage),
   aiRequests: many(aiRequests),
   aiBudgets: many(aiBudgets),
+  aiScheduledTasks: many(aiScheduledTasks),
   aiConversations: many(aiConversations),
+  messageDestinations: many(messageDestinations),
   aiAgentPromptVersions: many(aiAgentPromptVersions),
   aiAgentInferences: many(aiAgentInferences),
 }));
@@ -293,24 +308,6 @@ export const aiToolKitsRelations = relations(aiToolKits, ({ one, many }) => ({
     references: [users.id],
   }),
   aiToolKitTools: many(aiToolKitTools),
-}));
-
-export const financialAccountsRelations = relations(financialAccounts, ({ one, many }) => ({
-  caixa: one(caixas, {
-    fields: [financialAccounts.caixaId],
-    references: [caixas.id],
-  }),
-  settlements: many(settlements),
-  transfers_fromAccountId: many(transfers, {
-    relationName: 'transfers_fromAccountId_financialAccounts_id',
-  }),
-  transfers_toAccountId: many(transfers, {
-    relationName: 'transfers_toAccountId_financialAccounts_id',
-  }),
-  movements: many(movements),
-  statementCsvMappings: many(statementCsvMappings),
-  statementImports: many(statementImports),
-  statementLines: many(statementLines),
 }));
 
 export const caixaHiddenCategoriesRelations = relations(caixaHiddenCategories, ({ one }) => ({
@@ -362,6 +359,24 @@ export const settlementsRelations = relations(settlements, ({ one, many }) => ({
   transfers: many(transfers),
   movements: many(movements),
   settlementAttachments: many(settlementAttachments),
+}));
+
+export const financialAccountsRelations = relations(financialAccounts, ({ one, many }) => ({
+  settlements: many(settlements),
+  transfers_fromAccountId: many(transfers, {
+    relationName: 'transfers_fromAccountId_financialAccounts_id',
+  }),
+  transfers_toAccountId: many(transfers, {
+    relationName: 'transfers_toAccountId_financialAccounts_id',
+  }),
+  movements: many(movements),
+  statementCsvMappings: many(statementCsvMappings),
+  statementImports: many(statementImports),
+  statementLines: many(statementLines),
+  caixa: one(caixas, {
+    fields: [financialAccounts.caixaId],
+    references: [caixas.id],
+  }),
 }));
 
 export const titlesRelations = relations(titles, ({ one, many }) => ({
@@ -777,25 +792,6 @@ export const canvasNodePositionsRelations = relations(canvasNodePositions, ({ on
   }),
 }));
 
-export const messageDestinationsRelations = relations(messageDestinations, ({ one, many }) => ({
-  user_createdByUserId: one(users, {
-    fields: [messageDestinations.createdByUserId],
-    references: [users.id],
-    relationName: 'messageDestinations_createdByUserId_users_id',
-  }),
-  caixa: one(caixas, {
-    fields: [messageDestinations.ownerCaixaId],
-    references: [caixas.id],
-  }),
-  user_ownerUserId: one(users, {
-    fields: [messageDestinations.ownerUserId],
-    references: [users.id],
-    relationName: 'messageDestinations_ownerUserId_users_id',
-  }),
-  messageSubscriptions: many(messageSubscriptions),
-  messageOutboxes: many(messageOutbox),
-}));
-
 export const aiRunsRelations = relations(aiRuns, ({ one, many }) => ({
   aiAgent: one(aiAgents, {
     fields: [aiRuns.agentId],
@@ -825,6 +821,7 @@ export const aiRunsRelations = relations(aiRuns, ({ one, many }) => ({
   aiToolConfirmations: many(aiToolConfirmations),
   aiUsages: many(aiUsage),
   aiRequests: many(aiRequests),
+  aiScheduledTaskRuns: many(aiScheduledTaskRuns),
   contractDocumentVersions: many(contractDocumentVersions),
 }));
 
@@ -848,6 +845,7 @@ export const aiConversationsRelations = relations(aiConversations, ({ one, many 
     fields: [aiConversations.userId],
     references: [users.id],
   }),
+  aiScheduledTaskRuns: many(aiScheduledTaskRuns),
   aiAttachmentDerivatives: many(aiAttachmentDerivatives),
 }));
 
@@ -891,6 +889,32 @@ export const messageSubscriptionsRelations = relations(messageSubscriptions, ({ 
     references: [messageDestinations.id],
   }),
   messageOutboxes: many(messageOutbox),
+}));
+
+export const messageDestinationsRelations = relations(messageDestinations, ({ one, many }) => ({
+  messageSubscriptions: many(messageSubscriptions),
+  messageOutboxes: many(messageOutbox),
+  user_createdByUserId: one(users, {
+    fields: [messageDestinations.createdByUserId],
+    references: [users.id],
+    relationName: 'messageDestinations_createdByUserId_users_id',
+  }),
+  aiAgent: one(aiAgents, {
+    fields: [messageDestinations.inboundAgentId],
+    references: [aiAgents.id],
+  }),
+  caixa: one(caixas, {
+    fields: [messageDestinations.ownerCaixaId],
+    references: [caixas.id],
+  }),
+  user_ownerUserId: one(users, {
+    fields: [messageDestinations.ownerUserId],
+    references: [users.id],
+    relationName: 'messageDestinations_ownerUserId_users_id',
+  }),
+  telegramPairingCodes: many(telegramPairingCodes),
+  telegramLinks: many(telegramLinks),
+  telegramUpdatesSeens: many(telegramUpdatesSeen),
 }));
 
 export const aiMessageAttachmentsRelations = relations(aiMessageAttachments, ({ one }) => ({
@@ -1110,6 +1134,66 @@ export const notificationsRelations = relations(notifications, ({ one }) => ({
   }),
 }));
 
+export const aiScheduledTasksRelations = relations(aiScheduledTasks, ({ one, many }) => ({
+  aiAgent: one(aiAgents, {
+    fields: [aiScheduledTasks.agentId],
+    references: [aiAgents.id],
+  }),
+  user_createdByUserId: one(users, {
+    fields: [aiScheduledTasks.createdByUserId],
+    references: [users.id],
+    relationName: 'aiScheduledTasks_createdByUserId_users_id',
+  }),
+  user_userId: one(users, {
+    fields: [aiScheduledTasks.userId],
+    references: [users.id],
+    relationName: 'aiScheduledTasks_userId_users_id',
+  }),
+  aiScheduledTaskRuns: many(aiScheduledTaskRuns),
+}));
+
+export const aiScheduledTaskRunsRelations = relations(aiScheduledTaskRuns, ({ one }) => ({
+  aiConversation: one(aiConversations, {
+    fields: [aiScheduledTaskRuns.conversationId],
+    references: [aiConversations.id],
+  }),
+  aiRun: one(aiRuns, {
+    fields: [aiScheduledTaskRuns.runId],
+    references: [aiRuns.id],
+  }),
+  aiScheduledTask: one(aiScheduledTasks, {
+    fields: [aiScheduledTaskRuns.taskId],
+    references: [aiScheduledTasks.id],
+  }),
+}));
+
+export const telegramPairingCodesRelations = relations(telegramPairingCodes, ({ one }) => ({
+  messageDestination: one(messageDestinations, {
+    fields: [telegramPairingCodes.destinationId],
+    references: [messageDestinations.id],
+  }),
+  telegramLink: one(telegramLinks, {
+    fields: [telegramPairingCodes.linkId],
+    references: [telegramLinks.id],
+  }),
+  user: one(users, {
+    fields: [telegramPairingCodes.userId],
+    references: [users.id],
+  }),
+}));
+
+export const telegramLinksRelations = relations(telegramLinks, ({ one, many }) => ({
+  telegramPairingCodes: many(telegramPairingCodes),
+  messageDestination: one(messageDestinations, {
+    fields: [telegramLinks.destinationId],
+    references: [messageDestinations.id],
+  }),
+  user: one(users, {
+    fields: [telegramLinks.userId],
+    references: [users.id],
+  }),
+}));
+
 export const userAiSettingsRelations = relations(userAiSettings, ({ one }) => ({
   caixa: one(caixas, {
     fields: [userAiSettings.primaryCaixaId],
@@ -1256,6 +1340,13 @@ export const contractRenewalTasksRelations = relations(contractRenewalTasks, ({ 
   user: one(users, {
     fields: [contractRenewalTasks.decidedBy],
     references: [users.id],
+  }),
+}));
+
+export const telegramUpdatesSeenRelations = relations(telegramUpdatesSeen, ({ one }) => ({
+  messageDestination: one(messageDestinations, {
+    fields: [telegramUpdatesSeen.destinationId],
+    references: [messageDestinations.id],
   }),
 }));
 

@@ -80,7 +80,8 @@ export async function getCaixa(ctx: ServiceContext, id: string): Promise<CaixaDe
 
 export async function cardSettings(db: Executor, caixaId: string): Promise<CardSettings | null> {
   const result = await db.execute(sql`
-    SELECT c.default_payer_caixa_id, p.name AS default_payer_name, c.credit_limit_cents, c.closing_day, c.due_day, c.card_last4
+    SELECT c.default_payer_caixa_id, p.name AS default_payer_name, c.credit_limit_cents, c.closing_day, c.due_day, c.card_last4,
+           c.ai_auto_reconcile
       FROM caixas c JOIN caixas p ON p.id = c.default_payer_caixa_id
      WHERE c.id = ${caixaId} AND c.kind = 'credit_card'`);
   const row = result.rows[0];
@@ -170,6 +171,10 @@ export async function updateCaixa(ctx: ServiceContext, id: string, input: z.outp
       await assertGeneralPayer(tx, input.defaultPayerCaixaId);
     }
     for (const key of cardKeys) if (input[key] !== undefined) (patch as Record<string, unknown>)[key] = input[key];
+    if (input.aiAutoReconcile !== undefined) {
+      if (current.kind !== 'credit_card' && input.aiAutoReconcile) throw unprocessable(t.agents.reconcile.accountKind);
+      patch.aiAutoReconcile = input.aiAutoReconcile;
+    }
     if (Object.keys(patch).length > 0) await tx.update(caixas).set(patch).where(eq(caixas.id, id));
     // Novo dia de fechamento/vencimento: as faturas ainda abertas seguem as novas datas.
     if (current.kind === 'credit_card' && (input.closingDay !== undefined || input.dueDay !== undefined)) {
@@ -262,7 +267,7 @@ export async function listAccounts(
   if (opts.caixaId) ctx.access.assertRead(opts.caixaId);
   const result = await ctx.db.execute(sql`
     SELECT a.id, a.caixa_id, c.name AS caixa_name, a.kind, a.name, a.bank_code, a.ispb, a.branch, a.account_number,
-           a.opening_balance_cents, a.opening_date, a.archived_at, b.balance_cents
+           a.opening_balance_cents, a.opening_date, a.archived_at, b.balance_cents, a.ai_auto_reconcile
       FROM financial_accounts a
       JOIN caixas c ON c.id = a.caixa_id
       JOIN financial_account_balances b ON b.financial_account_id = a.id
@@ -308,6 +313,12 @@ export async function updateAccount(ctx: ServiceContext, id: string, input: z.ou
   const patch: Partial<typeof financialAccounts.$inferInsert> = {};
   for (const key of ['name', 'bankCode', 'ispb', 'branch', 'accountNumber', 'openingBalanceCents', 'openingDate'] as const) {
     if (input[key] !== undefined) (patch as Record<string, unknown>)[key] = input[key];
+  }
+  if (input.aiAutoReconcile !== undefined) {
+    if (input.aiAutoReconcile && account.kind !== 'checking' && account.kind !== 'savings') {
+      throw unprocessable(t.agents.reconcile.accountKind);
+    }
+    patch.aiAutoReconcile = input.aiAutoReconcile;
   }
   if (Object.keys(patch).length > 0) await withTx(ctx, (tx) => tx.update(financialAccounts).set(patch).where(eq(financialAccounts.id, id)));
   return (await listAccounts(ctx, { caixaId: account.caixaId, archived: true })).find((a) => a.id === id)!;

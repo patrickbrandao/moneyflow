@@ -15,7 +15,40 @@ export const FLOW_PURPOSES = ['document_reading', 'classify_lines', 'contract_re
 export const SYNC_FLOW_PURPOSES: readonly string[] = ['document_reading', 'contract_reading', 'contract_markdown'];
 export type FlowPurpose = (typeof FLOW_PURPOSES)[number];
 
-export function flowSystemPrompt(purpose: FlowPurpose): string {
+/**
+ * Fluxos autônomos com tools (spec 029): tarefa agendada (tools internas do kit
+ * e os MCP do agente, como o chat) e conciliação completa de um lote (só as
+ * tools internas do kit). Rodam o loop normal, sem ninguém digitando.
+ */
+export const TOOL_FLOW_PURPOSES = ['scheduled_task', 'reconcile_statement'] as const;
+export type ToolFlowPurpose = (typeof TOOL_FLOW_PURPOSES)[number];
+/** Finalidade que muda o prompt: um fluxo JSON ou um fluxo com tools (null = chat). */
+export type PromptPurpose = FlowPurpose | ToolFlowPurpose;
+
+export const isJsonFlow = (purpose: string | null | undefined): purpose is FlowPurpose =>
+  (FLOW_PURPOSES as readonly string[]).includes(purpose ?? '');
+export const isToolFlow = (purpose: string | null | undefined): purpose is ToolFlowPurpose =>
+  (TOOL_FLOW_PURPOSES as readonly string[]).includes(purpose ?? '');
+
+export function flowSystemPrompt(purpose: PromptPurpose): string {
+  if (purpose === 'scheduled_task') {
+    return [
+      'Contexto: esta é uma tarefa agendada, disparada automaticamente; ninguém está acompanhando agora.',
+      'Faça o que a instrução pede usando as tools, sem perguntar nada ao usuário (ele lê o resultado depois).',
+      'As ações que precisam de aprovação ficam esperando o usuário: chame a tool normalmente e siga com o resto.',
+      'Termine com um resumo curto do que foi feito e do que ficou pendente.',
+    ].join('\n');
+  }
+  if (purpose === 'reconcile_statement') {
+    return [
+      'Tarefa: conciliar um lote de extrato importado, sem ninguém acompanhando agora.',
+      'Para cada linha nova ou sugerida do lote: localize os candidatos (list_line_candidates) e case com o movimento ou o título certo;',
+      'lance as linhas sem par (com o espelho e a pagadora quando couber); ignore as tarifas conforme as regras de classificação;',
+      'corrija casamentos errados (desfazer e estornar). Não invente ids: use os das tools.',
+      'As ações que precisam de aprovação ficam esperando o usuário (aprovação em lote na tela do lote): chame a tool normalmente e siga.',
+      'Termine com um resumo curto: quantas linhas casou, lançou, ignorou e o que ficou para o usuário.',
+    ].join('\n');
+  }
   if (purpose === 'contract_reading') {
     return [
       'Tarefa: ler o contrato anexado (PDF) e extrair os dados para cadastrá-lo. O titular da caixa está no contexto da mensagem.',

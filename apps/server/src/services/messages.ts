@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'node:crypto';
 import type { Executor } from '@moneyflow/db';
 import type { destinationCreateInput, destinationUpdateInput, outboxQuery, subscriptionInput } from '@moneyflow/shared';
 import {
@@ -18,8 +19,9 @@ import type { z } from 'zod';
 import type { Access } from '../authz/access';
 import type { Config } from '../config';
 import type { ServiceContext } from '../context';
-import { forbidden, notFound, unprocessable } from '../errors';
-import { sendTelegramMessage } from '../integrations/telegram';
+import { findPgError, forbidden, notFound, unprocessable } from '../errors';
+import { deleteWebhook, sendTelegramMessage, setWebhook } from '../integrations/telegram';
+import { publicBaseUrl } from './ai-requests';
 import { createNotifications } from './notifications';
 import { deleteOrArchive, withTx } from './tx';
 import { camel, iso } from './util';
@@ -41,7 +43,7 @@ import { camel, iso } from './util';
 
 /** Colunas legíveis de message_destinations (tudo menos bot_token). */
 const DEST_COLUMNS = sql`d.id, d.channel, d.name, d.owner_user_id, d.owner_caixa_id, d.bot_id, d.chat_id, d.is_active,
-  d.created_by_user_id, d.notes, d.archived_at, d.created_at, d.updated_at`;
+  d.created_by_user_id, d.notes, d.archived_at, d.created_at, d.updated_at, d.inbound_enabled, d.inbound_agent_id`;
 
 type DestRow = {
   id: string;
@@ -51,6 +53,8 @@ type DestRow = {
   archivedAt: string | null;
   name: string;
   chatId: string | null;
+  inboundEnabled: boolean;
+  inboundAgentId: string | null;
 };
 
 export const ownerKindOf = (d: { ownerUserId: string | null; ownerCaixaId: string | null }) =>
@@ -106,10 +110,13 @@ export async function listDestinations(ctx: ServiceContext): Promise<MessageDest
     SELECT ${DEST_COLUMNS}, u.username AS owner_username, c.name AS owner_caixa_name,
            (SELECT count(*)::int FROM message_subscriptions s WHERE s.destination_id = d.id AND s.is_active) AS subscriptions,
            (SELECT max(o.sent_at) FROM message_outbox o WHERE o.destination_id = d.id) AS last_sent_at,
-           (SELECT count(*)::int FROM message_outbox o WHERE o.destination_id = d.id AND o.status = 'failed') AS failed_count
+           (SELECT count(*)::int FROM message_outbox o WHERE o.destination_id = d.id AND o.status = 'failed') AS failed_count,
+           ia.name AS inbound_agent_name,
+           (SELECT count(*)::int FROM telegram_links l WHERE l.destination_id = d.id AND l.revoked_at IS NULL) AS paired_chats
       FROM message_destinations d
       LEFT JOIN users u ON u.id = d.owner_user_id
       LEFT JOIN caixas c ON c.id = d.owner_caixa_id
+      LEFT JOIN ai_agents ia ON ia.id = d.inbound_agent_id
      WHERE ${visibleFilter(ctx.access)}
      ORDER BY d.archived_at NULLS FIRST, lower(d.name)`);
   return result.rows.map((row) => toDestination(ctx, row));
@@ -136,6 +143,10 @@ function toDestination(ctx: ServiceContext, row: Record<string, unknown>): Messa
     subscriptions: Number(r.subscriptions ?? 0),
     lastSentAt: iso(r.lastSentAt),
     failedCount: Number(r.failedCount ?? 0),
+    inboundEnabled: Boolean(r.inboundEnabled),
+    inboundAgentId: r.inboundAgentId ?? null,
+    inboundAgentName: r.inboundAgentName ?? null,
+    pairedChats: Number(r.pairedChats ?? 0),
   };
 }
 
@@ -169,6 +180,14 @@ export async function createDestination(ctx: ServiceContext, input: z.output<typ
   return getDestination(ctx, id);
 }
 
+/**
+ * Edição do destino. "Receber mensagens" (spec 029): ligar grava a entrada e o
+ * hash de um segredo novo e chama setWebhook na mesma transação (o Telegram
+ * recusou = nada muda); trocar o token com a entrada ligada liga o webhook no
+ * bot novo e desliga no antigo. Desligar, ou desativar o destino (o banco
+ * exige a entrada desligada junto), desliga no mesmo UPDATE e chama
+ * deleteWebhook depois.
+ */
 export async function updateDestination(ctx: ServiceContext, id: string, input: z.output<typeof destinationUpdateInput>) {
   const d = await manageable(ctx, id);
   if (d.archivedAt) throw unprocessable(t.errors.destinationArchived);
@@ -178,22 +197,98 @@ export async function updateDestination(ctx: ServiceContext, id: string, input: 
   if (input.chatId !== undefined) sets.push(sql`chat_id = ${input.chatId}`);
   if (input.isActive !== undefined) sets.push(sql`is_active = ${input.isActive}`);
   if (input.notes !== undefined) sets.push(sql`notes = ${input.notes}`);
-  if (sets.length > 0) {
-    await withTx(ctx, (tx) => tx.execute(sql`UPDATE message_destinations SET ${sql.join(sets, sql`, `)} WHERE id = ${id}`));
+
+  const active = input.isActive ?? d.isActive;
+  const wantInbound = active && (input.inboundEnabled ?? d.inboundEnabled);
+  const agentId = input.inboundAgentId === undefined ? d.inboundAgentId : input.inboundAgentId;
+  if (input.inboundAgentId !== undefined && input.inboundAgentId !== d.inboundAgentId && agentId) {
+    sets.push(sql`inbound_agent_id = ${agentId}`);
   }
+  const tokenChanged = input.botToken !== undefined;
+  // Liga (ou religa no bot novo) o webhook: segredo novo, gravado como hash.
+  const enabling = wantInbound && (!d.inboundEnabled || tokenChanged);
+  const disabling = d.inboundEnabled && !wantInbound;
+  if (wantInbound && !agentId) throw unprocessable(t.agents.telegram.agentRequired, 'inbound_agent_required');
+  if (wantInbound && input.inboundAgentId && input.inboundAgentId !== d.inboundAgentId) await assertInboundAgent(ctx, input.inboundAgentId);
+  if (enabling && !d.inboundEnabled) await assertInboundAgent(ctx, agentId!);
+
+  // O webhook antigo sai: ao desligar e ao trocar o bot com a entrada ligada (o token é lido antes da troca).
+  const oldToken = d.inboundEnabled && (disabling || tokenChanged) ? await inboundToken(ctx.db, id) : null;
+
+  if (enabling) {
+    const base = await publicBaseUrl(ctx.db, ctx.config);
+    if (!base.available || !base.url) throw unprocessable(t.agents.telegram.publicUrlRequired, 'public_base_url_required');
+    const secret = randomBytes(32).toString('base64url');
+    await withTx(ctx, async (tx) => {
+      sets.push(sql`inbound_enabled = true`, sql`webhook_secret_hash = ${sha256Hex(secret)}`);
+      await tx.execute(sql`UPDATE message_destinations SET ${sql.join(sets, sql`, `)} WHERE id = ${id}`);
+      const token = await inboundToken(tx, id);
+      if (!token) throw unprocessable(t.agents.telegram.inboundUnavailable);
+      const result = await setWebhook(botOptions(ctx.config), token, webhookUrl(base.url!, id), secret);
+      if (!result.ok) throw unprocessable(t.agents.telegram.webhookFailed(result.error), 'telegram_webhook_failed');
+    });
+  } else {
+    if (disabling) sets.push(sql`inbound_enabled = false`);
+    if (sets.length > 0) {
+      await withTx(ctx, (tx) => tx.execute(sql`UPDATE message_destinations SET ${sql.join(sets, sql`, `)} WHERE id = ${id}`));
+    }
+  }
+  if (oldToken && (disabling || tokenChanged)) await dropWebhook(ctx.config, oldToken);
   return getDestination(ctx, id);
 }
 
-/** Sem histórico na outbox, exclui; com histórico (FK), arquiva e desativa (as pendentes são canceladas pelo banco). */
+async function assertInboundAgent(ctx: ServiceContext, agentId: string) {
+  const result = await ctx.db.execute<{ ok: boolean }>(sql`
+    SELECT (a.is_active AND a.archived_at IS NULL) AS ok FROM ai_agents a WHERE a.id = ${agentId}`);
+  if (!result.rows[0]?.ok) throw unprocessable(t.agents.tasks.agentRequired, 'agent_inactive');
+}
+
+/** URL do webhook de um destino. */
+export const webhookUrl = (base: string, destinationId: string) => `${base}/api/telegram/webhook/${destinationId}`;
+
+export const botOptions = (config: Config) => ({ apiBase: config.telegramApiBase, timeoutMs: config.telegramTimeoutMs });
+
+export const sha256Hex = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
+
+/**
+ * Token do bot de um destino com a entrada ligada (ou já ligada antes):
+ * telegram_inbound_bot_token (spec 029). null = indisponível (inativo,
+ * arquivado, nunca ligado ou inexistente). Nunca vai a logs nem respostas.
+ */
+export async function inboundToken(db: Executor, destinationId: string): Promise<string | null> {
+  try {
+    const result = await db.execute<{ token: string }>(sql`SELECT telegram_inbound_bot_token(${destinationId}::uuid) AS token`);
+    return result.rows[0]?.token ?? null;
+  } catch (error) {
+    const code = findPgError(error)?.code;
+    if (code === '42501' || code === 'P0002') return null;
+    throw error;
+  }
+}
+
+/** deleteWebhook sem falhar a operação (o destino já ficou desligado). */
+async function dropWebhook(config: Config, token: string) {
+  await deleteWebhook(botOptions(config), token).catch(() => null);
+}
+
+/**
+ * Sem histórico na outbox, exclui; com histórico (FK), arquiva e desativa (as
+ * pendentes são canceladas pelo banco). Com a entrada ligada, ela é desligada
+ * no mesmo UPDATE e o webhook sai (deleteWebhook) depois.
+ */
 export async function deleteDestination(ctx: ServiceContext, id: string) {
-  await manageable(ctx, id);
-  return withTx(ctx, (tx) =>
+  const d = await manageable(ctx, id);
+  const token = d.inboundEnabled ? await inboundToken(ctx.db, id) : null;
+  const result = await withTx(ctx, (tx) =>
     deleteOrArchive(
       tx,
       async (sp) => (await sp.execute(sql`DELETE FROM message_destinations WHERE id = ${id} RETURNING id`)).rows.length,
-      (tx2) => tx2.execute(sql`UPDATE message_destinations SET is_active = false, archived_at = now() WHERE id = ${id}`),
+      (tx2) =>
+        tx2.execute(sql`UPDATE message_destinations SET is_active = false, inbound_enabled = false, archived_at = now() WHERE id = ${id}`),
     ),
   );
+  if (token) await dropWebhook(ctx.config, token);
+  return result;
 }
 
 /** Restaura um destino arquivado (desativado: o usuário reativa quando quiser). */

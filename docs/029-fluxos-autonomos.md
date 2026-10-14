@@ -52,8 +52,8 @@ Em todos, **o kit do agente decide** o que roda direto (`allow`) e o que espera 
 ## Responder pelo Telegram
 - **Entrada por webhook**:
   - o destino Telegram de [013](013-mensagens-telegram.md) ganha **"Receber mensagens"**, com o **agente** que responde;
-  - ao ligar, a aplicação chama `setWebhook` com `PUBLIC_BASE_URL` + `/api/telegram/webhook/:destinationId` e um `secret_token` aleatório;
-  - o webhook exige `PUBLIC_BASE_URL` com HTTPS (sem ela, o interruptor fica desabilitado com a explicação);
+  - ao ligar, a aplicação chama `setWebhook` com a URL pública (`telegram.public_base_url`, que vence `PUBLIC_BASE_URL`) + `/api/telegram/webhook/:destinationId` e um `secret_token` aleatório;
+  - o webhook exige a URL pública com HTTPS (sem ela, o interruptor fica desabilitado com a explicação);
   - ao desligar, `deleteWebhook`.
   - O webhook recusa (401) a chamada sem o cabeçalho `X-Telegram-Bot-Api-Secret-Token` correto e deduplica por `update_id`.
 - **Pareamento**:
@@ -85,14 +85,17 @@ Em todos, **o kit do agente decide** o que roda direto (`allow`) e o que espera 
   - colunas: `user_id`, `agent_id`, `name`, `instruction` (até 20 mil), `schedule` (jsonb validado: `kind daily|weekly|monthly`, `time`, `weekdays`, `day`), `is_active`, `next_run_at`, `last_run_at`, `created_by_user_id` e os timestamps;
   - auditada e no backup.
 - **`ai_scheduled_task_runs`**: `task_id`, `scheduled_for`, `status` (`started|skipped|failed`), `skip_reason`, `conversation_id` e `run_id`; único por (`task_id`, `scheduled_for`).
-- **Claim**: uma função de claim com `SKIP LOCKED`, e o cálculo de `next_run_at` no fuso de São Paulo, na aplicação ou no banco (escolha do dba, com testes).
+- **Claim**: `ai_scheduled_task_claim(limite, atraso_máximo = 6 h)` com `SKIP LOCKED` (vários disparos perdidos viram um, o mais recente; acima do atraso, `skipped` com `missed_window`; também `skipped` com `previous_run_active`, `user_inactive` ou `agent_inactive`) e `ai_scheduled_task_run_now(tarefa)` ("Rodar agora", `trigger_kind = manual`, vale para a tarefa desligada e não muda o próximo disparo).
+- **Escolhas do dba** (tarefa 032): `next_run_at` é **calculado pelo banco** (`ai_schedule_next_run`/`ai_schedule_prev_run`, fuso de São Paulo; dia que o mês não tem = último dia; trigger ao criar, ligar ou mudar a agenda, nulo se desligada) e o **limite de 20 ativas** também é do banco (`ai_scheduled_tasks_active_limit_check`); a agenda é `{"kind": "daily", "time"}`, `{"kind": "weekly", "time", "weekdays": [1–7, ISO]}` ou `{"kind": "monthly", "time", "day": 1–31 | "last"}` (`ai_schedule_valid`); o disparo tem `trigger_kind` (`schedule|manual`) e o motivo em `skip_reason` (os da aplicação: `budget_exceeded`, `rate_limited` ou a mensagem de erro); `ai_scheduled_task_runs` fica fora da auditoria e do backup; a coluna do segredo chama-se `webhook_secret_hash`.
 - **Novas finalidades** em `ai_conversations.purpose` e `ai_usage.purpose`: `scheduled_task` e `reconcile_statement`.
 - **`ai_auto_reconcile`** (`boolean NOT NULL DEFAULT false`) em `financial_accounts` e em `caixas`, nesta só com `kind = 'credit_card'` (CHECK).
 - **`message_destinations`**:
-  - entram `inbound_enabled`, `inbound_agent_id` e `webhook_secret` (com `GRANT SELECT` explícito nas colunas novas legíveis; o segredo não é legível, como o `bot_token`);
+  - entram `inbound_enabled`, `inbound_agent_id` e `webhook_secret_hash` (com `GRANT SELECT` explícito nas colunas novas legíveis; o hash do segredo não é legível, como o `bot_token`);
   - um bot só aceita um webhook: índice único em `bot_id` entre os destinos com `inbound_enabled`;
-  - o `webhook_secret` entra na lista de segredos que a auditoria nunca grava e ganha o leitor `admin_message_destination_webhook_secret(destino, ator)` para o backup; a importação do backup traz o destino com `inbound_enabled = false` (o webhook é de outra instância e precisa ser religado);
-  - o `webhook_secret` é write-only como o `bot_token`, guardado como hash, com a checagem por função `SECURITY DEFINER` `telegram_webhook_authenticate(destino, segredo)`.
+  - o `webhook_secret_hash` entra na lista de segredos que a auditoria nunca grava e ganha o leitor `admin_message_destination_webhook_secret(destino, ator)` para o backup; a importação do backup traz o destino com `inbound_enabled = false` (o webhook é de outra instância e precisa ser religado);
+  - o segredo é write-only como o `bot_token`: o banco guarda só o SHA-256 (`webhook_secret_hash`), conferido pela função `SECURITY DEFINER` `telegram_webhook_authenticate(destino, segredo)`;
+  - entrada ligada exige destino ativo, o agente e o hash (`message_destinations_inbound_check`): desativar ou arquivar o destino desliga a entrada no mesmo UPDATE;
+  - o token do bot para a entrada (`setWebhook`/`deleteWebhook`, respostas, botões, `getFile`) é lido por `telegram_inbound_bot_token(destino)` (`SECURITY DEFINER`; só destino ativo, não arquivado e com o hash gravado, inclusive na mesma transação que liga a entrada; tarefa [034](../tasks/034-token-do-bot-para-a-entrada-do-telegram.md)).
 - **Pareamento**:
   - `telegram_links`: `destination_id`, `user_id`, `chat_id`, `telegram_user_id`, `username`, `created_at` e `revoked_at`; único por (destino, chat) ativo;
   - `telegram_pairing_codes`: hash do código, usuário, destino, expiração e uso.
@@ -121,3 +124,34 @@ Em todos, **o kit do agente decide** o que roda direto (`allow`) e o que espera 
   - criar uma tarefa com "Rodar agora" e aprovar no sino;
   - importar OFX com "Conciliar com IA" e aprovar o lote;
   - parear o Telegram com a Bot API falsa e trocar mensagens.
+
+## Decisões da implementação (F15)
+Entregue na tarefa [033](../tasks/033-fluxos-autonomos-na-aplicacao.md) (banco nas tarefas 032 e 034).
+
+### Tarefas agendadas
+- Serviço `services/agent-tasks.ts`; rotas `/api/account/agent-tasks` (as próprias; o dono é sempre quem cria) e `/api/admin/ai/agent-tasks` (só admin, de qualquer usuário, com `userId`), cada uma com `/:id/runs` (histórico) e `/:id/run` ("Rodar agora").
+- O laço do worker (`AGENT_TASK_INTERVAL_MS`, padrão 30 s) reserva uma tarefa vencida por transação e, **na mesma transação da reserva**, confere o limite por minuto e o orçamento dos fluxos do dono (o admin dono fica isento do orçamento, como no resto) e cria, num savepoint, a sessão própria (`purpose = 'scheduled_task'`, arquivada, título "Tarefa: <nome> (<data>)"), a mensagem com a instrução e a execução, gravando `conversation_id` e `run_id` no disparo. Não deu para começar: o disparo fica `skipped` (`rate_limited`, `budget_exceeded`) ou `failed` (o erro), sem desfazer a reserva. O "Rodar agora" faz o mesmo na transação de `ai_scheduled_task_run_now`; a execução é sempre do dono, mesmo quando o admin clica.
+- A execução usa o loop normal com as tools internas do kit e os MCP do agente; o prompt é o do chat (instruções do usuário e as do MCP) com um bloco dizendo que é uma tarefa agendada sem ninguém acompanhando. A sessão não entra no fio do chat e abre em leitura no console (sem composer), com o cartão de aprovação para o dono.
+- `ask` deixa a execução em `awaiting_confirmation` e o worker cria a notificação `ai_awaiting_approval` ("A tarefa <nome> espera sua aprovação", link `/?conversation=<sessão>`) e o evento para os destinos; o aviso comum de "aguarda confirmação" (`agent_completed`) não é duplicado nesses fluxos. Ao terminar, vale o aviso de conclusão de [011](011-agentes-de-ia.md).
+- Tela: Minha conta → Tarefas do agente e /admin/ai → Tarefas e Telegram (lista com agenda em texto, próximo disparo, último resultado e ativo; formulário; histórico com link para a sessão; "Rodar agora").
+
+### Conciliação completa ao importar
+- O interruptor fica em `financial_accounts.ai_auto_reconcile` (corrente e poupança) e `caixas.ai_auto_reconcile` (cartão): no cadastro da conta e do cartão (edição) e no painel "Conciliação com IA" da tela do lote (`PUT /api/statement-imports/:id/reconcile-ai/auto`).
+- Ligado, o import enfileira a conciliação (resposta `aiReconcile`) em vez das sugestões de classificação; desligado, as sugestões seguem como antes (`aiSuggestion`). "Conciliar com IA" (`POST /api/statement-imports/:id/reconcile-ai`) dispara sob demanda (409 com uma execução ativa no lote); `GET` devolve o interruptor, o agente dos fluxos (com `hasKit`), a execução mais recente e as confirmações pendentes.
+- A conversa `reconcile_statement` (arquivada, `screen_context.importId`) roda como quem importou (ou clicou), com o ator `agent` na auditoria, **só com as tools internas** do kit do agente dos fluxos (sem MCP) e no mínimo 60 voltas (um lote tem muitas linhas). A mensagem pede ler o lote (`get_statement_import`), os candidatos (`list_line_candidates`), casar, lançar, ignorar tarifas e corrigir casamentos errados.
+- Aprovação em lote na tela do lote ("O agente propõe N ações"): todas, as selecionadas, ou recusar com motivo, por `POST /api/runs/:id/confirmations` (`ai_tool_confirmations_decide`); só quem disparou decide, os demais leitores veem. O sino avisa quem importou (`ai_awaiting_approval`, link para o lote). A tela segue o SSE ("O agente está conciliando…") e recarrega as linhas ao fim.
+
+### Telegram de entrada
+- "Receber mensagens" e o webhook: ver [013](013-mensagens-telegram.md), seção *Entrada*. A URL pública vem de `telegram.public_base_url` (/admin/ai → Tarefas e Telegram) ou `PUBLIC_BASE_URL`, e só vale com HTTPS.
+- `POST /api/telegram/webhook/:destinationId` fica fora da sessão por cookie: 401 sem o cabeçalho certo (`telegram_webhook_authenticate`), `update_id` repetido ignorado (`telegram_update_seen`; se o processamento falhar, a marca é apagada e o Telegram reentrega), purga de 7 dias na manutenção do worker.
+- Pareamento em Minha conta → Telegram (`/api/account/telegram`, `POST /api/account/telegram/pairing-codes`, `DELETE /api/account/telegram/links/:id`; o admin vê todos com `?all=true`): código de 8 caracteres sem os ambíguos (0/O, 1/I/L), 10 min, uso único, só o hash no banco (`telegram_pairing_code_create`/`telegram_pairing_consume`). `/start <código>` em chat privado pareia; grupos e canais são ignorados; chat não pareado recebe o aviso. O usuário precisa continuar podendo usar o destino (pessoal dele, de caixa que ele lê, ou global).
+- A mensagem entra na sessão ativa do usuário com o agente do destino (`sendToAgent`, como o próprio usuário, com o limite por minuto e o orçamento dele). A execução nasce com o evento interno `telegram`/`origin` (destino e chat), na mesma transação: o worker mantém o `sendChatAction` a cada 4 s enquanto roda e, ao parar, manda a resposta final (markdown → HTML do Telegram, `markdownToTelegramHtml` em `@moneyflow/shared`, partes de até 4096 sem cortar tags; HTML recusado vai como texto puro) ou os cartões das confirmações com os botões **Aprovar**/**Recusar** (`callback_data` `ok:<id>`/`no:<id>`). O que já foi ao chat fica marcado em eventos `telegram`/`sent` e não se repete. As respostas vão direto pela Bot API, fora da outbox.
+- Recusar grava o evento `reason_requested`; a mensagem seguinte do chat é o motivo ("pular" = sem motivo) e decide a recusa. Aprovar e recusar usam `decideConfirmations` como o dono; a mesma confirmação aparece no console e quem decide primeiro vale ("Esta ação já foi decidida"). Tool de segredo: só o botão Recusar e o aviso "abra o console para digitar o segredo".
+- Com uma execução ativa na sessão, a mensagem recebe "Ainda estou trabalhando na anterior: aguarde ou envie /parar" (ou, esperando aprovação, o pedido de responder pelos botões) e não vai ao agente.
+- Mídia: voz e áudio baixados (`getFile` e o download, até 20 MB) viram anexos da sessão com a transcrição enfileirada ([025](025-chat-multimidia.md)); foto (o maior tamanho) e documento viram anexos; agente sem áudio→texto recebe "O agente não transcreve áudio" e nada vai a ele; anexo recusado (ex.: imagem sem visão) devolve "Não consegui ler o anexo: <motivo>".
+- Comandos: `/nova` (finaliza a sessão), `/parar` (cancela a execução ativa), `/agente` (agente, sessão e mensagens), `/ajuda` (também `/start` sem código num chat pareado).
+- Serviço `services/telegram-inbound.ts`; integração `integrations/telegram.ts` (`botApiCall`, `sendChatMessage`, `setWebhook`, `deleteWebhook`, `sendChatAction`, `answerCallbackQuery`, `getFile`, `downloadFile`); a Bot API falsa dos testes e e2e é `e2e/fakes/fake-telegram.ts`.
+
+### Tools e backup
+- Tools da categoria Configuração de IA, sem `adminOnly`: `list_agent_tasks` (allow; `userId`/`all` só para o admin), `create_agent_task`, `update_agent_task`, `delete_agent_task` e `run_agent_task_now` (ask, com prévia: dono, agente, agenda em texto e instrução); o usuário só as próprias, o admin as de qualquer um (o serviço confere).
+- Backup: `SECRET_READERS` do destino leva o `bot_token` e o `webhook_secret_hash`; `ai_scheduled_task_runs`, `telegram_pairing_codes` e `telegram_updates_seen` ficam fora (`EXCLUDED_TABLES`); `ai_scheduled_tasks` e `telegram_links` vão. A importação traz o destino com `inbound_enabled = false` e a tarefa com o próximo disparo recalculado pelo banco.

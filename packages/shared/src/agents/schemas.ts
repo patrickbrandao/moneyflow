@@ -362,6 +362,8 @@ export const AI_USAGE_PURPOSES = [
   'vision_describe',
   'transcription',
   'speech',
+  'scheduled_task',
+  'reconcile_statement',
 ] as const;
 
 const day = z

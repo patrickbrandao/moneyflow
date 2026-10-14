@@ -2,6 +2,7 @@ import type { Database } from '@moneyflow/db';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config';
+import { tasksTick } from '../services/agent-tasks';
 import { requestRetentionDays } from '../services/ai-requests';
 import { type IndexState, indexEmbeddings, purgeEmbeddingIndexes } from './embeddings';
 import { type ClaimedRun, processRun } from './runner';
@@ -17,7 +18,8 @@ import { claimTranscriptions, processTranscription } from './transcriptions';
  * 024): a indexação de cada par (provedor, modelo) em uso por algum agente
  * ativo e a purga dos pares parados há mais de 7 dias. No mesmo ritmo da
  * fila de execuções, a fila das transcrições (spec 025: ai_transcription_claim,
- * até TRANSCRIPTION_CONCURRENCY ao mesmo tempo).
+ * até TRANSCRIPTION_CONCURRENCY ao mesmo tempo). E o laço das tarefas agendadas
+ * (spec 029, AGENT_TASK_INTERVAL_MS) e a purga da dedup do webhook do Telegram.
  */
 
 const TRANSCRIPTION_CONCURRENCY = 2;
@@ -37,7 +39,13 @@ export async function purgeAiRequests(db: Database, config: Config): Promise<num
   return total;
 }
 
-export type AgentWorkerOptions = { pollMs?: number; concurrency?: number; maintenanceMs?: number; staleAfter?: string };
+export type AgentWorkerOptions = {
+  pollMs?: number;
+  concurrency?: number;
+  maintenanceMs?: number;
+  staleAfter?: string;
+  taskIntervalMs?: number;
+};
 
 export function startAgentWorker(db: Database, config: Config, log: FastifyBaseLogger, opts: AgentWorkerOptions = {}) {
   const pollMs = opts.pollMs ?? config.agentPollMs;
@@ -108,11 +116,13 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
     if (maintaining || stopped) return;
     maintaining = true;
     try {
-      const result = await db.execute<{ purged: number; expired: number; orphans: number }>(sql`
+      const result = await db.execute<{ purged: number; expired: number; orphans: number; telegram: number }>(sql`
         SELECT ai_run_events_purge(interval '7 days') AS purged, ai_runs_expire_awaiting(interval '7 days') AS expired,
-               ai_embeddings_purge_orphans() AS orphans`);
+               ai_embeddings_purge_orphans() AS orphans, telegram_updates_seen_purge(interval '7 days') AS telegram`);
       const row = result.rows[0];
-      if (row && (Number(row.purged) || Number(row.expired) || Number(row.orphans))) log.info(row, 'agente: manutenção');
+      if (row && (Number(row.purged) || Number(row.expired) || Number(row.orphans) || Number(row.telegram))) {
+        log.info(row, 'agente: manutenção');
+      }
       const requests = await purgeAiRequests(db, config);
       if (requests) log.info({ requests }, 'agente: requisições ao provedor purgadas');
       const index = await indexEmbeddings(db, config, indexState);
@@ -129,10 +139,31 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
   const maintenanceTimer = setInterval(() => void maintenance(), opts.maintenanceMs ?? config.agentMaintenanceMs);
   void maintenance();
 
+  // Tarefas agendadas (spec 029): dispara as vencidas (reserva + sessão + execução numa transação) e acorda a fila.
+  let ticking = false;
+  const tasks = async () => {
+    if (ticking || stopped) return;
+    ticking = true;
+    try {
+      const result = await tasksTick(db, config, log);
+      if (result.started || result.skipped || result.failed) {
+        log.info(result, 'agente: tarefas agendadas');
+        void claim();
+      }
+    } catch (error) {
+      log.error({ err: error }, 'agente: falha no laço das tarefas agendadas');
+    } finally {
+      ticking = false;
+    }
+  };
+  const tasksTimer = setInterval(() => void tasks(), opts.taskIntervalMs ?? config.agentTaskIntervalMs);
+  void tasks();
+
   return async () => {
     stopped = true;
     clearInterval(pollTimer);
     clearInterval(maintenanceTimer);
+    clearInterval(tasksTimer);
     await Promise.allSettled([...active, ...transcribing]);
   };
 }

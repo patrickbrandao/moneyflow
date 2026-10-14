@@ -1,5 +1,6 @@
 import type { Executor } from '@moneyflow/db';
 import {
+  type AiRunDto,
   blocksText,
   type ClassificationSuggestResult,
   type DocumentReadingDto,
@@ -7,15 +8,18 @@ import {
   isIsoDate,
   normalizeDocument,
   parseBoleto,
+  type ReconcileAiStartResult,
+  type ReconcileAiStateDto,
   t,
 } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { extractJson } from '../agents/flows';
-import { loadMessages, loadRun } from '../agents/store';
+import { loadConfirmations, loadMessages, loadRun, RUN_COLUMNS, type RunRow, runDto } from '../agents/store';
 import type { ServiceContext } from '../context';
 import { AppError } from '../errors';
 import { assertCanStartRun } from './ai-budgets';
 import { assertUpload, storeAttachment } from './attachments';
+import { updateAccount, updateCaixa } from './caixas';
 import { assertReadsImages, createConversation, sendMessage } from './conversations';
 import { getImport } from './statements';
 import { withTx } from './tx';
@@ -184,4 +188,130 @@ export async function suggestImportClassifications(
     attachmentIds: [],
   });
   return { queued: true, runId: sent.run.id, lines: lines.length };
+}
+
+/* ---------------- conciliação completa com IA (spec 029) ---------------- */
+
+/** A conversa de conciliação mais recente do lote (purpose reconcile_statement, screen_context.importId). */
+async function reconcileConversation(db: Executor, importId: string) {
+  const result = await db.execute<{ id: string }>(sql`
+    SELECT id FROM ai_conversations
+     WHERE purpose = 'reconcile_statement' AND screen_context ->> 'importId' = ${importId}
+     ORDER BY created_at DESC, id DESC LIMIT 1`);
+  return result.rows[0]?.id ?? null;
+}
+
+/** "Conciliar com IA ao importar" da conta ou do cartão do lote. */
+async function autoReconcileOf(db: Executor, detail: { financialAccountId: string | null; cardCaixaId: string | null }) {
+  const result = detail.financialAccountId
+    ? await db.execute<{ on: boolean }>(sql`SELECT ai_auto_reconcile AS on FROM financial_accounts WHERE id = ${detail.financialAccountId}`)
+    : await db.execute<{ on: boolean }>(sql`SELECT ai_auto_reconcile AS on FROM caixas WHERE id = ${detail.cardCaixaId}`);
+  return Boolean(result.rows[0]?.on);
+}
+
+/** O lote importado deve ser conciliado pela IA (interruptor da conta ou do cartão)? */
+export async function autoReconcileEnabled(ctx: ServiceContext, importId: string) {
+  const detail = await getImport(ctx, importId);
+  return autoReconcileOf(ctx.db, detail);
+}
+
+/**
+ * Conciliação completa do lote pelo agente dos fluxos (spec 029): uma conversa
+ * reconcile_statement, como quem importou (ou clicou), com as tools internas do
+ * kit do agente; as tools em ask viram o lote de aprovações da tela. `auto`
+ * (logo após importar) não falha: devolve o motivo de não ter enfileirado.
+ */
+export async function reconcileImportWithAi(
+  ctx: ServiceContext,
+  importId: string,
+  opts: { auto?: boolean } = {},
+): Promise<ReconcileAiStartResult> {
+  const detail = await getImport(ctx, importId);
+  const none = (lines: number, skippedReason?: string): ReconcileAiStartResult => ({
+    queued: false,
+    runId: null,
+    conversationId: null,
+    lines,
+    ...(skippedReason ? { skippedReason } : {}),
+  });
+  if (!detail.canWrite) {
+    if (opts.auto) return none(0);
+    ctx.access.assertWrite(detail.caixaId);
+  }
+  const lines = detail.lines.filter((l) => l.status === 'new' || l.status === 'suggested').length;
+  if (lines === 0) {
+    if (opts.auto) return none(0);
+    throw new AppError(422, 'nothing_to_reconcile', t.agents.reconcile.noLines);
+  }
+  const agentId = await flowAgentId(ctx);
+  if (!agentId) {
+    if (opts.auto) return none(lines, t.agents.reconcile.noAgent);
+    throw new AppError(501, 'ai_unavailable', t.agents.reconcile.noAgent);
+  }
+  const previous = await reconcileConversation(ctx.db, importId);
+  if (previous) {
+    const active = await ctx.db.execute<{ id: string }>(sql`
+      SELECT id FROM ai_runs WHERE conversation_id = ${previous} AND status IN ('queued', 'running', 'awaiting_confirmation')`);
+    if (active.rows[0]) {
+      if (opts.auto) return { queued: false, runId: active.rows[0].id, conversationId: previous, lines };
+      throw new AppError(409, 'run_active', t.agents.errors.runActive);
+    }
+  }
+  try {
+    await assertCanStartRun(ctx, agentId, true);
+  } catch (error) {
+    if (opts.auto && error instanceof AppError && error.status === 429) return none(lines, error.message);
+    throw error;
+  }
+  const conversation = await createConversation(
+    ctx,
+    { agentId, title: t.agents.flows.reconcileConversation(detail.fileName).slice(0, 200) },
+    { purpose: 'reconcile_statement', screenContext: { importId }, archived: true },
+  );
+  const sent = await sendMessage(ctx, conversation.id, {
+    text: t.agents.flows.reconcileMessage(detail.fileName, importId, lines),
+    attachmentIds: [],
+  });
+  return { queued: true, runId: sent.run.id, conversationId: conversation.id, lines };
+}
+
+/** O estado da conciliação com IA do lote: interruptor, agente dos fluxos, execução e as ações propostas. */
+export async function reconcileAiState(ctx: ServiceContext, importId: string): Promise<ReconcileAiStateDto> {
+  const detail = await getImport(ctx, importId);
+  const agentId = await flowAgentId(ctx);
+  const agent = agentId
+    ? (
+        await ctx.db.execute<{ id: string; name: string; has_kit: boolean }>(
+          sql`SELECT id, name, tool_kit_id IS NOT NULL AS has_kit FROM ai_agents WHERE id = ${agentId}`,
+        )
+      ).rows[0]
+    : undefined;
+  const conversationId = await reconcileConversation(ctx.db, importId);
+  let run: AiRunDto | null = null;
+  let userId: string | null = null;
+  if (conversationId) {
+    const latest = await ctx.db.execute<RunRow>(sql`
+      SELECT ${RUN_COLUMNS} FROM ai_runs r WHERE r.conversation_id = ${conversationId} ORDER BY r.created_at DESC, r.id DESC LIMIT 1`);
+    const row = latest.rows[0];
+    if (row) {
+      run = runDto(row);
+      userId = row.user_id;
+    }
+  }
+  return {
+    autoEnabled: await autoReconcileOf(ctx.db, detail),
+    agent: agent ? { id: agent.id, name: agent.name, hasKit: Boolean(agent.has_kit) } : null,
+    conversationId,
+    run,
+    confirmations: run?.status === 'awaiting_confirmation' ? await loadConfirmations(ctx.db, run.id, true) : [],
+    canDecide: userId === ctx.access.actor.id,
+  };
+}
+
+/** Liga ou desliga "Conciliar com IA ao importar" na conta ou no cartão do lote (quem escreve na caixa). */
+export async function setReconcileAuto(ctx: ServiceContext, importId: string, enabled: boolean) {
+  const detail = await getImport(ctx, importId);
+  if (detail.financialAccountId) await updateAccount(ctx, detail.financialAccountId, { aiAutoReconcile: enabled });
+  else await updateCaixa(ctx, detail.cardCaixaId!, { aiAutoReconcile: enabled });
+  return reconcileAiState(ctx, importId);
 }

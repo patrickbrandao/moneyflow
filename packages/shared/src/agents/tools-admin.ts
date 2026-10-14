@@ -30,6 +30,7 @@ import {
   toolKitCreateInput,
   toolKitUpdateInput,
 } from './schemas';
+import { agentTaskCreateInput, agentTaskUpdateInput } from './tasks';
 import { AGENT_TOOL_CATEGORIES, attachmentId, date, define, limit } from './tool-def';
 
 /*
@@ -100,7 +101,12 @@ const userUpdateTool = z.object({
 });
 
 /** Chaves de app_settings que a tela (e as tools) gravam. */
-export const APP_SETTING_KEYS = ['ai.request_retention_days', 'ai.runs_per_minute', 'ai.flow_runs_per_minute'] as const;
+export const APP_SETTING_KEYS = [
+  'ai.request_retention_days',
+  'ai.runs_per_minute',
+  'ai.flow_runs_per_minute',
+  'telegram.public_base_url',
+] as const;
 
 const yearMonth = z
   .string()
@@ -609,7 +615,7 @@ export const ADMIN_TOOLS = [
     category: 'ai',
     title: 'Alterar configuração do sistema',
     description:
-      'Grava uma configuração do sistema (vence a variável de ambiente); value null volta ao padrão da variável. ai.request_retention_days = dias de retenção das requisições ao provedor (1–365); ai.runs_per_minute e ai.flow_runs_per_minute = execuções de IA por minuto por usuário nas sessões e nos fluxos (inteiro 1–1000).',
+      'Grava uma configuração do sistema (vence a variável de ambiente); value null volta ao padrão da variável. ai.request_retention_days = dias de retenção das requisições ao provedor (1–365); ai.runs_per_minute e ai.flow_runs_per_minute = execuções de IA por minuto por usuário nas sessões e nos fluxos (inteiro 1–1000); telegram.public_base_url = URL pública HTTPS da API para o webhook do Telegram (https://host[/caminho], sem barra no fim).',
     kind: 'write',
     adminOnly: true,
     input: z.object({
@@ -664,6 +670,54 @@ export const ADMIN_TOOLS = [
     destructive: true,
     adminOnly: true,
     input: z.object({ budgetId: id }),
+  }),
+  /* ---- tarefas agendadas dos agentes (spec 029): as próprias; o administrador, as de qualquer um ---- */
+  define({
+    name: 'list_agent_tasks',
+    category: 'ai',
+    title: 'Listar tarefas agendadas',
+    description:
+      'Tarefas agendadas dos agentes (nome, agente, instrução, agenda, ativa, próximo e último disparo e o resultado do último). As suas; o administrador pode pedir as de um usuário (userId) ou de todos (all: true).',
+    kind: 'read',
+    input: z.object({
+      userId: id.optional().describe('Só administrador: as tarefas deste usuário.'),
+      all: z.boolean().optional().describe('Só administrador: as tarefas de todos os usuários.'),
+    }),
+  }),
+  define({
+    name: 'create_agent_task',
+    category: 'ai',
+    title: 'Criar tarefa agendada',
+    description:
+      'Cria uma tarefa agendada: a cada disparo (diário, semanal ou mensal, no horário de São Paulo) a instrução vai ao agente numa sessão própria, rodando como o dono com as permissões dele. No máximo 20 ativas por usuário. Só o administrador cria para outro usuário (userId).',
+    kind: 'write',
+    input: agentTaskCreateInput,
+  }),
+  define({
+    name: 'update_agent_task',
+    category: 'ai',
+    title: 'Editar tarefa agendada',
+    description: 'Altera o agente, o nome, a instrução, a agenda ou liga/desliga uma tarefa agendada (o dono não muda).',
+    kind: 'write',
+    input: z.object({ taskId: id, changes: agentTaskUpdateInput }),
+  }),
+  define({
+    name: 'delete_agent_task',
+    category: 'ai',
+    title: 'Excluir tarefa agendada',
+    description: 'Exclui uma tarefa agendada e o histórico de disparos (as sessões ficam). Para só pausar, desligue com update_agent_task.',
+    kind: 'write',
+    destructive: true,
+    input: z.object({ taskId: id }),
+  }),
+  define({
+    name: 'run_agent_task_now',
+    category: 'ai',
+    title: 'Rodar tarefa agendada agora',
+    description:
+      'Dispara uma tarefa agendada agora (também desligada), numa sessão própria; não muda o próximo disparo. Pulada se a execução anterior ainda roda.',
+    kind: 'write',
+    input: z.object({ taskId: id }),
   }),
   define({
     name: 'list_ai_requests',

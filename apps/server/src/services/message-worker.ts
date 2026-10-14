@@ -780,7 +780,7 @@ export async function consumeOutbox(db: Database, config: Config, opts: { batch?
 export async function emitAgentEvent(
   db: Database,
   event: {
-    kind: 'agent_completed' | 'agent_message';
+    kind: 'agent_completed' | 'agent_message' | 'ai_awaiting_approval';
     userId: string;
     agentRunId: string;
     eventKey: string;
@@ -810,7 +810,10 @@ export async function emitAgentEvent(
   for (const sub of subs) {
     const scope = await destinationScope(db, sub);
     const personal = sub.owner_user_id === event.userId;
-    const sharedCaixa = sub.owner_caixa_id !== null && (event.caixaId ? scope.includes(event.caixaId) : scope.length > 0);
+    // A aprovação pendente sem caixa (tarefa agendada) é do usuário: só os destinos pessoais dele.
+    const sharedCaixa =
+      sub.owner_caixa_id !== null &&
+      (event.caixaId ? scope.includes(event.caixaId) : event.kind !== 'ai_awaiting_approval' && scope.length > 0);
     if (!personal && !sharedCaixa) continue;
     queued += await enqueue(
       db,

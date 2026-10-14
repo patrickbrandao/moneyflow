@@ -24,6 +24,7 @@ export const notificationsStrings = {
     contract_renewal_pending: 'Contrato: renovação pendente',
     contract_readjustment: 'Contrato: reajuste',
     ai_budget_alert: 'Orçamento de IA',
+    ai_awaiting_approval: 'Aprovação do agente',
     system: 'Sistema',
   } as Record<string, string>,
   // Títulos e corpos criados pelo worker.

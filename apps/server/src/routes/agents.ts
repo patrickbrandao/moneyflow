@@ -1,6 +1,9 @@
 import {
   agentSessionStartInput,
   agentSessionsQuery,
+  agentTaskCreateInput,
+  agentTaskListQuery,
+  agentTaskUpdateInput,
   agentThreadsQuery,
   aiAgentCreateInput,
   aiAgentUpdateInput,
@@ -35,6 +38,7 @@ import type { FastifyInstance } from 'fastify';
 import type { RunEventsHub } from '../agents/events-hub';
 import { AppError } from '../errors';
 import { param, parse, type Req } from '../http';
+import * as tasks from '../services/agent-tasks';
 import * as admin from '../services/ai-admin';
 import * as budgets from '../services/ai-budgets';
 import { suggestImportClassifications } from '../services/ai-flows';
@@ -203,6 +207,28 @@ export async function agentRoutes(app: FastifyInstance) {
   app.get('/api/users/:id/ai', (r: Req) => aiSettings.getUserAiSettings(r.ctx, id(r)));
   /** O próprio uso do mês e o orçamento que cobre o usuário (spec 028). */
   app.get('/api/account/ai/usage', (r: Req) => budgets.myUsage(r.ctx));
+
+  /* ---------------- tarefas agendadas (spec 029): as próprias em Minha conta; o admin, de qualquer um ---------------- */
+  app.get('/api/account/agent-tasks', (r: Req) => tasks.listTasks(r.ctx));
+  app.post('/api/account/agent-tasks', (r: Req) => tasks.createTask(r.ctx, { ...parse(agentTaskCreateInput, r.body), userId: null }));
+  app.get('/api/account/agent-tasks/:id', (r: Req) => tasks.getTask(r.ctx, id(r)));
+  app.patch('/api/account/agent-tasks/:id', (r: Req) => tasks.updateTask(r.ctx, id(r), parse(agentTaskUpdateInput, r.body)));
+  app.delete('/api/account/agent-tasks/:id', (r: Req) => tasks.deleteTask(r.ctx, id(r)));
+  app.get('/api/account/agent-tasks/:id/runs', (r: Req) => tasks.listTaskRuns(r.ctx, id(r)));
+  app.post('/api/account/agent-tasks/:id/run', (r: Req) => tasks.runTaskNow(r.ctx, id(r)));
+  const adminOnly = (r: Req) => {
+    r.ctx.access.assertAdmin();
+    return r.ctx;
+  };
+  app.get('/api/admin/ai/agent-tasks', (r: Req) =>
+    tasks.listTasks(adminOnly(r), { userId: parse(agentTaskListQuery, r.query).userId ?? 'all' }),
+  );
+  app.post('/api/admin/ai/agent-tasks', (r: Req) => tasks.createTask(adminOnly(r), parse(agentTaskCreateInput, r.body)));
+  app.get('/api/admin/ai/agent-tasks/:id', (r: Req) => tasks.getTask(adminOnly(r), id(r)));
+  app.patch('/api/admin/ai/agent-tasks/:id', (r: Req) => tasks.updateTask(adminOnly(r), id(r), parse(agentTaskUpdateInput, r.body)));
+  app.delete('/api/admin/ai/agent-tasks/:id', (r: Req) => tasks.deleteTask(adminOnly(r), id(r)));
+  app.get('/api/admin/ai/agent-tasks/:id/runs', (r: Req) => tasks.listTaskRuns(adminOnly(r), id(r)));
+  app.post('/api/admin/ai/agent-tasks/:id/run', (r: Req) => tasks.runTaskNow(adminOnly(r), id(r)));
 
   /* ---------------- tokens pessoais ---------------- */
   app.get('/api/account/api-tokens', (r: Req) => tokens.listApiTokens(r.ctx));

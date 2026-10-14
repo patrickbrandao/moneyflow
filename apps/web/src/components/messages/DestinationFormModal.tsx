@@ -1,4 +1,11 @@
-import { type CaixaSummary, type DestinationOwnerKind, type MessageDestinationDto, t } from '@moneyflow/shared';
+import {
+  type AgentOptionDto,
+  type CaixaSummary,
+  type DestinationOwnerKind,
+  type MessageDestinationDto,
+  type TelegramInboundConfigDto,
+  t,
+} from '@moneyflow/shared';
 import { type FormEvent, useState } from 'react';
 import { api } from '../../lib/api';
 import { useUser } from '../../lib/auth';
@@ -30,6 +37,13 @@ export function DestinationFormModal({
   const [chatId, setChatId] = useState(destination?.chatId ?? '');
   const [isActive, setIsActive] = useState(destination?.isActive ?? true);
   const [notes, setNotes] = useState(destination?.notes ?? '');
+  // "Receber mensagens" (spec 029): só na edição; exige a URL pública HTTPS.
+  const [inbound, setInbound] = useState(destination?.inboundEnabled ?? false);
+  const [inboundAgentId, setInboundAgentId] = useState(destination?.inboundAgentId ?? '');
+  const inboundConfig = useApi<TelegramInboundConfigDto>(open && editing ? '/api/message-destinations/inbound-config' : null);
+  const agents = useApi<AgentOptionDto[]>(open && editing ? '/api/agents' : null);
+  const agentChoice = inboundAgentId || agents.data?.[0]?.id || '';
+  const inboundAvailable = Boolean(inboundConfig.data?.available);
   const [error, setError] = useState<string | null>(null);
   const { run, busy } = useAction();
   const caixas = useApi<CaixaSummary[]>(open && !editing ? '/api/caixas' : null);
@@ -43,8 +57,16 @@ export function DestinationFormModal({
     if (!editing && !botToken.trim()) return setError(t.errors.invalidBotToken);
     if (!editing && ownerKind === 'caixa' && !ownerCaixaId) return setError(t.errors.destinationOwner);
     setError(null);
+    const inboundChanged = inbound !== (destination?.inboundEnabled ?? false) || (inbound && agentChoice !== destination?.inboundAgentId);
     const body = editing
-      ? { name, chatId: chatId.trim(), botToken: botToken.trim() || undefined, isActive, notes }
+      ? {
+          name,
+          chatId: chatId.trim(),
+          botToken: botToken.trim() || undefined,
+          isActive,
+          notes,
+          ...(inboundChanged ? { inboundEnabled: inbound && isActive, inboundAgentId: inbound ? agentChoice : undefined } : {}),
+        }
       : {
           name,
           ownerKind,
@@ -123,6 +145,37 @@ export function DestinationFormModal({
           <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} /> {t.messages.active}
         </label>
         {editing && destination?.isActive && !isActive && <p className="hint">{t.messages.deactivateHint}</p>}
+        {editing && (
+          <div className="well grid gap-2" data-testid="destination-inbound">
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={inbound}
+                disabled={!inboundAvailable && !inbound}
+                onChange={(e) => setInbound(e.target.checked)}
+                aria-label={t.agentsUi.telegram.inbound}
+              />{' '}
+              {t.agentsUi.telegram.inbound}
+            </label>
+            <p className="hint">{inboundAvailable || inbound ? t.agentsUi.telegram.inboundHint : t.agentsUi.telegram.inboundUnavailable}</p>
+            {inbound && (
+              <Field label={t.agentsUi.telegram.inboundAgent}>
+                <select
+                  className="field"
+                  value={agentChoice}
+                  onChange={(e) => setInboundAgentId(e.target.value)}
+                  aria-label={t.agentsUi.telegram.inboundAgent}
+                >
+                  {agents.data?.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+          </div>
+        )}
         <Field label={t.messages.notes}>
           <textarea className="field" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
         </Field>

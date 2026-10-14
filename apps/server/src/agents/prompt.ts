@@ -12,7 +12,7 @@ import {
 import { sql } from 'drizzle-orm';
 import type { Access } from '../authz/access';
 import { readableFilter } from '../services/caixas';
-import { type FlowPurpose, flowSystemPrompt } from './flows';
+import { flowSystemPrompt, type PromptPurpose } from './flows';
 
 /*
  * Montagem do prompt de sistema (spec 022), na ordem fixa:
@@ -62,7 +62,7 @@ const join = (parts: (string | null | undefined)[]) =>
 /** Monta as três partes do prompt e o bloco user dos MCP (puro: sem banco). */
 export function assemblePrompt(
   inputs: PromptInputs,
-  opts: { purpose: FlowPurpose | null; screen: Record<string, unknown> | null; today?: string },
+  opts: { purpose: PromptPurpose | null; screen: Record<string, unknown> | null; today?: string },
 ): AssembledPrompt {
   const today = opts.today ?? todayIso();
   const stableValues: PromptVariableValues = {
@@ -78,7 +78,9 @@ export function assemblePrompt(
     inputs.agent.system_prompt,
     volatileVariables ? { ...stableValues, ...volatilePromptValues(today) } : stableValues,
   );
-  const flow = opts.purpose !== null;
+  // Fluxos sem ninguém digitando ficam sem as instruções do usuário e sem as do MCP; a tarefa agendada roda como o
+  // chat (instruções do usuário e MCP do agente), com o aviso de que ninguém acompanha (spec 029).
+  const flow = opts.purpose !== null && opts.purpose !== 'scheduled_task';
   const mcpSystem = flow
     ? []
     : inputs.mcp.filter((m) => m.mode === 'system').map((m) => `${t.agents.systemPrompt.mcpInstructions(m.name)}\n${m.text.trim()}`);
@@ -201,15 +203,16 @@ export async function loadPromptInputs(
   db: Executor,
   access: Access,
   agent: { id: string; name: string; system_prompt: string },
-  purpose: FlowPurpose | null,
+  purpose: PromptPurpose | null,
 ): Promise<PromptInputs> {
   const settings = await loadUserAiSettings(db, access);
+  const flow = purpose !== null && purpose !== 'scheduled_task';
   return {
     agent,
     user: { username: access.actor.username, email: access.actor.email },
-    instructions: purpose ? '' : settings.instructions,
+    instructions: flow ? '' : settings.instructions,
     primaryCaixa: settings.primaryCaixa,
     context: await autoContext(db, access, settings.primaryCaixa),
-    mcp: purpose ? [] : await loadMcpInstructions(db, agent.id),
+    mcp: flow ? [] : await loadMcpInstructions(db, agent.id),
   };
 }

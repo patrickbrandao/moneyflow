@@ -159,6 +159,12 @@ export function MessagesPage() {
                         <Badge tone="warn">{t.messages.failures(d.failedCount)}</Badge>
                       </>
                     )}
+                    {d.inboundEnabled && (
+                      <>
+                        {' '}
+                        <Badge tone="info">{t.agentsUi.telegram.inboundOn(d.inboundAgentName ?? '')}</Badge>
+                      </>
+                    )}
                   </td>
                   <td className="num">{d.subscriptions}</td>
                   <td className="text-xs text-muted">{d.lastSentAt ? formatDateTime(d.lastSentAt) : '—'}</td>

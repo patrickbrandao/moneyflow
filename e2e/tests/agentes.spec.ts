@@ -31,6 +31,9 @@ import { ADMIN_STATE, baseURL, loginAsAdmin } from '../support/session';
  *    pelo "Provedor padrão";
  *  - os orçamentos (spec 028): orçamento baixo de um usuário na guia Uso, o
  *    aviso no sino e a conversa recusada com o escopo no texto;
+ *  - os fluxos autônomos (spec 029): tarefa criada em Minha conta, "Rodar
+ *    agora" e a aprovação pelo sino; o OFX importado com "Conciliar com IA"
+ *    e o lote de aprovações na tela do lote;
  *  - o chat multimídia (spec 025): anexar um áudio e ver a transcrição, tocar
  *    e trocar a velocidade para 2x, o modo áudio tocando uma resposta, as
  *    prévias de imagem (ampliar e navegar) e de PDF, o markdown bruto/renderizado
@@ -117,6 +120,17 @@ test.beforeAll(async () => {
   llm = await startFakeLlm(llmPort);
   llm.brain = (view) => {
     if (view.lastRole === 'user' && /reconectar o stream/i.test(view.lastText)) return { text: LONG_REPLY, chunks: 16, delayMs: 60 };
+    // Conciliação com IA (spec 029): lê o lote e propõe ignorar as duas primeiras linhas novas (escritas em ask).
+    if (/conciliar um lote de extrato/.test(view.system)) {
+      const importId = /statementImportId ([0-9a-f-]{36})/.exec(view.lastText)?.[1];
+      if (view.lastRole === 'user' && importId) return { toolCalls: [{ name: 'get_statement_import', input: { importId } }] };
+      const read = view.lastToolResults[0]?.content ?? '';
+      if (view.lastRole === 'tool' && read.includes('"lines"')) {
+        const lines = (JSON.parse(read).lines as { id: string; status: string }[]).filter((l) => l.status === 'new').slice(0, 2);
+        return { toolCalls: lines.map((l) => ({ name: 'ignore_statement_lines', input: { lineIds: [l.id] } })) };
+      }
+      return { text: 'Conciliação do lote concluída.' };
+    }
     return defaultBrain(view);
   };
   adminApi = await request.newContext({ baseURL, storageState: ADMIN_STATE });
@@ -761,6 +775,125 @@ test('fluxos: "Usar nos fluxos automáticos" no admin; sugestões da conciliaç�
   for (const line of rest) expect(after.get(line.id)?.classificationSource).toBe('agent');
   if (rest.length > 0) await expect(banner).toContainText(`${rest.length} sugestão(ões) do agente`);
   else await expect(banner).toHaveCount(0);
+});
+
+test('tarefa agendada (spec 029): criar em Minha conta, "Rodar agora" e aprovar pelo sino', async ({ page }) => {
+  await enter(page);
+  const taskName = `E2E Tarefa ${tag}`;
+  const entityName = `E2E Entidade da tarefa ${tag}`;
+  await page.goto('/account');
+  await page.getByTestId('task-new').click();
+  const form = page.getByRole('dialog', { name: 'Nova tarefa' });
+  await form.getByLabel('Nome').fill(taskName);
+  await form.getByTestId('task-agent').selectOption({ label: agent.name });
+  await form.getByTestId('task-instruction').fill(`criar entidade ${entityName}`);
+  await form.getByTestId('task-kind').selectOption('weekly');
+  await form.getByRole('checkbox', { name: 'Qua', exact: true }).check();
+  await form.getByTestId('task-time').fill('07:45');
+  await form.getByTestId('task-save').click();
+  await expect(form).toBeHidden();
+  const row = page.getByTestId('task-row').filter({ hasText: taskName });
+  await expect(row).toContainText('toda segunda e quarta às 07:45');
+
+  // "Rodar agora": a execução roda no worker e para esperando a aprovação da escrita (kit com ask).
+  await row.getByRole('button', { name: `Rodar agora: ${taskName}` }).click();
+  await expect(page.getByText('Tarefa disparada: acompanhe pelo histórico.')).toBeVisible();
+  const title = `A tarefa ${taskName} espera sua aprovação`;
+  await expect
+    .poll(
+      async () => {
+        const list = await (await page.request.get('/api/notifications?limit=30')).json();
+        return list.items.some((n: { kind: string; title: string }) => n.kind === 'ai_awaiting_approval' && n.title === title);
+      },
+      { timeout: 60_000, intervals: [1_000] },
+    )
+    .toBe(true);
+  await page.reload();
+  await expect(row).toContainText('Esperando aprovação');
+
+  // O sino leva à sessão da tarefa (somente leitura, com o cartão de aprovação).
+  await page.getByRole('button', { name: /^Notificações/ }).click();
+  await page
+    .getByRole('dialog', { name: 'Notificações' })
+    .getByRole('button', { name: new RegExp(title) })
+    .click();
+  const win = page.locator('[data-testid="agent-window"]').filter({ hasText: taskName }).last();
+  await expect(win.getByTestId('agent-flow-notice')).toBeVisible();
+  await expect(win.getByTestId('agent-composer')).toHaveCount(0);
+  await win.getByTestId('agent-approve').click();
+  await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Pronto:' })).toBeVisible({ timeout: 30_000 });
+  const entities = await (await page.request.get(`/api/entities?q=${encodeURIComponent(entityName)}`)).json();
+  expect(JSON.stringify(entities)).toContain(entityName);
+
+  // Histórico com o disparo concluído e a tarefa desligada no fim (o worker da pilha não a dispara de novo).
+  await page.goto('/account');
+  await row.getByRole('button', { name: `Histórico de disparos: ${taskName}` }).click();
+  const history = page.getByTestId('task-history');
+  await expect(history).toContainText('Manual');
+  await expect(history).toContainText('Concluída');
+  await page.keyboard.press('Escape');
+  await row.getByRole('checkbox', { name: `Ativa: ${taskName}` }).click();
+  await expect(page.getByText('Tarefa salva.')).toBeVisible();
+  await expect(row.getByRole('checkbox', { name: `Ativa: ${taskName}` })).not.toBeChecked();
+});
+
+test('conciliação com IA (spec 029): importar o OFX, "Conciliar com IA" e aprovar o lote proposto', async ({ page }) => {
+  await enter(page);
+  // O agente do e2e atende os fluxos (o mesmo kit: as escritas pedem aprovação).
+  const patched = await page.request.patch(`/api/admin/ai/agents/${agent.id}`, { data: { useForFlows: true } });
+  expect(patched.ok(), await patched.text()).toBeTruthy();
+  const api = page.request;
+  const holder = await postJson(api, '/api/entities', { kind: 'company', name: `E2E Conc IA Titular ${tag}` });
+  const caixa = await postJson(api, '/api/caixas', { name: `E2E Conc IA ${tag}`, holderEntityId: holder.id, isPrimary: true });
+  const account = await postJson(api, `/api/caixas/${caixa.id}/accounts`, {
+    kind: 'checking',
+    name: `Conta conc IA ${tag}`,
+    bankCode: '077',
+    openingBalanceCents: 0,
+    openingDate: '2026-01-01',
+  });
+
+  await page.goto(`/caixas/${caixa.id}/reconciliation`);
+  await page.getByRole('button', { name: 'Importar extrato' }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'Importar extrato' });
+  await dialog.getByLabel('escolha um arquivo').setInputFiles(join(FIXTURES, 'extrato-ofx1.ofx'));
+  await expect(dialog).toContainText('Resumo do OFX');
+  await dialog.getByRole('button', { name: 'Importar', exact: true }).click();
+  await expect(dialog).toBeHidden();
+
+  // O painel da conciliação com IA: o interruptor (desligado) e o botão sob demanda.
+  const panel = page.getByTestId('reconcile-ai');
+  await expect(panel).toBeVisible();
+  await expect(panel.getByTestId('reconcile-auto')).not.toBeChecked();
+  await expect(page.getByTestId('ai-suggesting')).toHaveCount(0, { timeout: 45_000 });
+  await panel.getByTestId('reconcile-start').click();
+  await expect(page.getByText('O agente começou a conciliar o lote.')).toBeVisible();
+
+  // O agente propõe duas ações (ask): o lote de aprovações na tela.
+  const batch = panel.getByTestId('reconcile-batch');
+  await expect(batch).toContainText('O agente propõe 2 ação(ões)', { timeout: 45_000 });
+  await batch.getByTestId('reconcile-approve-all').click();
+  await expect(page.getByText('Decisão enviada ao agente.')).toBeVisible();
+  await expect(batch).toHaveCount(0, { timeout: 30_000 });
+  const imports: { id: string }[] = await (await api.get(`/api/statement-imports?accountId=${account.id}`)).json();
+  await expect
+    .poll(
+      async () => {
+        const detail = await (await api.get(`/api/statement-imports/${imports[0]!.id}`)).json();
+        return detail.lines.filter((l: { status: string }) => l.status === 'ignored').length;
+      },
+      { timeout: 30_000 },
+    )
+    .toBe(2);
+  const state = await (await api.get(`/api/statement-imports/${imports[0]!.id}/reconcile-ai`)).json();
+  expect(state.run.status).toBe('completed');
+
+  // Liga o interruptor da conta pela tela do lote.
+  await panel.getByTestId('reconcile-auto').click();
+  await expect(page.getByText('Conciliação com IA ao importar ligada.')).toBeVisible();
+  await expect(panel.getByTestId('reconcile-auto')).toBeChecked();
+  const accounts: { id: string; aiAutoReconcile: boolean }[] = await (await api.get(`/api/accounts?caixaId=${caixa.id}`)).json();
+  expect(accounts.find((a) => a.id === account.id)?.aiAutoReconcile).toBe(true);
 });
 
 test('prompt: editar o prompt, ver o histórico e o diff, restaurar; variáveis e o prompt montado', async ({ page }) => {

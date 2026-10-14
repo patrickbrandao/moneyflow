@@ -92,8 +92,8 @@ async function fetchRows(
              ${where.length ? sql`WHERE ${sql.join(where, sql` AND `)}` : sql``}
              ORDER BY ${columnList(keys)} ${options.limit ? sql`LIMIT ${options.limit}` : sql``}) backup_row`);
   const rows = result.rows.map((r) => JSON.parse(r.j) as BackupRow);
-  const secret = SECRET_READERS[table];
-  if (options.withSecrets && secret && rows.length > 0) {
+  const secrets = options.withSecrets && rows.length > 0 ? (SECRET_READERS[table] ?? []) : [];
+  for (const secret of secrets) {
     const values = await tx.execute<{ id: string; s: unknown }>(sql`
       SELECT id::text AS id, ${sql.raw(secret.fn)}(id, ${actorId}::uuid) AS s
         FROM ${sql.identifier(table)} WHERE id = ANY(${uuidArray(rows.map((r) => r.id as string))})`);

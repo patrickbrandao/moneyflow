@@ -8,6 +8,8 @@ export * from './prompt-vars';
 export * from './requests';
 export * from './schemas';
 export * from './sse';
+export * from './tasks';
+export * from './telegram';
 export * from './tools';
 export * from './tools-admin';
 export * from './tools-operation';

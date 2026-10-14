@@ -280,7 +280,7 @@ export function testMessage(destinationName: string, at: string): MessagePayload
 
 /** Eventos de agente (F4): título e texto livres, sempre escapados. */
 export function agentMessage(
-  kind: 'agent_completed' | 'agent_message',
+  kind: 'agent_completed' | 'agent_message' | 'ai_awaiting_approval',
   title: string | null,
   text: string,
   url?: string | null,

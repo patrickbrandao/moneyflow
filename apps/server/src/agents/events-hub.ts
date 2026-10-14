@@ -4,7 +4,7 @@ import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config';
 import { emitAgentEvent } from '../services/message-worker';
-import { SYNC_FLOW_PURPOSES } from './flows';
+import { isToolFlow, SYNC_FLOW_PURPOSES } from './flows';
 import { loadMessages } from './store';
 
 /*
@@ -125,6 +125,8 @@ export class RunEventsHub {
     const done = row.event_type === 'done' && (status === 'completed' || status === 'failed');
     const awaiting = row.event_type === 'status' && status === 'awaiting_confirmation';
     if (!done && !awaiting) return;
+    // Tarefa agendada e conciliação (spec 029): a espera vira ai_awaiting_approval, avisada pelo worker.
+    if (awaiting && isToolFlow(row.purpose)) return;
     const messages = await loadMessages(this.db, row.conversation_id);
     const last = [...messages].reverse().find((m) => m.role === 'assistant' && blocksText(m.content).trim());
     const text = (status === 'failed' ? (row.payload.error ?? '') : last ? blocksText(last.content) : '') || (row.title ?? '');

@@ -25,6 +25,10 @@ export type Config = {
   messageIntervalMs: number;
   /** URL pública do console, para os links nas mensagens (vazia = mensagens sem link). */
   publicUrl: string | null;
+  /** URL pública HTTPS da API para o webhook do Telegram (spec 029); app_settings telegram.public_base_url vence. */
+  publicBaseUrl: string | null;
+  /** Intervalo do laço das tarefas agendadas dos agentes (spec 029), em ms. */
+  agentTaskIntervalMs: number;
   /** Horário (HH:MM, São Paulo) dos avisos diários do sino (vencem hoje, atrasados). */
   notifyAt: string;
   /** Agentes (spec 011): intervalo de busca de execuções na fila, em ms. */
@@ -87,6 +91,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     telegramTimeoutMs: Number(env.TELEGRAM_TIMEOUT_MS ?? 10_000),
     messageIntervalMs: Number(env.MESSAGE_INTERVAL_MS ?? 30_000),
     publicUrl: env.APP_URL ? env.APP_URL.replace(/\/+$/, '') : null,
+    publicBaseUrl: env.PUBLIC_BASE_URL?.trim() ? env.PUBLIC_BASE_URL.trim().replace(/\/+$/, '') : null,
+    agentTaskIntervalMs: clampInt(env.AGENT_TASK_INTERVAL_MS, 30_000, 1000, 3_600_000),
     notifyAt: /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(env.NOTIFY_AT ?? '') ? env.NOTIFY_AT! : '08:00',
     agentPollMs: Number(env.AGENT_POLL_MS ?? 1000),
     agentConcurrency: Math.max(1, Number(env.AGENT_CONCURRENCY ?? 4)),

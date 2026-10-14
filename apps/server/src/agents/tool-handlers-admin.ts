@@ -23,6 +23,7 @@ import {
   mcpServerUpdateInput,
   type PreviewField,
   type PreviewRow,
+  scheduleText,
   type ToolPreview,
   type ToolSecretField,
   t,
@@ -33,6 +34,7 @@ import {
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
 import { badRequest, forbidden, notFound, unprocessable } from '../errors';
+import * as agentTasks from '../services/agent-tasks';
 import * as aiAdmin from '../services/ai-admin';
 import * as aiBudgets from '../services/ai-budgets';
 import * as aiRequests from '../services/ai-requests';
@@ -63,6 +65,9 @@ import { type GeneratedFile, type Handlers, nameOf, toolAttachment } from './too
 type AdminToolName = (typeof ADMIN_TOOLS)[number]['name'];
 
 /* ---------------- orçamentos ---------------- */
+
+const TASK_WARNING =
+  'A tarefa roda como o dono, com as permissões dele, numa sessão própria; o que o kit do agente pede para aprovar fica esperando o dono.';
 
 const BUDGET_WARNING =
   'A 100% do valor, novas execuções que o orçamento cobre são recusadas até o mês seguinte (o administrador que aciona fica isento).';
@@ -1066,6 +1071,86 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
     run: (ctx, i) => aiBudgets.deleteBudget(ctx, i.budgetId),
   },
   list_ai_requests: { run: (ctx, i) => aiRequests.listRequests(ctx, i) },
+
+  /* ---- tarefas agendadas (spec 029): as próprias; o admin, as de qualquer um ---- */
+  list_agent_tasks: {
+    run: (ctx, i) => {
+      if (i.all || (i.userId && i.userId !== ctx.access.actor.id)) ctx.access.assertAdmin();
+      return agentTasks.listTasks(ctx, { userId: i.all ? 'all' : i.userId });
+    },
+  },
+  create_agent_task: {
+    preview: async (ctx, i) => {
+      const owner = i.userId ?? ctx.access.actor.id;
+      if (owner !== ctx.access.actor.id) ctx.access.assertAdmin();
+      return {
+        title: 'Criar tarefa agendada',
+        summary: i.name,
+        action: 'create',
+        rows: [
+          { label: 'Nome', after: i.name },
+          { label: 'Dono', after: await userName(ctx, owner) },
+          { label: 'Agente', after: await agentNameOf(ctx, i.agentId) },
+          { label: 'Agenda', after: scheduleText(i.schedule) },
+          { label: 'Instrução', after: i.instruction.slice(0, 500) },
+          { label: 'Ativa', after: yesNo(i.isActive) },
+        ],
+        warnings: [TASK_WARNING],
+      };
+    },
+    run: (ctx, i) => agentTasks.createTask(ctx, i),
+  },
+  update_agent_task: {
+    preview: async (ctx, i) => {
+      const task = await agentTasks.getTask(ctx, i.taskId);
+      const c = i.changes;
+      const rows: ToolPreview['rows'] = [];
+      if (c.name !== undefined && c.name !== task.name) rows.push({ label: 'Nome', before: task.name, after: c.name });
+      if (c.agentId !== undefined && c.agentId !== task.agentId) {
+        rows.push({ label: 'Agente', before: task.agentName, after: await agentNameOf(ctx, c.agentId) });
+      }
+      if (c.schedule !== undefined) rows.push({ label: 'Agenda', before: scheduleText(task.schedule), after: scheduleText(c.schedule) });
+      if (c.instruction !== undefined && c.instruction !== task.instruction) {
+        rows.push({ label: 'Instrução', before: task.instruction.slice(0, 300), after: c.instruction.slice(0, 500) });
+      }
+      if (c.isActive !== undefined && c.isActive !== task.isActive)
+        rows.push({ label: 'Ativa', before: yesNo(task.isActive), after: yesNo(c.isActive) });
+      return { title: 'Editar tarefa agendada', summary: `${task.name} (@${task.username})`, action: 'update', rows };
+    },
+    run: (ctx, i) => agentTasks.updateTask(ctx, i.taskId, i.changes),
+  },
+  delete_agent_task: {
+    preview: async (ctx, i) => {
+      const task = await agentTasks.getTask(ctx, i.taskId);
+      return {
+        title: 'Excluir tarefa agendada',
+        summary: `${task.name} (@${task.username})`,
+        action: 'delete',
+        rows: [
+          { label: 'Agente', after: task.agentName },
+          { label: 'Agenda', after: scheduleText(task.schedule) },
+        ],
+        warnings: ['O histórico de disparos sai junto (as sessões ficam). Para só pausar, desligue a tarefa.'],
+      };
+    },
+    run: (ctx, i) => agentTasks.deleteTask(ctx, i.taskId),
+  },
+  run_agent_task_now: {
+    preview: async (ctx, i) => {
+      const task = await agentTasks.getTask(ctx, i.taskId);
+      return {
+        title: 'Rodar tarefa agendada agora',
+        summary: `${task.name} (@${task.username})`,
+        action: 'other',
+        rows: [
+          { label: 'Agente', after: task.agentName },
+          { label: 'Instrução', after: task.instruction.slice(0, 500) },
+        ],
+        warnings: [TASK_WARNING],
+      };
+    },
+    run: (ctx, i) => agentTasks.runTaskNow(ctx, i.taskId),
+  },
 
   /* ---- backup ---- */
   export_backup: {

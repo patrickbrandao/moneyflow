@@ -247,7 +247,9 @@ export type AiUsagePurpose =
   | 'contract_markdown'
   | 'vision_describe'
   | 'transcription'
-  | 'speech';
+  | 'speech'
+  | 'scheduled_task'
+  | 'reconcile_statement';
 
 export type AiUsageReport = {
   byUser: (UsageTotals & { month: string; userId: string | null; username: string | null; runs: number })[];
@@ -288,6 +290,8 @@ export type ConversationDto = {
   createdAt: string;
   activeRunId: string | null;
   activeRunStatus: AiRunStatus | null;
+  /** chat (sessão) ou o fluxo que criou a conversa (tarefa agendada, conciliação com IA, leitura…). */
+  purpose: string;
   /** Resultado de busca: trecho com o termo entre « ». */
   snippet?: string | null;
 };
@@ -456,7 +460,20 @@ export type AiRunEvent =
   | { type: 'usage'; run: AiRunDto }
   | { type: 'title'; title: string }
   | { type: 'error'; message: string; code?: string }
-  | { type: 'done'; status: AiRunStatus; error?: string | null };
+  | { type: 'done'; status: AiRunStatus; error?: string | null }
+  /**
+   * Telegram de entrada (spec 029), interno: a execução veio de um chat pareado
+   * (origin), o "Recusar" pediu o motivo (reason_requested/reason_done) e o que
+   * já foi enviado ao chat (sent, por chave). O console ignora.
+   */
+  | {
+      type: 'telegram';
+      action: 'origin' | 'reason_requested' | 'reason_done' | 'sent';
+      destinationId?: string;
+      chatId?: string;
+      confirmationId?: string;
+      key?: string;
+    };
 
 export type ApiTokenDto = {
   id: string;

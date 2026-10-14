@@ -70,8 +70,11 @@ export type PaneHeaderInfo = {
 export function ConversationPane({ target, header }: { target: PaneTarget; header: (info: PaneHeaderInfo) => ReactNode }) {
   const state = useConversation(target);
   const { detail, error } = state;
-  const finished = Boolean(detail?.conversation?.archivedAt);
-  const readOnly = (detail?.readOnly ?? false) || finished;
+  // Sessão de um fluxo (tarefa agendada, conciliação, spec 029): sem composer, mas o dono aprova as ações pendentes.
+  const flow = Boolean(detail?.conversation && detail.conversation.purpose !== 'chat');
+  const finished = Boolean(detail?.conversation?.archivedAt) && !flow;
+  const readOnly = (detail?.readOnly ?? false) || finished || flow;
+  const canDecide = !(detail?.readOnly ?? false) && !finished;
   const agentInactive = target.kind === 'agent' && state.agent !== null && !state.agent.isActive;
   // Modo áudio (spec 025): por janela, só com texto→áudio no agente.
   const audioMode = Boolean(useAgents().state.windows.find((w) => w.id === target.windowId)?.audioMode && detail?.media.speech);
@@ -145,6 +148,10 @@ export function ConversationPane({ target, header }: { target: PaneTarget; heade
             <div className="agent-readonly" data-testid="agent-finished-notice">
               {u.window.finished}
             </div>
+          ) : flow ? (
+            <div className="agent-readonly" data-testid="agent-flow-notice">
+              {u.window.flowSession}
+            </div>
           ) : agentInactive ? (
             <div className="agent-readonly">{u.window.agentInactive}</div>
           ) : null}
@@ -156,7 +163,7 @@ export function ConversationPane({ target, header }: { target: PaneTarget; heade
             images={images}
           >
             <Messages state={state} detail={detail} audioMode={audioMode} />
-            {!readOnly && <Confirmations state={state} detail={detail} />}
+            {canDecide && <Confirmations state={state} detail={detail} />}
             {!readOnly && !agentInactive && <Composer ref={composer} state={state} transcribes={detail.media.transcription} />}
           </MediaProvider>
           <Footer state={state} detail={detail} />
@@ -567,7 +574,7 @@ function Confirmations({ state, detail }: { state: ConversationState; detail: Pa
   );
 }
 
-function PreviewRows({ rows }: { rows: PreviewRow[] }) {
+export function PreviewRows({ rows }: { rows: PreviewRow[] }) {
   if (rows.length === 0) return null;
   return (
     <dl className="agent-diff">

@@ -527,6 +527,77 @@ describe('backup: recursos num sistema novo', () => {
     }
   });
 
+  it('fluxos autônomos (spec 029): destino com os dois segredos entra com a entrada desligada; tarefas e pareamentos vão; códigos e disparos não', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const a = client(h, adminA.cookie);
+    const owner = await userSession(h);
+    const agent = await a.post('/api/admin/ai/agents', { name: `Agente F15 backup ${uid()}` });
+    const bot = `${600000 + Math.floor(Math.random() * 300000)}:AAFbackup${uid().replace(/[^A-Za-z0-9]/g, '')}xx${uid().replace(/[^A-Za-z0-9]/g, '')}`;
+    const destination = await client(h, owner.cookie).post('/api/message-destinations', {
+      name: `Entrada ${uid()}`,
+      botToken: bot,
+      chatId: '-1001112223',
+    });
+    const hash = createHash('sha256').update(`segredo-${uid()}`, 'utf8').digest('hex');
+    // A entrada ligada direto no banco (o setWebhook é testado com a Bot API falsa em autonomous.test.ts).
+    await h.db.execute(sql`
+      UPDATE message_destinations SET inbound_enabled = true, inbound_agent_id = ${agent.id}, webhook_secret_hash = ${hash}
+       WHERE id = ${destination.id}`);
+    const link = await h.db.execute<{ id: string }>(sql`
+      INSERT INTO telegram_links (destination_id, user_id, chat_id, telegram_user_id, username)
+      VALUES (${destination.id}, ${owner.id}, 777000111, 777000111, 'backup_f15') RETURNING id`);
+    await h.db.execute(sql`
+      INSERT INTO telegram_pairing_codes (user_id, destination_id, code_hash)
+      VALUES (${owner.id}, ${destination.id}, ${createHash('sha256').update(uid(), 'utf8').digest('hex')})`);
+    // O agente sem provedor está inativo: a tarefa entra direto no banco (a tela só oferece agentes ativos).
+    const inserted = await h.db.execute<{ id: string }>(sql`
+      INSERT INTO ai_scheduled_tasks (user_id, agent_id, name, instruction, schedule, created_by_user_id)
+      VALUES (${owner.id}, ${agent.id}, 'Tarefa do backup', 'Olá', '{"kind": "monthly", "time": "07:00", "day": 31}', ${adminA.id})
+      RETURNING id`);
+    const task = { id: inserted.rows[0]!.id, schedule: { kind: 'monthly', time: '07:00', day: 31 } };
+    const full = await h.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminA.cookie } });
+    expect(full.statusCode, full.body.slice(0, 300)).toBe(200);
+    const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+    const destinationRow = json.tables.message_destinations.find((r: any) => r.id === destination.id);
+    expect(destinationRow).toMatchObject({ bot_token: bot, webhook_secret_hash: hash, inbound_enabled: true, inbound_agent_id: agent.id });
+    expect(json.tables.telegram_links.find((r: any) => r.id === link.rows[0]!.id)).toMatchObject({ chat_id: 777000111 });
+    expect(json.tables.ai_scheduled_tasks.find((r: any) => r.id === task.id)).toMatchObject({ schedule: task.schedule });
+    expect(json.tables.telegram_pairing_codes).toBeUndefined();
+    expect(json.tables.ai_scheduled_task_runs).toBeUndefined();
+    expect(json.tables.telegram_updates_seen).toBeUndefined();
+
+    const ownerRow = json.tables.users.find((r: any) => r.id === owner.id);
+    const file = {
+      ...json,
+      tables: {
+        users: [ownerRow],
+        ai_agents: [json.tables.ai_agents.find((r: any) => r.id === agent.id)],
+        message_destinations: [destinationRow],
+        telegram_links: json.tables.telegram_links.filter((r: any) => r.id === link.rows[0]!.id),
+        ai_scheduled_tasks: json.tables.ai_scheduled_tasks.filter((r: any) => r.id === task.id),
+      },
+      references: {},
+    };
+    const report = await importFile(b, adminB.cookie, 'full', file);
+    expect(failures(report)).toEqual([]);
+    const imported = await b.db.execute<{ inbound_enabled: boolean; inbound_agent_id: string }>(
+      sql`SELECT inbound_enabled, inbound_agent_id FROM message_destinations WHERE id = ${destination.id}`,
+    );
+    expect(imported.rows[0]).toEqual({ inbound_enabled: false, inbound_agent_id: agent.id });
+    const secret = await b.db.execute<{ v: string }>(
+      sql`SELECT admin_message_destination_webhook_secret(${destination.id}::uuid, ${adminB.id}::uuid) AS v`,
+    );
+    expect(secret.rows[0]!.v).toBe(hash);
+    const tasks = await b.db.execute<{ next_run_at: unknown; user_id: string }>(
+      sql`SELECT next_run_at, user_id FROM ai_scheduled_tasks WHERE id = ${task.id}`,
+    );
+    expect(tasks.rows[0]!.user_id).toBe(owner.id);
+    expect(tasks.rows[0]!.next_run_at).not.toBeNull();
+    expect((await b.db.execute(sql`SELECT 1 FROM telegram_links WHERE id = ${link.rows[0]!.id}`)).rows).toHaveLength(1);
+    await h.db.execute(sql`DELETE FROM ai_scheduled_tasks WHERE id = ${task.id}`);
+  });
+
   it('prompt (spec 022): as versões do agente vão e voltam com números, notas e a restauração; arquivo sem versões ganha a 1', async () => {
     if (skip) return;
     const adminA = await userSession(h, 'admin');

@@ -40,6 +40,8 @@ const SETTINGS: Record<string, SettingDef> = {
   // Limite por minuto (spec 028): execuções de IA por usuário.
   'ai.runs_per_minute': { env: 'AI_RUNS_PER_MINUTE', envValue: (config) => config.aiRunsPerMinute },
   'ai.flow_runs_per_minute': { env: 'AI_FLOW_RUNS_PER_MINUTE', envValue: (config) => config.aiFlowRunsPerMinute },
+  // Telegram de entrada (spec 029): a URL pública HTTPS do webhook.
+  'telegram.public_base_url': { env: 'PUBLIC_BASE_URL', envValue: (config) => config.publicBaseUrl },
 };
 
 function settingDef(key: string): SettingDef {
@@ -117,6 +119,21 @@ export async function runsPerMinute(db: Executor, config: Config, flow: boolean)
   const value = Number(row?.value);
   if (row && Number.isInteger(value) && value >= 1 && value <= 1000) return { limit: value, source: 'database' };
   return { limit: flow ? config.aiFlowRunsPerMinute : config.aiRunsPerMinute, source: 'env' };
+}
+
+/**
+ * URL pública da API para o webhook do Telegram (spec 029): app_settings
+ * telegram.public_base_url vence PUBLIC_BASE_URL. Só vale com HTTPS.
+ */
+export async function publicBaseUrl(
+  db: Executor,
+  config: Config,
+): Promise<{ url: string | null; source: 'setting' | 'env' | null; available: boolean }> {
+  const row = await readSetting(db, 'telegram.public_base_url');
+  const fromDb = typeof row?.value === 'string' && row.value.trim() ? row.value.trim().replace(/\/+$/, '') : null;
+  const url = fromDb ?? config.publicBaseUrl;
+  const source = fromDb ? 'setting' : url ? 'env' : null;
+  return { url, source, available: Boolean(url && /^https:\/\/[^/\s]+/i.test(url)) };
 }
 
 /* ---------------- requisições ---------------- */

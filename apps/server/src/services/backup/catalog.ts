@@ -46,6 +46,11 @@ export const EXCLUDED_TABLES = new Set([
   // Cache dos anexos (descrição, texto do PDF, transcrição, áudio gerado) e os índices de embeddings (spec 024).
   'ai_attachment_derivatives',
   'ai_embedding_indexes',
+  // Fluxos autônomos (spec 029): o histórico dos disparos é operacional (como ai_runs); os códigos de pareamento são
+  // de uso único e curtos (só o hash, sem leitor); a dedup do webhook é estado (sem id, já fica fora do catálogo).
+  'ai_scheduled_task_runs',
+  'telegram_pairing_codes',
+  'telegram_updates_seen',
 ]);
 
 /**
@@ -80,12 +85,16 @@ export const RESOURCE_TABLES: Record<BackupResource, string[]> = {
  * Segredos que o papel da aplicação não lê: cada um sai por uma função do
  * banco que exige um admin ativo como ator (docs/016).
  */
-export const SECRET_READERS: Record<string, { column: string; fn: string }> = {
-  users: { column: 'password', fn: 'admin_reveal_password' },
-  ai_providers: { column: 'api_key', fn: 'admin_ai_provider_api_key' },
-  mcp_servers: { column: 'secret_headers', fn: 'admin_mcp_server_headers' },
-  message_destinations: { column: 'bot_token', fn: 'admin_message_destination_token' },
-  user_api_tokens: { column: 'token_hash', fn: 'admin_api_token_hash' },
+export const SECRET_READERS: Record<string, { column: string; fn: string }[]> = {
+  users: [{ column: 'password', fn: 'admin_reveal_password' }],
+  ai_providers: [{ column: 'api_key', fn: 'admin_ai_provider_api_key' }],
+  mcp_servers: [{ column: 'secret_headers', fn: 'admin_mcp_server_headers' }],
+  // O destino do Telegram tem dois: o token do bot e o hash do segredo do webhook (spec 029).
+  message_destinations: [
+    { column: 'bot_token', fn: 'admin_message_destination_token' },
+    { column: 'webhook_secret_hash', fn: 'admin_message_destination_webhook_secret' },
+  ],
+  user_api_tokens: [{ column: 'token_hash', fn: 'admin_api_token_hash' }],
 };
 
 /**

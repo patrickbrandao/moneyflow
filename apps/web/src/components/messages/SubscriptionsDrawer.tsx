@@ -65,6 +65,8 @@ export function SubscriptionsDrawer({
             ) : (
               <Badge tone="danger">{t.messages.inactive}</Badge>
             )}
+            {destination.inboundEnabled && <Badge tone="info">{t.agentsUi.telegram.inboundOn(destination.inboundAgentName ?? '')}</Badge>}
+            {destination.pairedChats > 0 && <Badge tone="outline">{t.agentsUi.telegram.pairedChats(destination.pairedChats)}</Badge>}
           </div>
           <dl className="kv mt-3">
             <dt>{t.messages.owner}</dt>
@@ -194,8 +196,8 @@ function SubscriptionEditor({
   const hasDays = kind === 'due_reminder' || kind === 'contract_notice_deadline' || kind === 'contract_ending';
   const hasRepeat = kind === 'overdue' || kind === 'contract_renewal_pending';
   const hasTime = hasDays || hasRepeat || kind === 'daily_summary' || kind === 'weekly_summary' || kind === 'contract_readjustment';
-  // Eventos sem caixa: os do agente e o orçamento de IA (spec 028).
-  const scoped = kind !== 'agent_completed' && kind !== 'agent_message' && kind !== 'ai_budget_alert';
+  // Eventos sem caixa: os do agente, o orçamento de IA (spec 028) e a aprovação pendente (spec 029).
+  const scoped = kind !== 'agent_completed' && kind !== 'agent_message' && kind !== 'ai_budget_alert' && kind !== 'ai_awaiting_approval';
 
   return (
     <div className={cx('sub-card well', enabled && 'on')}>

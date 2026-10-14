@@ -36,6 +36,7 @@ export function CaixaFormModal({
   const [closingDay, setClosingDay] = useState<number | ''>(card?.closingDay ?? '');
   const [dueDay, setDueDay] = useState<number | ''>(card?.dueDay ?? '');
   const [last4, setLast4] = useState(card?.cardLast4 ?? '');
+  const [aiAutoReconcile, setAiAutoReconcile] = useState(card?.aiAutoReconcile ?? false);
   const [error, setError] = useState<string | null>(null);
   const { run, busy } = useAction();
   const caixas = useApi<CaixaSummary[]>(isCard ? '/api/caixas' : null);
@@ -53,6 +54,7 @@ export function CaixaFormModal({
       if (!validDay(closingDay) || !validDay(dueDay)) return setError(t.card.invalidDay);
       if (!/^[0-9]{4}$/.test(last4)) return setError(t.card.invalidLast4);
       body = { ...body, defaultPayerCaixaId: payerId, creditLimitCents: limit, closingDay, dueDay, cardLast4: last4 };
+      if (caixa) body.aiAutoReconcile = aiAutoReconcile;
     } else {
       body.isPrimary = isPrimary;
     }
@@ -140,6 +142,15 @@ export function CaixaFormModal({
                 required
               />
             </Field>
+            {caixa && (
+              <div className="span-all">
+                <label className="check">
+                  <input type="checkbox" checked={aiAutoReconcile} onChange={(e) => setAiAutoReconcile(e.target.checked)} />{' '}
+                  {t.agentsUi.reconcile.auto}
+                </label>
+                <p className="hint">{t.agentsUi.reconcile.autoHint}</p>
+              </div>
+            )}
           </div>
         ) : (
           <label className="check">

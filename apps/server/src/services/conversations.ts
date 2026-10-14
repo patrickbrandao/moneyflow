@@ -6,6 +6,7 @@ import {
   type AgentThreadDto,
   type AgentThreadView,
   type AiRunDto,
+  type AiRunEvent,
   type agentSessionsQuery,
   type agentThreadsQuery,
   type ConversationDetail,
@@ -24,7 +25,7 @@ import {
 } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import type { FlowPurpose } from '../agents/flows';
+import type { FlowPurpose, ToolFlowPurpose } from '../agents/flows';
 import { visionMode } from '../agents/inferences';
 import {
   appendEvent,
@@ -109,6 +110,7 @@ function toDto(r: ConversationRow, snippet?: string | null): ConversationDto {
     createdAt: iso(r.created_at)!,
     activeRunId: r.active_run_id,
     activeRunStatus: r.active_run_status,
+    purpose: r.purpose,
     ...(snippet !== undefined ? { snippet } : {}),
   };
 }
@@ -194,7 +196,7 @@ async function assertAgentUsable(db: Executor, agentId: string) {
 export async function createConversation(
   ctx: ServiceContext,
   input: z.output<typeof conversationCreateInput>,
-  extra?: { purpose?: FlowPurpose; screenContext?: Record<string, unknown>; archived?: boolean },
+  extra?: { purpose?: FlowPurpose | ToolFlowPurpose; screenContext?: Record<string, unknown>; archived?: boolean },
 ) {
   await assertAgentUsable(ctx.db, input.agentId);
   const screen = extra?.screenContext ?? input.screenContext ?? null;
@@ -340,9 +342,10 @@ export async function sendToAgent(
   ctx: ServiceContext,
   agentId: string,
   input: z.output<typeof messageSendInput>,
+  opts: SendOptions = {},
 ): Promise<AgentSendResult> {
   const session = await ensureActiveSession(ctx, agentId, input.screenContext ?? null);
-  const result = await sendMessage(ctx, session.id, input);
+  const result = await sendMessage(ctx, session.id, input, opts);
   return { ...result, conversation: toDto((await conversationRow(ctx.db, session.id))!), created: session.created };
 }
 
@@ -536,7 +539,15 @@ async function assertAttachments(ctx: ServiceContext, conversationId: string, id
   return ids.map((id) => byId.get(id)!);
 }
 
-export async function sendMessage(ctx: ServiceContext, id: string, input: z.output<typeof messageSendInput>): Promise<SendMessageResult> {
+/** `origin`: evento gravado com a execução, na mesma transação (ex.: a mensagem veio do Telegram, spec 029). */
+export type SendOptions = { origin?: AiRunEvent };
+
+export async function sendMessage(
+  ctx: ServiceContext,
+  id: string,
+  input: z.output<typeof messageSendInput>,
+  opts: SendOptions = {},
+): Promise<SendMessageResult> {
   const conversation = await loadConversation(ctx, id, 'own');
   // Sessão finalizada é somente leitura: nenhuma execução nova nela (spec 026).
   if (conversation.purpose === 'chat' && conversation.archived_at) {
@@ -565,6 +576,7 @@ export async function sendMessage(ctx: ServiceContext, id: string, input: z.outp
         INSERT INTO ai_runs AS r (conversation_id, user_id, agent_id, trigger_message_id)
         VALUES (${id}, ${ctx.access.actor.id}, ${conversation.agent_id}, ${message.id})
         RETURNING ${RUN_COLUMNS}`);
+      if (opts.origin) await appendEvent(tx, run.rows[0]!.id, opts.origin);
       await appendEvent(tx, run.rows[0]!.id, { type: 'status', status: 'queued' });
       return { message: messageDto(message), run: runDto(run.rows[0]!) };
     });

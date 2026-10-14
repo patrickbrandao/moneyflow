@@ -1,6 +1,7 @@
 import { type Database, userColumns, users } from '@moneyflow/db';
 import {
   type AgentParams,
+  type AiUsagePurpose,
   type AssistantBlock,
   balanceToolUses,
   blocksText,
@@ -15,7 +16,9 @@ import type { Config } from '../config';
 import type { ServiceContext } from '../context';
 import { findPgError } from '../errors';
 import { exceededBudget } from '../services/ai-budgets';
-import { applyFlowResult, FLOW_PURPOSES, type FlowPurpose } from './flows';
+import { notifyAwaitingApproval } from '../services/autonomous-notify';
+import { deliverRunToTelegram, startTyping, telegramOrigin } from '../services/telegram-inbound';
+import { applyFlowResult, isJsonFlow, isToolFlow } from './flows';
 import { createLlmClient, type LlmClient, LlmError, type LlmResponse } from './llm';
 import { assemblePrompt, loadPromptInputs } from './prompt';
 import { RunAttachments } from './run-attachments';
@@ -51,6 +54,8 @@ export type ClaimedRun = RunRow & { lock_token: string };
 
 const HEARTBEAT_MS = 3_000;
 const DEFAULT_MAX_ITERATIONS = 20;
+/** Voltas mínimas da conciliação com IA (spec 029): uma ou mais tools por linha do lote. */
+const RECONCILE_MIN_ITERATIONS = 60;
 const FLUSH_MS = 120;
 
 class LockLost extends Error {}
@@ -71,7 +76,27 @@ type ConversationRow = {
   purpose: string;
 };
 
+/**
+ * Roda a execução reservada. Vinda do Telegram (spec 029): "digitando…"
+ * enquanto roda e, ao parar (concluída, falhou ou esperando aprovação), a
+ * resposta final ou os botões Aprovar/Recusar no chat.
+ */
 export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
+  const origin = await telegramOrigin(deps.db, claimed.id).catch(() => null);
+  const stopTyping = origin ? await startTyping(deps.db, deps.config, origin).catch(() => () => {}) : () => {};
+  try {
+    await runLoop(deps, claimed);
+  } finally {
+    stopTyping();
+  }
+  if (origin) {
+    await deliverRunToTelegram(deps, claimed.id).catch((error) =>
+      deps.log.warn({ err: error, runId: claimed.id }, 'agente: resposta ao Telegram falhou'),
+    );
+  }
+}
+
+async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
   const { db, log } = deps;
   const runId = claimed.id;
   const token = claimed.lock_token;
@@ -104,7 +129,11 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
   try {
     const loaded = await loadContext(db, claimed);
     const { agent, conversation, actor } = loaded;
-    const purpose = FLOW_PURPOSES.includes(conversation.purpose as FlowPurpose) ? (conversation.purpose as FlowPurpose) : null;
+    // Fluxo JSON (leitura de documento, classificação…): sem tools, uma volta. Fluxo com tools (tarefa agendada,
+    // conciliação, spec 029): o loop normal com o kit do agente; a conciliação só com as tools internas.
+    const purpose = isJsonFlow(conversation.purpose) ? conversation.purpose : null;
+    const toolFlow = isToolFlow(conversation.purpose) ? conversation.purpose : null;
+    const usagePurpose: AiUsagePurpose = purpose ?? toolFlow ?? 'chat';
     const access = await loadAccess(db, actor);
     const ctx: ServiceContext = { db, config: deps.config, access, actorKind: 'agent', agentRunId: runId };
 
@@ -136,7 +165,8 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
       },
     );
 
-    // Tools internas pelo kit do agente (spec 021); fluxos (leitura de documento, sugestões de classificação) rodam sem tools.
+    // Tools internas pelo kit do agente (spec 021); fluxos JSON (leitura de documento, sugestões de classificação) rodam
+    // sem tools; a conciliação com IA (spec 029) só com as internas.
     tools = await RunTools.forAgent(
       db,
       agent.id,
@@ -146,11 +176,11 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
         );
         return r.rows[0]?.headers ?? {};
       },
-      { internal: !purpose, mcp: !purpose, isAdmin: actor.role === 'admin' },
+      { internal: !purpose, mcp: !purpose && toolFlow !== 'reconcile_statement', isAdmin: actor.role === 'admin' },
     );
 
     // Instruções do usuário, contexto automático e instructions dos MCP: montados uma vez por execução (spec 022).
-    const promptInputs = await loadPromptInputs(db, access, agent, purpose);
+    const promptInputs = await loadPromptInputs(db, access, agent, purpose ?? toolFlow);
 
     // Imagens e PDFs pela visão do agente: direta, por descrição ou pela camada de texto (spec 024).
     const attachments = new RunAttachments(deps, {
@@ -163,7 +193,12 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
     });
 
     await appendEvent(db, runId, { type: 'status', status: 'running' });
-    const maxIterations = purpose ? 1 : (agent.params.max_tool_iterations ?? DEFAULT_MAX_ITERATIONS);
+    const maxIterations = purpose
+      ? 1
+      : toolFlow === 'reconcile_statement'
+        ? // Um lote tem muitas linhas: a conciliação ganha voltas a mais que a conversa.
+          Math.max(agent.params.max_tool_iterations ?? DEFAULT_MAX_ITERATIONS, RECONCILE_MIN_ITERATIONS)
+        : (agent.params.max_tool_iterations ?? DEFAULT_MAX_ITERATIONS);
 
     for (;;) {
       await checkpoint();
@@ -173,7 +208,15 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
       const pending = pendingToolUses(rows);
       if (pending.length > 0) {
         const outcome = await resolvePending(ctx, tools, runId, token, conversation.id, pending);
-        if (outcome === 'awaiting') return;
+        if (outcome === 'awaiting') {
+          // Tarefa agendada e conciliação (spec 029): o sino avisa que há ação esperando aprovação.
+          if (toolFlow) {
+            await notifyAwaitingApproval(db, deps.config, runId).catch((error) =>
+              log.warn({ err: error, runId }, 'agente: aviso de aprovação pendente falhou'),
+            );
+          }
+          return;
+        }
         continue;
       }
       const iterations = rows.filter((m) => m.role === 'assistant' && m.run_id === runId).length;
@@ -193,7 +236,7 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
         return;
       }
 
-      const system = assemblePrompt(promptInputs, { purpose, screen: conversation.screen_context });
+      const system = assemblePrompt(promptInputs, { purpose: purpose ?? toolFlow, screen: toolFlow ? null : conversation.screen_context });
       const history = balanceToolUses(toNeutral(rows));
       // MCP no modo user: bloco do papel user no início do histórico enviado, nunca gravado em ai_messages.
       const messages: NeutralMessage[] = system.mcpUserBlock
@@ -212,7 +255,7 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
         loadAttachment: attachments.load,
         signal: abort.signal,
         operation: 'chat',
-        purpose: purpose ?? 'chat',
+        purpose: usagePurpose,
       });
       if (lost) throw new LockLost();
 
@@ -221,7 +264,7 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
         const message = await insertMessage(tx, conversation.id, 'assistant', content, runId);
         await tx.execute(sql`
           INSERT INTO ai_usage (run_id, message_id, purpose, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, request_id)
-          VALUES (${runId}, ${message.id}, ${purpose ?? 'chat'}, ${response.usage.inputTokens}, ${response.usage.outputTokens},
+          VALUES (${runId}, ${message.id}, ${usagePurpose}, ${response.usage.inputTokens}, ${response.usage.outputTokens},
                   ${response.usage.cacheWriteTokens}, ${response.usage.cacheReadTokens}, ${response.requestId})`);
         await appendEvent(tx, runId, { type: 'message', message: { ...messageOut(message), usage: [] } });
         const run = await loadRun(tx, runId);
@@ -256,7 +299,7 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
       const rows = await loadMessages(db, conversation.id);
       const last = [...rows].reverse().find((m) => m.role === 'assistant' && m.run_id === runId);
       await applyFlowResult(ctx, purpose, conversation.screen_context ?? {}, last ? blocksText(last.content) : '');
-    } else if (conversation.title === null && conversation.title_source === 'auto') {
+    } else if (!toolFlow && conversation.title === null && conversation.title_source === 'auto') {
       await autoTitle(db, llm, runId, conversation.id, claimed.model).catch((error) =>
         log.warn({ err: error, runId }, 'agente: título automático falhou'),
       );

@@ -243,6 +243,8 @@ export const caixaUpdateInput = z.object({
   closingDay: cardFields.closingDay.optional(),
   dueDay: cardFields.dueDay.optional(),
   cardLast4: cardFields.cardLast4.optional(),
+  /** "Conciliar com IA ao importar" do cartão (spec 029). */
+  aiAutoReconcile: z.boolean().optional(),
 });
 
 export const ACCOUNT_KINDS = ['checking', 'cash', 'savings'] as const;
@@ -265,6 +267,8 @@ export const accountUpdateInput = z.object({
   accountNumber: digitsOrNull(/^[0-9]{1,20}(-[0-9A-Z])?$/).optional(),
   openingBalanceCents: cents.optional(),
   openingDate: isoDate.optional(),
+  /** "Conciliar com IA ao importar" (spec 029): só conta corrente e poupança. */
+  aiAutoReconcile: z.boolean().optional(),
 });
 
 export const adjustmentInput = z.object({

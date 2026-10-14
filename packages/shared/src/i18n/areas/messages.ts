@@ -58,6 +58,7 @@ export const messagesStrings = {
     contract_renewal_pending: 'Contrato: renovação pendente',
     contract_readjustment: 'Contrato: data-base de reajuste',
     ai_budget_alert: 'Orçamento de IA',
+    ai_awaiting_approval: 'Agente espera aprovação',
     test: 'Teste',
   } as Record<string, string>,
   eventHints: {
@@ -77,6 +78,8 @@ export const messagesStrings = {
     contract_readjustment: 'Na data-base do reajuste dos contratos com índice.',
     ai_budget_alert:
       'Quando um orçamento de IA passa do percentual de aviso e quando chega a 100%, uma vez por mês. Destino pessoal: só os orçamentos do dono (todos, se o dono é administrador); global: todos.',
+    ai_awaiting_approval:
+      'Quando uma tarefa agendada ou a conciliação com IA para esperando a sua aprovação (destino pessoal: as suas; de caixa: as das caixas do destino).',
   } as Record<string, string>,
   params: {
     days_before: 'Dias antes',

@@ -180,8 +180,8 @@ describe('registro de tools', () => {
     expect(agentTool('list_api_tokens')!.adminOnly).toBeUndefined();
     expect(agentTool('revoke_api_token')).toMatchObject({ destructive: true });
     expect(agentTool('create_api_token')).toBeUndefined();
-    // Restaurar o dump não é tool; as tarefas agendadas chegam na F15.
-    expect(AGENT_TOOLS.some((tool) => /dump|schedul/.test(tool.name))).toBe(false);
+    // Restaurar o dump não é tool.
+    expect(AGENT_TOOLS.some((tool) => /dump/.test(tool.name))).toBe(false);
     // Orçamentos (F14, spec 028): Configuração de IA, só admin.
     for (const name of ['list_ai_budgets', 'create_ai_budget', 'update_ai_budget', 'delete_ai_budget'])
       expect(agentTool(name), name).toMatchObject({ category: 'ai', adminOnly: true });
@@ -200,9 +200,15 @@ describe('registro de tools', () => {
         'delete_tool_kit',
         'archive_mcp_server',
         'delete_ai_budget',
+        'delete_agent_task',
         'import_backup',
       ].sort(),
     );
+    // Tarefas agendadas (F15, spec 029): Configuração de IA, de qualquer usuário (as próprias; o admin, as de todos).
+    for (const name of ['list_agent_tasks', 'create_agent_task', 'update_agent_task', 'delete_agent_task', 'run_agent_task_now'])
+      expect(agentTool(name)!.adminOnly, name).toBeUndefined();
+    expect(agentTool('list_agent_tasks')).toMatchObject({ category: 'ai', kind: 'read', suggestedMode: 'allow' });
+    expect(agentTool('run_agent_task_now')).toMatchObject({ category: 'ai', kind: 'write', suggestedMode: 'ask' });
   });
 
   it('a entrada valida com o mesmo schema da API (defaults e transforms)', () => {

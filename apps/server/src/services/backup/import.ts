@@ -216,12 +216,17 @@ const FLOW_PURPOSES = new Set(['document_reading', 'classify_lines', 'contract_r
  * - ai_agents: a marca "agente dos fluxos" (use_for_flows) só entra se o banco
  *   ainda não tem um agente marcado; senão o agente entra sem a marca, em vez
  *   de virar conflito (só um marcado por vez).
+ * - message_destinations: entra com inbound_enabled = false (o webhook é da
+ *   instância de origem).
  * - ai_conversations: um arquivo anterior à coluna `purpose` marcava as
  *   conversas dos fluxos em screen_context.purpose; a finalidade vem de lá.
  */
 function normalizeRow(table: string, data: BackupRow, state: { flowAgentTaken: boolean }): BackupRow {
   // A requisição ao provedor nunca vem no arquivo (spec 023): o uso entra sem o vínculo, como sem a execução.
   if (table === 'ai_usage' && data.request_id) return { ...data, request_id: null };
+  // O webhook do Telegram é da instância de origem (spec 029): o destino entra com a entrada desligada (religar gera
+  // um segredo novo e chama setWebhook com a URL desta instância).
+  if (table === 'message_destinations' && data.inbound_enabled === true) return { ...data, inbound_enabled: false };
   if (table === 'ai_agents' && data.use_for_flows === true && state.flowAgentTaken) {
     return { ...data, use_for_flows: false };
   }
