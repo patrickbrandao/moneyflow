@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type FakeLlm, silentWav, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { claimTranscriptions, drainTranscriptions, processTranscription } from '../src/agents/transcriptions';
-import { client, type Harness, minimalPdf, startApp, uid, userSession } from './helpers';
+import { client, type Harness, minimalPdf, newSession, startApp, uid, userSession } from './helpers';
 
 /*
  * Chat multimídia (spec 025), com o provedor FALSO (transcrição e fala): o
@@ -111,7 +111,7 @@ beforeEach(() => {
 
 describe('transcrição automática', () => {
   it('o upload de áudio grava a duração, enfileira o derivado e o worker transcreve com uso e requisição', async () => {
-    const conversation = await owner.post('/api/conversations', { agentId: audioAgent.id });
+    const conversation = await newSession(owner, audioAgent.id);
     const detail0 = await owner.get(`/api/conversations/${conversation.id}`);
     expect(detail0.media).toEqual({ transcription: true, speech: true });
 
@@ -154,7 +154,7 @@ describe('transcrição automática', () => {
   });
 
   it('a execução espera a transcrição pendente e o modelo recebe o texto, nunca o áudio', async () => {
-    const conversation = await owner.post('/api/conversations', { agentId: audioAgent.id });
+    const conversation = await newSession(owner, audioAgent.id);
     // WAV sem duração do navegador: a do cabeçalho.
     const res = await upload(conversation.id, 'recado.wav', 'audio/wav', silentWav(2500));
     const attachment = res.json();
@@ -185,7 +185,7 @@ describe('transcrição automática', () => {
   });
 
   it('esgotada a espera, o modelo recebe o áudio sem transcrição', async () => {
-    const conversation = await owner.post('/api/conversations', { agentId: audioAgent.id });
+    const conversation = await newSession(owner, audioAgent.id);
     const attachment = (await upload(conversation.id, 'lento.ogg', 'audio/ogg', Buffer.from('ogg'))).json();
     const marker = `espera-${uid()}`;
     await owner.post(`/api/conversations/${conversation.id}/messages`, { text: marker, attachmentIds: [attachment.id] });
@@ -196,7 +196,7 @@ describe('transcrição automática', () => {
   });
 
   it('a falha marca failed, o modelo recebe "sem transcrição" e o "tentar de novo" transcreve', async () => {
-    const conversation = await owner.post('/api/conversations', { agentId: audioAgent.id });
+    const conversation = await newSession(owner, audioAgent.id);
     const attachment = (await upload(conversation.id, 'ruim.mp3', 'audio/mpeg', Buffer.from('mp3'))).json();
     llm.audioQueue.push({ status: 400 });
     await drainTranscriptions(deps());
@@ -225,7 +225,7 @@ describe('transcrição automática', () => {
   });
 
   it('o agente sem áudio→texto não transcreve: o áudio fica como arquivo e o modelo recebe "sem transcrição"', async () => {
-    const conversation = await owner.post('/api/conversations', { agentId: plainAgent.id });
+    const conversation = await newSession(owner, plainAgent.id);
     const detail = await owner.get(`/api/conversations/${conversation.id}`);
     expect(detail.media).toEqual({ transcription: false, speech: false });
     const attachment = (await upload(conversation.id, 'voz.webm', 'video/webm', Buffer.from('webm'))).json();
@@ -246,7 +246,7 @@ describe('transcrição automática', () => {
 
 describe('texto→áudio (modo áudio)', () => {
   it('gera o áudio da mensagem uma vez (markdown falado) e reaproveita; uso com caracteres', async () => {
-    const conversation = await owner.post('/api/conversations', { agentId: audioAgent.id });
+    const conversation = await newSession(owner, audioAgent.id);
     llm.queue.push({
       text: '## Resumo\n\nVeja **isto** e [o link](https://exemplo.com).\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```js\nx()\n```\nFim.',
     });
@@ -293,7 +293,7 @@ describe('texto→áudio (modo áudio)', () => {
   });
 
   it('texto longo vira vários trechos; sem texto→áudio ou sem texto, recusa', async () => {
-    const conversation = await owner.post('/api/conversations', { agentId: audioAgent.id });
+    const conversation = await newSession(owner, audioAgent.id);
     const long = Array.from({ length: 900 }, (_, i) => `Frase número ${i} do texto longo.`).join(' ');
     await owner.post(`/api/conversations/${conversation.id}/messages`, { text: long });
     await runOnce();
@@ -304,7 +304,7 @@ describe('texto→áudio (modo áudio)', () => {
     expect(speech.parts.map((p: any) => p.blockIndex)).toEqual(speech.parts.map((_: any, i: number) => i));
     for (const part of speech.parts) expect(part.characters).toBeLessThanOrEqual(4096);
 
-    const plain = await owner.post('/api/conversations', { agentId: plainAgent.id });
+    const plain = await newSession(owner, plainAgent.id);
     await owner.post(`/api/conversations/${plain.id}/messages`, { text: 'oi' });
     await runOnce();
     const plainDetail = await owner.get(`/api/conversations/${plain.id}`);
@@ -322,7 +322,7 @@ describe('texto→áudio (modo áudio)', () => {
 
 describe('anexos: PDF, Range e admin', () => {
   it('o PDF grava as páginas; o download aceita Range; o admin lê os derivados de outra conversa', async () => {
-    const conversation = await owner.post('/api/conversations', { agentId: audioAgent.id });
+    const conversation = await newSession(owner, audioAgent.id);
     const pdf = (await upload(conversation.id, 'contrato.pdf', 'application/pdf', minimalPdf(['Linha um', 'Linha dois']))).json();
     expect(pdf).toMatchObject({ mimeType: 'application/pdf', pageCount: 1, durationMs: null, transcription: null });
 
@@ -356,7 +356,7 @@ describe('anexos: PDF, Range e admin', () => {
   });
 
   it('duração em PDF ou páginas em áudio são recusadas pelo banco com mensagem', async () => {
-    const conversation = await owner.post('/api/conversations', { agentId: audioAgent.id });
+    const conversation = await newSession(owner, audioAgent.id);
     const pdf = (await upload(conversation.id, 'x.pdf', 'application/pdf', minimalPdf(['oi']))).json();
     let error: unknown;
     try {

@@ -6,7 +6,7 @@ import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { startAgentWorker } from '../src/agents/worker';
 import { type FakeMcp, startFakeMcp } from './fakes/fake-mcp';
-import { client, type Harness, scenario, startApp, uid, userSession } from './helpers';
+import { client, type Harness, newSession, scenario, startApp, uid, userSession } from './helpers';
 
 /*
  * F8 (spec 022): montagem do prompt na ordem com os dois pontos de cache, instruções do usuário (Minha conta → IA),
@@ -143,7 +143,7 @@ describe('montagem do prompt', () => {
     await admin.put('/api/account/ai', { instructions: 'INSTRUCOES-DO-ADMIN: prefira tabelas.' });
 
     // Modo ignore (padrão): o texto do servidor não vai ao modelo.
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     let body = await chatRequest(admin, conversation.id);
     expect(JSON.stringify(body)).not.toContain('MCP-INSTRUCOES');
     expect(body.system).toHaveLength(3);
@@ -224,7 +224,7 @@ describe('montagem do prompt', () => {
     const volatileAgent = await newAgent({
       systemPrompt: 'AGENTE-VOLATIL hoje é {{dia_semana}}, {{data}} ({{data_iso}}); literal \\{{data}}.',
     });
-    const conversation = await admin.post('/api/conversations', { agentId: volatileAgent.id });
+    const conversation = await newSession(admin, volatileAgent.id);
     const body = await chatRequest(admin, conversation.id);
     expect(body.system[0]!.text).not.toContain('AGENTE-VOLATIL');
     expect(body.system[1]!.text).not.toContain('AGENTE-VOLATIL');
@@ -394,7 +394,7 @@ describe('conversas de fluxo', () => {
     expect(JSON.stringify(call!.body.messages)).not.toContain('MCP-INSTRUCOES');
 
     // Numa conversa comum do mesmo agente, as instruções entram.
-    const conversation = await admin.post('/api/conversations', { agentId: flowAgent.id });
+    const conversation = await newSession(admin, flowAgent.id);
     const body = await chatRequest(admin, conversation.id);
     expect(JSON.stringify(body.system)).toContain('INSTRUCOES-FORA-DO-FLUXO');
     expect(body.system[0]!.text).toContain('MCP-INSTRUCOES');

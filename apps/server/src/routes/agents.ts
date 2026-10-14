@@ -1,4 +1,7 @@
 import {
+  agentSessionStartInput,
+  agentSessionsQuery,
+  agentThreadsQuery,
   aiAgentCreateInput,
   aiAgentUpdateInput,
   aiPriceInput,
@@ -58,8 +61,22 @@ const settingKey = (r: Req) => {
 export async function agentRoutes(app: FastifyInstance) {
   const id = (r: Req) => param(r, 'id');
 
-  /* ---------------- conversas ---------------- */
+  /* ---------------- sessões por agente (spec 026) ---------------- */
   app.get('/api/agents', (r: Req) => conversations.listAgentOptions(r.ctx));
+  app.get('/api/agents/threads', (r: Req) => conversations.listThreads(r.ctx, parse(agentThreadsQuery, r.query)));
+  app.get('/api/agents/:agentId/thread', (r: Req) => conversations.getThread(r.ctx, param(r, 'agentId')));
+  app.get('/api/agents/:agentId/sessions', (r: Req) =>
+    conversations.listSessions(r.ctx, param(r, 'agentId'), parse(agentSessionsQuery, r.query)),
+  );
+  app.post('/api/agents/:agentId/sessions', (r: Req) =>
+    conversations.startSession(r.ctx, param(r, 'agentId'), parse(agentSessionStartInput, r.body ?? {}).screenContext ?? null),
+  );
+  app.post('/api/agents/:agentId/messages', (r: Req) =>
+    conversations.sendToAgent(r.ctx, param(r, 'agentId'), parse(messageSendInput, r.body)),
+  );
+  app.post('/api/conversations/:id/finish', (r: Req) => conversations.finishSession(r.ctx, id(r)));
+
+  /* ---------------- conversas (sessões, por id) ---------------- */
   app.get('/api/conversations', (r: Req) => conversations.listConversations(r.ctx, parse(conversationListQuery, r.query)));
   app.post('/api/conversations', (r: Req) => conversations.createConversation(r.ctx, parse(conversationCreateInput, r.body)));
   app.get('/api/conversations/:id', (r: Req) => conversations.getConversation(r.ctx, id(r)));

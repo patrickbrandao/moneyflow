@@ -22,19 +22,43 @@ for (const type of ['citext', 'bytea', 'tsvector']) {
 // Default de texto vazio sai como `.default(')` (bug do drizzle-kit com `DEFAULT ''`).
 src = src.replace(/\.default\('\)/g, ".default('')");
 // FK em ciclo com uma tabela declarada mais adiante (ex.: classification_rules ⇄
-// statement_lines) faz o TypeScript desistir da inferência (TS7022). As FKs do
-// schema Drizzle não são usadas em runtime (o banco as garante e as migrations são
-// do dbmate), então a referência adiante é removida daqui.
+// statement_lines, ou ai_runs → ai_conversations → ai_messages → ai_runs) faz o
+// TypeScript desistir da inferência (TS7022). As FKs do schema Drizzle não são
+// usadas em runtime (o banco as garante e as migrations são do dbmate), então a
+// referência adiante que fecha um ciclo (de qualquer tamanho) é removida daqui.
 const tableAt = new Map([...src.matchAll(/export const (\w+) = pgTable\(/g)].map((m) => [m[1], m.index]));
+const ordered = [...tableAt].sort((a, b) => a[1] - b[1]);
+const blockOf = (name) => {
+  const at = tableAt.get(name);
+  const next = ordered.find(([, pos]) => pos > at)?.[1] ?? src.length;
+  return src.slice(at, next);
+};
+const refs = new Map(
+  ordered.map(([name]) => [
+    name,
+    new Set([...blockOf(name).matchAll(/foreignColumns: \[(\w+)\./g)].map((m) => m[1]).filter((t) => t !== name)),
+  ]),
+);
+const reaches = (from, to) => {
+  const seen = new Set();
+  const stack = [from];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === to) return true;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    for (const next of refs.get(current) ?? []) stack.push(next);
+  }
+  return false;
+};
 src = src.replace(
   /^\s*foreignKey\(\{\s*columns: \[[^\]]*\],\s*foreignColumns: \[(\w+)\.[^\]]*\],\s*name: ["']([^"']+)["'],?\s*\}\)(?:\.on(?:Delete|Update)\(["'][^"']+["']\))*,?\n/gm,
   (block, target, name, offset) => {
     const at = tableAt.get(target);
     if (at === undefined || at < offset) return block;
-    // Só quando há ciclo: a tabela-alvo também referencia a tabela deste bloco.
-    const owner = [...tableAt].filter(([, pos]) => pos < offset).sort((a, b) => b[1] - a[1])[0]?.[0];
-    const next = [...tableAt.values()].filter((pos) => pos > at).sort((a, b) => a - b)[0] ?? src.length;
-    if (!owner || !src.slice(at, next).includes(`foreignColumns: [${owner}.`)) return block;
+    const owner = ordered.filter(([, pos]) => pos < offset).at(-1)?.[0];
+    // Só quando há ciclo: a tabela-alvo alcança, pelas FKs, a tabela deste bloco.
+    if (!owner || !reaches(target, owner)) return block;
     console.log(`postpull: FK ${name} omitida (referência adiante a ${target})`);
     return '';
   },

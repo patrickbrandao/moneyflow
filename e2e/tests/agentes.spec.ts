@@ -7,9 +7,12 @@ import { ADMIN_STATE, baseURL, loginAsAdmin } from '../support/session';
 /*
  * Fase 4 (agentes de IA) contra a API real, com o provedor FALSO:
  *  - conversar, aprovar uma escrita no cartão "Aplicar?", ancorar e minimizar;
+ *  - as sessões (spec 026): conversar, finalizar, a próxima mensagem numa
+ *    sessão nova, abrir a anterior em leitura e bifurcar; e as janelas salvas
+ *    por conversa (versão anterior) convertidas em janelas por agente;
  *  - recusar uma escrita com motivo (o agente recebe e responde com ele);
  *  - reconexão do SSE no meio da resposta (Last-Event-ID, sem duplicar nem perder);
- *  - o admin lê a conversa de outro usuário em modo somente leitura;
+ *  - o admin lê a sessão de outro usuário em modo somente leitura;
  *  - "Usar nos fluxos automáticos" em /admin/ai e as sugestões da conciliação
  *    aprovadas e descartadas em lote na tela;
  *  - o kit de ferramentas (spec 021): criar marcando a categoria Conciliação,
@@ -77,16 +80,24 @@ async function enter(page: Page) {
   await expect(page.getByRole('heading', { name: /^Olá,/ })).toBeVisible();
 }
 
-/** Nova conversa com o agente do e2e (ou outro, pelo nome) pelo ícone Agentes. */
-async function newConversation(page: Page, agentName = agent.name) {
+/**
+ * Janela do agente do e2e (ou outro, pelo nome) numa sessão nova: finaliza a
+ * ativa pela API, se houver, e abre o agente pelo ícone Agentes (spec 026).
+ */
+async function freshSession(page: Page, agentName = agent.name) {
+  const threads: { agentId: string; agentName: string; active: { id: string } | null }[] = await (
+    await page.request.get('/api/agents/threads')
+  ).json();
+  const thread = threads.find((th) => th.agentName === agentName);
+  expect(thread, `agente ${agentName} na lista`).toBeTruthy();
+  if (thread!.active) await postJson(page.request, `/api/conversations/${thread!.active.id}/finish`);
   await page.getByTestId('agents-button').click();
-  const select = page.getByTestId('agents-new-agent');
-  await expect(select).toBeEnabled();
-  await select.selectOption({ label: agentName });
-  await page.getByTestId('agents-new').click();
-  const win = page.getByTestId('agent-window').last();
+  const row = page.locator(`[data-testid="agents-thread"][data-agent-id="${thread!.agentId}"]`);
+  await expect(row).toContainText('Sem sessão ativa');
+  await row.getByTestId('agents-thread-open').click();
+  const win = page.locator(`[data-testid="agent-window"][data-kind="agent"][data-agent-id="${thread!.agentId}"]`);
   await expect(win).toBeVisible();
-  await expect(win).toHaveAttribute('data-conversation-id', /.+/);
+  await expect(win.getByTestId('agent-session-title')).toHaveText('Nova sessão');
   return win;
 }
 
@@ -142,7 +153,7 @@ test.afterAll(async () => {
 
 test('agente: conversa, aprova uma escrita, ancora no painel direito e minimiza', async ({ page }) => {
   await enter(page);
-  const win = await newConversation(page);
+  const win = await freshSession(page);
 
   // Conversa simples, em streaming.
   await say(win, 'Olá, tudo bem?');
@@ -185,9 +196,95 @@ test('agente: conversa, aprova uma escrita, ancora no painel direito e minimiza'
   expect(call?.body.system[0].cache_control).toEqual({ type: 'ephemeral' });
 });
 
+test('sessões: conversar, finalizar, a próxima mensagem numa sessão nova, abrir a anterior em leitura e bifurcar', async ({ page }) => {
+  await enter(page);
+  const win = await freshSession(page);
+  const marker = `primeira sessão ${tag}`;
+
+  // Conversar: a 1ª mensagem cria a sessão ativa; o id aparece no menu da janela.
+  await say(win, `Olá, ${marker}`);
+  await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Olá! Sou o agente de teste.' })).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(win).toHaveAttribute('data-conversation-id', /.+/);
+  const firstId = (await win.getAttribute('data-conversation-id'))!;
+  await expect(win.getByTestId('agent-composer')).toBeEnabled({ timeout: 30_000 });
+  await win.getByRole('button', { name: 'Mais ações' }).click();
+  await expect(page.getByTestId('agent-session-id')).toHaveText(firstId);
+  await page.keyboard.press('Escape');
+
+  // Finalizar (com confirmação): a janela volta ao fio vazio.
+  await win.getByTestId('agent-finish').click();
+  const confirm = page.getByRole('dialog', { name: 'Finalizar a sessão?' });
+  await confirm.getByRole('button', { name: 'Finalizar sessão' }).click();
+  await expect(win).toHaveAttribute('data-conversation-id', '');
+  await expect(win.getByTestId('agent-session-title')).toHaveText('Nova sessão');
+  await expect(win.getByTestId('agent-message-user')).toHaveCount(0);
+
+  // A próxima mensagem entra numa sessão nova, sem o histórico da anterior.
+  await say(win, 'segunda sessão, por favor');
+  await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Olá! Sou o agente de teste.' })).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(win).not.toHaveAttribute('data-conversation-id', firstId);
+  const secondId = (await win.getAttribute('data-conversation-id'))!;
+  expect(secondId).toMatch(/.+/);
+  await expect(win.getByText(marker)).toHaveCount(0);
+  await expect(win.getByTestId('agent-composer')).toBeEnabled({ timeout: 30_000 });
+
+  // Sessões anteriores: a finalizada abre numa janela de leitura.
+  await win.getByTestId('agent-previous').click();
+  const previous = page.getByRole('dialog', { name: `Sessões anteriores — ${agent.name}` });
+  const item = previous.locator(`[data-testid="agent-previous-session"][data-conversation-id="${firstId}"]`);
+  await expect(item).toBeVisible();
+  await item.getByTestId('agent-previous-open').click();
+  await expect(previous).toBeHidden();
+  const reader = page.locator(`[data-testid="agent-window"][data-kind="session"][data-conversation-id="${firstId}"]`);
+  await expect(reader).toBeVisible();
+  await expect(reader.getByTestId('agent-finished-notice')).toBeVisible();
+  await expect(reader).toContainText(marker);
+  await expect(reader.getByTestId('agent-composer')).toHaveCount(0);
+
+  // Bifurcar daqui: a cópia vira a sessão ativa na janela do agente e a ativa anterior é finalizada.
+  await reader.getByTestId('agent-fork').click();
+  await expect(reader).toHaveCount(0);
+  await expect(win).not.toHaveAttribute('data-conversation-id', secondId);
+  await expect(win).not.toHaveAttribute('data-conversation-id', firstId);
+  await expect(win).toContainText(marker, { timeout: 15_000 });
+  const forkId = (await win.getAttribute('data-conversation-id'))!;
+  const second = await (await page.request.get(`/api/conversations/${secondId}`)).json();
+  expect(second.conversation.archivedReason).toBe('forked');
+  const forked = await (await page.request.get(`/api/conversations/${forkId}`)).json();
+  expect(forked.conversation).toMatchObject({ archivedAt: null, forkedFromConversationId: firstId });
+
+  // O menu mostra o agente com a sessão ativa e as anteriores.
+  await page.getByTestId('agents-button').click();
+  const row = page.locator(`[data-testid="agents-thread"][data-agent-id="${agent.id}"]`);
+  await expect(row).not.toContainText('Sem sessão ativa');
+  await row.getByTestId('agents-thread-previous').click();
+  await expect(page.locator(`[data-testid="agent-previous-session"][data-conversation-id="${secondId}"]`)).toBeVisible();
+});
+
+test('sessões: janelas salvas por conversa (versão anterior) viram a janela do agente', async ({ page }) => {
+  await enter(page);
+  const session = await postJson(page.request, `/api/agents/${agent.id}/sessions`, {});
+  await page.evaluate((id) => {
+    const old = { id, title: 'Janela antiga', agentName: 'Agente', colorSlot: 5, x: 80, y: 80, w: 420, h: 560, z: 1, minimized: false };
+    localStorage.setItem('moneyflow:agents-ui', JSON.stringify({ windows: [old], docked: id, panelWidth: 400, panelCollapsed: false }));
+  }, session.id);
+  await page.reload();
+  // A conversa ancorada (a ativa do próprio usuário) vira o painel do agente.
+  const panel = page.getByTestId('agent-side-panel');
+  await expect(panel).toHaveAttribute('data-kind', 'agent');
+  await expect(panel).toHaveAttribute('data-agent-id', agent.id);
+  await expect(panel).toHaveAttribute('data-conversation-id', session.id);
+  const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('moneyflow:agents-ui') ?? '{}'));
+  expect(stored).toMatchObject({ v: 2, docked: agent.id, windows: [{ id: agent.id, kind: 'agent', agentId: agent.id }] });
+});
+
 test('agente: recusar uma escrita com motivo; nada é gravado e o agente responde com o motivo', async ({ page }) => {
   await enter(page);
-  const win = await newConversation(page);
+  const win = await freshSession(page);
   const entityName = `E2E Recusada ${tag}`;
   const reason = `Nome errado, era outro fornecedor ${tag}`;
 
@@ -221,8 +318,7 @@ test('agente: recusar uma escrita com motivo; nada é gravado e o agente respond
 
 test('agente: o SSE cai no meio da resposta e reconecta com Last-Event-ID, sem duplicar nem perder', async ({ page }) => {
   await enter(page);
-  const win = await newConversation(page);
-  const conversationId = (await win.getAttribute('data-conversation-id'))!;
+  const win = await freshSession(page);
 
   // A 1ª conexão de eventos da execução é cortada no meio: a resposta chega só até a metade dos text_delta
   // e o stream fecha sem o "done". O console tem de reconectar pedindo o que veio depois do último id visto.
@@ -258,6 +354,8 @@ test('agente: o SSE cai no meio da resposta e reconecta com Last-Event-ID, sem d
   expect(headers['last-event-id']).toBe(cutAfterId);
 
   // A mensagem final está inteira e uma vez só, e a tela bate com o histórico da API.
+  const conversationId = (await win.getAttribute('data-conversation-id'))!;
+  expect(conversationId).toMatch(/.+/);
   const text = (await final.innerText()).replace(/\s+/g, ' ').trim();
   expect(text).toBe(LONG_REPLY);
   const detail = await (await page.request.get(`/api/conversations/${conversationId}`)).json();
@@ -270,7 +368,7 @@ test('agente: o SSE cai no meio da resposta e reconecta com Last-Event-ID, sem d
   await expect(win.locator('[data-testid="agent-message-assistant"][data-live]')).toHaveCount(0);
 });
 
-test('agente: o admin abre a conversa de outro usuário em modo somente leitura', async ({ page }) => {
+test('agente: o admin abre a sessão de outro usuário em modo somente leitura', async ({ page }) => {
   // Outro usuário (de teste) conversa e deixa uma escrita esperando confirmação.
   const other = { username: `e2e-agente-${tag}`, password: `senha-e2e-${tag}` };
   const user = await postJson(adminApi, '/api/users', {
@@ -296,17 +394,22 @@ test('agente: o admin abre a conversa de outro usuário em modo somente leitura'
 
     await enter(page);
     await page.getByTestId('agents-button').click();
-    const list = page.getByRole('dialog', { name: 'Conversas' });
+    const list = page.getByRole('dialog', { name: 'Agentes' });
     await list.getByRole('button', { name: 'Todos os usuários' }).click();
-    const row = list.locator('.agents-row').filter({ hasText: `@${other.username}` });
+    // O fio do outro usuário com o agente: a sessão ativa em execução (esperando a confirmação).
+    const row = list.locator('[data-testid="agents-thread"]').filter({ hasText: `@${other.username}` });
     await expect(row).toHaveCount(1);
-    // Sem as ações de dono (fixar, renomear, arquivar, excluir).
+    await expect(row.getByTestId('agents-thread-running')).toContainText('Aguardando confirmação');
+    // Sem as ações de dono (renomear, excluir).
     await expect(row.getByRole('button', { name: 'Excluir' })).toHaveCount(0);
-    await row.getByRole('button').first().click();
+    await row.getByTestId('agents-thread-open').click();
 
-    const win = page.locator(`[data-testid="agent-window"][data-conversation-id="${conversation.id}"]`);
+    const win = page.locator(`[data-testid="agent-window"][data-kind="session"][data-conversation-id="${conversation.id}"]`);
     await expect(win).toBeVisible();
-    await expect(win).toContainText('Você está lendo a conversa de outro usuário (somente leitura).');
+    await expect(win).toContainText('Você está lendo a sessão de outro usuário (somente leitura).');
+    // Sem finalizar nem bifurcar a sessão de outro.
+    await expect(win.getByTestId('agent-finish')).toHaveCount(0);
+    await expect(win.getByTestId('agent-fork')).toHaveCount(0);
     await expect(win).toContainText(`criar entidade ${entityName}`);
     // Sem compositor e sem aprovar/recusar, mesmo com a confirmação pendente.
     await expect(win.getByTestId('agent-composer')).toHaveCount(0);
@@ -389,7 +492,7 @@ test('kit de ferramentas: marcar a Conciliação, pôr uma escrita em ask, ligar
   await expect(agentRow).toContainText(kitName);
 
   // Na conversa, a escrita em ask mostra o cartão; aprovar aplica.
-  const win = await newConversation(page, kitAgent.name);
+  const win = await freshSession(page, kitAgent.name);
   const before = llm.calls.length;
   await say(win, `chamar ignore_statement_lines {"lineIds":["${line.id}"]}`);
   const card = win.getByTestId('agent-confirmation');
@@ -565,7 +668,7 @@ test('requisições: detalhe do provedor, a requisição da conversa com as tent
   await enter(page);
   // O provedor responde 429 na primeira tentativa: o MoneyFlow espera o retry-after e tenta de novo.
   llm.queue.push({ status: 429, headers: { 'retry-after-ms': '50', 'anthropic-ratelimit-requests-remaining': '0' } });
-  const win = await newConversation(page);
+  const win = await freshSession(page);
   await say(win, `requisições do e2e ${tag}`);
   await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Olá! Sou o agente de teste.' })).toBeVisible({
     timeout: 30_000,
@@ -749,7 +852,7 @@ test.describe('chat multimídia (spec 025)', () => {
 
   test('áudio: anexar, ver a transcrição, tocar em 2x e o modo áudio tocando uma resposta', async ({ page }) => {
     await enter(page);
-    const win = await newConversation(page, mediaAgent.name);
+    const win = await freshSession(page, mediaAgent.name);
     // Sem o modo áudio ligado, nenhuma mensagem tem play.
     await expect(win.getByTestId('agent-audio-mode')).toHaveAttribute('aria-pressed', 'false');
 
@@ -807,7 +910,7 @@ test.describe('chat multimídia (spec 025)', () => {
 
   test('prévias: imagem ampliada com navegação, PDF no visualizador e markdown bruto/renderizado', async ({ page }) => {
     await enter(page);
-    const win = await newConversation(page, mediaAgent.name);
+    const win = await freshSession(page, mediaAgent.name);
     const input = win.locator('input[type="file"]');
     await input.setInputFiles([
       { name: 'foto-1.png', mimeType: 'image/png', buffer: PNG },
@@ -876,7 +979,7 @@ test.describe('chat multimídia (spec 025)', () => {
 
   test('gravação pelo microfone (fake media stream): ouvir, descartar, regravar e anexar com transcrição', async ({ page }) => {
     await enter(page);
-    const win = await newConversation(page, mediaAgent.name);
+    const win = await freshSession(page, mediaAgent.name);
     llm.audioQueue.push({ text: 'Mensagem gravada pelo microfone.' });
 
     await win.getByTestId('agent-record').click();

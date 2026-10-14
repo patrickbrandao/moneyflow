@@ -7,7 +7,7 @@ import { type IndexState, indexEmbeddings, touchEmbeddingIndexes } from '../src/
 import { resolveInference } from '../src/agents/inferences';
 import { speak, transcribe } from '../src/agents/llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
-import { client, type Harness, minimalPdf, startApp, TINY_PNG, uid, userSession } from './helpers';
+import { client, type Harness, minimalPdf, newSession, startApp, TINY_PNG, uid, userSession } from './helpers';
 
 /*
  * Capacidades dos provedores e provedor por inferência (spec 024), com o
@@ -72,7 +72,7 @@ async function upload(conversationId: string, fileName: string, mime: string, pa
 
 /** Conversa nova com uma mensagem (anexos opcionais), já processada. */
 async function ask(agentId: string, text: string, files: { name: string; mime: string; data: Buffer }[] = []) {
-  const conversation = await admin.post('/api/conversations', { agentId });
+  const conversation = await newSession(admin, agentId);
   const ids: string[] = [];
   for (const file of files) {
     const res = await upload(conversation.id, file.name, file.mime, file.data);
@@ -431,7 +431,7 @@ describe('visão: direta, por descrição, camada de texto do PDF e recusa', () 
   it('sem visão: imagem recusada ao anexar (também nos fluxos); PDF pela camada de texto ou o aviso de PDF sem texto', async () => {
     const agent = await newAgent({ providerId: claude.id, useForFlows: true });
     expect(agent.inferences).toEqual([]);
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const image = await upload(conversation.id, 'foto.png', 'image/png', TINY_PNG);
     expect(image.statusCode).toBe(422);
     expect(image.json().error.message).toBe('Este agente não lê imagens.');

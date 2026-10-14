@@ -2,7 +2,6 @@ import {
   type AiBlock,
   type AiMessageDto,
   type ChatAttachmentDto,
-  type ConversationDetail,
   formatDateTime,
   isAudioMime,
   isImageMime,
@@ -50,25 +49,28 @@ import { RecordButton, RecorderPanel, useAudioRecorder } from './AudioRecorder';
 import { agentColor, toolLabel, usageLine } from './format';
 import { Markdown } from './Markdown';
 import { hasRecord, readRecord, recordMarkdown } from './records';
-import { type ConversationState, type LiveTool, useConversation } from './useConversation';
+import { type ConversationState, type LiveTool, type PaneDetail, type PaneTarget, useConversation } from './useConversation';
 
 const u = t.agentsUi;
 
 export type PaneHeaderInfo = {
-  detail: ConversationDetail | null;
+  detail: PaneDetail | null;
   state: ConversationState;
 };
 
 /**
- * O miolo de uma conversa (janela flutuante ou painel): cabeçalho fornecido
- * por quem embrulha, mensagens, confirmações, composer e rodapé de uso.
+ * O miolo de uma sessão (janela flutuante ou painel): cabeçalho fornecido por
+ * quem embrulha, mensagens, confirmações, composer e rodapé de uso. A sessão
+ * finalizada e a de outro usuário ficam em somente leitura (spec 026).
  */
-export function ConversationPane({ conversationId, header }: { conversationId: string; header: (info: PaneHeaderInfo) => ReactNode }) {
-  const state = useConversation(conversationId);
+export function ConversationPane({ target, header }: { target: PaneTarget; header: (info: PaneHeaderInfo) => ReactNode }) {
+  const state = useConversation(target);
   const { detail, error } = state;
-  const readOnly = detail?.readOnly ?? false;
+  const finished = Boolean(detail?.conversation?.archivedAt);
+  const readOnly = (detail?.readOnly ?? false) || finished;
+  const agentInactive = target.kind === 'agent' && state.agent !== null && !state.agent.isActive;
   // Modo áudio (spec 025): por janela, só com texto→áudio no agente.
-  const audioMode = Boolean(useAgents().state.windows.find((w) => w.id === conversationId)?.audioMode && detail?.media.speech);
+  const audioMode = Boolean(useAgents().state.windows.find((w) => w.id === target.windowId)?.audioMode && detail?.media.speech);
   const images = useMemo(() => {
     const list: { id: string; fileName: string }[] = [];
     const meta = new Map(detail?.attachments.map((a) => [a.id, a]) ?? []);
@@ -133,9 +135,17 @@ export function ConversationPane({ conversationId, header }: { conversationId: s
         </div>
       ) : (
         <>
-          {readOnly && <div className="agent-readonly">{u.window.readOnly}</div>}
+          {detail.readOnly ? (
+            <div className="agent-readonly">{u.window.readOnly}</div>
+          ) : finished ? (
+            <div className="agent-readonly" data-testid="agent-finished-notice">
+              {u.window.finished}
+            </div>
+          ) : agentInactive ? (
+            <div className="agent-readonly">{u.window.agentInactive}</div>
+          ) : null}
           <MediaProvider
-            conversationId={conversationId}
+            conversationId={state.conversationId ?? ''}
             readOnly={readOnly}
             transcribes={detail.media.transcription}
             attachments={detail.attachments}
@@ -143,7 +153,7 @@ export function ConversationPane({ conversationId, header }: { conversationId: s
           >
             <Messages state={state} detail={detail} audioMode={audioMode} />
             {!readOnly && <Confirmations state={state} detail={detail} />}
-            {!readOnly && <Composer ref={composer} state={state} transcribes={detail.media.transcription} />}
+            {!readOnly && !agentInactive && <Composer ref={composer} state={state} transcribes={detail.media.transcription} />}
           </MediaProvider>
           <Footer state={state} detail={detail} />
         </>
@@ -157,7 +167,7 @@ export function ConversationPane({ conversationId, header }: { conversationId: s
 
 type ToolOutcome = { content: string; isError: boolean };
 
-function Messages({ state, detail, audioMode }: { state: ConversationState; detail: ConversationDetail; audioMode: boolean }) {
+function Messages({ state, detail, audioMode }: { state: ConversationState; detail: PaneDetail; audioMode: boolean }) {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const results = useMemo(() => {
@@ -380,7 +390,7 @@ function ToolView({
 
 /* ---------------- confirmações ("Aplicar?") ---------------- */
 
-function Confirmations({ state, detail }: { state: ConversationState; detail: ConversationDetail }) {
+function Confirmations({ state, detail }: { state: ConversationState; detail: PaneDetail }) {
   const pending = detail.confirmations.filter((c) => c.status === 'pending');
   const [busy, setBusy] = useState(false);
   const [rejecting, setRejecting] = useState<string | 'all' | null>(null);
@@ -718,7 +728,7 @@ function Composer({ state, ref, transcribes }: { state: ConversationState; ref: 
 
 /* ---------------- rodapé ---------------- */
 
-function Footer({ state, detail }: { state: ConversationState; detail: ConversationDetail }) {
+function Footer({ state, detail }: { state: ConversationState; detail: PaneDetail }) {
   const run = state.run;
   return (
     <div className="agent-foot">

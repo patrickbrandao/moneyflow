@@ -428,11 +428,28 @@ export const conversationCreateInput = z.object({
   screenContext: screenContextInput.optional(),
 });
 
+/** Só o título muda por aqui (spec 026): finalizar tem rota própria e a finalizada não volta. */
 export const conversationUpdateInput = z.object({
   title: z.string().trim().min(1).max(200).optional(),
-  pinned: z.boolean().optional(),
-  archived: z.boolean().optional(),
 });
+
+/* ---------------- sessões por agente (spec 026) ---------------- */
+
+/** Admin: os fios de outro usuário (ou de todos, "all"). */
+export const agentThreadsQuery = z.object({
+  userId: z.union([id, z.literal('all')]).optional(),
+});
+
+/** Sessões finalizadas de um agente, paginadas; `q` busca nelas. Admin: `userId` de outro usuário. */
+export const agentSessionsQuery = z.object({
+  q: z.string().trim().max(500).optional(),
+  userId: id.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).max(100_000).default(0),
+});
+
+/** Abre a sessão ativa do agente (cria se não houver). */
+export const agentSessionStartInput = z.object({ screenContext: screenContextInput.optional() });
 
 export const conversationForkInput = z.object({ messageId: id, title: z.string().trim().min(1).max(200).optional() });
 

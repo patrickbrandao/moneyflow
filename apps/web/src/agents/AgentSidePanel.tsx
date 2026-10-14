@@ -2,7 +2,7 @@ import { t } from '@moneyflow/shared';
 import { Bot, Minus, PanelRightClose, PanelRightOpen, SquareArrowOutUpLeft, X } from 'lucide-react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useAgents } from './AgentsProvider';
-import { PaneHeader } from './AgentWindows';
+import { PaneHeader, paneTarget } from './AgentWindows';
 import { ConversationPane } from './ConversationPane';
 import { agentColor } from './format';
 
@@ -48,34 +48,48 @@ export function AgentSidePanel() {
 
   if (panelCollapsed) {
     return (
-      <aside className="agent-side collapsed" data-testid="agent-side-panel" data-conversation-id={win.id} aria-label={u.panel.label}>
+      <aside
+        className="agent-side collapsed"
+        data-testid="agent-side-panel"
+        data-kind={win.kind}
+        data-agent-id={win.agentId}
+        data-conversation-id={win.conversationId ?? ''}
+        aria-label={u.panel.label}
+      >
         <button
           type="button"
           className="agent-side-strip"
           onClick={() => agents.setPanelCollapsed(false)}
-          title={`${u.window.expand}: ${win.title ?? u.list.untitled}`}
+          title={`${u.window.expand}: ${win.kind === 'agent' ? win.agentName : (win.title ?? u.list.untitled)}`}
           aria-label={u.window.expand}
         >
           <PanelRightOpen />
           <span className="agent-side-badge" style={{ background: agentColor(win.colorSlot) }}>
             <Bot />
           </span>
-          <span className="agent-side-vtitle">{win.title ?? win.agentName}</span>
+          <span className="agent-side-vtitle">{win.kind === 'agent' ? win.agentName : (win.title ?? win.agentName)}</span>
         </button>
       </aside>
     );
   }
 
   return (
-    <aside className="agent-side" data-testid="agent-side-panel" data-conversation-id={win.id} aria-label={u.panel.label}>
+    <aside
+      className="agent-side"
+      data-testid="agent-side-panel"
+      data-kind={win.kind}
+      data-agent-id={win.agentId}
+      data-conversation-id={win.conversationId ?? ''}
+      aria-label={u.panel.label}
+    >
       <div className="agent-side-grip" onPointerDown={startResize} title={u.window.resizePanel} aria-hidden />
       <ConversationPane
         key={win.id}
-        conversationId={win.id}
-        header={({ detail }) => (
+        target={paneTarget(win)}
+        header={(info) => (
           <PaneHeader
             win={win}
-            detail={detail}
+            info={info}
             buttons={
               <>
                 <button

@@ -43,6 +43,8 @@ export function alphaCnpj(): string {
  * importar num sistema limpo). Devolve a conexão como moneyflow_app, ou null
  * sem a conexão do dono (MONEYFLOW_TEST_OWNER_URL no modo de banco externo).
  */
+const freshNames: string[] = [];
+
 export async function freshDatabase(): Promise<string | null> {
   const owner = inject('ownerDatabaseUrl');
   if (!owner) return null;
@@ -51,6 +53,7 @@ export async function freshDatabase(): Promise<string | null> {
   await admin.connect();
   try {
     await admin.query(`CREATE DATABASE ${name}`);
+    freshNames.push(name);
   } finally {
     await admin.end();
   }
@@ -60,6 +63,23 @@ export async function freshDatabase(): Promise<string | null> {
   const appUrl = new URL(inject('databaseUrl'));
   appUrl.pathname = `/${name}`;
   return appUrl.toString();
+}
+
+/**
+ * Apaga os bancos criados por freshDatabase() (chame no afterAll, depois de
+ * fechar os harnesses). Contra um banco externo (MONEYFLOW_TEST_OWNER_URL)
+ * eles sobrariam no servidor; no Testcontainers somem com o container.
+ */
+export async function dropFreshDatabases() {
+  const owner = inject('ownerDatabaseUrl');
+  if (!owner || freshNames.length === 0) return;
+  const admin = new pg.Client({ connectionString: owner });
+  await admin.connect();
+  try {
+    for (const name of freshNames.splice(0)) await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+  } finally {
+    await admin.end();
+  }
 }
 
 /** Cria um usuário direto no banco e devolve o cookie de sessão dele. */
@@ -155,3 +175,15 @@ export const TINY_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
   'base64',
 );
+
+/**
+ * Sessão nova com o agente (spec 026): finaliza a sessão ativa do par, se
+ * houver (parando a execução), e abre outra. Os testes que querem começar do
+ * zero usam isto; a API recusa uma 2ª sessão ativa do mesmo usuário e agente.
+ */
+export async function newSession(api: ReturnType<typeof client>, agentId: string) {
+  const threads = await api.get<{ agentId: string; active: { id: string } | null }[]>('/api/agents/threads');
+  const active = threads.find((thread) => thread.agentId === agentId)?.active;
+  if (active) await api.post(`/api/conversations/${active.id}/finish`);
+  return api.post('/api/conversations', { agentId });
+}

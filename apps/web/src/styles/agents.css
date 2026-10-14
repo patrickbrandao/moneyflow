@@ -106,6 +106,13 @@ body.agent-resizing .shell {
 .agent-head .agent-dot {
   margin-right: 6px;
 }
+/* id da sessão no menu "…" (spec 026) */
+.agent-session-id {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  user-select: all;
+}
 .agent-head-title {
   display: flex;
   flex-direction: column;
@@ -756,54 +763,46 @@ body.agent-resizing .agent-side-grip {
   white-space: nowrap;
 }
 
-/* ---- lista da topbar ---- */
+/* ---- lista da topbar (agentes e sessões, spec 026) ---- */
 .agents-pop {
   width: min(440px, calc(100vw - 2rem));
   max-height: min(78vh, 680px);
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+.agents-pop.is-previous {
+  grid-template-rows: auto minmax(0, 1fr);
 }
 .agents-pop .nh {
   gap: 8px;
   flex-wrap: wrap;
 }
-.agents-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+.agents-pop .nh .icon-btn {
+  width: 26px;
   height: 26px;
-  padding: 0 8px;
-  border-radius: var(--radius-control);
-  border: 1px solid var(--border-strong);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 500;
 }
-.agents-toggle svg {
-  width: 13px;
-  height: 13px;
+.agents-previous {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
 }
-.agents-toggle.on {
-  background: var(--surface-4);
-  color: var(--text);
+.agents-previous-list {
+  overflow: auto;
+  padding: 8px;
 }
-.agents-new {
+.modal .agents-previous {
+  margin: -4px -4px 0;
+}
+.modal .agents-previous .agents-search {
+  margin: 0 0 4px;
+}
+.modal .agents-previous-list {
+  max-height: min(60vh, 520px);
+  padding: 4px 0 0;
+}
+.agents-more {
   display: flex;
-  gap: 6px;
-  padding: 10px 12px 0;
-}
-.agents-new .field {
-  flex: 1;
-  min-width: 0;
-}
-.agents-new .btn svg {
-  width: 14px;
-  height: 14px;
-}
-.agents-desc {
-  padding: 6px 14px 0;
-  font-size: 11.5px;
-  color: var(--text-muted);
+  justify-content: center;
+  padding: 6px 0 2px;
 }
 .agents-search {
   display: flex;
@@ -895,7 +894,8 @@ body.agent-resizing .agent-side-grip {
   padding: 6px 4px 0 0;
 }
 .agents-row:hover .agents-row-actions,
-.agents-row:focus-within .agents-row-actions {
+.agents-row:focus-within .agents-row-actions,
+.agents-row-actions.always {
   display: inline-flex;
 }
 .agents-row-actions .row-action {

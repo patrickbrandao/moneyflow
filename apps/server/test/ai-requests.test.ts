@@ -7,7 +7,7 @@ import { embed } from '../src/agents/llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { purgeAiRequests } from '../src/agents/worker';
 import { EXCLUDED_TABLES, fullTables, loadCatalog } from '../src/services/backup/catalog';
-import { client, type Harness, startApp, uid, userSession } from './helpers';
+import { client, type Harness, newSession, startApp, uid, userSession } from './helpers';
 
 /*
  * Requisições ao provedor (spec 023), com o provedor FALSO: cada chamada vira
@@ -91,7 +91,7 @@ beforeEach(() => {
 
 describe('tentativas', () => {
   it('429 seguido de 200: 2 tentativas, 1 requisição ok com tokens, ligada ao uso; retry-after e rate limit gravados', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     llm.queue = [
       { status: 429, headers: { 'retry-after-ms': '40', 'anthropic-ratelimit-requests-remaining': '0' } },
       { text: 'Respondi depois do 429.', usage: { input: 50, output: 7 } },
@@ -154,7 +154,7 @@ describe('tentativas', () => {
   });
 
   it('três 5xx: a requisição termina em erro e a execução volta à fila; na próxima reserva, conclui', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     llm.queue = [{ status: 503 }, { status: 500 }, { status: 529 }];
     const sent = await admin.post(`/api/conversations/${conversation.id}/messages`, { text: 'oi' });
     const before = messageCalls();
@@ -183,7 +183,7 @@ describe('tentativas', () => {
   });
 
   it('erro que não repete (400): uma tentativa só e a execução falha', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     llm.queue = [{ status: 400 }, { status: 400 }];
     const sent = await admin.post(`/api/conversations/${conversation.id}/messages`, { text: 'oi' });
     await processOnce();
@@ -193,7 +193,7 @@ describe('tentativas', () => {
   });
 
   it('queda no meio do stream: não repete a chamada; a requisição termina em erro e a execução volta à fila', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     llm.queue = [{ text: 'Primeiro pedaço. Segundo pedaço. Terceiro pedaço.', chunks: 6, dropAfter: 2, delayMs: 20 }];
     const sent = await admin.post(`/api/conversations/${conversation.id}/messages`, { text: 'oi' });
     const before = messageCalls();
@@ -215,7 +215,7 @@ describe('tentativas', () => {
   });
 
   it('cancelar a execução interrompe a espera do retry-after', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     llm.queue = [{ status: 429, headers: { 'retry-after': '30' } }];
     const sent = await admin.post(`/api/conversations/${conversation.id}/messages`, { text: 'oi' });
     const claimed = await h.db.execute<ClaimedRun>(sql`SELECT * FROM ai_run_claim(1, '1 hour')`);
@@ -234,7 +234,7 @@ describe('tentativas', () => {
 
 describe('corpos e segredos', () => {
   it('sem log_bodies nada de corpo; com ele, o corpo completo com o base64 do anexo, sem a chave nos cabeçalhos', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(600, 7)]);
     const upload = async () => {
       const res = await h.app.inject({

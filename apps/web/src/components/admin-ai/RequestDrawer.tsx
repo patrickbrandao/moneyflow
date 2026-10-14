@@ -97,7 +97,7 @@ export function RequestDrawer({ requestId, onClose }: { requestId: string; onClo
                       <button
                         type="button"
                         className="link-btn"
-                        onClick={() => agents.open({ id: data.conversationId!, title: data.conversationTitle })}
+                        onClick={() => void agents.openById(data.conversationId!).catch(() => undefined)}
                         title={d.openConversation}
                         data-testid="request-open-conversation"
                       >

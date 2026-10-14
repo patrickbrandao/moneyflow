@@ -5,7 +5,7 @@ import { formatCnpj } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { strFromU8, unzipSync } from 'fflate';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { alphaCnpj, client, freshDatabase, type Harness, login, scenario, startApp, uid, userSession } from './helpers';
+import { alphaCnpj, client, dropFreshDatabases, freshDatabase, type Harness, login, scenario, startApp, uid, userSession } from './helpers';
 
 /*
  * Backup e restauração (spec 019): exportação com segredos, importação com
@@ -17,7 +17,11 @@ let h: Harness;
 beforeAll(async () => {
   h = await startApp();
 });
-afterAll(() => h.close());
+afterAll(async () => {
+  await h.close();
+  // Os bancos novos dos testes abaixo não ficam no servidor (banco externo).
+  await dropFreshDatabases();
+});
 
 type Report = {
   dryRun: boolean;
@@ -320,6 +324,61 @@ describe('backup: recursos num sistema novo', () => {
     expect(failures(await importFile(b, adminB.cookie, 'full', second.file))).toEqual([]);
     const after = await api.get('/api/admin/ai/agents');
     expect(after.filter((a: any) => a.useForFlows).map((a: any) => a.id)).toEqual([second.agentId]);
+  });
+
+  it('sessão ativa única (spec 026): a importada que traria uma 2ª ativa do par entra finalizada; no arquivo antigo fica a mais recente', async () => {
+    if (skip) return;
+    const api = client(b, adminB.cookie);
+    const provider = await api.post('/api/admin/ai/providers', {
+      name: `Provedor sessões ${uid()}`,
+      kind: 'openai',
+      apiKey: `sk-${uid()}`,
+    });
+    const base = { systemPrompt: 'Sessões.', providerId: provider.id, model: 'gpt-x', isActive: true };
+    const withActive = await api.post('/api/admin/ai/agents', { ...base, name: `Com ativa ${uid()}` });
+    const withoutActive = await api.post('/api/admin/ai/agents', { ...base, name: `Sem ativa ${uid()}` });
+    // No banco: a sessão ativa do admin com o 1º agente.
+    const current = await api.post(`/api/agents/${withActive.id}/sessions`, {});
+
+    const full = await b.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminB.cookie } });
+    const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+    // Arquivo de antes da 0043: várias ativas do mesmo par e o pinned_at que saiu.
+    const row = (agentId: string, lastMessageAt: string | null) => ({
+      id: randomUUID(),
+      user_id: adminB.id,
+      agent_id: agentId,
+      title: `Importada ${uid()}`,
+      title_source: 'user',
+      pinned_at: null,
+      archived_at: null,
+      last_message_at: lastMessageAt,
+      created_at: '2026-01-01T12:00:00Z',
+    });
+    const conflicting = [row(withActive.id, '2026-05-01T12:00:00Z'), row(withActive.id, null)];
+    const [older, newest, empty] = [
+      row(withoutActive.id, '2026-02-01T12:00:00Z'),
+      row(withoutActive.id, '2026-06-01T12:00:00Z'),
+      row(withoutActive.id, null),
+    ];
+    const file = { ...json, tables: { ai_conversations: [...conflicting, older, newest, empty] }, references: {} };
+
+    const report = await importFile(b, adminB.cookie, 'full', file);
+    expect(failures(report)).toEqual([]);
+    expect(sum(report, 'ai_conversations').imported).toBe(5);
+    const states = await b.db.execute<{ id: string; archived: boolean; archived_reason: string | null }>(sql`
+      SELECT id, archived_at IS NOT NULL AS archived, archived_reason FROM ai_conversations
+       WHERE id = ANY (${`{${[current.id, ...conflicting.map((c) => c.id), older!.id, newest!.id, empty!.id].join(',')}}`}::uuid[])`);
+    const state = new Map(states.rows.map((r) => [r.id, r.archived ? r.archived_reason : 'active']));
+    // O banco já tinha a ativa do 1º agente: as importadas entram finalizadas.
+    expect(state.get(current.id)).toBe('active');
+    for (const c of conflicting) expect(state.get(c.id)).toBe('import_conflict');
+    // Sem ativa no banco: fica ativa a de mensagem mais recente; as outras, finalizadas.
+    expect(state.get(newest!.id)).toBe('active');
+    expect(state.get(older!.id)).toBe('import_conflict');
+    expect(state.get(empty!.id)).toBe('import_conflict');
+    const threads = await api.get('/api/agents/threads');
+    expect(threads.find((th: any) => th.agentId === withoutActive.id).active.id).toBe(newest!.id);
+    expect(threads.find((th: any) => th.agentId === withoutActive.id).finishedCount).toBe(2);
   });
 
   it('kits de ferramentas: ida e volta com as tools e o agente apontando pelo nome; arquivo antigo (enabled_tools) vira kit', async () => {

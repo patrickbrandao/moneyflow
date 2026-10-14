@@ -236,6 +236,38 @@ function normalizeRow(table: string, data: BackupRow, state: { flowAgentTaken: b
   return data;
 }
 
+/** Conversa `chat` (ou sem `purpose`, que vira `chat`) não finalizada: uma sessão ativa (spec 026). */
+const isActiveChat = (data: BackupRow) => (data.purpose ?? 'chat') === 'chat' && !data.archived_at;
+
+/**
+ * Arquivo anterior à sessão ativa única (0043) pode trazer várias ativas do
+ * mesmo usuário e agente: como a migração, fica ativa a de `last_message_at`
+ * mais recente (nulos por último; empate por `created_at` e id) e as outras
+ * entram finalizadas com `import_conflict`. O conflito com o banco é tratado
+ * na gravação (sessionConflict).
+ */
+function oneActiveSessionPerPair(nodes: Node[], importedAt: string) {
+  const pairs = new Map<string, Node[]>();
+  for (const node of nodes) {
+    if (node.ref || node.table !== 'ai_conversations' || !isActiveChat(node.data)) continue;
+    const key = `${String(node.data.user_id).toLowerCase()}|${String(node.data.agent_id).toLowerCase()}`;
+    if (!pairs.has(key)) pairs.set(key, []);
+    pairs.get(key)!.push(node);
+  }
+  const time = (value: unknown) => (typeof value === 'string' || value instanceof Date ? new Date(value).getTime() || 0 : 0);
+  for (const group of pairs.values()) {
+    if (group.length < 2) continue;
+    group.sort(
+      (a, b) =>
+        Number(!a.data.last_message_at) - Number(!b.data.last_message_at) ||
+        time(b.data.last_message_at) - time(a.data.last_message_at) ||
+        time(b.data.created_at) - time(a.data.created_at) ||
+        (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
+    );
+    for (const node of group.slice(1)) node.data = { ...node.data, archived_at: importedAt, archived_reason: 'import_conflict' };
+  }
+}
+
 /** Estados que só se alcançam por transição: insere no estado inicial e atualiza depois. */
 function replay(table: string, data: BackupRow): { insert: BackupRow; post: BackupRow | null } {
   if (table === 'titles') {
@@ -428,6 +460,8 @@ export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, ki
   for (const table of included) addRows(table, file.tables[table]!, false);
   for (const [table, rows] of Object.entries(file.tables)) if (!included.has(table)) addRows(table, rows, true);
   for (const [table, rows] of Object.entries(file.references ?? {})) addRows(table, rows, true);
+  const importedAt = new Date().toISOString();
+  oneActiveSessionPerPair([...nodes.values()], importedAt);
 
   const all = [...nodes.values()].sort((a, b) => ranks.get(a.table)! - ranks.get(b.table)! || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   all.forEach((node, index) => {
@@ -627,6 +661,21 @@ export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, ki
          WHERE id = ${id}::uuid`);
     };
 
+    /**
+     * Sessão ativa (spec 026): se o banco (inclusive o que esta importação já
+     * gravou) tem outra `chat` ativa do mesmo usuário e agente, a importada
+     * entra finalizada, com `import_conflict`.
+     */
+    const sessionConflict = async (table: string, data: BackupRow): Promise<BackupRow> => {
+      if (table !== 'ai_conversations' || !isActiveChat(data)) return data;
+      if (typeof data.user_id !== 'string' || typeof data.agent_id !== 'string') return data;
+      const found = await tx.execute(sql`
+        SELECT 1 FROM ai_conversations
+         WHERE user_id = ${data.user_id}::uuid AND agent_id = ${data.agent_id}::uuid AND purpose = 'chat' AND archived_at IS NULL
+           AND id <> ${String(data.id)}::uuid`);
+      return found.rows.length > 0 ? { ...data, archived_at: importedAt, archived_reason: 'import_conflict' } : data;
+    };
+
     const late: { node: Node; data: BackupRow }[] = [];
 
     const processUnit = async (unit: Unit) => {
@@ -746,7 +795,7 @@ export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, ki
       try {
         for (const step of stepOrder.order) {
           current = step;
-          if (step.kind === 'insert') await insertRow(step.node.table, step.data);
+          if (step.kind === 'insert') await insertRow(step.node.table, await sessionConflict(step.node.table, step.data));
           else await updateRow(step.node.table, step.node.id, step.data);
         }
         current = null;

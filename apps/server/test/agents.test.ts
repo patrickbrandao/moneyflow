@@ -14,9 +14,10 @@ import { mcpExposedName } from '../src/agents/mcp-client';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { registerInternalTool } from '../src/agents/tools-runtime';
 import { startAgentWorker } from '../src/agents/worker';
+import { translateDbError } from '../src/errors';
 import { withTx } from '../src/services/tx';
 import { type FakeMcp, startFakeMcp } from './fakes/fake-mcp';
-import { client, type Harness, scenario, startApp, uid, userSession } from './helpers';
+import { client, type Harness, newSession, scenario, startApp, uid, userSession } from './helpers';
 
 /*
  * Fase 4 (agentes de IA, spec 011), sem chamar APIs reais: provedor falso
@@ -181,7 +182,7 @@ describe('administração', () => {
 describe('execução do agente', () => {
   it('tool de leitura: run completo com streaming, título automático, uso e custo, SSE com Last-Event-ID', async () => {
     const s = await scenario(h, admin);
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const sent = await chat(admin, conversation.id, 'Pode listar caixas?');
     expect(sent.run.status).toBe('queued');
     // Uma execução ativa por conversa.
@@ -224,7 +225,7 @@ describe('execução do agente', () => {
   });
 
   it('escrita com confirmação aprovada: cartão com prévia, aplica como agente na auditoria', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const name = `ACME Agente ${uid()}`;
     const sent = await chat(admin, conversation.id, `criar entidade ${name}`);
     await drain();
@@ -257,7 +258,7 @@ describe('execução do agente', () => {
   });
 
   it('escrita rejeitada: nada é gravado e o modelo recebe a recusa com o motivo', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const name = `Recusada ${uid()}`;
     const sent = await chat(admin, conversation.id, `criar entidade ${name}`);
     await drain();
@@ -283,7 +284,7 @@ describe('execução do agente', () => {
     const userSess = await userSession(h);
     const user = client(h, userSess.cookie);
     await admin.post(`/api/caixas/${s.caixaA.id}/members`, { userId: userSess.id, role: 'editor' });
-    const conversation = await user.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(user, agent.id);
     await chat(user, conversation.id, 'listar caixas');
     await drain();
     let detail = await user.get(`/api/conversations/${conversation.id}`);
@@ -309,7 +310,7 @@ describe('execução do agente', () => {
   });
 
   it('cancelamento: na fila cancela na hora; rodando, o worker para e fecha como canceled', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const queued = await chat(admin, conversation.id, 'oi');
     const canceled = await admin.post(`/api/runs/${queued.run.id}/cancel`);
     expect(canceled.status).toBe('canceled');
@@ -332,7 +333,7 @@ describe('execução do agente', () => {
   });
 
   it('retomada: reserva abandonada por um worker que caiu é retomada por outro', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const sent = await chat(admin, conversation.id, 'listar caixas');
     const claimed = await h.db.execute<ClaimedRun>(sql`SELECT * FROM ai_run_claim(1, '1 hour')`);
     expect(claimed.rows[0]!.id).toBe(sent.run.id);
@@ -346,7 +347,7 @@ describe('execução do agente', () => {
   });
 
   it('falha do provedor: erro 500 repetido termina como failed com a mensagem', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     llm.queue = Array.from({ length: 12 }, () => ({ status: 400 }));
     const sent = await chat(admin, conversation.id, 'oi');
     await drain();
@@ -448,7 +449,7 @@ describe('kit de ferramentas (spec 021)', () => {
     const kit = await createKit('Em uso', ['list_caixas']);
     const active = await kitAgent(kit.id, 'Ativo com kit');
     const archived = await kitAgent(kit.id, 'Arquivado com kit');
-    await admin.post('/api/conversations', { agentId: archived.id });
+    await newSession(admin, archived.id);
     expect(await admin.del(`/api/admin/ai/agents/${archived.id}`)).toMatchObject({ archived: true });
     expect((await admin.get(`/api/admin/ai/tool-kits/${kit.id}`)).agents).toEqual([
       { id: active.id, name: active.name, archived: false },
@@ -469,7 +470,7 @@ describe('kit de ferramentas (spec 021)', () => {
   it('fora do kit não chega ao modelo; em allow a escrita roda sem confirmação; em ask a leitura pede confirmação', async () => {
     const kit = await createKit('Misto', ['list_caixas', 'create_entity'], { list_caixas: 'ask', create_entity: 'allow' });
     const mixed = await kitAgent(kit.id, 'Misto');
-    const conversation = await admin.post('/api/conversations', { agentId: mixed.id });
+    const conversation = await newSession(admin, mixed.id);
 
     // Escrita em allow: executa direto, sem ai_tool_confirmations.
     const name = `Direto ${uid()}`;
@@ -503,7 +504,7 @@ describe('kit de ferramentas (spec 021)', () => {
   it('sem kit: todas as tools internas, tudo roda direto (inclusive enviar mensagem e escritas)', async () => {
     const free = await kitAgent(null, 'Sem kit');
     expect(free).toMatchObject({ toolKitId: null, toolKitName: null });
-    const conversation = await admin.post('/api/conversations', { agentId: free.id });
+    const conversation = await newSession(admin, free.id);
     const name = `Sem kit ${uid()}`;
     const sent = await chat(admin, conversation.id, `criar entidade ${name}`);
     await drain();
@@ -557,14 +558,14 @@ describe('kit de ferramentas (spec 021)', () => {
       const kit = await createKit('Admin', ['list_caixas', 'test_admin_only']);
       const withAdminTool = await kitAgent(kit.id, 'Com tool de admin');
 
-      const adminConversation = await admin.post('/api/conversations', { agentId: withAdminTool.id });
+      const adminConversation = await newSession(admin, withAdminTool.id);
       await chat(admin, adminConversation.id, 'oi');
       await drain();
       expect(lastToolNames()).toEqual(['list_caixas', 'test_admin_only']);
 
       const userSess = await userSession(h);
       const user = client(h, userSess.cookie);
-      const userConversation = await user.post('/api/conversations', { agentId: withAdminTool.id });
+      const userConversation = await newSession(user, withAdminTool.id);
       await chat(user, userConversation.id, 'oi');
       await drain();
       expect(lastToolNames()).toEqual(['list_caixas']);
@@ -581,7 +582,7 @@ describe('kit de ferramentas (spec 021)', () => {
       const switching = await createKit('Troca', ['list_caixas', 'test_kit_switch', 'create_entity']);
       switchKitId = switching.id;
       const switcher = await kitAgent(switching.id, 'Troca de kit');
-      const conversation = await admin.post('/api/conversations', { agentId: switcher.id });
+      const conversation = await newSession(admin, switcher.id);
       const sent = await chat(admin, conversation.id, 'chamar test_kit_switch {}');
       const before = llm.calls.length;
       await drain();
@@ -638,7 +639,7 @@ describe('provedor OpenAI-compatível', () => {
       isActive: true,
       toolKitId: kit.id,
     });
-    const conversation = await admin.post('/api/conversations', { agentId: gpt.id });
+    const conversation = await newSession(admin, gpt.id);
     llm.queue = [{ toolCalls: [{ name: 'list_caixas', input: {} }], usage: { input: 50, output: 5, cacheRead: 30 } }];
     const sent = await chat(admin, conversation.id, 'quais caixas?');
     await drain();
@@ -696,7 +697,7 @@ describe('embeddings', () => {
       expect(indexUsage.rows[0]!.n).toBeGreaterThan(0);
 
       // A tool semantic_search vetoriza a consulta (uso atribuído ao usuário) e devolve a entidade.
-      const conversation = await admin.post('/api/conversations', { agentId: searcher.id });
+      const conversation = await newSession(admin, searcher.id);
       const sent = await chat(
         admin,
         conversation.id,
@@ -744,7 +745,7 @@ describe('MCP', () => {
     expect(patched.headerNames).toEqual(['Authorization', 'X-Extra']);
     expect((await admin.raw('GET', '/api/admin/ai/mcp-servers')).body).not.toContain(MCP_SECRET);
 
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+    const conversation = await newSession(admin, agent.id);
     const echo = mcpExposedName(server.name, 'echo');
     await chat(admin, conversation.id, `chamar ${echo} {"text":"oi"}`);
     await drain();
@@ -826,9 +827,9 @@ describe('MCP', () => {
   });
 });
 
-describe('conversas', () => {
-  it('renomear, fixar, arquivar, buscar, bifurcar e excluir (com anexos órfãos)', async () => {
-    const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+describe('sessões (spec 026)', () => {
+  it('renomear, buscar, bifurcar (finaliza a ativa) e excluir só a finalizada (com anexos órfãos)', async () => {
+    const conversation = await newSession(admin, agent.id);
     const pdf = Buffer.from('%PDF-1.4\n% teste\n');
     const up = await h.app.inject({
       method: 'POST',
@@ -854,28 +855,136 @@ describe('conversas', () => {
     });
     expect(download.statusCode).toBe(404);
 
-    await admin.patch(`/api/conversations/${conversation.id}`, { title: 'Reforma da casa', pinned: true });
-    let list = await admin.get('/api/conversations');
-    expect(list[0]).toMatchObject({ id: conversation.id, title: 'Reforma da casa', titleSource: 'user' });
+    const renamed = await admin.patch(`/api/conversations/${conversation.id}`, { title: 'Reforma da casa' });
+    expect(renamed).toMatchObject({ id: conversation.id, title: 'Reforma da casa', titleSource: 'user', archivedAt: null });
+    expect(renamed).not.toHaveProperty('pinnedAt');
     const found = await admin.get('/api/conversations?q=reforma');
     expect(found.map((c: any) => c.id)).toContain(conversation.id);
 
+    // Bifurcar da ativa: a cópia vira a ativa e a origem é finalizada (forked).
     const detail = await admin.get(`/api/conversations/${conversation.id}`);
     const fork = await admin.post(`/api/conversations/${conversation.id}/fork`, { messageId: detail.messages.at(-1).id, title: 'Cópia' });
     const forked = await admin.get(`/api/conversations/${fork.id}`);
     expect(forked.messages).toHaveLength(detail.messages.length);
     expect(forked.conversation.forkedFromConversationId).toBe(conversation.id);
-
-    await admin.patch(`/api/conversations/${conversation.id}`, { archived: true });
-    list = await admin.get('/api/conversations');
-    expect(list.map((c: any) => c.id)).not.toContain(conversation.id);
+    const source = (await admin.get(`/api/conversations/${conversation.id}`)).conversation;
+    expect(source).toMatchObject({ archivedReason: 'forked' });
+    expect(source.archivedAt).not.toBeNull();
     expect((await admin.get('/api/conversations?archived=1')).map((c: any) => c.id)).toContain(conversation.id);
+    // A busca cobre as finalizadas também.
+    expect((await admin.get('/api/conversations?q=reforma')).map((c: any) => c.id)).toEqual(
+      expect.arrayContaining([conversation.id, fork.id]),
+    );
 
-    // O anexo continua ligado à bifurcação; excluindo as duas, o arquivo some.
+    // A ativa não se exclui: finalize antes. O anexo continua ligado à bifurcação; excluindo as duas, o arquivo some.
+    await admin.del(`/api/conversations/${fork.id}`, 422);
     await admin.del(`/api/conversations/${conversation.id}`);
     expect((await h.db.execute(sql`SELECT 1 FROM attachments WHERE id = ${attachment.id}`)).rows).toHaveLength(1);
+    await admin.post(`/api/conversations/${fork.id}/finish`);
     await admin.del(`/api/conversations/${fork.id}`);
     expect((await h.db.execute(sql`SELECT 1 FROM attachments WHERE id = ${attachment.id}`)).rows).toHaveLength(0);
+  });
+
+  it('uma ativa por par; mensagem sem ativa cria; finalizar para a execução rodando; o modelo recebe só a ativa', async () => {
+    const owner = await userSession(h);
+    const api = client(h, owner.cookie);
+    // Corrida de duas abas: as duas recebem a mesma sessão ativa.
+    const [first, second] = await Promise.all([
+      api.post(`/api/agents/${agent.id}/sessions`, {}),
+      api.post(`/api/agents/${agent.id}/sessions`, {}),
+    ]);
+    expect(second.id).toBe(first.id);
+    // A 2ª ativa do mesmo par é recusada (23505 traduzido).
+    const dup = await h.app.inject({
+      method: 'POST',
+      url: '/api/conversations',
+      payload: { agentId: agent.id },
+      headers: { cookie: owner.cookie },
+    });
+    expect(dup.statusCode).toBe(409);
+    expect(dup.json().error).toMatchObject({ code: 'ai_conversations_active_chat_key', message: expect.stringMatching(/sessão ativa/) });
+
+    // A mensagem pelo agente entra na ativa.
+    const token = `segredo-da-sessao-${uid()}`;
+    const hello = await api.post(`/api/agents/${agent.id}/messages`, { text: `oi ${token}` });
+    expect(hello).toMatchObject({ created: false, conversation: { id: first.id } });
+    await drain();
+
+    // Finalizar com a execução rodando: o parar é pedido e a sessão é arquivada na hora.
+    const slow = await api.post(`/api/agents/${agent.id}/messages`, { text: 'responda devagar' });
+    const claimed = await h.db.execute<ClaimedRun>(sql`SELECT * FROM ai_run_claim(1, '1 hour')`);
+    expect(claimed.rows[0]!.id).toBe(slow.run.id);
+    const job = processRun({ db: h.db, config: h.config, log }, claimed.rows[0]!);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const finished = await api.post(`/api/conversations/${first.id}/finish`);
+    expect(finished).toMatchObject({ id: first.id, archivedReason: 'finished' });
+    expect(finished.archivedAt).not.toBeNull();
+    expect((await api.get(`/api/runs/${slow.run.id}`)).cancelRequested).toBe(true);
+    await job;
+    expect((await runStatus(slow.run.id)).status).toBe('canceled');
+    // Finalizar de novo não muda nada; a finalizada não recebe mensagem nem volta (23514).
+    expect((await api.post(`/api/conversations/${first.id}/finish`)).archivedAt).toBe(finished.archivedAt);
+    const closed = await h.app.inject({
+      method: 'POST',
+      url: `/api/conversations/${first.id}/messages`,
+      payload: { text: 'ainda aí?' },
+      headers: { cookie: owner.cookie },
+    });
+    expect(closed.statusCode).toBe(409);
+    expect(closed.json().error.code).toBe('session_finished');
+    const unarchive = await h.db
+      .execute(sql`UPDATE ai_conversations SET archived_at = NULL WHERE id = ${first.id}`)
+      .catch((error) => translateDbError(error));
+    expect(unarchive).toMatchObject({ status: 422, message: expect.stringMatching(/Bifurque/) });
+
+    // Sem ativa, a próxima mensagem cria a sessão nova; o modelo não recebe o histórico da finalizada.
+    const before = llm.calls.length;
+    const next = await api.post(`/api/agents/${agent.id}/messages`, { text: 'começo novo' });
+    expect(next.created).toBe(true);
+    expect(next.conversation.id).not.toBe(first.id);
+    await drain();
+    const sent = llm.calls
+      .slice(before)
+      .filter((c) => c.path === '/v1/messages' && JSON.stringify(c.body.messages).includes('começo novo'));
+    expect(sent.length).toBeGreaterThan(0);
+    for (const call of sent) expect(JSON.stringify(call.body)).not.toContain(token);
+
+    // O fio: a ativa, a última atividade e as finalizadas (paginadas, com busca).
+    const threads = await api.get('/api/agents/threads');
+    const thread = threads.find((th: any) => th.agentId === agent.id);
+    expect(thread).toMatchObject({ agentName: agent.name, agentUsable: true, userId: owner.id, finishedCount: 1 });
+    expect(thread.active.id).toBe(next.conversation.id);
+    expect(thread.lastActivityAt).not.toBeNull();
+    const sessions = await api.get(`/api/agents/${agent.id}/sessions`);
+    expect(sessions).toMatchObject({ hasMore: false, items: [{ id: first.id, archivedReason: 'finished' }] });
+    expect((await api.get(`/api/agents/${agent.id}/sessions?q=${token}`)).items.map((c: any) => c.id)).toEqual([first.id]);
+    expect((await api.get(`/api/agents/${agent.id}/sessions?q=inexistente-${uid()}`)).items).toEqual([]);
+    const view = await api.get(`/api/agents/${agent.id}/thread`);
+    expect(view.agent).toMatchObject({ id: agent.id, isActive: true });
+    expect(view.session.conversation.id).toBe(next.conversation.id);
+    expect(view.media).toEqual({ transcription: false, speech: false });
+
+    // Bifurcar da finalizada com a ativa na fila: a ativa é finalizada (forked), a execução cancelada e a cópia vira a ativa.
+    const queued = await api.post(`/api/agents/${agent.id}/messages`, { text: 'na fila' });
+    const firstDetail = await api.get(`/api/conversations/${first.id}`);
+    const copy = await api.post(`/api/conversations/${first.id}/fork`, { messageId: firstDetail.messages.at(-1).id });
+    expect(copy).toMatchObject({ archivedAt: null, forkedFromConversationId: first.id });
+    expect((await runStatus(queued.run.id)).status).toBe('canceled');
+    expect((await api.get(`/api/conversations/${next.conversation.id}`)).conversation.archivedReason).toBe('forked');
+    expect((await api.get(`/api/agents/${agent.id}/thread`)).session.conversation.id).toBe(copy.id);
+    const page = await api.get(`/api/agents/${agent.id}/sessions?limit=1`);
+    expect(page.items.map((c: any) => c.id)).toEqual([next.conversation.id]);
+    expect(page.hasMore).toBe(true);
+
+    // Admin: lê os fios e as sessões dos outros; o usuário comum não.
+    const ofOwner = await admin.get(`/api/agents/threads?userId=${owner.id}`);
+    expect(ofOwner.map((th: any) => [th.agentId, th.userId, th.active?.id])).toEqual([[agent.id, owner.id, copy.id]]);
+    expect((await admin.get('/api/agents/threads?userId=all')).some((th: any) => th.userId === owner.id)).toBe(true);
+    expect((await admin.get(`/api/agents/${agent.id}/sessions?userId=${owner.id}`)).items.length).toBe(2);
+    await api.get(`/api/agents/threads?userId=${adminSession.id}`, 403);
+    await api.get(`/api/agents/${agent.id}/sessions?userId=${adminSession.id}`, 403);
+    // O admin não finaliza nem bifurca a sessão de outro.
+    await admin.post(`/api/conversations/${copy.id}/finish`, {}, 403);
   });
 });
 
@@ -897,7 +1006,7 @@ describe('conciliação pelo agente', () => {
 
   /** Uma chamada de tool pelo agente (o provedor falso pede "chamar <tool> <json>"); devolve o resultado. */
   async function callTool(agentId: string, name: string, input: unknown) {
-    const conversation = await admin.post('/api/conversations', { agentId });
+    const conversation = await newSession(admin, agentId);
     const sent = await chat(admin, conversation.id, `chamar ${name} ${JSON.stringify(input)}`);
     await drain();
     const detail = await admin.get(`/api/conversations/${conversation.id}`);

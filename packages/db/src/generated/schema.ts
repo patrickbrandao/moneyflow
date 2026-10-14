@@ -1434,64 +1434,6 @@ END AND ((status = 'matched'::text) = (matched_at IS NOT NULL))`,
   ],
 );
 
-export const aiConversations = pgTable(
-  'ai_conversations',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    userId: uuid('user_id').notNull(),
-    agentId: uuid('agent_id').notNull(),
-    title: text(),
-    titleSource: text('title_source').default('auto').notNull(),
-    pinnedAt: timestamp('pinned_at', { withTimezone: true, mode: 'string' }),
-    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
-    forkedFromConversationId: uuid('forked_from_conversation_id'),
-    forkedFromMessageId: uuid('forked_from_message_id'),
-    screenContext: jsonb('screen_context'),
-    lastMessageAt: timestamp('last_message_at', { withTimezone: true, mode: 'string' }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    purpose: text().default('chat').notNull(),
-  },
-  (table) => [
-    index('ai_conversations_agent_id_idx').using('btree', table.agentId.asc().nullsLast().op('uuid_ops')),
-    index('ai_conversations_chat_user_idx')
-      .using('btree', table.userId.asc().nullsLast().op('timestamptz_ops'), table.lastMessageAt.desc().nullsLast().op('timestamptz_ops'))
-      .where(sql`(purpose = 'chat'::text)`),
-    index('ai_conversations_forked_from_idx').using(
-      'btree',
-      table.forkedFromConversationId.asc().nullsLast().op('uuid_ops'),
-      table.forkedFromMessageId.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('ai_conversations_purpose_idx')
-      .using('btree', table.purpose.asc().nullsLast().op('text_ops'), table.createdAt.asc().nullsLast().op('timestamptz_ops'))
-      .where(sql`(purpose <> 'chat'::text)`),
-    index('ai_conversations_title_trgm_idx').using('gin', table.title.asc().nullsLast().op('gin_trgm_ops')),
-    index('ai_conversations_user_id_idx').using(
-      'btree',
-      table.userId.asc().nullsLast().op('uuid_ops'),
-      table.lastMessageAt.desc().nullsLast().op('uuid_ops'),
-    ),
-    foreignKey({
-      columns: [table.agentId],
-      foreignColumns: [aiAgents.id],
-      name: 'ai_conversations_agent_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.userId],
-      foreignColumns: [users.id],
-      name: 'ai_conversations_user_id_fkey',
-    }).onDelete('cascade'),
-    check('ai_conversations_fork_check', sql`forked_from_conversation_id <> id`),
-    check(
-      'ai_conversations_purpose_check',
-      sql`purpose = ANY (ARRAY['chat'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text])`,
-    ),
-    check('ai_conversations_screen_context_check', sql`jsonb_typeof(screen_context) = 'object'::text`),
-    check('ai_conversations_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
-    check('ai_conversations_title_source_check', sql`title_source = ANY (ARRAY['auto'::text, 'user'::text])`),
-  ],
-);
-
 export const auditLog = pgTable(
   'audit_log',
   {
@@ -1711,11 +1653,6 @@ export const aiRuns = pgTable(
       name: 'ai_runs_agent_id_fkey',
     }),
     foreignKey({
-      columns: [table.conversationId],
-      foreignColumns: [aiConversations.id],
-      name: 'ai_runs_conversation_id_fkey',
-    }).onDelete('cascade'),
-    foreignKey({
       columns: [table.providerId],
       foreignColumns: [aiProviders.id],
       name: 'ai_runs_provider_id_fkey',
@@ -1820,11 +1757,6 @@ export const aiMessages = pgTable(
       table.runId.asc().nullsLast().op('uuid_ops'),
     ),
     index('ai_messages_search_tsv_idx').using('gin', table.searchTsv.asc().nullsLast().op('tsvector_ops')),
-    foreignKey({
-      columns: [table.conversationId],
-      foreignColumns: [aiConversations.id],
-      name: 'ai_messages_conversation_id_fkey',
-    }).onDelete('cascade'),
     foreignKey({
       columns: [table.conversationId, table.runId],
       foreignColumns: [aiRuns.id, aiRuns.conversationId],
@@ -2772,6 +2704,77 @@ export const aiModelPrices = pgTable(
       'ai_model_prices_values_check',
       sql`(input_price_per_million >= (0)::numeric) AND (output_price_per_million >= (0)::numeric) AND (cache_write_price_per_million >= (0)::numeric) AND (cache_read_price_per_million >= (0)::numeric)`,
     ),
+  ],
+);
+
+export const aiConversations = pgTable(
+  'ai_conversations',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    userId: uuid('user_id').notNull(),
+    agentId: uuid('agent_id').notNull(),
+    title: text(),
+    titleSource: text('title_source').default('auto').notNull(),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    forkedFromConversationId: uuid('forked_from_conversation_id'),
+    forkedFromMessageId: uuid('forked_from_message_id'),
+    screenContext: jsonb('screen_context'),
+    lastMessageAt: timestamp('last_message_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    purpose: text().default('chat').notNull(),
+    archivedReason: text('archived_reason'),
+  },
+  (table) => [
+    uniqueIndex('ai_conversations_active_chat_key')
+      .using('btree', table.userId.asc().nullsLast().op('uuid_ops'), table.agentId.asc().nullsLast().op('uuid_ops'))
+      .where(sql`((purpose = 'chat'::text) AND (archived_at IS NULL))`),
+    index('ai_conversations_agent_id_idx').using('btree', table.agentId.asc().nullsLast().op('uuid_ops')),
+    index('ai_conversations_chat_user_idx')
+      .using('btree', table.userId.asc().nullsLast().op('timestamptz_ops'), table.lastMessageAt.desc().nullsLast().op('timestamptz_ops'))
+      .where(sql`(purpose = 'chat'::text)`),
+    index('ai_conversations_forked_from_idx').using(
+      'btree',
+      table.forkedFromConversationId.asc().nullsLast().op('uuid_ops'),
+      table.forkedFromMessageId.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('ai_conversations_purpose_idx')
+      .using('btree', table.purpose.asc().nullsLast().op('timestamptz_ops'), table.createdAt.asc().nullsLast().op('timestamptz_ops'))
+      .where(sql`(purpose <> 'chat'::text)`),
+    index('ai_conversations_title_trgm_idx').using('gin', table.title.asc().nullsLast().op('gin_trgm_ops')),
+    index('ai_conversations_user_id_idx').using(
+      'btree',
+      table.userId.asc().nullsLast().op('uuid_ops'),
+      table.lastMessageAt.desc().nullsLast().op('uuid_ops'),
+    ),
+    foreignKey({
+      columns: [table.agentId],
+      foreignColumns: [aiAgents.id],
+      name: 'ai_conversations_agent_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.forkedFromConversationId, table.forkedFromMessageId],
+      foreignColumns: [aiMessages.id, aiMessages.conversationId],
+      name: 'ai_conversations_forked_from_message_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'ai_conversations_user_id_fkey',
+    }).onDelete('cascade'),
+    check('ai_conversations_archived_reason_archived_check', sql`(archived_reason IS NULL) OR (archived_at IS NOT NULL)`),
+    check(
+      'ai_conversations_archived_reason_check',
+      sql`archived_reason = ANY (ARRAY['finished'::text, 'forked'::text, 'migrated_from_multi'::text, 'import_conflict'::text])`,
+    ),
+    check('ai_conversations_fork_check', sql`forked_from_conversation_id <> id`),
+    check(
+      'ai_conversations_purpose_check',
+      sql`purpose = ANY (ARRAY['chat'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text])`,
+    ),
+    check('ai_conversations_screen_context_check', sql`jsonb_typeof(screen_context) = 'object'::text`),
+    check('ai_conversations_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
+    check('ai_conversations_title_source_check', sql`title_source = ANY (ARRAY['auto'::text, 'user'::text])`),
   ],
 );
 

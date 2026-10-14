@@ -280,8 +280,9 @@ export type ConversationDto = {
   agentColorSlot: number;
   title: string | null;
   titleSource: 'auto' | 'user';
-  pinnedAt: string | null;
+  /** Finalizada (spec 026): a sessão `chat` com archived_at não volta a ser ativa. */
   archivedAt: string | null;
+  archivedReason: SessionArchivedReason | null;
   forkedFromConversationId: string | null;
   lastMessageAt: string | null;
   createdAt: string;
@@ -394,6 +395,41 @@ export type MessageSpeechDto = {
 };
 
 export type SendMessageResult = { message: AiMessageDto; run: AiRunDto };
+
+/* ---------------- sessões por agente (spec 026) ---------------- */
+
+/** Por que a sessão foi finalizada: o usuário, o fork, a migração de várias ativas ou o conflito na importação. */
+export type SessionArchivedReason = 'finished' | 'forked' | 'migrated_from_multi' | 'import_conflict';
+
+/** O fio de um usuário com um agente: a sessão ativa e o resumo (menu Agentes). */
+export type AgentThreadDto = {
+  agentId: string;
+  agentName: string;
+  agentDescription: string | null;
+  agentColorSlot: number;
+  agentIcon: string | null;
+  /** O agente e o provedor estão ativos (dá para conversar). */
+  agentUsable: boolean;
+  userId: string;
+  username: string;
+  /** A sessão ativa (null = a próxima mensagem cria uma). */
+  active: ConversationDto | null;
+  /** Última atividade em qualquer sessão do fio (null = nunca conversou). */
+  lastActivityAt: string | null;
+  finishedCount: number;
+};
+
+/** A janela do agente: o agente, o que ele converte e a sessão ativa (null = nenhuma ainda). */
+export type AgentThreadView = {
+  agent: AgentOptionDto;
+  media: { transcription: boolean; speech: boolean };
+  session: ConversationDetail | null;
+};
+
+export type AgentSessionsPage = { items: ConversationDto[]; hasMore: boolean };
+
+/** Mensagem enviada ao agente: a sessão em que entrou (criada se não havia ativa). */
+export type AgentSendResult = SendMessageResult & { conversation: ConversationDto; created: boolean };
 export type DecideResult = { decided: number; pending: number; runStatus: AiRunStatus };
 
 /** Eventos do SSE de uma execução (event_type + payload). */
