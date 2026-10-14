@@ -273,6 +273,65 @@ COMMENT ON FUNCTION public.admin_reveal_password(target_user_id uuid, actor_user
 
 
 --
+-- Name: ai_agent_inferences_audit_row(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_inferences_audit_row() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed, coalesce(n ->> 'agent_id', o ->> 'agent_id')::uuid);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_agent_inferences_audit_row(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_agent_inferences_audit_row() IS 'Trigger de auditoria de ai_agent_inferences: grava com record_id = agent_id (a linha não tem id), para as inferências aparecerem no histórico do agente.';
+
+
+--
+-- Name: ai_agent_inferences_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_inferences_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  caps text[];
+BEGIN
+  -- FOR SHARE: espera (e depois relê) uma troca de flags em andamento no provedor.
+  SELECT p.capabilities INTO caps FROM ai_providers p WHERE p.id = NEW.provider_id FOR SHARE;
+  IF FOUND AND NOT (NEW.capability = ANY (caps)) THEN
+    RAISE EXCEPTION 'ai_agent_inferences: provider % does not have the % capability', NEW.provider_id, NEW.capability
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_agent_inferences_provider_capability_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: ai_agent_params_valid(jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -464,6 +523,28 @@ COMMENT ON FUNCTION public.ai_agents_prompt_version_init() IS 'Constraint trigge
 
 
 --
+-- Name: ai_agents_provider_capability(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agents_provider_capability() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  caps text[];
+BEGIN
+  IF NEW.provider_id IS NOT NULL AND (TG_OP = 'INSERT' OR NEW.provider_id IS DISTINCT FROM OLD.provider_id) THEN
+    SELECT p.capabilities INTO caps FROM ai_providers p WHERE p.id = NEW.provider_id FOR SHARE;
+    IF FOUND AND NOT ('text' = ANY (caps)) THEN
+      RAISE EXCEPTION 'ai_agents: text provider % does not have the text capability', NEW.provider_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_agents_provider_text_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: ai_agents_system_prompt_guard(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -491,6 +572,129 @@ $$;
 --
 
 COMMENT ON FUNCTION public.ai_agents_system_prompt_guard() IS 'Recusa (23514 ai_agents_system_prompt_version_check) UPDATE que deixe system_prompt diferente da última versão. Agente ainda sem versão (no meio da transação que o criou) aceita.';
+
+
+--
+-- Name: ai_attachment_derivatives_guard(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_attachment_derivatives_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF (NEW.attachment_id, NEW.message_id, NEW.block_index, NEW.kind, NEW.provider_id, NEW.model, NEW.voice)
+     IS DISTINCT FROM (OLD.attachment_id, OLD.message_id, OLD.block_index, OLD.kind, OLD.provider_id, OLD.model, OLD.voice) THEN
+    RAISE EXCEPTION 'ai_attachment_derivatives: origin, kind, provider, model and voice of derivative % are immutable', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_attachment_derivatives_immutable_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: ai_attachment_derivatives_release_result(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_attachment_derivatives_release_result() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF OLD.result_attachment_id IS NOT NULL
+     AND (TG_OP = 'DELETE' OR NEW.result_attachment_id IS DISTINCT FROM OLD.result_attachment_id)
+     AND NOT EXISTS (SELECT 1 FROM attachment_links l WHERE l.attachment_id = OLD.result_attachment_id) THEN
+    DELETE FROM attachments a WHERE a.id = OLD.result_attachment_id;
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_attachment_derivatives_release_result(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_attachment_derivatives_release_result() IS 'AFTER UPDATE OF result_attachment_id / DELETE: apaga o áudio gerado antigo se ele não aparece mais em attachment_links (excluir a conversa leva as mensagens, os derivados speech e os áudios gerados).';
+
+
+--
+-- Name: ai_capability_credentials(uuid, text, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_capability_credentials(p_agent_id uuid, p_capability text, p_actor_user_id uuid) RETURNS TABLE(provider_id uuid, kind text, base_url text, api_key text, model text, voice text)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  ag  public.ai_agents;
+  inf public.ai_agent_inferences;
+  p   public.ai_providers;
+BEGIN
+  IF p_capability IS NULL OR p_capability NOT IN ('text', 'vision', 'embeddings', 'transcription', 'speech') THEN
+    RAISE EXCEPTION 'ai_capability_credentials: unknown capability %', p_capability USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.users u WHERE u.id = p_actor_user_id AND u.is_active) THEN
+    RAISE EXCEPTION 'ai_capability_credentials: actor % is not an active user', p_actor_user_id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  SELECT * INTO ag FROM public.ai_agents a WHERE a.id = p_agent_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_capability_credentials: agent % not found', p_agent_id USING ERRCODE = 'no_data_found';
+  END IF;
+  IF NOT ag.is_active OR ag.archived_at IS NOT NULL THEN
+    RAISE EXCEPTION 'ai_capability_credentials: agent % is not active', p_agent_id USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
+  IF p_capability = 'text' THEN
+    SELECT * INTO p FROM public.ai_providers x WHERE x.id = ag.provider_id;
+  ELSE
+    SELECT * INTO inf FROM public.ai_agent_inferences i WHERE i.agent_id = ag.id AND i.capability = p_capability;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'ai_capability_credentials: agent % has no provider for %', p_agent_id, p_capability
+        USING ERRCODE = 'no_data_found';
+    END IF;
+    SELECT * INTO p FROM public.ai_providers x WHERE x.id = inf.provider_id;
+  END IF;
+  IF p.id IS NULL OR NOT p.is_active OR p.archived_at IS NOT NULL OR NOT (p_capability = ANY (p.capabilities)) THEN
+    RAISE EXCEPTION 'ai_capability_credentials: provider % is not active or lacks the % capability', p.id, p_capability
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
+  RETURN QUERY
+  SELECT p.id, p.kind, p.base_url, p.api_key,
+         CASE WHEN p_capability = 'text' THEN ag.model ELSE coalesce(inf.model, p.default_models ->> p_capability) END,
+         CASE WHEN p_capability = 'speech' THEN coalesce(inf.voice, p.default_models ->> 'speech_voice') END;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_capability_credentials(p_agent_id uuid, p_capability text, p_actor_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_capability_credentials(p_agent_id uuid, p_capability text, p_actor_user_id uuid) IS 'Provedor, URL, chave, modelo e voz de uma inferência do agente (text, vision, embeddings, transcription, speech), fora ou dentro de uma execução (transcrição no upload, TTS, embedding da consulta, visão por descrição no runner). Modelo nulo da inferência = default_models do provedor (pode voltar nulo: não configurado); text = provedor e modelo do agente; voz só no speech. Erros: 22023 capacidade desconhecida; 42501 ator não é usuário ativo, agente inativo/arquivado, provedor inativo/arquivado ou sem a flag; P0002 agente inexistente ou sem provedor para a capacidade. O ator vem da sessão autenticada (na execução, o usuário dela).';
+
+
+--
+-- Name: ai_capability_list_valid(text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_capability_list_valid(p_capabilities text[]) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT p_capabilities IS NOT NULL
+     AND coalesce(array_ndims(p_capabilities), 1) = 1
+     AND array_position(p_capabilities, NULL) IS NULL
+     AND p_capabilities <@ ARRAY['text', 'vision', 'embeddings', 'transcription', 'speech']
+     AND (SELECT count(DISTINCT c) FROM unnest(p_capabilities) c) = cardinality(p_capabilities)
+$$;
+
+
+--
+-- Name: FUNCTION ai_capability_list_valid(p_capabilities text[]); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_capability_list_valid(p_capabilities text[]) IS 'true se a lista é um subconjunto, sem nulos nem repetição, de text, vision, embeddings, transcription e speech (lista vazia vale).';
 
 
 --
@@ -606,24 +810,125 @@ $$;
 
 
 --
--- Name: ai_embedding_credentials(); Type: FUNCTION; Schema: public; Owner: -
+-- Name: ai_embedding_credentials(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.ai_embedding_credentials() RETURNS TABLE(provider_id uuid, kind text, base_url text, api_key text, embedding_model text)
-    LANGUAGE sql STABLE SECURITY DEFINER
+CREATE FUNCTION public.ai_embedding_credentials(p_provider_id uuid) RETURNS TABLE(provider_id uuid, kind text, base_url text, api_key text, default_model text)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public', 'pg_temp'
     AS $$
-  SELECT p.id, p.kind, p.base_url, p.api_key, p.embedding_model
-    FROM public.ai_providers p
-   WHERE p.embedding_model IS NOT NULL AND p.is_active
+DECLARE
+  p public.ai_providers;
+BEGIN
+  SELECT * INTO p FROM public.ai_providers x WHERE x.id = p_provider_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_embedding_credentials: provider % not found', p_provider_id USING ERRCODE = 'no_data_found';
+  END IF;
+  IF NOT p.is_active OR p.archived_at IS NOT NULL OR NOT ('embeddings' = ANY (p.capabilities)) THEN
+    RAISE EXCEPTION 'ai_embedding_credentials: provider % is not active or lacks the embeddings capability', p.id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN QUERY SELECT p.id, p.kind, p.base_url, p.api_key, p.default_models ->> 'embeddings';
+END
 $$;
 
 
 --
--- Name: FUNCTION ai_embedding_credentials(); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION ai_embedding_credentials(p_provider_id uuid); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_embedding_credentials() IS 'Worker (indexação e busca semântica): credenciais do provedor de embeddings ativo (0 ou 1 linha). Sem linha = sem embeddings; a busca dos agentes cai para trigram.';
+COMMENT ON FUNCTION public.ai_embedding_credentials(p_provider_id uuid) IS 'Worker (indexação de um par): tipo, URL, chave e modelo padrão de embeddings do provedor. Erro 42501 se o provedor está inativo, arquivado ou sem a flag embeddings; P0002 se não existe. Use o modelo do par, não o padrão, quando forem diferentes.';
+
+
+--
+-- Name: ai_embedding_indexes_purge(interval); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_embedding_indexes_purge(p_idle interval DEFAULT '7 days'::interval) RETURNS bigint
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  n bigint;
+BEGIN
+  IF p_idle IS NULL OR p_idle < interval '1 hour' THEN
+    RAISE EXCEPTION 'ai_embedding_indexes_purge: idle interval must be at least 1 hour'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- Os vetores primeiro (para contar), depois os pares (a FK levaria os vetores de qualquer jeito).
+  WITH gone AS (
+    DELETE FROM ai_embeddings e USING ai_embedding_indexes x
+     WHERE e.provider_id = x.provider_id AND e.model = x.model
+       AND x.last_in_use_at < now() - p_idle
+       AND NOT EXISTS (SELECT 1 FROM ai_embedding_pairs_in_use u WHERE u.provider_id = x.provider_id AND u.model = x.model)
+    RETURNING 1
+  )
+  SELECT count(*) INTO n FROM gone;
+  DELETE FROM ai_embedding_indexes x
+   WHERE x.last_in_use_at < now() - p_idle
+     AND NOT EXISTS (SELECT 1 FROM ai_embedding_pairs_in_use u WHERE u.provider_id = x.provider_id AND u.model = x.model);
+  RETURN n;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_embedding_indexes_purge(p_idle interval); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_embedding_indexes_purge(p_idle interval) IS 'Worker: apaga os pares fora de uso cujo last_in_use_at é mais velho que p_idle (padrão 7 dias), com os vetores, e devolve quantos vetores saíram. Erro 22023 com p_idle nulo ou menor que 1 hora.';
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: ai_embedding_indexes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_embedding_indexes (
+    provider_id uuid NOT NULL,
+    model text NOT NULL,
+    last_in_use_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_embedding_indexes_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text))
+);
+
+
+--
+-- Name: TABLE ai_embedding_indexes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_embedding_indexes IS 'Um índice de embeddings por par (provedor, modelo) (spec 024). O worker registra os pares em uso a cada ciclo (ai_embedding_indexes_touch) e apaga os parados há mais de 7 dias com os vetores (ai_embedding_indexes_purge). Todo vetor pertence a um par registrado (FK; registre antes de gravar). Estado operacional: fora da auditoria e do backup.';
+
+
+--
+-- Name: COLUMN ai_embedding_indexes.last_in_use_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embedding_indexes.last_in_use_at IS 'Última vez em que algum agente ativo usava o par.';
+
+
+--
+-- Name: ai_embedding_indexes_touch(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_embedding_indexes_touch() RETURNS SETOF public.ai_embedding_indexes
+    LANGUAGE sql
+    AS $$
+  INSERT INTO ai_embedding_indexes AS x (provider_id, model, last_in_use_at)
+  SELECT u.provider_id, u.model, now() FROM ai_embedding_pairs_in_use u
+  ON CONFLICT (provider_id, model) DO UPDATE SET last_in_use_at = excluded.last_in_use_at
+  RETURNING x.*
+$$;
+
+
+--
+-- Name: FUNCTION ai_embedding_indexes_touch(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_embedding_indexes_touch() IS 'Worker, a cada ciclo: registra os pares em uso (ai_embedding_pairs_in_use) com last_in_use_at = agora e os devolve (o que indexar). Rode antes de gravar vetores de um par novo (a FK de ai_embeddings exige o par).';
 
 
 --
@@ -687,34 +992,42 @@ COMMENT ON FUNCTION public.ai_embeddings_purge_orphans() IS 'Apaga os embeddings
 
 
 --
--- Name: ai_embeddings_search(public.vector, text, uuid[], text[], integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: ai_embeddings_search(public.vector, uuid, text, uuid[], text[], integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.ai_embeddings_search(p_query public.vector, p_model text, p_caixa_ids uuid[], p_object_types text[] DEFAULT NULL::text[], p_limit integer DEFAULT 20) RETURNS TABLE(object_type text, object_id uuid, caixa_id uuid, source_text text, distance double precision)
+CREATE FUNCTION public.ai_embeddings_search(p_query public.vector, p_provider_id uuid, p_model text, p_caixa_ids uuid[], p_object_types text[] DEFAULT NULL::text[], p_limit integer DEFAULT 20) RETURNS TABLE(object_type text, object_id uuid, caixa_id uuid, source_text text, distance double precision)
     LANGUAGE plpgsql STABLE
+    SET "hnsw.iterative_scan" TO 'relaxed_order'
     AS $$
 BEGIN
-  IF p_query IS NULL OR p_model IS NULL OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 200 THEN
-    RAISE EXCEPTION 'ai_embeddings_search: query vector, model and limit 1..200 are required'
+  IF p_query IS NULL OR p_provider_id IS NULL OR p_model IS NULL OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 200 THEN
+    RAISE EXCEPTION 'ai_embeddings_search: query vector, provider, model and limit 1..200 are required'
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
+  -- Vários pares no mesmo HNSW: com o filtro depois do índice, a varredura iterativa continua até achar p_limit
+  -- linhas do par; relaxed_order pode devolver fora de ordem, então reordena por fora. O "+ 0" impede o planejador
+  -- (PostgreSQL 17+) de reaproveitar a ordem declarada pela CTE e pular a ordenação.
   RETURN QUERY
-  SELECT e.object_type, e.object_id, e.caixa_id, e.source_text, (e.embedding <=> p_query)::double precision
-    FROM ai_embeddings e
-   WHERE e.model = p_model AND e.embedding IS NOT NULL
-     AND (e.caixa_id IS NULL OR e.caixa_id = ANY (coalesce(p_caixa_ids, '{}')))
-     AND (p_object_types IS NULL OR e.object_type = ANY (p_object_types))
-   ORDER BY e.embedding <=> p_query
-   LIMIT p_limit;
+  WITH nearest AS MATERIALIZED (
+    SELECT e.object_type AS o_type, e.object_id AS o_id, e.caixa_id AS c_id, e.source_text AS s_text,
+           (e.embedding <=> p_query)::double precision AS dist
+      FROM ai_embeddings e
+     WHERE e.provider_id = p_provider_id AND e.model = p_model AND e.embedding IS NOT NULL
+       AND (e.caixa_id IS NULL OR e.caixa_id = ANY (coalesce(p_caixa_ids, '{}')))
+       AND (p_object_types IS NULL OR e.object_type = ANY (p_object_types))
+     ORDER BY e.embedding <=> p_query
+     LIMIT p_limit
+  )
+  SELECT n.o_type, n.o_id, n.c_id, n.s_text, n.dist FROM nearest n ORDER BY n.dist + 0, n.o_type, n.o_id;
 END
 $$;
 
 
 --
--- Name: FUNCTION ai_embeddings_search(p_query public.vector, p_model text, p_caixa_ids uuid[], p_object_types text[], p_limit integer); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION ai_embeddings_search(p_query public.vector, p_provider_id uuid, p_model text, p_caixa_ids uuid[], p_object_types text[], p_limit integer); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_embeddings_search(p_query public.vector, p_model text, p_caixa_ids uuid[], p_object_types text[], p_limit integer) IS 'Vizinhos mais próximos (distância de cosseno, menor = mais parecido) do vetor de consulta, no mesmo modelo, só de objetos globais (caixa_id nulo) ou das caixas listadas (as que o usuário lê), opcionalmente por tipos. Vetores velhos (needs_reindex) ainda entram. Erro 22023 sem vetor/modelo ou com limite fora de 1..200.';
+COMMENT ON FUNCTION public.ai_embeddings_search(p_query public.vector, p_provider_id uuid, p_model text, p_caixa_ids uuid[], p_object_types text[], p_limit integer) IS 'Vizinhos mais próximos (distância de cosseno, menor = mais parecido) do vetor de consulta, no mesmo par (provedor, modelo), só de objetos globais (caixa_id nulo) ou das caixas listadas (as que o usuário lê), opcionalmente por tipos. Roda com hnsw.iterative_scan = relaxed_order (o filtro do par não derruba resultados) e reordena. Vetores velhos (needs_reindex) ainda entram. Erro 22023 sem vetor/provedor/modelo ou com limite fora de 1..200.';
 
 
 --
@@ -917,10 +1230,6 @@ END
 $$;
 
 
-SET default_tablespace = '';
-
-SET default_table_access_method = heap;
-
 --
 -- Name: ai_model_prices; Type: TABLE; Schema: public; Owner: -
 --
@@ -937,6 +1246,9 @@ CREATE TABLE public.ai_model_prices (
     valid_from timestamp with time zone DEFAULT now() NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    audio_input_per_minute numeric(14,6),
+    speech_per_million_chars numeric(14,6),
+    CONSTRAINT ai_model_prices_audio_values_check CHECK (((audio_input_per_minute >= (0)::numeric) AND (speech_per_million_chars >= (0)::numeric))),
     CONSTRAINT ai_model_prices_currency_check CHECK ((currency = ANY (ARRAY['USD'::text, 'BRL'::text]))),
     CONSTRAINT ai_model_prices_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
     CONSTRAINT ai_model_prices_values_check CHECK (((input_price_per_million >= (0)::numeric) AND (output_price_per_million >= (0)::numeric) AND (cache_write_price_per_million >= (0)::numeric) AND (cache_read_price_per_million >= (0)::numeric)))
@@ -1000,6 +1312,20 @@ COMMENT ON COLUMN public.ai_model_prices.valid_from IS 'Início da vigência des
 
 
 --
+-- Name: COLUMN ai_model_prices.audio_input_per_minute; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_model_prices.audio_input_per_minute IS 'Preço por minuto de áudio transcrito, para os modelos cobrados assim (ex.: whisper-1). Nulo = não cobra por minuto.';
+
+
+--
+-- Name: COLUMN ai_model_prices.speech_per_million_chars; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_model_prices.speech_per_million_chars IS 'Preço por 1 milhão de caracteres convertidos em fala, para os modelos cobrados assim (ex.: tts-1). Nulo = não cobra por caractere.';
+
+
+--
 -- Name: ai_model_price_at(uuid, text, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1018,6 +1344,48 @@ $$;
 --
 
 COMMENT ON FUNCTION public.ai_model_price_at(p_provider_id uuid, p_model text, p_at timestamp with time zone) IS 'Preço vigente do modelo no instante (linha mais recente com valid_from <= p_at); todos os campos nulos se não há preço.';
+
+
+--
+-- Name: ai_provider_default_models_valid(text[], jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_provider_default_models_valid(p_capabilities text[], p_models jsonb) RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $_$
+DECLARE
+  k text;
+  v jsonb;
+BEGIN
+  IF p_models IS NULL OR jsonb_typeof(p_models) <> 'object' THEN
+    RETURN false;
+  END IF;
+  FOR k, v IN SELECT * FROM jsonb_each(p_models) LOOP
+    IF jsonb_typeof(v) <> 'string' THEN
+      RETURN false;
+    END IF;
+    IF k = 'speech_voice' THEN
+      IF NOT ('speech' = ANY (coalesce(p_capabilities, '{}'))) OR v #>> '{}' !~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' THEN
+        RETURN false;
+      END IF;
+    ELSIF k IN ('text', 'vision', 'embeddings', 'transcription', 'speech') THEN
+      IF NOT (k = ANY (coalesce(p_capabilities, '{}'))) OR v #>> '{}' !~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$' THEN
+        RETURN false;
+      END IF;
+    ELSE
+      RETURN false;
+    END IF;
+  END LOOP;
+  RETURN true;
+END
+$_$;
+
+
+--
+-- Name: FUNCTION ai_provider_default_models_valid(p_capabilities text[], p_models jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_provider_default_models_valid(p_capabilities text[], p_models jsonb) IS 'true se default_models é um objeto só com as chaves text, vision, embeddings, transcription, speech (nome de modelo) e speech_voice (nome de voz, até 64), cada uma só com a capacidade ligada (speech_voice com speech). Nenhuma chave é obrigatória aqui; o modelo de texto do Anthropic compatível é exigido por ai_providers_validate.';
 
 
 --
@@ -1062,6 +1430,68 @@ $$;
 --
 
 COMMENT ON FUNCTION public.ai_provider_health(p_days integer, p_provider_id uuid) IS 'Saúde por provedor e modelo nos últimos p_days dias (1–365, padrão 7; senão 22023), só requisições terminadas, de um provedor (p_provider_id) ou de todos: requests, ok, errors, canceled; error_rate = erros ÷ (ok + erros), sem as canceladas (nula sem nenhuma); p50/p95 da duração e do primeiro byte das que deram certo (ms); média de tentativas; último erro. provider_id nulo = provedor não salvo ou excluído; model nulo = sem modelo (listar modelos).';
+
+
+--
+-- Name: ai_providers_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_providers_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  all_caps constant text[] := ARRAY['text', 'vision', 'embeddings', 'transcription', 'speech'];
+  removed text[];
+  names   text;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    NEW.capabilities := coalesce(NEW.capabilities,
+                                 CASE WHEN NEW.kind = 'anthropic' THEN ARRAY['text', 'vision'] ELSE all_caps END);
+    NEW.prompt_cache_enabled := coalesce(NEW.prompt_cache_enabled, NEW.base_url IS NULL);
+    NEW.thinking_enabled := coalesce(NEW.thinking_enabled, NEW.base_url IS NULL);
+  END IF;
+
+  -- Ordem canônica (a lista inválida fica como veio, para o CHECK recusar).
+  IF ai_capability_list_valid(NEW.capabilities) THEN
+    NEW.capabilities := ARRAY(SELECT c FROM unnest(all_caps) WITH ORDINALITY x (c, o)
+                               WHERE c = ANY (NEW.capabilities) ORDER BY o);
+  END IF;
+
+  -- Anthropic compatível: modelo de texto padrão obrigatório. Conferido quando algo que o afeta muda, para um
+  -- provedor antigo sem o modelo ainda poder ser ativado, desativado ou arquivado.
+  IF NEW.kind = 'anthropic' AND NEW.base_url IS NOT NULL AND 'text' = ANY (NEW.capabilities)
+     AND NOT (NEW.default_models ? 'text')
+     AND (TG_OP = 'INSERT' OR NEW.kind IS DISTINCT FROM OLD.kind OR NEW.base_url IS DISTINCT FROM OLD.base_url
+          OR NEW.capabilities IS DISTINCT FROM OLD.capabilities OR NEW.default_models IS DISTINCT FROM OLD.default_models) THEN
+    RAISE EXCEPTION 'ai_providers: an Anthropic-compatible provider (base_url) needs a default text model'
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_providers_text_model_check';
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    removed := ARRAY(SELECT unnest(OLD.capabilities) EXCEPT SELECT unnest(coalesce(NEW.capabilities, '{}')));
+    IF cardinality(removed) > 0 THEN
+      SELECT string_agg(DISTINCT x.name, ', ' ORDER BY x.name) INTO names
+        FROM (SELECT a.name FROM ai_agents a
+               WHERE 'text' = ANY (removed) AND a.provider_id = NEW.id
+              UNION ALL
+              SELECT a.name FROM ai_agent_inferences i JOIN ai_agents a ON a.id = i.agent_id
+               WHERE i.provider_id = NEW.id AND i.capability = ANY (removed)) x;
+      IF names IS NOT NULL THEN
+        RAISE EXCEPTION 'ai_providers: capability removed from provider % is in use by agents: %', NEW.id, names
+          USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_providers_capability_in_use_check', DETAIL = names;
+      END IF;
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_providers_validate(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_providers_validate() IS 'BEFORE INSERT/UPDATE de ai_providers: preenche capabilities, prompt_cache_enabled e thinking_enabled omitidos no INSERT (pelo tipo e pela base_url), põe as flags em ordem canônica, exige default_models.text no Anthropic compatível (ai_providers_text_model_check) e recusa tirar uma flag em uso por algum agente, arquivado inclusive (ai_providers_capability_in_use_check; os nomes dos agentes vão no DETAIL).';
 
 
 --
@@ -1611,6 +2041,10 @@ BEGIN
   IF NOT p.is_active OR p.archived_at IS NOT NULL THEN
     RAISE EXCEPTION 'ai_run_provider_credentials: provider % is not active', p.id USING ERRCODE = 'insufficient_privilege';
   END IF;
+  IF NOT ('text' = ANY (p.capabilities)) THEN
+    RAISE EXCEPTION 'ai_run_provider_credentials: provider % lacks the text capability', p.id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
   RETURN QUERY SELECT p.id, p.kind, p.base_url, p.api_key, r.model;
 END
 $$;
@@ -1620,7 +2054,7 @@ $$;
 -- Name: FUNCTION ai_run_provider_credentials(p_run_id uuid); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_run_provider_credentials(p_run_id uuid) IS 'Worker: provedor, URL, chave e modelo de uma execução RESERVADA (status running). Erro 42501 em outro status ou com o provedor inativo; P0002 se a execução não existe. Única forma de ler ai_providers.api_key durante o loop.';
+COMMENT ON FUNCTION public.ai_run_provider_credentials(p_run_id uuid) IS 'Worker: provedor, URL, chave e modelo de texto de uma execução RESERVADA (status running). Erro 42501 em outro status ou com o provedor inativo ou sem a flag text; P0002 se a execução não existe. Única forma de ler ai_providers.api_key durante o loop, além de ai_capability_credentials para as outras inferências.';
 
 
 --
@@ -2058,10 +2492,13 @@ BEGIN
     END IF;
   END IF;
   IF p.id IS NOT NULL THEN
+    -- Preços por milhão (tokens, caracteres) dão micros direto; o minuto de áudio vira micros × 1 000 000 / 60.
     NEW.cost_micros := round(NEW.input_tokens * p.input_price_per_million
                              + NEW.output_tokens * p.output_price_per_million
                              + NEW.cache_write_tokens * coalesce(p.cache_write_price_per_million, p.input_price_per_million)
-                             + NEW.cache_read_tokens * coalesce(p.cache_read_price_per_million, p.input_price_per_million))::bigint;
+                             + NEW.cache_read_tokens * coalesce(p.cache_read_price_per_million, p.input_price_per_million)
+                             + NEW.audio_seconds * coalesce(p.audio_input_per_minute, 0) * 1000000 / 60
+                             + NEW.characters * coalesce(p.speech_per_million_chars, 0))::bigint;
     NEW.currency := p.currency;
   ELSE
     NEW.cost_micros := NULL;
@@ -2076,7 +2513,7 @@ $$;
 -- Name: FUNCTION ai_usage_before_insert(); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_usage_before_insert() IS 'Completa conversa/usuário/agente/provedor/modelo da execução, confere as ligações (ai_usage_links_check), troca purpose chat pela finalidade da conversa quando ela é de fluxo e calcula o custo pelo preço vigente.';
+COMMENT ON FUNCTION public.ai_usage_before_insert() IS 'Completa conversa/usuário/agente/provedor/modelo da execução, confere as ligações (ai_usage_links_check), troca purpose chat pela finalidade da conversa quando ela é de fluxo e calcula o custo pelo preço vigente: tokens, segundos de áudio (audio_input_per_minute) e caracteres de fala (speech_per_million_chars).';
 
 
 --
@@ -6072,6 +6509,45 @@ COMMENT ON COLUMN public.agent_mcp_servers.enabled_tools IS 'Tools habilitadas d
 
 
 --
+-- Name: ai_agent_inferences; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_agent_inferences (
+    agent_id uuid NOT NULL,
+    capability text NOT NULL,
+    provider_id uuid NOT NULL,
+    model text,
+    voice text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_agent_inferences_capability_check CHECK ((capability = ANY (ARRAY['vision'::text, 'embeddings'::text, 'transcription'::text, 'speech'::text]))),
+    CONSTRAINT ai_agent_inferences_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
+    CONSTRAINT ai_agent_inferences_voice_check CHECK (((voice IS NULL) OR ((capability = 'speech'::text) AND (voice ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'::text))))
+);
+
+
+--
+-- Name: TABLE ai_agent_inferences; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_agent_inferences IS 'Provedor de cada inferência do agente além do texto (spec 024): vision, embeddings, transcription e speech; uma por agente e capacidade, sem linha = "Nenhum". O texto continua em ai_agents.provider_id/model. O provedor precisa ter a flag (ai_agent_inferences_provider_capability_check); excluir provedor em uso dá 23503. Some com o agente. Auditada com record_id = agent_id (histórico do agente).';
+
+
+--
+-- Name: COLUMN ai_agent_inferences.model; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_inferences.model IS 'Modelo (nulo = o padrão do provedor para a capacidade, default_models).';
+
+
+--
+-- Name: COLUMN ai_agent_inferences.voice; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_inferences.voice IS 'Voz do TTS, só em speech (nula = default_models.speech_voice do provedor).';
+
+
+--
 -- Name: ai_agent_prompt_versions; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6239,6 +6715,130 @@ COMMENT ON COLUMN public.ai_agents.tool_kit_id IS 'Kit de ferramentas (spec 021)
 
 
 --
+-- Name: ai_attachment_derivatives; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_attachment_derivatives (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    attachment_id uuid,
+    message_id uuid,
+    block_index integer,
+    kind text NOT NULL,
+    provider_id uuid,
+    model text,
+    voice text,
+    content text,
+    result_attachment_id uuid,
+    status text DEFAULT 'pending'::text NOT NULL,
+    error text,
+    attempts smallint DEFAULT 0 NOT NULL,
+    locked_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_attachment_derivatives_attempts_check CHECK (((attempts >= 0) AND (attempts <= 100))),
+    CONSTRAINT ai_attachment_derivatives_block_index_check CHECK (((block_index >= 0) AND (block_index <= 9999))),
+    CONSTRAINT ai_attachment_derivatives_content_check CHECK ((length(content) <= 5000000)),
+    CONSTRAINT ai_attachment_derivatives_error_check CHECK (((length(error) <= 4000) AND ((status <> 'failed'::text) OR (error IS NOT NULL)))),
+    CONSTRAINT ai_attachment_derivatives_kind_check CHECK ((kind = ANY (ARRAY['description'::text, 'pdf_text'::text, 'transcription'::text, 'speech'::text]))),
+    CONSTRAINT ai_attachment_derivatives_lock_check CHECK (((status = 'running'::text) = (locked_at IS NOT NULL))),
+    CONSTRAINT ai_attachment_derivatives_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
+    CONSTRAINT ai_attachment_derivatives_origin_check CHECK ((((attachment_id IS NULL) <> (message_id IS NULL)) AND ((message_id IS NULL) = (block_index IS NULL)) AND ((kind = 'speech'::text) = (message_id IS NOT NULL)))),
+    CONSTRAINT ai_attachment_derivatives_provider_check CHECK ((((kind = 'pdf_text'::text) = (provider_id IS NULL)) AND ((kind = 'pdf_text'::text) = (model IS NULL)))),
+    CONSTRAINT ai_attachment_derivatives_result_check CHECK ((((result_attachment_id IS NULL) OR (kind = 'speech'::text)) AND ((status <> 'done'::text) OR
+CASE
+    WHEN (kind = 'speech'::text) THEN (result_attachment_id IS NOT NULL)
+    ELSE (content IS NOT NULL)
+END))),
+    CONSTRAINT ai_attachment_derivatives_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'running'::text, 'done'::text, 'failed'::text]))),
+    CONSTRAINT ai_attachment_derivatives_voice_check CHECK (((voice IS NULL) OR ((kind = 'speech'::text) AND (voice ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'::text))))
+);
+
+
+--
+-- Name: TABLE ai_attachment_derivatives; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_attachment_derivatives IS 'Derivados (cache) de anexos e mensagens dos agentes (specs 024 e 025): description (o provedor de visão descreve o anexo para outro modelo de texto), pdf_text (camada de texto do PDF, extraída no servidor, sem provedor), transcription (áudio→texto) e speech (áudio gerado de uma mensagem). Um por origem, tipo, provedor, modelo e voz (ai_attachment_derivatives_key, NULLS NOT DISTINCT). Some com a origem; o áudio gerado aparece em attachment_links como ai_message_speech e é apagado com o derivado quando não tem outro vínculo. Fora da auditoria e do backup.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.attachment_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.attachment_id IS 'Origem anexo (description, pdf_text, transcription). Exatamente uma origem.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.message_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.message_id IS 'Origem mensagem (só speech), com block_index.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.block_index; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.block_index IS 'Parte da mensagem que virou áudio (0–9999, definida pela aplicação: o bloco de texto ou o trecho dividido no limite do provedor). Só com message_id.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.provider_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.provider_id IS 'Provedor que gerou (nulo só em pdf_text). Excluir o provedor leva o cache.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.model; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.model IS 'Modelo que gerou (nulo só em pdf_text).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.voice; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.voice IS 'Voz do TTS (só speech; opcional).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.content; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.content IS 'Texto gerado (descrição, texto do PDF, transcrição; até 5 milhões de caracteres). Obrigatório em done, menos no speech.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.result_attachment_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.result_attachment_id IS 'Áudio gerado (só speech; obrigatório em done). Entra em attachment_links (ai_message_speech, alvo = a mensagem); trocado ou com o derivado excluído, o anexo antigo é apagado se ficou sem vínculo.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.status IS 'pending (na fila), running (reservado: locked_at), done ou failed (com error).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.attempts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.attempts IS 'Tentativas feitas (0–100), para a fila desistir.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.locked_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.locked_at IS 'Instante da reserva, só em running (reserva velha = worker caiu).';
+
+
+--
 -- Name: ai_conversations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6336,6 +6936,143 @@ COMMENT ON COLUMN public.ai_conversations.purpose IS 'Finalidade, definida no IN
 
 
 --
+-- Name: ai_providers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_providers (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    name text NOT NULL,
+    kind text NOT NULL,
+    base_url text,
+    api_key text,
+    api_key_hint text GENERATED ALWAYS AS (
+CASE
+    WHEN (api_key IS NOT NULL) THEN ('…'::text || "right"(api_key, 4))
+    ELSE NULL::text
+END) STORED,
+    is_active boolean DEFAULT true NOT NULL,
+    created_by_user_id uuid,
+    notes text,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    log_bodies boolean DEFAULT false NOT NULL,
+    capabilities text[] NOT NULL,
+    default_models jsonb DEFAULT '{}'::jsonb NOT NULL,
+    prompt_cache_enabled boolean NOT NULL,
+    thinking_enabled boolean NOT NULL,
+    CONSTRAINT ai_providers_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
+    CONSTRAINT ai_providers_api_key_check CHECK (((api_key ~ '^[[:graph:]]+$'::text) AND ((length(api_key) >= 8) AND (length(api_key) <= 1000)))),
+    CONSTRAINT ai_providers_base_url_check CHECK (((base_url ~ '^https?://[^[:space:]]+$'::text) AND (length(base_url) <= 500))),
+    CONSTRAINT ai_providers_capabilities_check CHECK (public.ai_capability_list_valid(capabilities)),
+    CONSTRAINT ai_providers_capabilities_kind_check CHECK (((kind <> 'anthropic'::text) OR (capabilities <@ ARRAY['text'::text, 'vision'::text]))),
+    CONSTRAINT ai_providers_credentials_check CHECK (((api_key IS NOT NULL) OR (base_url IS NOT NULL))),
+    CONSTRAINT ai_providers_default_models_check CHECK (public.ai_provider_default_models_valid(capabilities, default_models)),
+    CONSTRAINT ai_providers_kind_check CHECK ((kind = ANY (ARRAY['anthropic'::text, 'openai'::text]))),
+    CONSTRAINT ai_providers_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120)))
+);
+
+
+--
+-- Name: TABLE ai_providers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_providers IS 'Provedores de LLM cadastrados pelo admin (specs 011 e 024). kind anthropic (Messages API; com base_url, um compatível) ou openai (Chat Completions, embeddings e áudio; com base_url, um compatível). capabilities diz o que cada um faz e default_models o modelo padrão de cada capacidade. A chave é segredo: moneyflow_app grava mas não lê api_key.';
+
+
+--
+-- Name: COLUMN ai_providers.kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.kind IS 'anthropic (Messages API) ou openai (Chat Completions/Responses; cobre APIs compatíveis via base_url).';
+
+
+--
+-- Name: COLUMN ai_providers.base_url; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.base_url IS 'URL base da API (nulo = a oficial do kind). Ex.: proxy, Azure, Ollama, OpenRouter.';
+
+
+--
+-- Name: COLUMN ai_providers.api_key; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.api_key IS 'SEGREDO: chave da API. moneyflow_app grava mas NÃO lê esta coluna; leitura só por ai_run_provider_credentials, ai_capability_credentials, ai_embedding_credentials e admin_ai_provider_api_key. Nula só com base_url (servidor local sem chave). Nunca vai para o audit_log, respostas da API, logs ou tools de agente. Na edição, campo vazio mantém a atual.';
+
+
+--
+-- Name: COLUMN ai_providers.api_key_hint; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.api_key_hint IS 'Parte pública da chave (…últimos 4 caracteres), gerada pelo banco, para a tela.';
+
+
+--
+-- Name: COLUMN ai_providers.is_active; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.is_active IS 'false = agentes deste provedor não iniciam execuções novas.';
+
+
+--
+-- Name: COLUMN ai_providers.log_bodies; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.log_bodies IS 'Registrar os corpos e cabeçalhos das requisições (spec 023): desligado por padrão; ligado, ai_requests guarda o corpo enviado completo (inclusive o base64 dos anexos), a resposta e o stream bruto, com o conteúdo das conversas e dados financeiros. Desligado, o banco descarta corpos e cabeçalhos que chegarem. Auditada.';
+
+
+--
+-- Name: COLUMN ai_providers.capabilities; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.capabilities IS 'O que o provedor sabe fazer (spec 024): text (texto→texto), vision (imagens e PDF), embeddings, transcription (áudio→texto) e speech (texto→áudio), em ordem canônica. Omitida no INSERT = padrão do tipo (anthropic = text + vision; openai = todas); anthropic só aceita text e vision. Flag em uso por um agente não sai (ai_providers_capability_in_use_check).';
+
+
+--
+-- Name: COLUMN ai_providers.default_models; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.default_models IS 'Modelo padrão por capacidade ligada ({"text": …, "vision": …, "embeddings": …, "transcription": …, "speech": …}) e a voz padrão do TTS (speech_voice). A inferência do agente com modelo nulo herda daqui. Obrigatório só o text do Anthropic compatível (kind anthropic com base_url): o modelo da chamada mínima do teste e a sugestão no agente.';
+
+
+--
+-- Name: COLUMN ai_providers.prompt_cache_enabled; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.prompt_cache_enabled IS 'Messages API: manda cache_control. Omitido no INSERT = true sem base_url, false com ela. Desligado, o adaptador não manda cache_control mesmo que o agente peça.';
+
+
+--
+-- Name: COLUMN ai_providers.thinking_enabled; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_providers.thinking_enabled IS 'Messages API: manda thinking (raciocínio). Omitido no INSERT = true sem base_url, false com ela. Desligado, o adaptador não manda thinking mesmo que o agente peça.';
+
+
+--
+-- Name: ai_embedding_pairs_in_use; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.ai_embedding_pairs_in_use WITH (security_invoker='true') AS
+ SELECT i.provider_id,
+    COALESCE(i.model, (p.default_models ->> 'embeddings'::text)) AS model,
+    (count(*))::integer AS agents
+   FROM ((public.ai_agent_inferences i
+     JOIN public.ai_agents a ON (((a.id = i.agent_id) AND a.is_active AND (a.archived_at IS NULL))))
+     JOIN public.ai_providers p ON (((p.id = i.provider_id) AND p.is_active AND (p.archived_at IS NULL) AND ('embeddings'::text = ANY (p.capabilities)))))
+  WHERE ((i.capability = 'embeddings'::text) AND (COALESCE(i.model, (p.default_models ->> 'embeddings'::text)) IS NOT NULL))
+  GROUP BY i.provider_id, COALESCE(i.model, (p.default_models ->> 'embeddings'::text));
+
+
+--
+-- Name: VIEW ai_embedding_pairs_in_use; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.ai_embedding_pairs_in_use IS 'Pares (provedor, modelo) de embeddings usados por algum agente ativo e não arquivado, com provedor ativo e com a flag; o modelo nulo da inferência herda default_models.embeddings (sem nenhum dos dois, o par não existe).';
+
+
+--
 -- Name: ai_embeddings; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6353,6 +7090,7 @@ CREATE TABLE public.ai_embeddings (
     needs_reindex boolean GENERATED ALWAYS AS (((embedding IS NULL) OR (embedded_hash IS DISTINCT FROM public.ai_text_sha256(source_text)))) STORED NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    provider_id uuid NOT NULL,
     CONSTRAINT ai_embeddings_embedded_check CHECK ((((embedding IS NULL) = (embedded_hash IS NULL)) AND ((embedding IS NULL) = (embedded_at IS NULL)))),
     CONSTRAINT ai_embeddings_embedded_hash_check CHECK ((embedded_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT ai_embeddings_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
@@ -6365,7 +7103,7 @@ CREATE TABLE public.ai_embeddings (
 -- Name: TABLE ai_embeddings; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.ai_embeddings IS 'Embeddings dos registros para a busca semântica dos agentes (vector(1536), HNSW por cosseno). Um por objeto e modelo. Sem FK para o objeto (polimórfico): ai_embeddings_purge_orphans limpa os de objetos excluídos. Derivado: fora da auditoria. A busca SEMPRE filtra pelas caixas que o usuário lê (caixa_id) e a aplicação revalida o objeto.';
+COMMENT ON TABLE public.ai_embeddings IS 'Embeddings dos registros para a busca semântica dos agentes (vector(1536), HNSW por cosseno). Um por objeto e par (provedor, modelo); todos os pares dividem o mesmo HNSW e a busca filtra pelo par com hnsw.iterative_scan. Sem FK para o objeto (polimórfico): ai_embeddings_purge_orphans limpa os de objetos excluídos. Derivado: fora da auditoria. A busca SEMPRE filtra pelas caixas que o usuário lê (caixa_id) e a aplicação revalida o objeto.';
 
 
 --
@@ -6386,7 +7124,7 @@ COMMENT ON COLUMN public.ai_embeddings.caixa_id IS 'Caixa do objeto, para filtra
 -- Name: COLUMN ai_embeddings.model; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_embeddings.model IS 'Modelo de embeddings (ex.: text-embedding-3-small). Busque sempre com o mesmo modelo do vetor de consulta.';
+COMMENT ON COLUMN public.ai_embeddings.model IS 'Modelo de embeddings (ex.: text-embedding-3-small). Busque sempre com o par (provedor, modelo) do vetor de consulta.';
 
 
 --
@@ -6422,6 +7160,39 @@ COMMENT ON COLUMN public.ai_embeddings.embedded_hash IS 'source_hash do texto us
 --
 
 COMMENT ON COLUMN public.ai_embeddings.needs_reindex IS 'true = falta o vetor ou o texto mudou depois dele (gerado). Fila do worker (índice parcial).';
+
+
+--
+-- Name: COLUMN ai_embeddings.provider_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embeddings.provider_id IS 'Provedor que gera o vetor. O par (provider_id, model) precisa estar em ai_embedding_indexes, e sai com ele.';
+
+
+--
+-- Name: ai_embedding_index_stats; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.ai_embedding_index_stats WITH (security_invoker='true') AS
+ SELECT x.provider_id,
+    x.model,
+    x.last_in_use_at,
+    (EXISTS ( SELECT 1
+           FROM public.ai_embedding_pairs_in_use u
+          WHERE ((u.provider_id = x.provider_id) AND (u.model = x.model)))) AS in_use,
+    (count(e.id))::integer AS vectors,
+    (count(e.id) FILTER (WHERE (NOT e.needs_reindex)))::integer AS indexed,
+    (count(e.id) FILTER (WHERE e.needs_reindex))::integer AS pending
+   FROM (public.ai_embedding_indexes x
+     LEFT JOIN public.ai_embeddings e ON (((e.provider_id = x.provider_id) AND (e.model = x.model))))
+  GROUP BY x.provider_id, x.model, x.last_in_use_at;
+
+
+--
+-- Name: VIEW ai_embedding_index_stats; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.ai_embedding_index_stats IS 'Progresso de cada índice (detalhe do provedor): linhas (vectors), já indexadas com o texto atual (indexed) e na fila (pending), mais se o par está em uso.';
 
 
 --
@@ -6468,10 +7239,13 @@ CREATE TABLE public.ai_usage (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     request_id uuid,
+    audio_seconds numeric(12,3) DEFAULT 0 NOT NULL,
+    characters bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT ai_usage_audio_check CHECK (((audio_seconds >= (0)::numeric) AND (characters >= 0))),
     CONSTRAINT ai_usage_cost_check CHECK (((cost_micros >= 0) AND ((cost_micros IS NULL) = (currency IS NULL)) AND ((price_id IS NULL) OR (cost_micros IS NOT NULL)))),
     CONSTRAINT ai_usage_currency_check CHECK ((currency = ANY (ARRAY['USD'::text, 'BRL'::text]))),
     CONSTRAINT ai_usage_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
-    CONSTRAINT ai_usage_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text]))),
+    CONSTRAINT ai_usage_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text]))),
     CONSTRAINT ai_usage_tokens_check CHECK (((input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)))
 );
 
@@ -6494,7 +7268,7 @@ COMMENT ON COLUMN public.ai_usage.message_id IS 'Mensagem do assistente que a ch
 -- Name: COLUMN ai_usage.purpose; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_usage.purpose IS 'chat (loop do agente), title (título automático), embedding (indexação/busca semântica, sem agente) ou a finalidade de um fluxo automático: document_reading (leitura de documento), classify_lines (sugestões da conciliação), contract_reading (leitura do PDF do contrato) e contract_markdown (PDF do contrato → markdown). Mesmo vocabulário de ai_conversations.purpose; chat numa conversa de fluxo vira a finalidade da conversa.';
+COMMENT ON COLUMN public.ai_usage.purpose IS 'chat (loop do agente), title (título automático), embedding (indexação/busca semântica), vision_describe (descrição de anexo pelo provedor de visão), transcription (áudio→texto), speech (texto→áudio) ou a finalidade de um fluxo automático: document_reading (leitura de documento), classify_lines (sugestões da conciliação), contract_reading (leitura do PDF do contrato) e contract_markdown (PDF do contrato → markdown). chat numa conversa de fluxo vira a finalidade da conversa.';
 
 
 --
@@ -6537,6 +7311,20 @@ COMMENT ON COLUMN public.ai_usage.cost_micros IS 'Custo estimado em milionésimo
 --
 
 COMMENT ON COLUMN public.ai_usage.request_id IS 'Requisição que gerou o uso (spec 023). Purgada a requisição, vira nula; o uso fica. A FK é NOT VALID (as linhas novas são checadas): o dump do backup leva só a estrutura de ai_requests e, validada, a FK derrubaria o pg_restore. Depois de um restore, ai_usage_unlink_missing_requests() anula os vínculos órfãos.';
+
+
+--
+-- Name: COLUMN ai_usage.audio_seconds; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_usage.audio_seconds IS 'Segundos de áudio transcritos (transcription), com milésimos. Entra no custo por audio_input_per_minute.';
+
+
+--
+-- Name: COLUMN ai_usage.characters; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_usage.characters IS 'Caracteres convertidos em fala (speech). Entra no custo por speech_per_million_chars.';
 
 
 --
@@ -6625,95 +7413,6 @@ COMMENT ON COLUMN public.ai_messages.run_id IS 'Execução que produziu a mensag
 --
 
 COMMENT ON COLUMN public.ai_messages.search_tsv IS 'Full-text (português) dos blocos text, gerado pelo banco.';
-
-
---
--- Name: ai_providers; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.ai_providers (
-    id uuid DEFAULT uuidv7() NOT NULL,
-    name text NOT NULL,
-    kind text NOT NULL,
-    base_url text,
-    api_key text,
-    api_key_hint text GENERATED ALWAYS AS (
-CASE
-    WHEN (api_key IS NOT NULL) THEN ('…'::text || "right"(api_key, 4))
-    ELSE NULL::text
-END) STORED,
-    embedding_model text,
-    is_active boolean DEFAULT true NOT NULL,
-    created_by_user_id uuid,
-    notes text,
-    archived_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    log_bodies boolean DEFAULT false NOT NULL,
-    CONSTRAINT ai_providers_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
-    CONSTRAINT ai_providers_api_key_check CHECK (((api_key ~ '^[[:graph:]]+$'::text) AND ((length(api_key) >= 8) AND (length(api_key) <= 1000)))),
-    CONSTRAINT ai_providers_base_url_check CHECK (((base_url ~ '^https?://[^[:space:]]+$'::text) AND (length(base_url) <= 500))),
-    CONSTRAINT ai_providers_credentials_check CHECK (((api_key IS NOT NULL) OR (base_url IS NOT NULL))),
-    CONSTRAINT ai_providers_embedding_model_check CHECK (((embedding_model IS NULL) OR ((embedding_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text) AND (kind = 'openai'::text)))),
-    CONSTRAINT ai_providers_kind_check CHECK ((kind = ANY (ARRAY['anthropic'::text, 'openai'::text]))),
-    CONSTRAINT ai_providers_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120)))
-);
-
-
---
--- Name: TABLE ai_providers; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.ai_providers IS 'Provedores de LLM cadastrados pelo admin (spec 011). kind anthropic (Claude API, padrão) ou openai (OpenAI API e APIs compatíveis, com base_url). A chave é segredo: moneyflow_app grava mas não lê api_key.';
-
-
---
--- Name: COLUMN ai_providers.kind; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_providers.kind IS 'anthropic (Messages API) ou openai (Chat Completions/Responses; cobre APIs compatíveis via base_url).';
-
-
---
--- Name: COLUMN ai_providers.base_url; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_providers.base_url IS 'URL base da API (nulo = a oficial do kind). Ex.: proxy, Azure, Ollama, OpenRouter.';
-
-
---
--- Name: COLUMN ai_providers.api_key; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_providers.api_key IS 'SEGREDO: chave da API. moneyflow_app grava mas NÃO lê esta coluna; leitura só por ai_run_provider_credentials, ai_embedding_credentials e admin_ai_provider_api_key. Nula só com base_url (servidor local sem chave). Nunca vai para o audit_log, respostas da API, logs ou tools de agente. Na edição, campo vazio mantém a atual.';
-
-
---
--- Name: COLUMN ai_providers.api_key_hint; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_providers.api_key_hint IS 'Parte pública da chave (…últimos 4 caracteres), gerada pelo banco, para a tela.';
-
-
---
--- Name: COLUMN ai_providers.embedding_model; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_providers.embedding_model IS 'Modelo de embeddings deste provedor (só kind openai; ex.: text-embedding-3-small, 1536 dimensões). Nulo = o provedor não gera embeddings. No máximo um provedor ativo com embeddings; sem nenhum, a busca dos agentes cai para trigram.';
-
-
---
--- Name: COLUMN ai_providers.is_active; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_providers.is_active IS 'false = agentes deste provedor não iniciam execuções novas.';
-
-
---
--- Name: COLUMN ai_providers.log_bodies; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_providers.log_bodies IS 'Registrar os corpos e cabeçalhos das requisições (spec 023): desligado por padrão; ligado, ai_requests guarda o corpo enviado completo (inclusive o base64 dos anexos), a resposta e o stream bruto, com o conteúdo das conversas e dados financeiros. Desligado, o banco descarta corpos e cabeçalhos que chegarem. Auditada.';
 
 
 --
@@ -6834,7 +7533,7 @@ CREATE TABLE public.ai_requests (
     CONSTRAINT ai_requests_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
     CONSTRAINT ai_requests_operation_check CHECK ((operation = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'test_connection'::text, 'list_models'::text]))),
     CONSTRAINT ai_requests_path_check CHECK (((path ~ '^[^[:space:]]+$'::text) AND (length(path) <= 2000))),
-    CONSTRAINT ai_requests_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text]))),
+    CONSTRAINT ai_requests_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text]))),
     CONSTRAINT ai_requests_purpose_null_check CHECK (((purpose IS NULL) = (operation = ANY (ARRAY['test_connection'::text, 'list_models'::text])))),
     CONSTRAINT ai_requests_status_check CHECK ((status = ANY (ARRAY['running'::text, 'ok'::text, 'error'::text, 'canceled'::text]))),
     CONSTRAINT ai_requests_tokens_check CHECK (((input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)))
@@ -6873,7 +7572,7 @@ COMMENT ON COLUMN public.ai_requests.operation IS 'chat, title, embedding, visio
 -- Name: COLUMN ai_requests.purpose; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_requests.purpose IS 'Finalidade, com o vocabulário de ai_usage.purpose; nula só (e sempre) em test_connection e list_models. chat numa conversa de fluxo vira a finalidade da conversa, como em ai_usage.';
+COMMENT ON COLUMN public.ai_requests.purpose IS 'Finalidade, com o vocabulário de ai_usage.purpose; nula só (e sempre) em test_connection e list_models. chat numa conversa de fluxo vira a finalidade dela.';
 
 
 --
@@ -7668,7 +8367,13 @@ UNION ALL
     'contract_document'::text AS target_kind,
     contract_documents.id AS target_id
    FROM public.contract_documents
-  WHERE (contract_documents.attachment_id IS NOT NULL);
+  WHERE (contract_documents.attachment_id IS NOT NULL)
+UNION ALL
+ SELECT ai_attachment_derivatives.result_attachment_id AS attachment_id,
+    'ai_message_speech'::text AS target_kind,
+    ai_attachment_derivatives.message_id AS target_id
+   FROM public.ai_attachment_derivatives
+  WHERE (ai_attachment_derivatives.result_attachment_id IS NOT NULL);
 
 
 --
@@ -10771,6 +11476,14 @@ ALTER TABLE ONLY public.agent_mcp_servers
 
 
 --
+-- Name: ai_agent_inferences ai_agent_inferences_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_inferences
+    ADD CONSTRAINT ai_agent_inferences_pkey PRIMARY KEY (agent_id, capability);
+
+
+--
 -- Name: ai_agent_prompt_versions ai_agent_prompt_versions_agent_version_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10803,6 +11516,22 @@ ALTER TABLE ONLY public.ai_agents
 
 
 --
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_key UNIQUE NULLS NOT DISTINCT (attachment_id, message_id, block_index, kind, provider_id, model, voice);
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: ai_conversations ai_conversations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10811,11 +11540,19 @@ ALTER TABLE ONLY public.ai_conversations
 
 
 --
+-- Name: ai_embedding_indexes ai_embedding_indexes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_embedding_indexes
+    ADD CONSTRAINT ai_embedding_indexes_pkey PRIMARY KEY (provider_id, model);
+
+
+--
 -- Name: ai_embeddings ai_embeddings_object_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.ai_embeddings
-    ADD CONSTRAINT ai_embeddings_object_key UNIQUE (object_type, object_id, model);
+    ADD CONSTRAINT ai_embeddings_object_key UNIQUE (object_type, object_id, provider_id, model);
 
 
 --
@@ -11674,6 +12411,13 @@ CREATE INDEX agent_mcp_servers_mcp_server_id_idx ON public.agent_mcp_servers USI
 
 
 --
+-- Name: ai_agent_inferences_provider_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_agent_inferences_provider_id_idx ON public.ai_agent_inferences USING btree (provider_id);
+
+
+--
 -- Name: ai_agent_prompt_versions_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11720,6 +12464,34 @@ CREATE INDEX ai_agents_tool_kit_id_idx ON public.ai_agents USING btree (tool_kit
 --
 
 CREATE UNIQUE INDEX ai_agents_use_for_flows_key ON public.ai_agents USING btree ((true)) WHERE use_for_flows;
+
+
+--
+-- Name: ai_attachment_derivatives_message_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_attachment_derivatives_message_id_idx ON public.ai_attachment_derivatives USING btree (message_id, block_index);
+
+
+--
+-- Name: ai_attachment_derivatives_provider_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_attachment_derivatives_provider_id_idx ON public.ai_attachment_derivatives USING btree (provider_id);
+
+
+--
+-- Name: ai_attachment_derivatives_queue_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_attachment_derivatives_queue_idx ON public.ai_attachment_derivatives USING btree (kind, created_at) WHERE (status = ANY (ARRAY['pending'::text, 'running'::text]));
+
+
+--
+-- Name: ai_attachment_derivatives_result_attachment_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_attachment_derivatives_result_attachment_id_idx ON public.ai_attachment_derivatives USING btree (result_attachment_id);
 
 
 --
@@ -11786,10 +12558,17 @@ CREATE INDEX ai_embeddings_object_idx ON public.ai_embeddings USING btree (objec
 
 
 --
+-- Name: ai_embeddings_pair_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_embeddings_pair_idx ON public.ai_embeddings USING btree (provider_id, model);
+
+
+--
 -- Name: ai_embeddings_reindex_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX ai_embeddings_reindex_idx ON public.ai_embeddings USING btree (model, updated_at) WHERE needs_reindex;
+CREATE INDEX ai_embeddings_reindex_idx ON public.ai_embeddings USING btree (provider_id, model, updated_at) WHERE needs_reindex;
 
 
 --
@@ -11825,13 +12604,6 @@ CREATE INDEX ai_messages_search_tsv_idx ON public.ai_messages USING gin (search_
 --
 
 CREATE INDEX ai_providers_created_by_user_id_idx ON public.ai_providers USING btree (created_by_user_id);
-
-
---
--- Name: ai_providers_embedding_key; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX ai_providers_embedding_key ON public.ai_providers USING btree ((true)) WHERE ((embedding_model IS NOT NULL) AND is_active);
 
 
 --
@@ -13081,6 +13853,27 @@ CREATE TRIGGER agent_mcp_servers_set_updated_at BEFORE UPDATE ON public.agent_mc
 
 
 --
+-- Name: ai_agent_inferences ai_agent_inferences_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_inferences_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_agent_inferences FOR EACH ROW EXECUTE FUNCTION public.ai_agent_inferences_audit_row();
+
+
+--
+-- Name: ai_agent_inferences ai_agent_inferences_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_inferences_set_updated_at BEFORE UPDATE ON public.ai_agent_inferences FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_agent_inferences ai_agent_inferences_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_inferences_validate BEFORE INSERT OR UPDATE ON public.ai_agent_inferences FOR EACH ROW EXECUTE FUNCTION public.ai_agent_inferences_validate();
+
+
+--
 -- Name: ai_agent_prompt_versions ai_agent_prompt_versions_apply; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -13130,6 +13923,13 @@ CREATE CONSTRAINT TRIGGER ai_agents_prompt_version_init AFTER INSERT ON public.a
 
 
 --
+-- Name: ai_agents ai_agents_provider_capability; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agents_provider_capability BEFORE INSERT OR UPDATE OF provider_id ON public.ai_agents FOR EACH ROW EXECUTE FUNCTION public.ai_agents_provider_capability();
+
+
+--
 -- Name: ai_agents ai_agents_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -13144,6 +13944,27 @@ CREATE TRIGGER ai_agents_system_prompt_guard BEFORE UPDATE OF system_prompt ON p
 
 
 --
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_attachment_derivatives_guard BEFORE UPDATE ON public.ai_attachment_derivatives FOR EACH ROW EXECUTE FUNCTION public.ai_attachment_derivatives_guard();
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_release_result; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_attachment_derivatives_release_result AFTER DELETE OR UPDATE OF result_attachment_id ON public.ai_attachment_derivatives FOR EACH ROW EXECUTE FUNCTION public.ai_attachment_derivatives_release_result();
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_attachment_derivatives_set_updated_at BEFORE UPDATE ON public.ai_attachment_derivatives FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
 -- Name: ai_conversations ai_conversations_purpose_immutable; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -13155,6 +13976,13 @@ CREATE TRIGGER ai_conversations_purpose_immutable BEFORE UPDATE OF purpose ON pu
 --
 
 CREATE TRIGGER ai_conversations_set_updated_at BEFORE UPDATE ON public.ai_conversations FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_embedding_indexes ai_embedding_indexes_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_embedding_indexes_set_updated_at BEFORE UPDATE ON public.ai_embedding_indexes FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -13225,6 +14053,13 @@ CREATE TRIGGER ai_providers_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_
 --
 
 CREATE TRIGGER ai_providers_set_updated_at BEFORE UPDATE ON public.ai_providers FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_providers ai_providers_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_providers_validate BEFORE INSERT OR UPDATE ON public.ai_providers FOR EACH ROW EXECUTE FUNCTION public.ai_providers_validate();
 
 
 --
@@ -14448,6 +15283,22 @@ ALTER TABLE ONLY public.agent_mcp_servers
 
 
 --
+-- Name: ai_agent_inferences ai_agent_inferences_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_inferences
+    ADD CONSTRAINT ai_agent_inferences_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.ai_agents(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_agent_inferences ai_agent_inferences_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_inferences
+    ADD CONSTRAINT ai_agent_inferences_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.ai_providers(id);
+
+
+--
 -- Name: ai_agent_prompt_versions ai_agent_prompt_versions_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -14496,6 +15347,38 @@ ALTER TABLE ONLY public.ai_agents
 
 
 --
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_attachment_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_attachment_id_fkey FOREIGN KEY (attachment_id) REFERENCES public.attachments(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_message_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.ai_messages(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.ai_providers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_result_attachment_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_result_attachment_id_fkey FOREIGN KEY (result_attachment_id) REFERENCES public.attachments(id) ON DELETE CASCADE;
+
+
+--
 -- Name: ai_conversations ai_conversations_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -14520,11 +15403,27 @@ ALTER TABLE ONLY public.ai_conversations
 
 
 --
+-- Name: ai_embedding_indexes ai_embedding_indexes_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_embedding_indexes
+    ADD CONSTRAINT ai_embedding_indexes_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.ai_providers(id) ON DELETE CASCADE;
+
+
+--
 -- Name: ai_embeddings ai_embeddings_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.ai_embeddings
     ADD CONSTRAINT ai_embeddings_caixa_id_fkey FOREIGN KEY (caixa_id) REFERENCES public.caixas(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_embeddings ai_embeddings_index_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_embeddings
+    ADD CONSTRAINT ai_embeddings_index_fkey FOREIGN KEY (provider_id, model) REFERENCES public.ai_embedding_indexes(provider_id, model) ON DELETE CASCADE;
 
 
 --

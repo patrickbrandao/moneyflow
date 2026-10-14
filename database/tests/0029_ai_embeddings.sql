@@ -10,7 +10,7 @@ SELECT is((SELECT amname::text FROM pg_class c JOIN pg_am a ON a.oid = c.relam W
           'hnsw', 'índice HNSW');
 SELECT ok((SELECT pg_get_indexdef('ai_embeddings_embedding_idx'::regclass) LIKE '%vector_cosine_ops%'), 'por cosseno');
 SELECT ok(has_function_privilege('moneyflow_app', f, 'EXECUTE'), 'app executa ' || f)
-  FROM unnest(ARRAY['ai_embeddings_search(vector, text, uuid[], text[], integer)', 'ai_embedding_store(uuid, text, vector)',
+  FROM unnest(ARRAY['ai_embeddings_search(vector, uuid, text, uuid[], text[], integer)', 'ai_embedding_store(uuid, text, vector)',
                     'ai_embeddings_purge_orphans()']) f;
 SELECT is(ai_text_sha256('ação'), encode(sha256(convert_to('ação', 'UTF8')), 'hex'), 'sha256 do texto em UTF-8');
 
@@ -25,24 +25,33 @@ INSERT INTO caixas (id, name, kind, holder_entity_id, is_primary) VALUES
   ('00000000-0000-7000-8000-0000000c0001', 'Casa', 'general', '00000000-0000-7000-8000-00000000e001', true),
   ('00000000-0000-7000-8000-0000000c0002', 'Empresa', 'general', '00000000-0000-7000-8000-00000000e001', false);
 
-INSERT INTO ai_embeddings (id, object_type, object_id, caixa_id, model, source_text) VALUES
-  ('00000000-0000-7000-8000-0000000e0001', 'entity', '00000000-0000-7000-8000-00000000e001', NULL, 'text-embedding-3-small',
-   'Energisa — distribuidora de energia elétrica'),
+-- Desde a 0041 o vetor é de um par (provedor, modelo) registrado em ai_embedding_indexes (testes do par em 0041).
+INSERT INTO ai_providers (id, name, kind, api_key) VALUES
+  ('00000000-0000-7000-8000-0000000a1001', 'OpenAI', 'openai', 'sk-proj-abcdefgh');
+INSERT INTO ai_embedding_indexes (provider_id, model) VALUES
+  ('00000000-0000-7000-8000-0000000a1001', 'text-embedding-3-small'),
+  ('00000000-0000-7000-8000-0000000a1001', 'nomic-embed-text');
+INSERT INTO ai_embeddings (id, object_type, object_id, caixa_id, provider_id, model, source_text) VALUES
+  ('00000000-0000-7000-8000-0000000e0001', 'entity', '00000000-0000-7000-8000-00000000e001', NULL,
+   '00000000-0000-7000-8000-0000000a1001', 'text-embedding-3-small', 'Energisa — distribuidora de energia elétrica'),
   ('00000000-0000-7000-8000-0000000e0002', 'caixa', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000c0001',
-   'text-embedding-3-small', 'Casa'),
+   '00000000-0000-7000-8000-0000000a1001', 'text-embedding-3-small', 'Casa'),
   ('00000000-0000-7000-8000-0000000e0003', 'caixa', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-0000000c0002',
-   'text-embedding-3-small', 'Empresa');
+   '00000000-0000-7000-8000-0000000a1001', 'text-embedding-3-small', 'Empresa');
 SELECT results_eq($$SELECT needs_reindex, source_hash = ai_text_sha256(source_text) FROM ai_embeddings WHERE id = '00000000-0000-7000-8000-0000000e0001'$$,
                   $$VALUES (true, true)$$, 'sem vetor: precisa indexar; hash gerado');
-SELECT throws_ok($$INSERT INTO ai_embeddings (object_type, object_id, model, source_text) VALUES
-                   ('entity', '00000000-0000-7000-8000-00000000e001', 'text-embedding-3-small', 'outro')$$, '23505', NULL,
-                 'um por objeto e modelo');
-SELECT lives_ok($$INSERT INTO ai_embeddings (object_type, object_id, model, source_text) VALUES
-                  ('entity', '00000000-0000-7000-8000-00000000e001', 'nomic-embed-text', 'Energisa')$$, 'outro modelo, outra linha');
-SELECT throws_ok($$INSERT INTO ai_embeddings (object_type, object_id, model, source_text) VALUES
-                   ('ai_message', gen_random_uuid(), 'm', 'x')$$, '23514', NULL, 'tipo de objeto conhecido');
-SELECT throws_ok($$INSERT INTO ai_embeddings (object_type, object_id, model, source_text) VALUES
-                   ('title', gen_random_uuid(), 'm', '  ')$$, '23514', NULL, 'texto não vazio');
+SELECT throws_ok($$INSERT INTO ai_embeddings (object_type, object_id, provider_id, model, source_text) VALUES
+                   ('entity', '00000000-0000-7000-8000-00000000e001', '00000000-0000-7000-8000-0000000a1001',
+                    'text-embedding-3-small', 'outro')$$, '23505', NULL, 'um por objeto e par');
+SELECT lives_ok($$INSERT INTO ai_embeddings (object_type, object_id, provider_id, model, source_text) VALUES
+                  ('entity', '00000000-0000-7000-8000-00000000e001', '00000000-0000-7000-8000-0000000a1001',
+                   'nomic-embed-text', 'Energisa')$$, 'outro modelo, outra linha');
+SELECT throws_ok($$INSERT INTO ai_embeddings (object_type, object_id, provider_id, model, source_text) VALUES
+                   ('ai_message', gen_random_uuid(), '00000000-0000-7000-8000-0000000a1001', 'nomic-embed-text', 'x')$$,
+                 '23514', NULL, 'tipo de objeto conhecido');
+SELECT throws_ok($$INSERT INTO ai_embeddings (object_type, object_id, provider_id, model, source_text) VALUES
+                   ('title', gen_random_uuid(), '00000000-0000-7000-8000-0000000a1001', 'nomic-embed-text', '  ')$$,
+                 '23514', NULL, 'texto não vazio');
 SELECT throws_ok($$UPDATE ai_embeddings SET embedding = '[1,2,3]' WHERE id = '00000000-0000-7000-8000-0000000e0001'$$, '22000', NULL,
                  'dimensão fixa 1536');
 SELECT throws_ok($$UPDATE ai_embeddings SET embedding = (SELECT e1 FROM v) WHERE id = '00000000-0000-7000-8000-0000000e0001'$$,
@@ -62,18 +71,18 @@ SELECT ok(NOT ai_embedding_store('00000000-0000-7000-8000-0000000e0001', ai_text
 SELECT is((SELECT count(*)::int FROM ai_embeddings WHERE needs_reindex), 2, 'fila de reindexação');
 
 -- Busca: filtra pelas caixas e ordena por distância
-SELECT results_eq($$SELECT object_type, object_id FROM ai_embeddings_search((SELECT e1 FROM v), 'text-embedding-3-small',
+SELECT results_eq($$SELECT object_type, object_id FROM ai_embeddings_search((SELECT e1 FROM v), '00000000-0000-7000-8000-0000000a1001', 'text-embedding-3-small',
                      ARRAY['00000000-0000-7000-8000-0000000c0001'::uuid, '00000000-0000-7000-8000-0000000c0002'::uuid])$$,
                   $$VALUES ('entity', '00000000-0000-7000-8000-00000000e001'::uuid),
                            ('caixa', '00000000-0000-7000-8000-0000000c0002'::uuid),
                            ('caixa', '00000000-0000-7000-8000-0000000c0001'::uuid)$$, 'mais parecidos primeiro');
-SELECT results_eq($$SELECT object_id FROM ai_embeddings_search((SELECT e1 FROM v), 'text-embedding-3-small',
+SELECT results_eq($$SELECT object_id FROM ai_embeddings_search((SELECT e1 FROM v), '00000000-0000-7000-8000-0000000a1001', 'text-embedding-3-small',
                      ARRAY['00000000-0000-7000-8000-0000000c0001'::uuid], ARRAY['caixa'])$$,
                   $$VALUES ('00000000-0000-7000-8000-0000000c0001'::uuid)$$, 'só caixas permitidas e tipos pedidos');
-SELECT results_eq($$SELECT object_id FROM ai_embeddings_search((SELECT e1 FROM v), 'text-embedding-3-small', NULL)$$,
+SELECT results_eq($$SELECT object_id FROM ai_embeddings_search((SELECT e1 FROM v), '00000000-0000-7000-8000-0000000a1001', 'text-embedding-3-small', NULL)$$,
                   $$VALUES ('00000000-0000-7000-8000-00000000e001'::uuid)$$, 'sem caixas: só o cadastro global');
-SELECT is_empty($$SELECT * FROM ai_embeddings_search((SELECT e1 FROM v), 'outro-modelo', NULL)$$, 'só do mesmo modelo');
-SELECT throws_ok($$SELECT * FROM ai_embeddings_search(NULL, 'x', NULL)$$, '22023', NULL, 'vetor obrigatório');
+SELECT is_empty($$SELECT * FROM ai_embeddings_search((SELECT e1 FROM v), '00000000-0000-7000-8000-0000000a1001', 'outro-modelo', NULL)$$, 'só do mesmo modelo');
+SELECT throws_ok($$SELECT * FROM ai_embeddings_search(NULL, '00000000-0000-7000-8000-0000000a1001', 'x', NULL)$$, '22023', NULL, 'vetor obrigatório');
 
 -- Órfãos e caixa excluída
 UPDATE ai_embeddings SET object_id = gen_random_uuid() WHERE model = 'nomic-embed-text';
