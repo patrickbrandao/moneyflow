@@ -17,7 +17,7 @@ Perfis de ferramentas dos agentes de IA. O kit diz quais tools internas do Money
 - O kit não se aplica ao servidor `/mcp` próprio: os tokens pessoais continuam expondo todas as tools. Ele também não se aplica aos fluxos automáticos, que rodam sem tools até a [029](029-fluxos-autonomos.md).
 - **Excluir**: só o kit sem agentes ligados (inclusive os arquivados). O kit em uso mostra os agentes que o usam. Não há arquivamento.
 - O kit é **auditado** como o resto da configuração da IA.
-- O backup do admin ([019](019-backup-e-restauracao.md)) exporta e importa os kits. O agente aponta para o kit pelo nome (chave natural).
+- O backup do admin ([019](019-backup-e-restauracao.md)) exporta e importa os kits. O agente aponta para o kit pelo nome (chave natural). Um arquivo de antes do kit (v0.1.7, agente com `enabled_tools`/`require_write_confirmation`) é convertido na importação pela mesma regra da migração (abaixo), com o retrato `ai_legacy_tool_registry()`: o agente novo ganha o kit "Kit – <nome>" no próprio arquivo, ou fica sem kit; um agente que já existe no banco (mesmo id ou nome) fica como está.
 
 ## Categorias das tools
 O registro (`packages/shared/src/agents/tools.ts`) ganha o campo `category` em cada tool. As categorias são fixas no código, com nome e ordem em pt-BR, e as tools de cada uma são:
@@ -67,7 +67,9 @@ A [027](027-tools-de-controle-total.md) acrescenta as categorias Contratos, Impo
     - há busca por nome e o filtro "só incluídas";
     - "Duplicar kit" cria uma cópia para ajustar.
 - **Formulário do agente**: o campo "Kit de ferramentas" (lista de kits, ou "Sem kit — todas as ferramentas, sem aprovação") substitui a lista de tools e a flag de confirmação. A lista de agentes mostra o kit.
-- **Backup**: as duas tabelas entram no catálogo (`services/backup/catalog.ts`), com o kit por nome como chave natural.
+- **API (detalhes)**: `GET/POST /api/admin/ai/tool-kits`, `GET/PATCH/DELETE /api/admin/ai/tool-kits/:id` e `POST /api/admin/ai/tool-kits/:id/duplicate` (corpo opcional `{ name }`; sem nome, "Cópia de <nome>", com " (n)" se já existir). O kit volta com `tools` (`name`, `mode`, na ordem do registro) e `agents` (inclusive os arquivados). No PATCH, `tools` substitui o conjunto inteiro; a gravação mexe só no que mudou (a auditoria mostra cada tool incluída, removida ou com o modo trocado). Nomes fora do registro são recusados (400); o modo é obrigatório; as tools de segredo são gravadas em `ask`. O kit em uso devolve 422 com os nomes dos agentes. O agente recebe `toolKitId` (kit inexistente: 400) e devolve `toolKitId` e `toolKitName`.
+- **Execução (detalhes)**: `apps/server/src/agents/tools-runtime.ts` monta as tools internas com `kitTools()` (shared) sobre `internalTools()` — o `AGENT_TOOLS` mais as tools registradas por `registerInternalTool()`, usada só nos testes (a tool `adminOnly` do teste) —, relendo o kit (`loadAgentKit`) a cada volta do loop. O `/mcp` próprio não usa o kit, mas também tira as `adminOnly` de quem não é admin.
+- **Backup**: as duas tabelas entram no catálogo (`services/backup/catalog.ts`), com o kit por nome como chave natural. `ai_tool_kit_tools` não tem `id`: entra em `COMPOSITE_KEYS` (`kit_id`, `tool_name`; a parte que não é FK é texto) e é filha do kit (`OWNED_BY`): as tools de um kit que já existia não entram.
 - **Textos**: em `i18n/areas/agents.ts`.
 
 ## Testes

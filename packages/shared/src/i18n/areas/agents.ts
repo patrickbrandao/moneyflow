@@ -22,6 +22,23 @@ export const agentsStrings = {
     mcpUnavailable: (name: string, message: string) => `Servidor MCP ${name} indisponível: ${message}`,
     noAttachments: 'Este provedor não aceita este tipo de anexo.',
     forkCut: 'Escolha uma mensagem que não deixe uma ação sem resultado.',
+    toolKitNotFound: 'Kit de ferramentas não encontrado.',
+    toolKitInUse: (agents: string[]) =>
+      `O kit está em uso e não pode ser excluído. Agentes que o usam: ${agents.join(', ')}. Troque o kit deles antes.`,
+  },
+  /** Categorias das tools (spec 021), na ordem de AGENT_TOOL_CATEGORIES. */
+  toolCategories: {
+    search: 'Busca e consulta',
+    caixas: 'Caixas e contas',
+    entities: 'Entidades',
+    titles: 'Títulos e baixas',
+    cards: 'Cartão de crédito',
+    reconciliation: 'Conciliação',
+    reports: 'Relatórios e canvas',
+    messages: 'Mensagens e avisos',
+  } as Record<string, string>,
+  toolKits: {
+    copyName: (name: string) => `Cópia de ${name}`,
   },
   notifications: {
     completedTitle: (title: string | null) => (title ? `Agente concluiu: ${title}` : 'Agente concluiu a tarefa'),
@@ -43,7 +60,7 @@ export const agentsStrings = {
       'Você é um agente do MoneyFlow, um sistema de contas a pagar e a receber organizado por caixas (livros financeiros de pessoas e empresas).',
       'Responda em português do Brasil, de forma direta. Valores em reais (R$); nas tools, os valores são em centavos (inteiros) e as datas em AAAA-MM-DD.',
       'Use as tools para consultar dados antes de responder; nunca invente ids. Você só enxerga o que o usuário pode ver.',
-      'Tools de escrita podem pedir a confirmação do usuário: explique o que vai fazer e chame a tool; se ele recusar, não insista.',
+      'Algumas tools pedem a aprovação do usuário antes de rodar: explique o que vai fazer e chame a tool; se ele recusar, não insista.',
       'Nunca peça, revele ou registre senhas, tokens ou chaves.',
     ].join('\n'),
     today: (date: string, user: string) => `Hoje é ${date} (America/Sao_Paulo). Usuário: ${user}.`,

@@ -1,20 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AGENT_TOOL_CATEGORIES,
   AGENT_TOOL_NAMES,
   AGENT_TOOLS,
+  type AgentToolMode,
   agentTool,
   aiAgentCreateInput,
   aiAgentUpdateInput,
   balanceToolUses,
   blocksText,
   diffRows,
+  effectiveToolMode,
   formatSse,
   isValidBlock,
+  kitTools,
   type NeutralMessage,
-  needsConfirmation,
   previewText,
   SseParser,
+  t,
   toolJsonSchema,
+  toolKitCreateInput,
 } from '../src';
 
 describe('registro de tools', () => {
@@ -29,12 +34,39 @@ describe('registro de tools', () => {
     expect(AGENT_TOOLS.filter((t) => t.kind === 'write').length).toBeGreaterThan(10);
   });
 
-  it('confirmação: leitura nunca, escrita conforme o agente, enviar mensagem sempre, avisar o usuário nunca', () => {
-    expect(needsConfirmation(agentTool('list_caixas')!, true)).toBe(false);
-    expect(needsConfirmation(agentTool('create_title')!, true)).toBe(true);
-    expect(needsConfirmation(agentTool('create_title')!, false)).toBe(false);
-    expect(needsConfirmation(agentTool('send_telegram_message')!, false)).toBe(true);
-    expect(needsConfirmation(agentTool('notify_user')!, true)).toBe(false);
+  it('categorias e modo sugerido (spec 021): toda tool numa categoria com nome; leituras e notify_user allow, demais escritas ask', () => {
+    for (const tool of AGENT_TOOLS) {
+      expect(AGENT_TOOL_CATEGORIES).toContain(tool.category);
+      expect(tool.suggestedMode).toBe(tool.kind === 'read' || tool.name === 'notify_user' ? 'allow' : 'ask');
+    }
+    for (const category of AGENT_TOOL_CATEGORIES) {
+      expect(t.agents.toolCategories[category]).toBeTruthy();
+      expect(AGENT_TOOLS.some((tool) => tool.category === category)).toBe(true);
+    }
+    expect(AGENT_TOOLS.filter((tool) => tool.category === 'reconciliation')).toHaveLength(13);
+    expect(agentTool('send_telegram_message')).toMatchObject({ category: 'messages', suggestedMode: 'ask' });
+  });
+
+  it('kit: sem kit tudo allow; com kit só as dele no modo do kit; segredo sempre ask; adminOnly fora para não admin', () => {
+    const registry = [
+      { name: 'ler', secrets: undefined, adminOnly: undefined },
+      { name: 'escrever', secrets: undefined, adminOnly: undefined },
+      { name: 'segredo', secrets: ['token'] as const, adminOnly: undefined },
+      { name: 'admin', secrets: undefined, adminOnly: true },
+    ];
+    const names = (list: { tool: { name: string }; mode: AgentToolMode }[]) => list.map((x) => `${x.tool.name}:${x.mode}`);
+    expect(names(kitTools(registry, null, true))).toEqual(['ler:allow', 'escrever:allow', 'segredo:ask', 'admin:allow']);
+    expect(names(kitTools(registry, null, false))).toEqual(['ler:allow', 'escrever:allow', 'segredo:ask']);
+    const kit = new Map<string, AgentToolMode>([
+      ['ler', 'ask'],
+      ['segredo', 'allow'],
+      ['admin', 'allow'],
+    ]);
+    expect(names(kitTools(registry, kit, true))).toEqual(['ler:ask', 'segredo:ask', 'admin:allow']);
+    expect(names(kitTools(registry, kit, false))).toEqual(['ler:ask', 'segredo:ask']);
+    expect(names(kitTools(registry, new Map(), true))).toEqual([]);
+    expect(effectiveToolMode(agentTool('create_title')!, null)).toBe('allow');
+    expect(effectiveToolMode(agentTool('list_caixas')!, 'ask')).toBe('ask');
   });
 
   it('a entrada valida com o mesmo schema da API (defaults e transforms)', () => {
@@ -163,12 +195,32 @@ describe('entrada do agente (admin)', () => {
       systemPrompt: '',
       isActive: false,
       useForFlows: false,
-      requireWriteConfirmation: true,
       colorSlot: 1,
-      enabledTools: null,
+      toolKitId: null,
       params: {},
     });
     expect(aiAgentUpdateInput.parse({ useForFlows: true })).toEqual({ useForFlows: true });
     expect(aiAgentUpdateInput.parse({ isActive: false })).toEqual({ isActive: false });
+  });
+});
+
+describe('entrada do kit de ferramentas (admin)', () => {
+  it('modo obrigatório (allow|ask), sem tool repetida', () => {
+    expect(toolKitCreateInput.parse({ name: ' Kit ', tools: [{ name: 'list_caixas', mode: 'allow' }] })).toEqual({
+      name: 'Kit',
+      description: null,
+      tools: [{ name: 'list_caixas', mode: 'allow' }],
+    });
+    expect(() => toolKitCreateInput.parse({ name: 'K', tools: [{ name: 'list_caixas' }] })).toThrow();
+    expect(() => toolKitCreateInput.parse({ name: 'K', tools: [{ name: 'list_caixas', mode: 'never' }] })).toThrow();
+    expect(() =>
+      toolKitCreateInput.parse({
+        name: 'K',
+        tools: [
+          { name: 'list_caixas', mode: 'allow' },
+          { name: 'list_caixas', mode: 'ask' },
+        ],
+      }),
+    ).toThrow();
   });
 });

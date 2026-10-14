@@ -38,7 +38,7 @@ import { RunTools, toolErrorMessage } from './tools-runtime';
  *  - heartbeat a cada poucos segundos (renova a reserva e descobre o pedido de
  *    cancelamento; perder a reserva = parar sem gravar mais nada);
  *  - eventos de streaming em ai_run_events (NOTIFY → SSE da API);
- *  - tools de escrita com confirmação viram ai_tool_confirmations e a execução
+ *  - tools em ask no kit do agente (spec 021) e as escritas de MCP viram ai_tool_confirmations e a execução
  *    passa a awaiting_confirmation; decididas, ela volta à fila e este mesmo
  *    loop retoma executando as aprovadas e devolvendo a recusa das rejeitadas;
  *  - escritas de negócio com o ator agent + app.agent_run_id (ServiceContext).
@@ -59,8 +59,6 @@ type AgentRow = {
   name: string;
   system_prompt: string;
   params: AgentParams;
-  enabled_tools: string[] | null;
-  require_write_confirmation: boolean;
 };
 
 type ConversationRow = {
@@ -131,17 +129,17 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
     const cred = creds.rows[0]!;
     const llm = createLlmClient({ kind: cred.kind, baseUrl: cred.base_url, apiKey: cred.api_key });
 
-    // Fluxos (leitura de documento, sugestões de classificação) rodam sem tools.
+    // Tools internas pelo kit do agente (spec 021); fluxos (leitura de documento, sugestões de classificação) rodam sem tools.
     tools = await RunTools.forAgent(
       db,
-      { id: agent.id, enabledTools: purpose ? [] : agent.enabled_tools },
+      agent.id,
       async (serverId) => {
         const r = await db.execute<{ headers: Record<string, string> }>(
           sql`SELECT ai_run_mcp_headers(${runId}::uuid, ${serverId}::uuid) AS headers`,
         );
         return r.rows[0]?.headers ?? {};
       },
-      { mcp: !purpose },
+      { internal: !purpose, mcp: !purpose, isAdmin: actor.role === 'admin' },
     );
 
     await appendEvent(db, runId, { type: 'status', status: 'running' });
@@ -149,10 +147,12 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
 
     for (;;) {
       await checkpoint();
+      // O kit vale na próxima chamada: relido a cada volta (lista e modos), sem reabrir as sessões MCP.
+      await tools.refreshInternal(db);
       const rows = await loadMessages(db, conversation.id);
       const pending = pendingToolUses(rows);
       if (pending.length > 0) {
-        const outcome = await resolvePending(ctx, tools, agent, runId, token, conversation.id, pending);
+        const outcome = await resolvePending(ctx, tools, runId, token, conversation.id, pending);
         if (outcome === 'awaiting') return;
         continue;
       }
@@ -264,7 +264,7 @@ function messageOut(m: Awaited<ReturnType<typeof insertMessage>>) {
 
 async function loadContext(db: Database, run: RunRow) {
   const agentResult = await db.execute<AgentRow>(sql`
-    SELECT id, name, system_prompt, params, enabled_tools, require_write_confirmation FROM ai_agents WHERE id = ${run.agent_id}`);
+    SELECT id, name, system_prompt, params FROM ai_agents WHERE id = ${run.agent_id}`);
   const conversationResult = await db.execute<ConversationRow>(
     sql`SELECT id, title, title_source, screen_context, purpose FROM ai_conversations WHERE id = ${run.conversation_id}`,
   );
@@ -336,7 +336,6 @@ async function insertToolResults(db: Database, runId: string, conversationId: st
 async function resolvePending(
   ctx: ServiceContext,
   tools: RunTools,
-  agent: AgentRow,
   runId: string,
   token: string,
   conversationId: string,
@@ -354,7 +353,7 @@ async function resolvePending(
       preErrors.set(use.id, t.agents.errors.toolInvalidInput('JSON inválido'));
       continue;
     }
-    if (!tools.requiresConfirmation(tool, agent.require_write_confirmation) || confirmations.has(use.id)) continue;
+    if (!tools.requiresConfirmation(tool) || confirmations.has(use.id)) continue;
     try {
       toConfirm.push({ use, preview: await tools.preview(ctx, tool, use.input) });
     } catch (error) {

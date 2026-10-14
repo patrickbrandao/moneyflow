@@ -249,6 +249,104 @@ describe('backup: recursos num sistema novo', () => {
     expect(after.filter((a: any) => a.useForFlows).map((a: any) => a.id)).toEqual([second.agentId]);
   });
 
+  it('kits de ferramentas: ida e volta com as tools e o agente apontando pelo nome; arquivo antigo (enabled_tools) vira kit', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const a = client(h, adminA.cookie);
+    const bApi = client(b, adminB.cookie);
+    const tag = uid();
+    const kit = await a.post('/api/admin/ai/tool-kits', {
+      name: `Kit backup ${tag}`,
+      description: 'Ida e volta',
+      tools: [
+        { name: 'list_caixas', mode: 'allow' },
+        { name: 'create_title', mode: 'ask' },
+      ],
+    });
+    const agent = await a.post('/api/admin/ai/agents', { name: `Agente kit ${tag}`, toolKitId: kit.id });
+
+    const full = await h.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminA.cookie } });
+    expect(full.statusCode, full.body.slice(0, 300)).toBe(200);
+    const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+    const kitRow = json.tables.ai_tool_kits.find((r: any) => r.id === kit.id);
+    const toolRows = json.tables.ai_tool_kit_tools.filter((r: any) => r.kit_id === kit.id);
+    const agentRow = json.tables.ai_agents.find((r: any) => r.id === agent.id);
+    expect(kitRow).toMatchObject({ name: kit.name, description: 'Ida e volta' });
+    expect(toolRows.map((r: any) => `${r.tool_name}:${r.mode}`).sort()).toEqual(['create_title:ask', 'list_caixas:allow']);
+    expect(agentRow.tool_kit_id).toBe(kit.id);
+    const fileOf = (tables: Record<string, unknown[]>) => ({ ...json, tables, references: {} });
+
+    const file = fileOf({ ai_tool_kits: [kitRow], ai_tool_kit_tools: toolRows, ai_agents: [agentRow] });
+    const report = await importFile(b, adminB.cookie, 'full', file);
+    expect(failures(report)).toEqual([]);
+    expect(sum(report, 'ai_tool_kits').imported).toBe(1);
+    expect(sum(report, 'ai_tool_kit_tools').imported).toBe(2);
+    expect(sum(report, 'ai_agents').imported).toBe(1);
+    const imported = await bApi.get(`/api/admin/ai/tool-kits/${kit.id}`);
+    expect(imported).toMatchObject({ name: kit.name, tools: kit.tools, agents: [{ id: agent.id, name: agent.name, archived: false }] });
+    // Reimportar não duplica: o kit e as tools (sem id) já existem.
+    const again = await importFile(b, adminB.cookie, 'full', file);
+    expect(failures(again)).toEqual([]);
+    expect(sum(again, 'ai_tool_kits').existing).toBe(1);
+    expect(sum(again, 'ai_tool_kit_tools').imported).toBe(0);
+
+    // Outro id com o mesmo nome (outra caixa de letras) é o mesmo kit: o agente do arquivo aponta para o daqui.
+    const otherKit = randomUUID();
+    const otherAgent = randomUUID();
+    const byName = await importFile(
+      b,
+      adminB.cookie,
+      'full',
+      fileOf({
+        ai_tool_kits: [{ ...kitRow, id: otherKit, name: kit.name.toUpperCase() }],
+        ai_tool_kit_tools: [{ ...toolRows[0], kit_id: otherKit, tool_name: 'end_series', mode: 'ask' }],
+        ai_agents: [{ ...agentRow, id: otherAgent, name: `Outro agente ${tag}`, tool_kit_id: otherKit }],
+      }),
+    );
+    expect(failures(byName)).toEqual([]);
+    expect(issuesOf(byName, 'ai_tool_kits')[0]?.reason).toMatch(/nome/);
+    // As tools do kit do arquivo não entram no kit que já existia.
+    expect(sum(byName, 'ai_tool_kit_tools').skipped).toBe(1);
+    expect((await bApi.get('/api/admin/ai/agents')).find((x: any) => x.id === otherAgent).toolKitId).toBe(kit.id);
+    expect((await bApi.get(`/api/admin/ai/tool-kits/${kit.id}`)).tools).toEqual(kit.tools);
+
+    // Arquivo de antes do kit (v0.1.7): enabled_tools/require_write_confirmation viram kit pela regra da migration 0038.
+    const { tool_kit_id: _kit, ...legacyBase } = agentRow;
+    const legacy = (name: string, enabled: string[] | null, confirm: boolean) => ({
+      ...legacyBase,
+      id: randomUUID(),
+      name: `${name} ${tag}`,
+      enabled_tools: enabled,
+      require_write_confirmation: confirm,
+    });
+    const listed = legacy('Lista', ['list_caixas', 'create_title', 'send_telegram_message', 'nao_existe'], false);
+    const confirming = legacy('Confirma', null, true);
+    const free = legacy('Livre', null, false);
+    const legacyReport = await importFile(b, adminB.cookie, 'full', fileOf({ ai_agents: [listed, confirming, free] }));
+    expect(failures(legacyReport)).toEqual([]);
+    expect(sum(legacyReport, 'ai_agents').imported).toBe(3);
+    expect(sum(legacyReport, 'ai_tool_kits').imported).toBe(2);
+    const agents = await bApi.get('/api/admin/ai/agents');
+    const kitOf = async (id: string) => {
+      const row = agents.find((x: any) => x.id === id);
+      return row.toolKitId ? bApi.get(`/api/admin/ai/tool-kits/${row.toolKitId}`) : null;
+    };
+    const listedKit = await kitOf(listed.id);
+    expect(listedKit.name).toBe(`Kit – ${listed.name}`);
+    expect(listedKit.tools).toEqual([
+      { name: 'list_caixas', mode: 'allow' },
+      { name: 'create_title', mode: 'allow' },
+      { name: 'send_telegram_message', mode: 'ask' },
+    ]);
+    const confirmingKit = await kitOf(confirming.id);
+    expect(confirmingKit.tools).toHaveLength(49);
+    const catalog = await bApi.get('/api/admin/ai/tools');
+    for (const tool of confirmingKit.tools) {
+      expect(tool.mode, tool.name).toBe(catalog.find((x: any) => x.name === tool.name).suggestedMode);
+    }
+    expect(await kitOf(free.id)).toBeNull();
+  });
+
   it('caixas exigem o titular; entidades casam pelo documento e conflitos de chave PIX voltam com o motivo', async () => {
     if (skip) return;
     const adminA = await userSession(h, 'admin');

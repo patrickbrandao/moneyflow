@@ -449,8 +449,6 @@ export const aiAgents = pgTable(
     providerId: uuid('provider_id'),
     model: text(),
     params: jsonb().default({}).notNull(),
-    enabledTools: text('enabled_tools').array(),
-    requireWriteConfirmation: boolean('require_write_confirmation').default(true).notNull(),
     colorSlot: smallint('color_slot').default(1).notNull(),
     icon: text(),
     isActive: boolean('is_active').default(true).notNull(),
@@ -459,11 +457,13 @@ export const aiAgents = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
     useForFlows: boolean('use_for_flows').default(false).notNull(),
+    toolKitId: uuid('tool_kit_id'),
   },
   (table) => [
     index('ai_agents_created_by_user_id_idx').using('btree', table.createdByUserId.asc().nullsLast().op('uuid_ops')),
     uniqueIndex('ai_agents_name_key').using('btree', sql`lower(name)`),
     index('ai_agents_provider_id_idx').using('btree', table.providerId.asc().nullsLast().op('uuid_ops')),
+    index('ai_agents_tool_kit_id_idx').using('btree', table.toolKitId.asc().nullsLast().op('uuid_ops')),
     uniqueIndex('ai_agents_use_for_flows_key').using('btree', sql`(true)`).where(sql`use_for_flows`),
     foreignKey({
       columns: [table.createdByUserId],
@@ -475,10 +475,14 @@ export const aiAgents = pgTable(
       foreignColumns: [aiProviders.id],
       name: 'ai_agents_provider_id_fkey',
     }),
+    foreignKey({
+      columns: [table.toolKitId],
+      foreignColumns: [aiToolKits.id],
+      name: 'ai_agents_tool_kit_id_fkey',
+    }),
     check('ai_agents_active_check', sql`NOT (is_active AND (archived_at IS NOT NULL))`),
     check('ai_agents_color_slot_check', sql`(color_slot >= 1) AND (color_slot <= 12)`),
     check('ai_agents_description_check', sql`length(description) <= 2000`),
-    check('ai_agents_enabled_tools_check', sql`CHECK (ai_tool_list_valid(enabled_tools`),
     check('ai_agents_icon_check', sql`icon ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text`),
     check('ai_agents_model_check', sql`model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text`),
     check('ai_agents_name_check', sql`(btrim(name) <> ''::text) AND (length(name) <= 120)`),
@@ -2172,6 +2176,29 @@ export const aiToolConfirmations = pgTable(
   ],
 );
 
+export const aiToolKits = pgTable(
+  'ai_tool_kits',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    name: text().notNull(),
+    description: text(),
+    createdByUserId: uuid('created_by_user_id'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_tool_kits_created_by_user_id_idx').using('btree', table.createdByUserId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('ai_tool_kits_name_key').using('btree', sql`lower(name)`),
+    foreignKey({
+      columns: [table.createdByUserId],
+      foreignColumns: [users.id],
+      name: 'ai_tool_kits_created_by_user_id_fkey',
+    }).onDelete('set null'),
+    check('ai_tool_kits_description_check', sql`length(description) <= 2000`),
+    check('ai_tool_kits_name_check', sql`(btrim(name) <> ''::text) AND (length(name) <= 120)`),
+  ],
+);
+
 export const userApiTokens = pgTable(
   'user_api_tokens',
   {
@@ -2953,6 +2980,27 @@ export const entityTagLinks = pgTable(
       name: 'entity_tag_links_tag_id_fkey',
     }),
     primaryKey({ columns: [table.entityId, table.tagId], name: 'entity_tag_links_pkey' }),
+  ],
+);
+
+export const aiToolKitTools = pgTable(
+  'ai_tool_kit_tools',
+  {
+    kitId: uuid('kit_id').notNull(),
+    toolName: text('tool_name').notNull(),
+    mode: text().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.kitId],
+      foreignColumns: [aiToolKits.id],
+      name: 'ai_tool_kit_tools_kit_id_fkey',
+    }).onDelete('cascade'),
+    primaryKey({ columns: [table.kitId, table.toolName], name: 'ai_tool_kit_tools_pkey' }),
+    check('ai_tool_kit_tools_mode_check', sql`mode = ANY (ARRAY['allow'::text, 'ask'::text])`),
+    check('ai_tool_kit_tools_tool_name_check', sql`CHECK (ai_tool_list_valid(ARRAY[tool_name]`),
   ],
 );
 export const aiUsageMonthlyByPurpose = pgView('ai_usage_monthly_by_purpose', {

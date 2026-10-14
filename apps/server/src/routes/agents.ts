@@ -16,6 +16,9 @@ import {
   mcpServerUpdateInput,
   messageSendInput,
   suggestionDecisionInput,
+  toolKitCreateInput,
+  toolKitDuplicateInput,
+  toolKitUpdateInput,
 } from '@moneyflow/shared';
 import type { FastifyInstance } from 'fastify';
 import type { RunEventsHub } from '../agents/events-hub';
@@ -172,6 +175,14 @@ export async function agentRoutes(app: FastifyInstance) {
   app.post('/api/admin/ai/prices', (r: Req) => admin.createPrice(r.ctx, parse(aiPriceInput, r.body)));
   app.delete('/api/admin/ai/prices/:id', (r: Req) => admin.deletePrice(r.ctx, id(r)));
   app.get('/api/admin/ai/tools', async (r: Req) => admin.listToolCatalog(r.ctx));
+  app.get('/api/admin/ai/tool-kits', (r: Req) => admin.listToolKits(r.ctx));
+  app.post('/api/admin/ai/tool-kits', (r: Req) => admin.createToolKit(r.ctx, parse(toolKitCreateInput, r.body)));
+  app.get('/api/admin/ai/tool-kits/:id', (r: Req) => admin.getToolKit(r.ctx, id(r)));
+  app.patch('/api/admin/ai/tool-kits/:id', (r: Req) => admin.updateToolKit(r.ctx, id(r), parse(toolKitUpdateInput, r.body)));
+  app.delete('/api/admin/ai/tool-kits/:id', (r: Req) => admin.deleteToolKit(r.ctx, id(r)));
+  app.post('/api/admin/ai/tool-kits/:id/duplicate', (r: Req) =>
+    admin.duplicateToolKit(r.ctx, id(r), parse(toolKitDuplicateInput, r.body ?? {})),
+  );
   app.get('/api/admin/ai/agents', (r: Req) => admin.listAgents(r.ctx));
   app.post('/api/admin/ai/agents', (r: Req) => admin.createAgent(r.ctx, parse(aiAgentCreateInput, r.body)));
   app.patch('/api/admin/ai/agents/:id', (r: Req) => admin.updateAgent(r.ctx, id(r), parse(aiAgentUpdateInput, r.body)));

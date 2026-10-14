@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type APIRequestContext, expect, type Page, type Request, request, test } from '@playwright/test';
 import { defaultBrain, type FakeLlm, startFakeLlm } from '../fakes/fake-llm';
@@ -10,7 +11,9 @@ import { ADMIN_STATE, baseURL, loginAsAdmin } from '../support/session';
  *  - reconexão do SSE no meio da resposta (Last-Event-ID, sem duplicar nem perder);
  *  - o admin lê a conversa de outro usuário em modo somente leitura;
  *  - "Usar nos fluxos automáticos" em /admin/ai e as sugestões da conciliação
- *    aprovadas e descartadas em lote na tela.
+ *    aprovadas e descartadas em lote na tela;
+ *  - o kit de ferramentas (spec 021): criar marcando a categoria Conciliação,
+ *    pôr uma escrita em ask, ligar ao agente e ver o cartão de aprovação.
  *
  * O provedor falso (Anthropic Messages API) sobe aqui na porta E2E_LLM_PORT
  * (padrão 18082). O worker da pilha o alcança em E2E_LLM_BASE (padrão
@@ -30,6 +33,7 @@ let llm: FakeLlm;
 let adminApi: APIRequestContext;
 let provider: { id: string };
 let agent: { id: string; name: string };
+const extraAgents: string[] = [];
 const tag = Date.now().toString(36);
 
 async function apiLogin(login: string, secret: string) {
@@ -55,12 +59,12 @@ async function enter(page: Page) {
   await expect(page.getByRole('heading', { name: /^Olá,/ })).toBeVisible();
 }
 
-/** Nova conversa com o agente do e2e pelo ícone Agentes. */
-async function newConversation(page: Page) {
+/** Nova conversa com o agente do e2e (ou outro, pelo nome) pelo ícone Agentes. */
+async function newConversation(page: Page, agentName = agent.name) {
   await page.getByTestId('agents-button').click();
   const select = page.getByTestId('agents-new-agent');
   await expect(select).toBeEnabled();
-  await select.selectOption({ label: agent.name });
+  await select.selectOption({ label: agentName });
   await page.getByTestId('agents-new').click();
   const win = page.getByTestId('agent-window').last();
   await expect(win).toBeVisible();
@@ -87,11 +91,18 @@ test.beforeAll(async () => {
     baseUrl: llmBase,
     apiKey: 'sk-e2e-fake-key',
   });
+  // Kit com todas as tools no modo sugerido (escritas pedem aprovação): o cartão "Aplicar?" dos testes abaixo.
+  const catalog: { name: string; suggestedMode: string }[] = await (await adminApi.get('/api/admin/ai/tools')).json();
+  const kit = await postJson(adminApi, '/api/admin/ai/tool-kits', {
+    name: `E2E Kit padrão ${tag}`,
+    tools: catalog.map((tool) => ({ name: tool.name, mode: tool.suggestedMode })),
+  });
   agent = await postJson(adminApi, '/api/admin/ai/agents', {
     name: `E2E Agente ${tag}`,
     description: 'Agente de teste do e2e',
     providerId: provider.id,
     model: 'claude-sonnet-5-5',
+    toolKitId: kit.id,
     isActive: true,
     colorSlot: 5,
   });
@@ -100,6 +111,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   if (adminApi) {
     if (agent) await adminApi.patch(`/api/admin/ai/agents/${agent.id}`, { data: { isActive: false } });
+    for (const id of extraAgents) await adminApi.patch(`/api/admin/ai/agents/${id}`, { data: { isActive: false } });
     if (provider) await adminApi.patch(`/api/admin/ai/providers/${provider.id}`, { data: { isActive: false } });
     await adminApi.dispose();
   }
@@ -288,6 +300,92 @@ test('agente: o admin abre a conversa de outro usuário em modo somente leitura'
     if (runId) await otherApi.post(`/api/runs/${runId}/cancel`);
     await otherApi.dispose();
   }
+});
+
+test('kit de ferramentas: marcar a Conciliação, pôr uma escrita em ask, ligar ao agente e ver o cartão de aprovação', async ({ page }) => {
+  await enter(page);
+  const api = page.request;
+  const post = (url: string, data: unknown) => postJson(api, url, data);
+
+  // Agente próprio, ainda sem kit, e uma linha de extrato de verdade para o agente pedir para ignorar.
+  const kitAgent = await post('/api/admin/ai/agents', {
+    name: `E2E Agente do kit ${tag}`,
+    providerId: provider.id,
+    model: 'claude-sonnet-5-5',
+    isActive: true,
+    colorSlot: 3,
+  });
+  extraAgents.push(kitAgent.id);
+  const holder = await post('/api/entities', { kind: 'company', name: `E2E Kit Titular ${tag}` });
+  const caixa = await post('/api/caixas', { name: `E2E Kit Caixa ${tag}`, holderEntityId: holder.id, isPrimary: true });
+  const account = await post(`/api/caixas/${caixa.id}/accounts`, {
+    kind: 'checking',
+    name: `Conta kit ${tag}`,
+    bankCode: '077',
+    openingBalanceCents: 0,
+    openingDate: '2026-01-01',
+  });
+  const upload = await api.post(`/api/statement-imports?accountId=${account.id}&fileName=kit.ofx`, {
+    data: readFileSync(join(FIXTURES, 'extrato-ofx2.ofx')),
+    headers: { 'content-type': 'application/octet-stream' },
+  });
+  expect(upload.ok(), await upload.text()).toBeTruthy();
+  const statement: { id: string; lines: { id: string; status: string }[] } = await upload.json();
+  const line = statement.lines[0]!;
+
+  // Cria o kit pela tela: a categoria inteira, todas em allow, e uma escrita em ask.
+  const kitName = `E2E Kit conciliação ${tag}`;
+  await page.goto('/admin/ai/tool-kits');
+  await page.getByRole('button', { name: 'Novo kit' }).first().click();
+  const form = page.getByRole('dialog', { name: 'Novo kit' });
+  await form.getByLabel('Nome').fill(kitName);
+  await form.getByRole('checkbox', { name: 'Incluir todas as tools de Conciliação' }).check();
+  const category = form.getByTestId('kit-category-reconciliation');
+  await expect(category).toContainText('13 de 13');
+  await category.getByRole('button', { name: 'todas allow' }).click();
+  const tool = form.getByTestId('kit-tool-ignore_statement_lines');
+  await expect(tool.getByRole('radio', { name: 'allow' })).toHaveAttribute('aria-checked', 'true');
+  await tool.getByRole('radio', { name: 'ask' }).click();
+  await expect(tool.getByRole('radio', { name: 'ask' })).toHaveAttribute('aria-checked', 'true');
+  // Uma tool de outra categoria fica de fora.
+  await expect(form.getByTestId('kit-tool-list_caixas')).toContainText('não incluída');
+  await form.getByRole('button', { name: 'Salvar' }).click();
+  await expect(form).toBeHidden();
+  const kitRow = page.getByRole('row').filter({ hasText: kitName });
+  await expect(kitRow).toContainText('3 leitura · 10 escrita');
+  await expect(kitRow).toContainText('1 em ask');
+  await expect(kitRow).toContainText('Nenhum agente');
+
+  // Liga o kit ao agente pelo formulário.
+  await page.goto('/admin/ai/agents');
+  const agentRow = page.getByRole('row').filter({ hasText: kitAgent.name });
+  await agentRow.getByRole('button', { name: 'Editar' }).click();
+  const agentForm = page.getByRole('dialog', { name: 'Editar agente' });
+  await agentForm.getByTestId('agent-tool-kit').selectOption({ label: kitName });
+  await agentForm.getByRole('button', { name: 'Salvar' }).click();
+  await expect(agentForm).toBeHidden();
+  await expect(agentRow).toContainText(kitName);
+
+  // Na conversa, a escrita em ask mostra o cartão; aprovar aplica.
+  const win = await newConversation(page, kitAgent.name);
+  const before = llm.calls.length;
+  await say(win, `chamar ignore_statement_lines {"lineIds":["${line.id}"]}`);
+  const card = win.getByTestId('agent-confirmation');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card).toContainText('Ignorar linhas do extrato');
+  const sent = llm.calls.slice(before).find((c) => c.path === '/v1/messages' && Array.isArray(c.body.tools) && c.body.tools.length > 0);
+  const offered: string[] = sent!.body.tools.map((x: { name: string }) => x.name);
+  expect(offered).toHaveLength(13);
+  expect(offered).toContain('ignore_statement_lines');
+  expect(offered).not.toContain('list_caixas');
+  await card.getByTestId('agent-approve').first().click();
+  await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Pronto:' })).toBeVisible({ timeout: 30_000 });
+  const after: { lines: { id: string; status: string }[] } = await (await api.get(`/api/statement-imports/${statement.id}`)).json();
+  expect(after.lines.find((l) => l.id === line.id)?.status).toBe('ignored');
+
+  // O kit em uso mostra o agente na lista.
+  await page.goto('/admin/ai/tool-kits');
+  await expect(page.getByRole('row').filter({ hasText: kitName })).toContainText(kitAgent.name);
 });
 
 test('fluxos: "Usar nos fluxos automáticos" no admin; sugestões da conciliação aprovadas e descartadas em lote', async ({ page }) => {

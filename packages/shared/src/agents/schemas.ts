@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { id, optionalText, queryBool, requiredText } from '../schemas/common';
+import { AGENT_TOOL_MODES } from './tools';
 
 /* Entradas da API dos agentes (spec 011): administração, conversas e tokens. */
 
@@ -112,9 +113,8 @@ const agentFields = {
     .or(z.literal(''))
     .transform((v) => v || null),
   params: agentParamsInput,
-  /** null = todas as tools internas; [] = nenhuma. */
-  enabledTools: toolList,
-  requireWriteConfirmation: z.boolean(),
+  /** Kit de ferramentas (spec 021); null = sem kit = todas as tools internas, sem aprovação. */
+  toolKitId: id.nullish().transform((v) => v ?? null),
   colorSlot: z.number().int().min(1).max(12),
   icon: z
     .string()
@@ -133,8 +133,6 @@ export const aiAgentCreateInput = z.object({
   ...agentFields,
   systemPrompt: agentFields.systemPrompt.default(''),
   params: agentParamsInput.default({}),
-  enabledTools: toolList.default(null),
-  requireWriteConfirmation: agentFields.requireWriteConfirmation.default(true),
   colorSlot: agentFields.colorSlot.default(1),
   isActive: agentFields.isActive.default(false),
   useForFlows: agentFields.useForFlows.default(false),
@@ -145,6 +143,33 @@ export const aiAgentCreateInput = z.object({
  * `.default()`, e um PATCH com um campo só desativaria o agente e zeraria o prompt).
  */
 export const aiAgentUpdateInput = z.object(agentFields).partial();
+
+/* Kit de ferramentas (spec 021): lista de permissões das tools internas, cada uma em allow ou ask. */
+const kitToolInput = z.object({
+  name: z.string().regex(/^[A-Za-z0-9_./-]{1,128}$/, 'Nome de tool inválido.'),
+  /** Sempre informado (o banco não tem padrão): o modo sugerido é preenchido pela tela. */
+  mode: z.enum(AGENT_TOOL_MODES),
+});
+const kitTools = z
+  .array(kitToolInput)
+  .max(500)
+  .refine((tools) => new Set(tools.map((x) => x.name)).size === tools.length, 'Tool repetida no kit.');
+
+export const toolKitCreateInput = z.object({
+  name: requiredText(120),
+  description: optionalText(2000),
+  tools: kitTools.default([]),
+});
+
+/** Edição parcial; `tools`, quando vem, substitui o conjunto inteiro. */
+export const toolKitUpdateInput = z.object({
+  name: requiredText(120).optional(),
+  description: optionalText(2000).optional(),
+  tools: kitTools.optional(),
+});
+
+/** Duplicar: nome da cópia opcional ("Cópia de …" quando omitido). */
+export const toolKitDuplicateInput = z.object({ name: requiredText(120).optional() });
 
 export const MCP_VISIBILITIES = ['global', 'public', 'private'] as const;
 const headerName = z.string().regex(/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$/, 'Nome de cabeçalho inválido.');

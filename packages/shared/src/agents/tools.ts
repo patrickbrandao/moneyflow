@@ -18,38 +18,54 @@ import {
 } from '../schemas';
 
 /*
- * Registro único das tools dos agentes (spec 011): nome, título e descrição em
- * pt-BR, schema Zod de entrada (convertido para JSON Schema para os provedores
- * e para o servidor MCP próprio) e o tipo:
- *  - read: executa direto;
- *  - write: altera dados; pede confirmação ("Aplicar?") conforme o agente
- *    (require_write_confirmation);
- * `confirm: 'always'` força a confirmação mesmo com o agente configurado para
- * não pedir (enviar mensagem ao Telegram); `confirm: 'never'` dispensa (avisar
- * o próprio usuário no sino).
+ * Registro único das tools dos agentes (specs 011 e 021): nome, título e
+ * descrição em pt-BR, schema Zod de entrada (convertido para JSON Schema para
+ * os provedores e para o servidor MCP próprio), o tipo (read = só consulta;
+ * write = altera dados), a categoria (blocos da guia "Kit de Ferramentas") e o
+ * modo sugerido quando a tool é marcada num kit (leituras e notify_user em
+ * allow; as demais escritas em ask).
+ *
+ * Quem decide se a chamada roda direto (allow) ou pede aprovação (ask) é o kit
+ * de ferramentas do agente; agente sem kit = todas em allow. Exceções fixas:
+ *  - `secrets`: campos de segredo, digitados pelo usuário no cartão de
+ *    aprovação (spec 027) — a tool fica sempre em ask, com ou sem kit;
+ *  - `adminOnly`: nunca oferecida ao modelo quando quem aciona não é admin.
  *
  * A execução fica no servidor (apps/server/src/agents/tool-handlers.ts), com
  * os mesmos serviços e a mesma autorização da API, como o usuário que acionou.
  */
 
 export type AgentToolKind = 'read' | 'write';
-export type AgentToolConfirm = 'agent' | 'always' | 'never';
+
+/** allow = executa sem perguntar; ask = mostra o cartão "Aplicar?" e espera o usuário. */
+export const AGENT_TOOL_MODES = ['allow', 'ask'] as const;
+export type AgentToolMode = (typeof AGENT_TOOL_MODES)[number];
+
+/** Categorias fixas, na ordem da tela (nomes em t.agents.toolCategories). */
+export const AGENT_TOOL_CATEGORIES = ['search', 'caixas', 'entities', 'titles', 'cards', 'reconciliation', 'reports', 'messages'] as const;
+export type AgentToolCategory = (typeof AGENT_TOOL_CATEGORIES)[number];
 
 export type AgentToolDef<S extends z.ZodType = z.ZodType> = {
   name: string;
   title: string;
   description: string;
   kind: AgentToolKind;
-  confirm: AgentToolConfirm;
+  category: AgentToolCategory;
+  /** Modo usado quando a tool é marcada num kit. */
+  suggestedMode: AgentToolMode;
   /** Escrita que apaga/desfaz algo (anotação destructiveHint no MCP). */
   destructive?: boolean;
+  /** Só administrador: fora da lista quando quem aciona não é admin (mesmo no kit). */
+  adminOnly?: boolean;
+  /** Campos de segredo da entrada (digitados no cartão de aprovação): a tool é sempre ask. */
+  secrets?: readonly string[];
   input: S;
 };
 
 const define = <const N extends string, S extends z.ZodType>(
-  def: Omit<AgentToolDef<S>, 'confirm' | 'name'> & { name: N; confirm?: AgentToolConfirm },
+  def: Omit<AgentToolDef<S>, 'suggestedMode' | 'name'> & { name: N; suggestedMode?: AgentToolMode },
 ): AgentToolDef<S> & { name: N } => ({
-  confirm: def.kind === 'read' ? 'never' : 'agent',
+  suggestedMode: def.kind === 'read' ? 'allow' : 'ask',
   ...def,
 });
 
@@ -81,6 +97,7 @@ export const AGENT_TOOLS = [
   /* ---------------- leitura ---------------- */
   define({
     name: 'search_records',
+    category: 'search',
     title: 'Buscar registros',
     description:
       'Busca rápida por texto em entidades, caixas e títulos (nome, documento, descrição). Use para descobrir ids antes de outras tools.',
@@ -89,6 +106,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'semantic_search',
+    category: 'search',
     title: 'Busca por significado',
     description:
       'Busca por significado (embeddings) em entidades, títulos, compras de cartão e linhas de extrato; sem provedor de embeddings, busca por semelhança de texto.',
@@ -104,6 +122,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'list_caixas',
+    category: 'caixas',
     title: 'Listar caixas',
     description: 'Lista as caixas (livros financeiros) que o usuário vê, com titular, tipo e saldo.',
     kind: 'read',
@@ -111,6 +130,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'get_caixa',
+    category: 'caixas',
     title: 'Ver caixa',
     description: 'Detalhe de uma caixa: titular, tipo, contas financeiras e configuração de cartão.',
     kind: 'read',
@@ -118,6 +138,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'list_accounts',
+    category: 'caixas',
     title: 'Listar contas e saldos',
     description: 'Contas financeiras (corrente, cofre, investimento) de uma caixa com o saldo atual.',
     kind: 'read',
@@ -125,6 +146,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'get_account_statement',
+    category: 'caixas',
     title: 'Extrato da conta',
     description: 'Movimentos de uma conta financeira no período, com saldo inicial e final.',
     kind: 'read',
@@ -132,6 +154,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'list_entities',
+    category: 'entities',
     title: 'Listar entidades',
     description:
       'Pessoas e empresas cadastradas (busca por nome ou documento), com tags e favorita; filtra por tags (any/all) e só favoritas.',
@@ -145,6 +168,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'list_entity_tags',
+    category: 'entities',
     title: 'Listar tags de entidade',
     description: 'Tags ativas do catálogo global de entidades (id, nome, cor e quantas entidades usam cada uma).',
     kind: 'read',
@@ -152,6 +176,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'get_entity',
+    category: 'entities',
     title: 'Ver entidade',
     description: 'Detalhe de uma entidade: documento, contatos, endereços, dados bancários, chaves PIX e vínculos.',
     kind: 'read',
@@ -159,6 +184,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'list_categories',
+    category: 'titles',
     title: 'Listar categorias',
     description: 'Plano de categorias (receitas e despesas), em árvore.',
     kind: 'read',
@@ -166,6 +192,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'list_titles',
+    category: 'titles',
     title: 'Listar títulos',
     description: 'Títulos a pagar e a receber com filtros (caixa, direção, status, período de vencimento, entidade, texto).',
     kind: 'read',
@@ -182,6 +209,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'get_title',
+    category: 'titles',
     title: 'Ver título',
     description: 'Detalhe de um título: valores, baixas, espelho, série/parcelas e anexos.',
     kind: 'read',
@@ -189,6 +217,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'list_transfers',
+    category: 'caixas',
     title: 'Listar transferências',
     description: 'Transferências entre contas no período.',
     kind: 'read',
@@ -196,6 +225,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'get_card',
+    category: 'cards',
     title: 'Ver cartão',
     description: 'Resumo de um cartão de crédito (caixa do tipo cartão): limite, faturas abertas e fechadas.',
     kind: 'read',
@@ -203,6 +233,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'get_invoice',
+    category: 'cards',
     title: 'Ver fatura',
     description: 'Fatura do cartão: itens, total por caixa pagadora, status e pagamentos.',
     kind: 'read',
@@ -210,6 +241,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'list_card_purchases',
+    category: 'cards',
     title: 'Listar compras do cartão',
     description: 'Compras, estornos e encargos de um cartão no período.',
     kind: 'read',
@@ -217,6 +249,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'calendar',
+    category: 'search',
     title: 'Calendário',
     description: 'Vencimentos (títulos e faturas) no período, por dia, com status.',
     kind: 'read',
@@ -224,6 +257,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'report_categories',
+    category: 'reports',
     title: 'Relatório por categoria',
     description:
       'Totais por categoria e mês no período (competência ou caixa). Com filtro de entidades, só as linhas cuja contraparte casa (sem pagamento de fatura nem linhas sem entidade).',
@@ -232,6 +266,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'report_entities',
+    category: 'reports',
     title: 'Relatório por entidade',
     description: 'Totais pagos e recebidos por entidade no período (filtro opcional por tags e favoritas).',
     kind: 'read',
@@ -239,6 +274,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'report_projection',
+    category: 'reports',
     title: 'Saldo projetado',
     description:
       'Saldo projetado das caixas em horizontes de dias (padrão 30, 60 e 90). Com filtro de entidades, o saldo de hoje é o da caixa inteira e os lançamentos contam só as entidades filtradas (sem faturas abertas).',
@@ -247,6 +283,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'flow_graph',
+    category: 'reports',
     title: 'Fluxo de dinheiro',
     description:
       'Grafo do fluxo de dinheiro entre caixas e entidades no período (nós e arestas com valores). Os nós de entidade trazem tagIds e isFavorite.',
@@ -255,6 +292,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'list_statement_imports',
+    category: 'reconciliation',
     title: 'Listar extratos importados',
     description: 'Extratos (OFX/CSV) importados de uma conta ou cartão.',
     kind: 'read',
@@ -262,6 +300,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'get_statement_import',
+    category: 'reconciliation',
     title: 'Ver extrato importado',
     description: 'Linhas de um extrato importado com status de conciliação e classificação sugerida.',
     kind: 'read',
@@ -269,6 +308,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'list_line_candidates',
+    category: 'reconciliation',
     title: 'Candidatos da linha do extrato',
     description:
       'Candidatos para casar uma linha do extrato (movimentos, títulos em aberto e itens de fatura próximos em data e valor), do mais provável ao menos.',
@@ -277,6 +317,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'list_message_destinations',
+    category: 'messages',
     title: 'Listar destinos de mensagem',
     description: 'Destinos do Telegram que o usuário pode usar.',
     kind: 'read',
@@ -286,6 +327,7 @@ export const AGENT_TOOLS = [
   /* ---------------- escrita ---------------- */
   define({
     name: 'create_entity',
+    category: 'entities',
     title: 'Criar entidade',
     description:
       'Cadastra uma pessoa (CPF) ou empresa (CNPJ), com tags (tagIds) e favorita opcionais. Verifique antes com search_records se já existe.',
@@ -294,6 +336,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'update_entity',
+    category: 'entities',
     title: 'Editar entidade',
     description:
       'Altera nome, nome fantasia, documento, nascimento, observações, tags (tagIds substitui o conjunto) ou favorita de uma entidade.',
@@ -302,6 +345,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'set_entity_tags',
+    category: 'entities',
     title: 'Definir tags da entidade',
     description:
       'Substitui o conjunto de tags de uma entidade (tagIds de list_entity_tags; só tags ativas; lista vazia remove todas). Criar ou arquivar tags não é feito por agentes.',
@@ -310,6 +354,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'set_entity_favorite',
+    category: 'entities',
     title: 'Marcar entidade como favorita',
     description: 'Marca (favorite true) ou desmarca (false) uma entidade como favorita. A marca é global, igual para todos.',
     kind: 'write',
@@ -317,6 +362,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'add_pix_key',
+    category: 'entities',
     title: 'Adicionar chave PIX',
     description: 'Adiciona uma chave PIX (cpf, cnpj, email, phone ou random) a uma entidade.',
     kind: 'write',
@@ -324,6 +370,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'create_title',
+    category: 'titles',
     title: 'Criar título',
     description:
       'Cria um título a pagar (payable) ou a receber (receivable) numa caixa. Espelho: a caixa principal da entidade recebe o lado oposto (mirrorCaixaId null = sem espelho). Parcelado ou recorrente via series; no parcelado amountCents é o valor de CADA parcela.',
@@ -332,6 +379,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'update_title',
+    category: 'titles',
     title: 'Editar título',
     description: 'Altera um título em aberto (entidade, categoria, descrição, datas, valor, observações).',
     kind: 'write',
@@ -339,6 +387,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'end_series',
+    category: 'titles',
     title: 'Encerrar série recorrente',
     description:
       'Encerra (ou estende) a série recorrente de um título numa data: as ocorrências que vencem até endsOn continuam; as seguintes em aberto são canceladas (com o espelho), sem apagar. endsOn null = sem fim (reabre as canceladas por um encerramento anterior). Falha se houver ocorrência com baixa depois da data.',
@@ -351,6 +400,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'settle_title',
+    category: 'titles',
     title: 'Baixar título',
     description:
       'Registra uma baixa (pagamento ou recebimento, total ou parcial) de um título, numa conta da caixa do título (financialAccountId null = conta a definir).',
@@ -359,6 +409,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'reverse_settlement',
+    category: 'titles',
     title: 'Estornar baixa',
     description:
       'Estorna uma baixa (get_title lista as baixas do título, com o id): a baixa e a perna do espelho ficam estornadas, cada perna com conta recebe o movimento oposto e o título volta a ter o valor em aberto. Use para corrigir uma baixa errada, inclusive a criada ao casar uma linha do extrato com o título errado (desfaça antes a conciliação com unmatch_statement_line).',
@@ -377,6 +428,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'create_transfer',
+    category: 'caixas',
     title: 'Criar transferência',
     description: 'Transfere dinheiro entre duas contas financeiras (inclusive de caixas diferentes).',
     kind: 'write',
@@ -384,6 +436,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'create_card_purchase',
+    category: 'cards',
     title: 'Lançar compra no cartão',
     description: 'Lança uma compra no cartão (valor total; parcelas em installmentsTotal), com o recebedor final (entidade) e a categoria.',
     kind: 'write',
@@ -391,6 +444,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'match_statement_line',
+    category: 'reconciliation',
     title: 'Conciliar linha do extrato',
     description:
       'Casa uma linha do extrato com um movimento, um título em aberto (vira baixa) ou um item de fatura. Para várias linhas, use match_statement_lines.',
@@ -399,6 +453,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'match_statement_lines',
+    category: 'reconciliation',
     title: 'Conciliar linhas do extrato em lote',
     description:
       'Casa até 500 linhas do extrato, cada uma com um movimento, um título em aberto (vira baixa) ou um item de fatura (use list_line_candidates). Cada linha é independente: as que falham voltam em failed com o motivo.',
@@ -407,6 +462,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'confirm_statement_lines',
+    category: 'reconciliation',
     title: 'Confirmar sugestões de conciliação',
     description: 'Confirma em lote as linhas do extrato com casamento sugerido.',
     kind: 'write',
@@ -414,6 +470,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'unmatch_statement_line',
+    category: 'reconciliation',
     title: 'Desfazer conciliação da linha',
     description:
       'Desfaz a conciliação (ou a sugestão) de uma linha do extrato, que volta a nova. O movimento ou a baixa criados ao conciliar continuam lançados (estorne a baixa errada com reverse_settlement).',
@@ -423,6 +480,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'ignore_statement_lines',
+    category: 'reconciliation',
     title: 'Ignorar linhas do extrato',
     description: 'Marca linhas do extrato (não conciliadas) como ignoradas: ficam fora da conciliação.',
     kind: 'write',
@@ -430,6 +488,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'unignore_statement_lines',
+    category: 'reconciliation',
     title: 'Voltar linhas ignoradas',
     description: 'Linhas ignoradas do extrato voltam a novas.',
     kind: 'write',
@@ -437,6 +496,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'create_from_statement_line',
+    category: 'reconciliation',
     title: 'Lançar a partir da linha',
     description: `Transforma uma linha nova do extrato em lançamento conciliado com ela. ${LINE_CREATE_HELP}`,
     kind: 'write',
@@ -444,6 +504,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'create_from_statement_lines',
+    category: 'reconciliation',
     title: 'Lançar linhas do extrato em lote',
     description: `Transforma até 500 linhas novas do extrato em lançamentos conciliados. Cada linha é independente: as que falham voltam em failed com o motivo. ${LINE_CREATE_HELP}`,
     kind: 'write',
@@ -451,6 +512,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'classify_statement_lines',
+    category: 'reconciliation',
     title: 'Sugerir classificação',
     description:
       'Sugere entidade e categoria para linhas do extrato sem regra; ficam como "sugerido pelo agente", pendentes de aprovação do usuário.',
@@ -464,6 +526,7 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'apply_classification_suggestions',
+    category: 'reconciliation',
     title: 'Aprovar sugestões de classificação',
     description: 'Aprova (ou descarta) as sugestões de classificação do agente nas linhas do extrato.',
     kind: 'write',
@@ -471,19 +534,20 @@ export const AGENT_TOOLS = [
   }),
   define({
     name: 'send_telegram_message',
+    category: 'messages',
     title: 'Enviar mensagem',
-    description: 'Envia um texto a um destino do Telegram (use list_message_destinations). Sempre pede confirmação.',
+    description: 'Envia um texto a um destino do Telegram (use list_message_destinations).',
     kind: 'write',
-    confirm: 'always',
     input: z.object({ destinationId: id, text: z.string().trim().min(1).max(3500) }),
   }),
   define({
     name: 'notify_user',
+    category: 'messages',
     title: 'Avisar o usuário',
     description:
       'Avisa o próprio usuário no sino (e nos destinos dele que assinam "mensagens do agente"). Use para resultados de tarefas longas.',
     kind: 'write',
-    confirm: 'never',
+    suggestedMode: 'allow',
     input: z.object({
       title: z.string().trim().min(1).max(200),
       text: z.string().trim().min(1).max(2000),
@@ -505,9 +569,28 @@ export const AGENT_TOOL_NAMES: string[] = AGENT_TOOLS.map((tool) => tool.name);
 /** Valor da entrada já validada (com defaults) de uma tool. */
 export type AgentToolInput<N extends AgentToolName> = z.output<Extract<(typeof AGENT_TOOLS)[number], { name: N }>['input']>;
 
-/** A chamada precisa de confirmação? */
-export function needsConfirmation(tool: Pick<AgentToolDef, 'kind' | 'confirm'>, agentRequiresConfirmation: boolean): boolean {
-  if (tool.confirm === 'always') return true;
-  if (tool.confirm === 'never') return false;
-  return tool.kind === 'write' && agentRequiresConfirmation;
+/** Modo efetivo de uma tool oferecida: as de segredo sempre ask; sem kit (`kitMode` null) = allow. */
+export function effectiveToolMode(tool: Pick<AgentToolDef, 'secrets'>, kitMode: AgentToolMode | null): AgentToolMode {
+  if (tool.secrets && tool.secrets.length > 0) return 'ask';
+  return kitMode ?? 'allow';
+}
+
+/**
+ * Tools internas oferecidas ao modelo, com o modo de cada uma (spec 021):
+ * sem kit (`kit` null), todas; com kit, só as dele (tool fora do kit não
+ * existe para o agente). As só de administrador saem quando quem aciona não é
+ * admin. `registry` = AGENT_TOOLS (o servidor acrescenta as registradas nos testes).
+ */
+export function kitTools<T extends Pick<AgentToolDef, 'name' | 'secrets' | 'adminOnly'>>(
+  registry: readonly T[],
+  kit: ReadonlyMap<string, AgentToolMode> | null,
+  isAdmin: boolean,
+): { tool: T; mode: AgentToolMode }[] {
+  const offered: { tool: T; mode: AgentToolMode }[] = [];
+  for (const tool of registry) {
+    if (tool.adminOnly && !isAdmin) continue;
+    if (kit && !kit.has(tool.name)) continue;
+    offered.push({ tool, mode: effectiveToolMode(tool, kit ? kit.get(tool.name)! : null) });
+  }
+  return offered;
 }

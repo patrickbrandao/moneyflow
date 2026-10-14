@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Tx } from '@moneyflow/db';
 import {
   BACKUP_FORMAT,
@@ -257,12 +258,70 @@ function replay(table: string, data: BackupRow): { insert: BackupRow; post: Back
 /** Tabelas cujo passo "depois" (replay) roda no fim da importação, depois de todos os registros. */
 const LATE_POST = new Set(['entity_tags']);
 
+/** Colunas da tabela que são FK (uuid); as demais colunas de uma chave composta são texto. */
+const fkColumns = (catalog: Catalog, table: string) => new Set(catalog.get(table)?.fks.map((fk) => fk.refColumn) ?? []);
+
 /** Identificador da linha no arquivo: o id, ou a chave composta (`a|b`) nas tabelas sem id. */
-function rowKey(table: string, data: BackupRow): string {
+function rowKey(table: string, data: BackupRow, uuidColumns: Set<string>): string {
   const composite = COMPOSITE_KEYS[table];
   if (!composite) return typeof data.id === 'string' ? data.id.toLowerCase() : '';
-  const parts = composite.map((column) => data[column]);
-  return parts.every((v) => typeof v === 'string' && UUID.test(v)) ? parts.map((v) => String(v).toLowerCase()).join('|') : '';
+  const valid = composite.every((column) => {
+    const v = data[column];
+    return typeof v === 'string' && v !== '' && !v.includes('|') && (!uuidColumns.has(column) || UUID.test(v));
+  });
+  return valid
+    ? composite.map((column) => (uuidColumns.has(column) ? String(data[column]).toLowerCase() : String(data[column]))).join('|')
+    : '';
+}
+
+/**
+ * Arquivo anterior ao kit de ferramentas (spec 021): o agente trazia
+ * enabled_tools e require_write_confirmation. Com a mesma regra da migration
+ * 0038 (retrato da v0.1.7 em ai_legacy_tool_registry()), o agente novo ganha o
+ * kit "Kit – <nome>" no próprio arquivo — ninguém ganha nem perde poder —, ou
+ * fica sem kit (lista nula e sem confirmação). Agentes que já existem aqui
+ * (mesmo id ou nome) ficam como estão, então não ganham kit.
+ */
+async function legacyAgentKits(ctx: ServiceContext, file: BackupFile): Promise<BackupFile> {
+  const agents = file.tables.ai_agents ?? [];
+  const legacy = agents.filter(
+    (row) => row && typeof row === 'object' && !('tool_kit_id' in row) && ('enabled_tools' in row || 'require_write_confirmation' in row),
+  );
+  if (legacy.length === 0) return file;
+  const registry = await ctx.db.execute<{ tool_name: string; kind: string; confirm: string }>(
+    sql`SELECT tool_name, kind, confirm FROM ai_legacy_tool_registry()`,
+  );
+  const known = await ctx.db.execute<{ id: string; name: string }>(sql`SELECT id::text AS id, lower(name) AS name FROM ai_agents`);
+  const knownIds = new Set(known.rows.map((r) => r.id));
+  const knownNames = new Set(known.rows.map((r) => r.name));
+  const kits: BackupRow[] = [];
+  const kitTools: BackupRow[] = [];
+  const rows = agents.map((row) => {
+    if (!legacy.includes(row)) return row;
+    const { enabled_tools: enabled, require_write_confirmation: flag, ...rest } = row;
+    const list = Array.isArray(enabled) ? new Set(enabled.map(String)) : null;
+    const confirmWrites = flag !== false;
+    const name = typeof rest.name === 'string' ? rest.name : '';
+    const exists = (typeof rest.id === 'string' && knownIds.has(rest.id.toLowerCase())) || knownNames.has(name.toLowerCase());
+    if (exists || (list === null && !confirmWrites)) return { ...rest, tool_kit_id: null };
+    const kitId = randomUUID();
+    kits.push({ id: kitId, name: `Kit – ${name}`.slice(0, 120), description: null, created_by_user_id: null });
+    for (const tool of registry.rows) {
+      if (list && !list.has(tool.tool_name)) continue;
+      const ask = tool.confirm === 'always' || (confirmWrites && tool.kind === 'write' && tool.confirm !== 'never');
+      kitTools.push({ kit_id: kitId, tool_name: tool.tool_name, mode: ask ? 'ask' : 'allow' });
+    }
+    return { ...rest, tool_kit_id: kitId };
+  });
+  return {
+    ...file,
+    tables: {
+      ...file.tables,
+      ai_agents: rows,
+      ai_tool_kits: [...(file.tables.ai_tool_kits ?? []), ...kits],
+      ai_tool_kit_tools: [...(file.tables.ai_tool_kit_tools ?? []), ...kitTools],
+    },
+  };
 }
 
 function describe(error: unknown): string {
@@ -272,9 +331,10 @@ function describe(error: unknown): string {
   return t.backup.reasons.db(pg?.message ?? (error as Error).message ?? t.errors.generic);
 }
 
-export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: BackupKind, dryRun: boolean): Promise<ImportReport> {
+export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, kind: BackupKind, dryRun: boolean): Promise<ImportReport> {
   ctx.access.assertAdmin();
   const started = Date.now();
+  const file = kind === 'full' ? await legacyAgentKits(ctx, uploaded) : uploaded;
   const catalog = await loadCatalog(ctx.db);
   const ranks = tableRanks(catalog);
 
@@ -294,7 +354,7 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
     for (const raw of rows) {
       if (!raw || typeof raw !== 'object') continue;
       const data = ref ? raw : normalizeRow(table, raw, normalizeState);
-      const id = rowKey(table, data);
+      const id = rowKey(table, data, fkColumns(catalog, table));
       const node: Node = {
         key: `${table}:${id}`,
         table,
@@ -476,7 +536,12 @@ export async function importBackup(ctx: ServiceContext, file: BackupFile, kind: 
     const compositeExists = async (table: string, data: BackupRow) => {
       const composite = COMPOSITE_KEYS[table];
       if (!composite) return false;
-      const conditions = composite.map((column) => sql`${sql.identifier(column)} = ${String(data[column])}::uuid`);
+      const uuids = fkColumns(catalog, table);
+      const conditions = composite.map((column) =>
+        uuids.has(column)
+          ? sql`${sql.identifier(column)} = ${String(data[column])}::uuid`
+          : sql`${sql.identifier(column)} = ${String(data[column])}`,
+      );
       const found = await tx.execute(sql`SELECT 1 FROM ${sql.identifier(table)} WHERE ${sql.join(conditions, sql` AND `)}`);
       return found.rows.length > 0;
     };

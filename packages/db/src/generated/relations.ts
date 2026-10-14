@@ -13,6 +13,7 @@ import {
   caixas,
   caixaMembers,
   aiAgents,
+  aiToolKits,
   financialAccounts,
   caixaHiddenCategories,
   categories,
@@ -62,6 +63,7 @@ import {
   contractRenewalTasks,
   entityTagLinks,
   entityTags,
+  aiToolKitTools,
 } from './schema';
 
 export const sessionsRelations = relations(sessions, ({ one }) => ({
@@ -92,6 +94,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   aiRuns: many(aiRuns),
   aiUsages: many(aiUsage),
   aiToolConfirmations: many(aiToolConfirmations),
+  aiToolKits: many(aiToolKits),
   userApiTokens: many(userApiTokens),
   messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
@@ -258,10 +261,23 @@ export const aiAgentsRelations = relations(aiAgents, ({ one, many }) => ({
     fields: [aiAgents.providerId],
     references: [aiProviders.id],
   }),
+  aiToolKit: one(aiToolKits, {
+    fields: [aiAgents.toolKitId],
+    references: [aiToolKits.id],
+  }),
   agentMcpServers: many(agentMcpServers),
   aiConversations: many(aiConversations),
   aiRuns: many(aiRuns),
   aiUsages: many(aiUsage),
+}));
+
+export const aiToolKitsRelations = relations(aiToolKits, ({ one, many }) => ({
+  aiAgents: many(aiAgents),
+  user: one(users, {
+    fields: [aiToolKits.createdByUserId],
+    references: [users.id],
+  }),
+  aiToolKitTools: many(aiToolKitTools),
 }));
 
 export const financialAccountsRelations = relations(financialAccounts, ({ one, many }) => ({
@@ -1109,4 +1125,11 @@ export const entityTagLinksRelations = relations(entityTagLinks, ({ one }) => ({
 
 export const entityTagsRelations = relations(entityTags, ({ many }) => ({
   entityTagLinks: many(entityTagLinks),
+}));
+
+export const aiToolKitToolsRelations = relations(aiToolKitTools, ({ one }) => ({
+  aiToolKit: one(aiToolKits, {
+    fields: [aiToolKitTools.kitId],
+    references: [aiToolKits.id],
+  }),
 }));

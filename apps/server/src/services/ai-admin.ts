@@ -1,12 +1,11 @@
 import type { Executor, Tx } from '@moneyflow/db';
 import {
-  AGENT_TOOL_NAMES,
-  AGENT_TOOLS,
   type AgentToolInfo,
   type AiAgentDto,
   type AiPriceDto,
   type AiProviderDto,
   type AiProviderTestResult,
+  type AiToolKitDto,
   type AiUsagePurpose,
   type AiUsageReport,
   type aiAgentCreateInput,
@@ -20,21 +19,26 @@ import {
   type mcpServerCreateInput,
   type mcpServerUpdateInput,
   t,
+  type toolKitCreateInput,
+  type toolKitDuplicateInput,
+  type toolKitUpdateInput,
 } from '@moneyflow/shared';
 import { type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { createLlmClient, LlmError } from '../agents/llm';
 import { connectMcp } from '../agents/mcp-client';
 import { usageDto } from '../agents/store';
+import { internalTool, internalTools } from '../agents/tools-runtime';
 import type { ServiceContext } from '../context';
-import { badRequest, notFound } from '../errors';
+import { badRequest, findPgError, notFound, unprocessable } from '../errors';
 import { deleteOrArchive, withTx } from './tx';
 import { iso } from './util';
 
 /*
  * Administração dos agentes (spec 011, só admin): provedores (chave
  * write-only: grava, nunca devolve; a tela vê api_key_hint), preços, agentes
- * (com os vínculos MCP), servidores MCP (cabeçalhos write-only; a tela vê só
+ * (com o kit de ferramentas e os vínculos MCP), kits de ferramentas (spec
+ * 021), servidores MCP (cabeçalhos write-only; a tela vê só
  * os nomes) e o painel de uso. Testar conexão e listar tools leem os segredos
  * só pelas funções admin_* do banco, que exigem um admin ativo.
  */
@@ -197,12 +201,16 @@ export async function deletePrice(ctx: ServiceContext, id: string) {
 
 export function listToolCatalog(ctx: ServiceContext): AgentToolInfo[] {
   ctx.access.assertAdmin();
-  return AGENT_TOOLS.map((tool) => ({
+  return internalTools().map((tool) => ({
     name: tool.name,
     title: tool.title,
     description: tool.description,
     kind: tool.kind,
-    confirm: tool.confirm,
+    category: tool.category,
+    destructive: tool.destructive === true,
+    suggestedMode: tool.secrets?.length ? 'ask' : tool.suggestedMode,
+    adminOnly: tool.adminOnly === true,
+    secret: Boolean(tool.secrets?.length),
   }));
 }
 
@@ -215,8 +223,8 @@ type AgentRow = {
   provider_name: string | null;
   model: string | null;
   params: AiAgentDto['params'];
-  enabled_tools: string[] | null;
-  require_write_confirmation: boolean;
+  tool_kit_id: string | null;
+  tool_kit_name: string | null;
   color_slot: number;
   icon: string | null;
   is_active: boolean;
@@ -227,9 +235,9 @@ type AgentRow = {
 
 async function loadAgents(db: Executor, where = sql`true`): Promise<AiAgentDto[]> {
   const result = await db.execute<AgentRow>(sql`
-    SELECT a.id, a.name, a.description, a.system_prompt, a.provider_id, p.name AS provider_name, a.model, a.params, a.enabled_tools,
-           a.require_write_confirmation, a.color_slot, a.icon, a.is_active, a.use_for_flows, a.archived_at, a.created_at
-      FROM ai_agents a LEFT JOIN ai_providers p ON p.id = a.provider_id
+    SELECT a.id, a.name, a.description, a.system_prompt, a.provider_id, p.name AS provider_name, a.model, a.params, a.tool_kit_id,
+           k.name AS tool_kit_name, a.color_slot, a.icon, a.is_active, a.use_for_flows, a.archived_at, a.created_at
+      FROM ai_agents a LEFT JOIN ai_providers p ON p.id = a.provider_id LEFT JOIN ai_tool_kits k ON k.id = a.tool_kit_id
      WHERE ${where}
      ORDER BY a.archived_at NULLS FIRST, lower(a.name)`);
   const links = await db.execute<{
@@ -250,8 +258,8 @@ async function loadAgents(db: Executor, where = sql`true`): Promise<AiAgentDto[]
     providerName: r.provider_name,
     model: r.model,
     params: r.params ?? {},
-    enabledTools: r.enabled_tools,
-    requireWriteConfirmation: r.require_write_confirmation,
+    toolKitId: r.tool_kit_id,
+    toolKitName: r.tool_kit_name,
     colorSlot: Number(r.color_slot),
     icon: r.icon,
     isActive: r.is_active,
@@ -275,10 +283,11 @@ async function getAgent(db: Executor, id: string) {
   return agent;
 }
 
-function checkTools(tools: string[] | null | undefined) {
-  if (!tools) return;
-  const unknown = tools.filter((name) => !AGENT_TOOL_NAMES.includes(name));
-  if (unknown.length > 0) throw badRequest(t.agents.errors.toolUnknown(unknown.join(', ')));
+/** O kit escolhido no agente precisa existir (o 23503 da FK diria "em uso"). */
+async function checkKit(db: Executor, kitId: string | null | undefined) {
+  if (!kitId) return;
+  const found = await db.execute(sql`SELECT 1 FROM ai_tool_kits WHERE id = ${kitId}`);
+  if (found.rows.length === 0) throw badRequest(t.agents.errors.toolKitNotFound);
 }
 
 async function setLinks(tx: Tx, agentId: string, links: { mcpServerId: string; enabledTools: string[] | null }[]) {
@@ -299,19 +308,17 @@ async function clearFlowAgent(tx: Tx, exceptId: string | null) {
   await tx.execute(sql`UPDATE ai_agents SET use_for_flows = false WHERE use_for_flows ${exceptId ? sql`AND id <> ${exceptId}` : sql``}`);
 }
 
-const textArray = (values: string[] | null) => (values === null ? null : `{${values.map((v) => `"${v}"`).join(',')}}`);
-
 export async function createAgent(ctx: ServiceContext, input: z.output<typeof aiAgentCreateInput>) {
   ctx.access.assertAdmin();
-  checkTools(input.enabledTools);
+  await checkKit(ctx.db, input.toolKitId);
   const id = await withTx(ctx, async (tx) => {
     if (input.useForFlows) await clearFlowAgent(tx, null);
     const result = await tx.execute<{ id: string }>(sql`
-      INSERT INTO ai_agents (name, description, system_prompt, provider_id, model, params, enabled_tools, require_write_confirmation,
-                             color_slot, icon, is_active, use_for_flows, created_by_user_id)
+      INSERT INTO ai_agents (name, description, system_prompt, provider_id, model, params, tool_kit_id, color_slot, icon, is_active,
+                             use_for_flows, created_by_user_id)
       VALUES (${input.name}, ${input.description}, ${input.systemPrompt}, ${input.providerId}, ${input.model},
-              ${JSON.stringify(input.params)}::jsonb, ${textArray(input.enabledTools)}::text[], ${input.requireWriteConfirmation},
-              ${input.colorSlot}, ${input.icon}, ${input.isActive}, ${input.useForFlows}, ${ctx.access.actor.id})
+              ${JSON.stringify(input.params)}::jsonb, ${input.toolKitId}, ${input.colorSlot}, ${input.icon}, ${input.isActive},
+              ${input.useForFlows}, ${ctx.access.actor.id})
       RETURNING id`);
     const agentId = result.rows[0]!.id;
     if (input.mcpServers) await setLinks(tx, agentId, input.mcpServers);
@@ -323,7 +330,7 @@ export async function createAgent(ctx: ServiceContext, input: z.output<typeof ai
 export async function updateAgent(ctx: ServiceContext, id: string, input: z.output<typeof aiAgentUpdateInput>) {
   ctx.access.assertAdmin();
   await getAgent(ctx.db, id);
-  checkTools(input.enabledTools);
+  await checkKit(ctx.db, input.toolKitId);
   const sets: SQL[] = [];
   if (input.name !== undefined) sets.push(sql`name = ${input.name}`);
   if (input.description !== undefined) sets.push(sql`description = ${input.description}`);
@@ -331,8 +338,7 @@ export async function updateAgent(ctx: ServiceContext, id: string, input: z.outp
   if (input.providerId !== undefined) sets.push(sql`provider_id = ${input.providerId}`);
   if (input.model !== undefined) sets.push(sql`model = ${input.model}`);
   if (input.params !== undefined) sets.push(sql`params = ${JSON.stringify(input.params)}::jsonb`);
-  if (input.enabledTools !== undefined) sets.push(sql`enabled_tools = ${textArray(input.enabledTools)}::text[]`);
-  if (input.requireWriteConfirmation !== undefined) sets.push(sql`require_write_confirmation = ${input.requireWriteConfirmation}`);
+  if (input.toolKitId !== undefined) sets.push(sql`tool_kit_id = ${input.toolKitId}`);
   if (input.colorSlot !== undefined) sets.push(sql`color_slot = ${input.colorSlot}`);
   if (input.icon !== undefined) sets.push(sql`icon = ${input.icon}`);
   if (input.isActive !== undefined) sets.push(sql`is_active = ${input.isActive}`);
@@ -357,6 +363,138 @@ export async function deleteAgent(ctx: ServiceContext, id: string) {
       (t2) => t2.execute(sql`UPDATE ai_agents SET is_active = false, use_for_flows = false, archived_at = now() WHERE id = ${id}`),
     ),
   );
+}
+
+/* ---------------- kits de ferramentas (spec 021) ---------------- */
+
+type ToolKitRow = { id: string; name: string; description: string | null; created_at: unknown; updated_at: unknown };
+
+async function loadToolKits(db: Executor, where = sql`true`): Promise<AiToolKitDto[]> {
+  const kits = await db.execute<ToolKitRow>(sql`
+    SELECT k.id, k.name, k.description, k.created_at, k.updated_at FROM ai_tool_kits k WHERE ${where} ORDER BY lower(k.name)`);
+  if (kits.rows.length === 0) return [];
+  const ids = `{${kits.rows.map((k) => k.id).join(',')}}`;
+  const tools = await db.execute<{ kit_id: string; tool_name: string; mode: 'allow' | 'ask' }>(sql`
+    SELECT kit_id, tool_name, mode FROM ai_tool_kit_tools WHERE kit_id = ANY(${ids}::uuid[]) ORDER BY tool_name`);
+  const agents = await db.execute<{ tool_kit_id: string; id: string; name: string; archived: boolean }>(sql`
+    SELECT tool_kit_id, id, name, archived_at IS NOT NULL AS archived FROM ai_agents
+     WHERE tool_kit_id = ANY(${ids}::uuid[]) ORDER BY archived_at NULLS FIRST, lower(name)`);
+  // Na ordem do registro (categorias da tela); nomes que saíram do registro vêm no fim.
+  const order = new Map(internalTools().map((tool, index) => [tool.name, index]));
+  const rank = (name: string) => order.get(name) ?? Number.MAX_SAFE_INTEGER;
+  return kits.rows.map((k) => ({
+    id: k.id,
+    name: k.name,
+    description: k.description,
+    tools: tools.rows
+      .filter((x) => x.kit_id === k.id)
+      .map((x) => ({ name: x.tool_name, mode: x.mode }))
+      .sort((a, b) => rank(a.name) - rank(b.name)),
+    agents: agents.rows.filter((a) => a.tool_kit_id === k.id).map((a) => ({ id: a.id, name: a.name, archived: a.archived })),
+    createdAt: iso(k.created_at)!,
+    updatedAt: iso(k.updated_at)!,
+  }));
+}
+
+export async function listToolKits(ctx: ServiceContext): Promise<AiToolKitDto[]> {
+  ctx.access.assertAdmin();
+  return loadToolKits(ctx.db);
+}
+
+async function getToolKitRow(db: Executor, id: string) {
+  const [kit] = await loadToolKits(db, sql`k.id = ${id}`);
+  if (!kit) throw notFound(t.agents.errors.toolKitNotFound);
+  return kit;
+}
+
+export async function getToolKit(ctx: ServiceContext, id: string) {
+  ctx.access.assertAdmin();
+  return getToolKitRow(ctx.db, id);
+}
+
+/** Valida as tools contra o registro; as de segredo ficam sempre em ask. */
+function kitToolRows(tools: { name: string; mode: 'allow' | 'ask' }[]) {
+  const unknown = tools.filter((x) => !internalTool(x.name)).map((x) => x.name);
+  if (unknown.length > 0) throw badRequest(t.agents.errors.toolUnknown(unknown.join(', ')));
+  return tools.map((x) => ({ name: x.name, mode: internalTool(x.name)!.secrets?.length ? ('ask' as const) : x.mode }));
+}
+
+/** Substitui o conjunto de tools do kit (só o que mudou, para a auditoria contar a história certa). */
+async function setKitTools(tx: Tx, kitId: string, tools: { name: string; mode: 'allow' | 'ask' }[]) {
+  const keep = `{${tools.map((x) => `"${x.name}"`).join(',')}}`;
+  await tx.execute(sql`DELETE FROM ai_tool_kit_tools WHERE kit_id = ${kitId} AND NOT (tool_name = ANY(${keep}::text[]))`);
+  if (tools.length === 0) return;
+  await tx.execute(sql`
+    INSERT INTO ai_tool_kit_tools (kit_id, tool_name, mode)
+    SELECT ${kitId}::uuid, x.name, x.mode FROM json_to_recordset(${JSON.stringify(tools)}::json) AS x(name text, mode text)
+    ON CONFLICT (kit_id, tool_name) DO UPDATE SET mode = EXCLUDED.mode WHERE ai_tool_kit_tools.mode <> EXCLUDED.mode`);
+}
+
+export async function createToolKit(ctx: ServiceContext, input: z.output<typeof toolKitCreateInput>) {
+  ctx.access.assertAdmin();
+  const tools = kitToolRows(input.tools);
+  const id = await withTx(ctx, async (tx) => {
+    const result = await tx.execute<{ id: string }>(sql`
+      INSERT INTO ai_tool_kits (name, description, created_by_user_id)
+      VALUES (${input.name}, ${input.description}, ${ctx.access.actor.id}) RETURNING id`);
+    const kitId = result.rows[0]!.id;
+    await setKitTools(tx, kitId, tools);
+    return kitId;
+  });
+  return getToolKitRow(ctx.db, id);
+}
+
+export async function updateToolKit(ctx: ServiceContext, id: string, input: z.output<typeof toolKitUpdateInput>) {
+  ctx.access.assertAdmin();
+  await getToolKitRow(ctx.db, id);
+  const tools = input.tools ? kitToolRows(input.tools) : null;
+  const sets: SQL[] = [];
+  if (input.name !== undefined) sets.push(sql`name = ${input.name}`);
+  if (input.description !== undefined) sets.push(sql`description = ${input.description}`);
+  await withTx(ctx, async (tx) => {
+    if (sets.length > 0) await tx.execute(sql`UPDATE ai_tool_kits SET ${sql.join(sets, sql`, `)} WHERE id = ${id}`);
+    if (tools) {
+      await setKitTools(tx, id, tools);
+      // Mudar só as tools também conta como edição do kit.
+      if (sets.length === 0) await tx.execute(sql`UPDATE ai_tool_kits SET updated_at = now() WHERE id = ${id}`);
+    }
+  });
+  return getToolKitRow(ctx.db, id);
+}
+
+/** Cópia do kit para ajustar: "Cópia de <nome>" (com " (n)" se já existir), as mesmas tools e modos, sem agentes. */
+export async function duplicateToolKit(ctx: ServiceContext, id: string, input: z.output<typeof toolKitDuplicateInput>) {
+  ctx.access.assertAdmin();
+  const source = await getToolKitRow(ctx.db, id);
+  const base = (input.name ?? t.agents.toolKits.copyName(source.name)).slice(0, 120);
+  let name = base;
+  if (!input.name) {
+    const taken = await ctx.db.execute<{ name: string }>(sql`SELECT lower(name) AS name FROM ai_tool_kits`);
+    const names = new Set(taken.rows.map((r) => r.name));
+    for (let n = 2; names.has(name.toLowerCase()); n += 1) {
+      const suffix = ` (${n})`;
+      name = `${base.slice(0, 120 - suffix.length)}${suffix}`;
+    }
+  }
+  const tools = source.tools.filter((x) => internalTool(x.name));
+  return createToolKit(ctx, { name, description: source.description, tools });
+}
+
+/** Só o kit sem agentes ligados (inclusive os arquivados); em uso, o erro lista os agentes. */
+export async function deleteToolKit(ctx: ServiceContext, id: string) {
+  ctx.access.assertAdmin();
+  await getToolKitRow(ctx.db, id);
+  try {
+    await withTx(ctx, (tx) => tx.execute(sql`DELETE FROM ai_tool_kits WHERE id = ${id}`));
+  } catch (error) {
+    const pg = findPgError(error);
+    if (pg?.code !== '23503' || pg.constraint !== 'ai_agents_tool_kit_id_fkey') throw error;
+    const agents = await ctx.db.execute<{ name: string }>(
+      sql`SELECT name FROM ai_agents WHERE tool_kit_id = ${id} ORDER BY archived_at NULLS FIRST, lower(name)`,
+    );
+    throw unprocessable(t.agents.errors.toolKitInUse(agents.rows.map((r) => r.name)), 'tool_kit_in_use');
+  }
+  return { deleted: true };
 }
 
 /* ---------------- servidores MCP ---------------- */

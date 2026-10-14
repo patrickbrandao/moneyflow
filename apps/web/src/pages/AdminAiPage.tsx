@@ -1,10 +1,11 @@
 import { t } from '@moneyflow/shared';
-import { BarChart3, Bot, CircleDollarSign, Plug, Server } from 'lucide-react';
+import { BarChart3, Bot, CircleDollarSign, Plug, Server, Wrench } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { AgentsTab } from '../components/admin-ai/AgentsTab';
 import { McpTab } from '../components/admin-ai/McpTab';
 import { PricesTab } from '../components/admin-ai/PricesTab';
 import { ProvidersTab } from '../components/admin-ai/ProvidersTab';
+import { ToolKitsTab } from '../components/admin-ai/ToolKitsTab';
 import { UsageTab } from '../components/admin-ai/UsageTab';
 import { PageHead } from '../components/domain';
 import { Tabs } from '../components/ui';
@@ -12,10 +13,10 @@ import { useUser } from '../lib/auth';
 import { NotFoundPage } from './NotFoundPage';
 
 const a = t.agentsUi.admin;
-const TABS = ['providers', 'prices', 'agents', 'mcp', 'usage'] as const;
+const TABS = ['providers', 'prices', 'agents', 'tool-kits', 'mcp', 'usage'] as const;
 type Tab = (typeof TABS)[number];
 
-/** Administração da IA (spec 011, só admin): provedores, preços, agentes, servidores MCP e uso. */
+/** Administração da IA (spec 011, só admin): provedores, preços, agentes, kits de ferramentas (spec 021), servidores MCP e uso. */
 export function AdminAiPage() {
   const user = useUser();
   const { tab: raw } = useParams();
@@ -33,6 +34,7 @@ export function AdminAiPage() {
           { key: 'providers', label: a.tabs.providers, icon: <Server /> },
           { key: 'prices', label: a.tabs.prices, icon: <CircleDollarSign /> },
           { key: 'agents', label: a.tabs.agents, icon: <Bot /> },
+          { key: 'tool-kits', label: a.tabs.toolKits, icon: <Wrench /> },
           { key: 'mcp', label: a.tabs.mcp, icon: <Plug /> },
           { key: 'usage', label: a.tabs.usage, icon: <BarChart3 /> },
         ]}
@@ -40,6 +42,7 @@ export function AdminAiPage() {
       {tab === 'providers' && <ProvidersTab />}
       {tab === 'prices' && <PricesTab />}
       {tab === 'agents' && <AgentsTab />}
+      {tab === 'tool-kits' && <ToolKitsTab />}
       {tab === 'mcp' && <McpTab />}
       {tab === 'usage' && <UsageTab />}
     </div>

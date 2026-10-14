@@ -1,6 +1,7 @@
-import { type AgentParams, type AgentToolInfo, type AiAgentDto, type AiProviderDto, type McpServerDto, t } from '@moneyflow/shared';
+import { type AgentParams, type AiAgentDto, type AiProviderDto, type AiToolKitDto, type McpServerDto, t } from '@moneyflow/shared';
 import { Bot, Pencil, Plus, Trash2 } from 'lucide-react';
 import { type FormEvent, type ReactNode, useId, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { agentColor } from '../../agents/format';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
@@ -12,7 +13,7 @@ import { ActiveBadge, ANTHROPIC_SUGGESTIONS, optionalNumber, useProviderModels, 
 const g = t.agentsUi.admin.agents;
 const mcpT = t.agentsUi.admin.mcp;
 
-/** Agentes (só o admin cria): provedor/modelo, parâmetros, tools internas, confirmação, cor, ícone e MCPs. */
+/** Agentes (só o admin cria): provedor/modelo, parâmetros, kit de ferramentas (spec 021), cor, ícone e MCPs. */
 export function AgentsTab() {
   const { data, error, reload } = useApi<AiAgentDto[]>('/api/admin/ai/agents');
   const [editing, setEditing] = useState<AiAgentDto | 'new' | null>(null);
@@ -63,7 +64,7 @@ export function AgentsTab() {
                   </td>
                   <td className="mono text-xs">{g.model_(agent.providerName, agent.model)}</td>
                   <td className="text-[12.5px] text-dim">
-                    {g.toolsSummary(agent.enabledTools ? agent.enabledTools.length : null)}
+                    {g.toolsSummary(agent.toolKitName)}
                     {agent.mcpServers.length > 0 && ` · ${g.mcpSummary(agent.mcpServers.length)}`}
                   </td>
                   <td>
@@ -131,7 +132,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 
 function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null; onClose: () => void; onSaved: () => void }) {
   const providers = useApi<AiProviderDto[]>('/api/admin/ai/providers');
-  const tools = useApi<AgentToolInfo[]>('/api/admin/ai/tools');
+  const kits = useApi<AiToolKitDto[]>('/api/admin/ai/tool-kits');
   const servers = useApi<McpServerDto[]>('/api/admin/ai/mcp-servers');
   const [models] = useProviderModels();
   const listId = useId();
@@ -148,9 +149,7 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
   const [topP, setTopP] = useState(params.top_p?.toString() ?? '');
   const [thinking, setThinking] = useState(params.thinking_budget_tokens?.toString() ?? '');
   const [effort, setEffort] = useState<AgentParams['reasoning_effort'] | ''>(params.reasoning_effort ?? '');
-  const [allTools, setAllTools] = useState(agent ? agent.enabledTools === null : true);
-  const [enabled, setEnabled] = useState<Set<string>>(new Set(agent?.enabledTools ?? []));
-  const [requireConfirmation, setRequireConfirmation] = useState(agent?.requireWriteConfirmation ?? true);
+  const [toolKitId, setToolKitId] = useState(agent?.toolKitId ?? '');
   const [colorSlot, setColorSlot] = useState(agent?.colorSlot ?? 1);
   const [icon, setIcon] = useState(agent?.icon ?? '');
   const [isActive, setIsActive] = useState(agent?.isActive ?? false);
@@ -168,16 +167,6 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
 
   const provider = providers.data?.find((x) => x.id === providerId);
   const suggestions = [...new Set([...(models[providerId] ?? []), ...(provider?.kind === 'anthropic' ? ANTHROPIC_SUGGESTIONS : [])])];
-  const toolList = tools.data ?? [];
-
-  function toggleTool(name: string) {
-    setEnabled((current) => {
-      const next = new Set(current);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  }
 
   function setLink(id: string, patch: Partial<McpLink>) {
     setLinks((all) => {
@@ -211,8 +200,7 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
       providerId: providerId || null,
       model: model.trim(),
       params: nextParams,
-      enabledTools: allTools ? null : [...enabled],
-      requireWriteConfirmation: requireConfirmation,
+      toolKitId: toolKitId || null,
       colorSlot,
       icon: icon.trim(),
       isActive,
@@ -225,48 +213,6 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
     );
     if (saved) onSaved();
   }
-
-  const toolGroup = (kind: 'read' | 'write') => {
-    const items = toolList.filter((x) => x.kind === kind);
-    if (items.length === 0) return null;
-    const checked = items.filter((x) => enabled.has(x.name)).length;
-    return (
-      <div className="admin-ai-tools">
-        <div className="admin-ai-tools-head">
-          <span className="label !mb-0">
-            {kind === 'read' ? g.toolsRead : g.toolsWrite} · {g.toolsCount(checked, items.length)}
-          </span>
-          <button
-            type="button"
-            className="link-action"
-            onClick={() =>
-              setEnabled((current) => {
-                const next = new Set(current);
-                for (const x of items) {
-                  if (checked === items.length) next.delete(x.name);
-                  else next.add(x.name);
-                }
-                return next;
-              })
-            }
-          >
-            {checked === items.length ? g.selectNone : g.selectAll}
-          </button>
-        </div>
-        <div className="admin-ai-checks">
-          {items.map((tool) => (
-            <label key={tool.name} className="check" title={tool.description}>
-              <input type="checkbox" checked={enabled.has(tool.name)} onChange={() => toggleTool(tool.name)} />
-              <span>
-                {tool.title} <span className="mono text-[11px] text-faint">{tool.name}</span>
-                {tool.confirm === 'always' && <span className="text-[11px] text-faint"> · {g.confirmAlways}</span>}
-              </span>
-            </label>
-          ))}
-        </div>
-      </div>
-    );
-  };
 
   return (
     <Modal open title={agent ? g.edit : g.new} onClose={onClose} wide>
@@ -389,24 +335,19 @@ function AgentFormModal({ agent, onClose, onSaved }: { agent: AiAgentDto | null;
           </Section>
 
           <Section title={g.tools}>
-            <div className="segmented mb-3" role="group" aria-label={g.tools}>
-              <button type="button" className={cx(allTools && 'active')} aria-pressed={allTools} onClick={() => setAllTools(true)}>
-                {g.toolsAll}
-              </button>
-              <button type="button" className={cx(!allTools && 'active')} aria-pressed={!allTools} onClick={() => setAllTools(false)}>
-                {g.toolsSelected}
-              </button>
-            </div>
-            {!allTools && (
-              <>
-                {toolGroup('read')}
-                {toolGroup('write')}
-              </>
-            )}
-            <label className="check mt-2">
-              <input type="checkbox" checked={requireConfirmation} onChange={(e) => setRequireConfirmation(e.target.checked)} />{' '}
-              {g.requireConfirmation}
-            </label>
+            <Field label={g.toolKit} hint={g.toolKitHint}>
+              <select className="field" value={toolKitId} onChange={(e) => setToolKitId(e.target.value)} data-testid="agent-tool-kit">
+                <option value="">{g.toolKitNone}</option>
+                {(kits.data ?? []).map((kit) => (
+                  <option key={kit.id} value={kit.id}>
+                    {kit.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Link className="link-action mt-2 inline-block text-[12px]" to="/admin/ai/tool-kits">
+              {g.toolKitManage}
+            </Link>
           </Section>
 
           <Section title={g.mcpServers}>

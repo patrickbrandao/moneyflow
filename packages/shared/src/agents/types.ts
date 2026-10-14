@@ -1,6 +1,6 @@
 import type { AiBlock, AiRole } from './blocks';
 import type { ToolPreview } from './preview';
-import type { AgentToolKind } from './tools';
+import type { AgentToolCategory, AgentToolKind, AgentToolMode } from './tools';
 
 /* DTOs da API dos agentes (spec 011). Segredos nunca aparecem: só dicas/nomes. */
 
@@ -58,8 +58,9 @@ export type AiAgentDto = {
   providerName: string | null;
   model: string | null;
   params: AgentParams;
-  enabledTools: string[] | null;
-  requireWriteConfirmation: boolean;
+  /** Kit de ferramentas (spec 021); null = sem kit = todas as tools internas, sem aprovação. */
+  toolKitId: string | null;
+  toolKitName: string | null;
   colorSlot: number;
   icon: string | null;
   isActive: boolean;
@@ -85,7 +86,26 @@ export type AgentToolInfo = {
   title: string;
   description: string;
   kind: AgentToolKind;
-  confirm: 'agent' | 'always' | 'never';
+  category: AgentToolCategory;
+  destructive: boolean;
+  /** Modo usado quando a tool é marcada num kit. */
+  suggestedMode: AgentToolMode;
+  /** Só administrador: nunca oferecida a quem não é admin. */
+  adminOnly: boolean;
+  /** Tem campo de segredo: sempre ask, com ou sem kit. */
+  secret: boolean;
+};
+
+/** Kit de ferramentas (spec 021). */
+export type AiToolKitDto = {
+  id: string;
+  name: string;
+  description: string | null;
+  tools: { name: string; mode: AgentToolMode }[];
+  /** Agentes ligados ao kit (inclusive os arquivados, que também impedem a exclusão). */
+  agents: { id: string; name: string; archived: boolean }[];
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type McpToolInfo = {

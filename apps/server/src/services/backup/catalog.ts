@@ -85,6 +85,8 @@ export const NATURAL_KEYS: Record<string, string[][]> = {
   entity_tags: [['lower:name']],
   ai_providers: [['lower:name']],
   ai_agents: [['lower:name']],
+  // O agente aponta para o kit pelo nome (spec 021).
+  ai_tool_kits: [['lower:name']],
   mcp_servers: [['lower:name']],
   message_destinations: [['owner_user_id', 'owner_caixa_id', 'lower:name']],
   ai_model_prices: [['provider_id', 'model', 'valid_from']],
@@ -107,6 +109,7 @@ export const OWNED_BY: Record<string, string[]> = {
   entity_links: ['entity_id', 'related_entity_id'],
   entity_tag_links: ['entity_id'],
   ai_model_prices: ['provider_id'],
+  ai_tool_kit_tools: ['kit_id'],
   agent_mcp_servers: ['agent_id', 'mcp_server_id'],
   message_subscriptions: ['destination_id'],
   message_subscription_caixas: ['subscription_id'],
@@ -140,10 +143,12 @@ export const DEFERRED_CLUSTER = new Set([
 /**
  * Tabelas sem coluna `id` (chave primária composta): a linha é identificada
  * pelas colunas da chave (no relatório, `a|b`), e "já cadastrado" = mesma chave
- * depois de traduzir as FKs.
+ * depois de traduzir as FKs. As colunas que são FK levam uuid; as demais, texto
+ * (o nome da tool no kit).
  */
 export const COMPOSITE_KEYS: Record<string, string[]> = {
   entity_tag_links: ['entity_id', 'tag_id'],
+  ai_tool_kit_tools: ['kit_id', 'tool_name'],
 };
 
 /** Colunas que identificam a linha (id ou a chave composta). */
@@ -251,6 +256,7 @@ const LABEL_COLUMNS = [
   'username',
   'title',
   'description',
+  'tool_name',
   'key_value',
   'value',
   'model',

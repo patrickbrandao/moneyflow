@@ -2,16 +2,19 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { formatBRL, SseParser } from '@moneyflow/shared';
+import { AGENT_TOOLS, formatBRL, SseParser } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { embeddingCredentials, embedPending, type IndexState, syncEmbeddingSources } from '../src/agents/embeddings';
 import { mcpExposedName } from '../src/agents/mcp-client';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
+import { registerInternalTool } from '../src/agents/tools-runtime';
 import { startAgentWorker } from '../src/agents/worker';
+import { withTx } from '../src/services/tx';
 import { type FakeMcp, startFakeMcp } from './fakes/fake-mcp';
 import { client, type Harness, scenario, startApp, uid, userSession } from './helpers';
 
@@ -34,6 +37,24 @@ let admin: ReturnType<typeof client>;
 let adminSession: Awaited<ReturnType<typeof userSession>>;
 let provider: any;
 let agent: any;
+let defaultKit: any;
+
+/** Kit com as tools indicadas (padrão: todas) no modo sugerido de cada uma, salvo `modes`. */
+async function createKit(name: string, names?: string[], modes: Record<string, 'allow' | 'ask'> = {}) {
+  const catalog: any[] = await admin.get('/api/admin/ai/tools');
+  const tools = catalog
+    .filter((tool) => !names || names.includes(tool.name))
+    .map((tool) => ({ name: tool.name, mode: modes[tool.name] ?? tool.suggestedMode }));
+  return admin.post('/api/admin/ai/tool-kits', { name: `${name} ${uid()}`, tools });
+}
+
+/** Nomes das tools enviadas na última chamada de chat ao provedor falso (Anthropic). */
+function lastToolNames(): string[] {
+  const call = llm.calls
+    .filter((c) => c.path === '/v1/messages' && Array.isArray(c.body.tools) && !/Gere um título/.test(JSON.stringify(c.body.system)))
+    .at(-1)!;
+  return call.body.tools.map((tool: any) => tool.name);
+}
 
 /** Roda a fila de execuções no próprio teste (o worker, sem timers). */
 async function drain(stale = '1 hour') {
@@ -81,12 +102,15 @@ beforeAll(async () => {
     outputPricePerMillion: 10,
     cacheReadPricePerMillion: 0.2,
   });
+  // O agente principal usa um kit com todas as tools no modo sugerido (escritas pedem aprovação).
+  defaultKit = await createKit('Padrão dos testes');
   agent = await admin.post('/api/admin/ai/agents', {
     name: `Assistente teste ${uid()}`,
     systemPrompt: 'Você ajuda nos testes.',
     providerId: provider.id,
     model: 'claude-sonnet-5-5',
     params: { max_tokens: 2000, max_tool_iterations: 6 },
+    toolKitId: defaultKit.id,
     isActive: true,
   });
 });
@@ -124,11 +148,21 @@ describe('administração', () => {
     await user.post('/api/admin/ai/agents', { name: 'x' }, 403);
   });
 
-  it('agente: tools desconhecidas recusadas, ativo exige provedor e modelo', async () => {
-    await admin.post('/api/admin/ai/agents', { name: `Ruim ${uid()}`, enabledTools: ['nao_existe'] }, 400);
+  it('agente: kit inexistente recusado, ativo exige provedor e modelo; catálogo com categoria e modo sugerido', async () => {
+    await admin.post('/api/admin/ai/agents', { name: `Ruim ${uid()}`, toolKitId: '00000000-0000-7000-8000-000000000000' }, 400);
     await admin.post('/api/admin/ai/agents', { name: `Sem modelo ${uid()}`, isActive: true }, 422);
+    expect(agent).toMatchObject({ toolKitId: defaultKit.id, toolKitName: defaultKit.name });
     const tools = await admin.get('/api/admin/ai/tools');
-    expect(tools.find((t: any) => t.name === 'send_telegram_message')).toMatchObject({ kind: 'write', confirm: 'always' });
+    expect(tools.find((t: any) => t.name === 'send_telegram_message')).toMatchObject({
+      kind: 'write',
+      category: 'messages',
+      suggestedMode: 'ask',
+      destructive: false,
+      adminOnly: false,
+      secret: false,
+    });
+    expect(tools.find((t: any) => t.name === 'notify_user')).toMatchObject({ kind: 'write', suggestedMode: 'allow' });
+    expect(tools.find((t: any) => t.name === 'unmatch_statement_line')).toMatchObject({ category: 'reconciliation', destructive: true });
     const options = await client(h, (await userSession(h)).cookie).get('/api/agents');
     expect(options.some((a: any) => a.id === agent.id)).toBe(true);
   });
@@ -312,6 +346,271 @@ describe('execução do agente', () => {
   });
 });
 
+describe('kit de ferramentas (spec 021)', () => {
+  /** Agente ativo com o kit dado (null = sem kit). */
+  const kitAgent = (toolKitId: string | null, name = 'Kit') =>
+    admin.post('/api/admin/ai/agents', {
+      name: `${name} ${uid()}`,
+      providerId: provider.id,
+      model: 'claude-sonnet-5-5',
+      params: { max_tokens: 2000, max_tool_iterations: 6 },
+      toolKitId,
+      isActive: true,
+    });
+
+  async function confirmationsOf(runId: string) {
+    const r = await h.db.execute<{ tool_name: string; status: string }>(
+      sql`SELECT tool_name, status FROM ai_tool_confirmations WHERE run_id = ${runId} ORDER BY created_at`,
+    );
+    return r.rows;
+  }
+
+  it('CRUD, duplicar, validação contra o registro, nome único sem distinção de maiúsculas e auditoria', async () => {
+    const name = `Kit CRUD ${uid()}`;
+    const kit = await admin.post('/api/admin/ai/tool-kits', {
+      name,
+      description: 'Teste',
+      tools: [
+        { name: 'create_title', mode: 'ask' },
+        { name: 'list_caixas', mode: 'allow' },
+      ],
+    });
+    // Na ordem do registro (a da tela).
+    expect(kit).toMatchObject({
+      name,
+      description: 'Teste',
+      agents: [],
+      tools: [
+        { name: 'list_caixas', mode: 'allow' },
+        { name: 'create_title', mode: 'ask' },
+      ],
+    });
+    await admin.post('/api/admin/ai/tool-kits', { name: name.toUpperCase() }, 409);
+    await admin.post('/api/admin/ai/tool-kits', { name: `Outro ${uid()}`, tools: [{ name: 'nao_existe', mode: 'allow' }] }, 400);
+    await admin.post('/api/admin/ai/tool-kits', { name: `Outro ${uid()}`, tools: [{ name: 'list_caixas' }] }, 400);
+    await admin.post('/api/admin/ai/tool-kits', { name: `Outro ${uid()}`, tools: [{ name: 'list_caixas', mode: 'nunca' }] }, 400);
+
+    // `tools` substitui o conjunto: sai create_title, list_caixas muda para ask, entra end_series.
+    const edited = await admin.patch(`/api/admin/ai/tool-kits/${kit.id}`, {
+      tools: [
+        { name: 'end_series', mode: 'allow' },
+        { name: 'list_caixas', mode: 'ask' },
+      ],
+    });
+    expect(edited).toMatchObject({ name, description: 'Teste' });
+    expect(edited.tools).toEqual([
+      { name: 'list_caixas', mode: 'ask' },
+      { name: 'end_series', mode: 'allow' },
+    ]);
+    expect((await admin.patch(`/api/admin/ai/tool-kits/${kit.id}`, { description: '' })).description).toBeNull();
+
+    const copy = await admin.post(`/api/admin/ai/tool-kits/${kit.id}/duplicate`);
+    expect(copy).toMatchObject({ name: `Cópia de ${name}`, tools: edited.tools, agents: [] });
+    expect(copy.id).not.toBe(kit.id);
+    const copy2 = await admin.post(`/api/admin/ai/tool-kits/${kit.id}/duplicate`);
+    expect(copy2.name).toBe(`Cópia de ${name} (2)`);
+    const named = await admin.post(`/api/admin/ai/tool-kits/${kit.id}/duplicate`, { name: `Ajustado ${uid()}` });
+    expect(named.tools).toEqual(edited.tools);
+    const list = await admin.get('/api/admin/ai/tool-kits');
+    expect(list.map((k: any) => k.id)).toEqual(expect.arrayContaining([kit.id, copy.id, copy2.id, named.id]));
+
+    // Auditoria: o kit e as tools dele (record_id = kit), com o admin como ator humano.
+    const audit = await h.db.execute<{ table_name: string; action: string; actor_kind: string; user_id: string }>(sql`
+      SELECT table_name, action, actor_kind, user_id FROM audit_log WHERE record_id = ${kit.id} ORDER BY created_at, id`);
+    const kinds = audit.rows.map((r) => `${r.table_name}:${r.action}`);
+    expect(kinds).toEqual(
+      expect.arrayContaining(['ai_tool_kits:insert', 'ai_tool_kit_tools:insert', 'ai_tool_kit_tools:update', 'ai_tool_kit_tools:delete']),
+    );
+    for (const row of audit.rows) expect(row).toMatchObject({ actor_kind: 'human', user_id: adminSession.id });
+
+    // Só o admin administra kits.
+    const user = client(h, (await userSession(h)).cookie);
+    await user.get('/api/admin/ai/tool-kits', 403);
+    await user.post('/api/admin/ai/tool-kits', { name: 'x' }, 403);
+    await user.post(`/api/admin/ai/tool-kits/${kit.id}/duplicate`, {}, 403);
+
+    for (const id of [copy.id, copy2.id, named.id]) expect(await admin.del(`/api/admin/ai/tool-kits/${id}`)).toEqual({ deleted: true });
+    await admin.get(`/api/admin/ai/tool-kits/${copy.id}`, 404);
+  });
+
+  it('o kit em uso (inclusive por agente arquivado) não é excluído: o erro lista os agentes', async () => {
+    const kit = await createKit('Em uso', ['list_caixas']);
+    const active = await kitAgent(kit.id, 'Ativo com kit');
+    const archived = await kitAgent(kit.id, 'Arquivado com kit');
+    await admin.post('/api/conversations', { agentId: archived.id });
+    expect(await admin.del(`/api/admin/ai/agents/${archived.id}`)).toMatchObject({ archived: true });
+    expect((await admin.get(`/api/admin/ai/tool-kits/${kit.id}`)).agents).toEqual([
+      { id: active.id, name: active.name, archived: false },
+      { id: archived.id, name: archived.name, archived: true },
+    ]);
+
+    const res = await admin.raw('DELETE', `/api/admin/ai/tool-kits/${kit.id}`);
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.message).toContain(active.name);
+    expect(res.json().error.message).toContain(archived.name);
+
+    await admin.patch(`/api/admin/ai/agents/${active.id}`, { toolKitId: null, isActive: false });
+    expect((await admin.del(`/api/admin/ai/tool-kits/${kit.id}`, 422)).error.message).toContain(archived.name);
+    await admin.patch(`/api/admin/ai/agents/${archived.id}`, { toolKitId: null });
+    expect(await admin.del(`/api/admin/ai/tool-kits/${kit.id}`)).toEqual({ deleted: true });
+  });
+
+  it('fora do kit não chega ao modelo; em allow a escrita roda sem confirmação; em ask a leitura pede confirmação', async () => {
+    const kit = await createKit('Misto', ['list_caixas', 'create_entity'], { list_caixas: 'ask', create_entity: 'allow' });
+    const mixed = await kitAgent(kit.id, 'Misto');
+    const conversation = await admin.post('/api/conversations', { agentId: mixed.id });
+
+    // Escrita em allow: executa direto, sem ai_tool_confirmations.
+    const name = `Direto ${uid()}`;
+    const write = await chat(admin, conversation.id, `criar entidade ${name}`);
+    await drain();
+    expect((await runStatus(write.run.id)).status).toBe('completed');
+    expect(await confirmationsOf(write.run.id)).toEqual([]);
+    expect((await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).filter((e: any) => e.name === name)).toHaveLength(1);
+    // Só as tools do kit foram ao modelo, na ordem do registro.
+    expect(lastToolNames()).toEqual(['list_caixas', 'create_entity']);
+
+    // Leitura em ask: pede confirmação.
+    const read = await chat(admin, conversation.id, 'listar caixas');
+    await drain();
+    expect((await runStatus(read.run.id)).status).toBe('awaiting_confirmation');
+    expect(await confirmationsOf(read.run.id)).toEqual([{ tool_name: 'list_caixas', status: 'pending' }]);
+    await admin.post(`/api/runs/${read.run.id}/confirmations`, { decision: 'approved' });
+    await drain();
+    expect((await runStatus(read.run.id)).status).toBe('completed');
+
+    // Tool fora do kit: o modelo não a recebe e, se a chamar mesmo assim, recebe o erro (sem executar).
+    const outside = await chat(admin, conversation.id, `chamar get_entity {"entityId":"${mixed.id}"}`);
+    await drain();
+    expect((await runStatus(outside.run.id)).status).toBe('completed');
+    const detail = await admin.get(`/api/conversations/${conversation.id}`);
+    const result = detail.messages.filter((m: any) => m.role === 'tool').at(-1).content[0];
+    expect(result).toMatchObject({ is_error: true, content: 'Tool desconhecida ou não habilitada: get_entity' });
+    expect(await confirmationsOf(outside.run.id)).toEqual([]);
+  });
+
+  it('sem kit: todas as tools internas, tudo roda direto (inclusive enviar mensagem e escritas)', async () => {
+    const free = await kitAgent(null, 'Sem kit');
+    expect(free).toMatchObject({ toolKitId: null, toolKitName: null });
+    const conversation = await admin.post('/api/conversations', { agentId: free.id });
+    const name = `Sem kit ${uid()}`;
+    const sent = await chat(admin, conversation.id, `criar entidade ${name}`);
+    await drain();
+    expect((await runStatus(sent.run.id)).status).toBe('completed');
+    expect(await confirmationsOf(sent.run.id)).toEqual([]);
+    expect((await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).filter((e: any) => e.name === name)).toHaveLength(1);
+    expect(lastToolNames()).toEqual(AGENT_TOOLS.map((tool) => tool.name));
+  });
+
+  it('tool só de admin num kit não é oferecida a quem não é admin; o kit é relido a cada chamada ao modelo', async () => {
+    let switchKitId = '';
+    const unregister = [
+      registerInternalTool(
+        {
+          name: 'test_admin_only',
+          title: 'Tool de admin (teste)',
+          description: 'Só para administradores (registrada no teste).',
+          kind: 'read',
+          category: 'search',
+          suggestedMode: 'allow',
+          adminOnly: true,
+          input: z.object({}),
+        },
+        { run: async () => ({ ok: true }) },
+      ),
+      registerInternalTool(
+        {
+          name: 'test_kit_switch',
+          title: 'Troca o kit (teste)',
+          description: 'Tira list_caixas do kit e libera create_entity (registrada no teste).',
+          kind: 'read',
+          category: 'search',
+          suggestedMode: 'allow',
+          input: z.object({}),
+        },
+        {
+          run: (ctx) =>
+            withTx(ctx, async (tx) => {
+              await tx.execute(sql`DELETE FROM ai_tool_kit_tools WHERE kit_id = ${switchKitId} AND tool_name = 'list_caixas'`);
+              await tx.execute(
+                sql`UPDATE ai_tool_kit_tools SET mode = 'allow' WHERE kit_id = ${switchKitId} AND tool_name = 'create_entity'`,
+              );
+              return { switched: true };
+            }),
+        },
+      ),
+    ];
+    try {
+      const catalog = await admin.get('/api/admin/ai/tools');
+      expect(catalog.find((t: any) => t.name === 'test_admin_only')).toMatchObject({ adminOnly: true, category: 'search' });
+      const kit = await createKit('Admin', ['list_caixas', 'test_admin_only']);
+      const withAdminTool = await kitAgent(kit.id, 'Com tool de admin');
+
+      const adminConversation = await admin.post('/api/conversations', { agentId: withAdminTool.id });
+      await chat(admin, adminConversation.id, 'oi');
+      await drain();
+      expect(lastToolNames()).toEqual(['list_caixas', 'test_admin_only']);
+
+      const userSess = await userSession(h);
+      const user = client(h, userSess.cookie);
+      const userConversation = await user.post('/api/conversations', { agentId: withAdminTool.id });
+      await chat(user, userConversation.id, 'oi');
+      await drain();
+      expect(lastToolNames()).toEqual(['list_caixas']);
+      const forced = await chat(user, userConversation.id, 'chamar test_admin_only {}');
+      await drain();
+      expect((await runStatus(forced.run.id)).status).toBe('completed');
+      const detail = await user.get(`/api/conversations/${userConversation.id}`);
+      expect(detail.messages.filter((m: any) => m.role === 'tool').at(-1).content[0]).toMatchObject({
+        is_error: true,
+        content: 'Tool desconhecida ou não habilitada: test_admin_only',
+      });
+
+      // Alterar o kit vale na próxima chamada ao modelo, na mesma execução.
+      const switching = await createKit('Troca', ['list_caixas', 'test_kit_switch', 'create_entity']);
+      switchKitId = switching.id;
+      const switcher = await kitAgent(switching.id, 'Troca de kit');
+      const conversation = await admin.post('/api/conversations', { agentId: switcher.id });
+      const sent = await chat(admin, conversation.id, 'chamar test_kit_switch {}');
+      const before = llm.calls.length;
+      await drain();
+      expect((await runStatus(sent.run.id)).status).toBe('completed');
+      const calls = llm.calls
+        .slice(before)
+        .filter((c) => c.path === '/v1/messages' && Array.isArray(c.body.tools) && c.body.tools.length > 0)
+        .map((c) => c.body.tools.map((tool: any) => tool.name));
+      // (as tools registradas no teste vêm depois das de AGENT_TOOLS)
+      expect(calls).toEqual([
+        ['list_caixas', 'create_entity', 'test_kit_switch'],
+        ['create_entity', 'test_kit_switch'],
+      ]);
+      expect((await admin.get(`/api/admin/ai/tool-kits/${switching.id}`)).tools).toEqual([
+        { name: 'create_entity', mode: 'allow' },
+        { name: 'test_kit_switch', mode: 'allow' },
+      ]);
+    } finally {
+      for (const off of unregister) off();
+    }
+  });
+
+  it('o retrato da v0.1.7 no banco (migration 0038) bate com o registro: mesmas tools, tipo e modo sugerido', async () => {
+    const legacy = await h.db.execute<{ tool_name: string; kind: string; confirm: string }>(
+      sql`SELECT tool_name, kind, confirm FROM ai_legacy_tool_registry()`,
+    );
+    expect(legacy.rows).toHaveLength(49);
+    expect(legacy.rows.filter((r) => r.kind === 'read')).toHaveLength(25);
+    for (const row of legacy.rows) {
+      const tool = AGENT_TOOLS.find((x) => x.name === row.tool_name);
+      expect(tool, row.tool_name).toBeDefined();
+      expect(tool!.kind).toBe(row.kind);
+      // never ⇔ allow; agent/always (pediam confirmação) ⇔ ask.
+      expect(tool!.suggestedMode).toBe(row.confirm === 'never' ? 'allow' : 'ask');
+    }
+    // Tools novas (F13 em diante) não estão no retrato; até lá, o registro é o retrato.
+    expect(new Set(AGENT_TOOLS.map((x) => x.name))).toEqual(new Set(legacy.rows.map((r) => r.tool_name)));
+  });
+});
+
 describe('provedor OpenAI-compatível', () => {
   it('tools e streaming pelo Chat Completions, com uso normalizado', async () => {
     const openai = await admin.post('/api/admin/ai/providers', {
@@ -320,12 +619,13 @@ describe('provedor OpenAI-compatível', () => {
       baseUrl: `${llm.url}/v1`,
       apiKey: 'sk-openai-SEGREDO-02',
     });
+    const kit = await createKit('Só leitura', ['list_caixas', 'search_records']);
     const gpt = await admin.post('/api/admin/ai/agents', {
       name: `GPT teste ${uid()}`,
       providerId: openai.id,
       model: 'fake-gpt',
       isActive: true,
-      enabledTools: ['list_caixas', 'search_records'],
+      toolKitId: kit.id,
     });
     const conversation = await admin.post('/api/conversations', { agentId: gpt.id });
     llm.queue = [{ toolCalls: [{ name: 'list_caixas', input: {} }], usage: { input: 50, output: 5, cacheRead: 30 } }];
@@ -567,7 +867,7 @@ describe('conciliação pelo agente', () => {
       providerId: provider.id,
       model: 'claude-sonnet-5-5',
       params: { max_tokens: 2000, max_tool_iterations: 6 },
-      requireWriteConfirmation: false,
+      // Sem kit: todas as tools internas, sem aprovação (spec 021).
       isActive: true,
     });
   });
