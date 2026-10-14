@@ -12,7 +12,7 @@ Registro de tudo o que é enviado ao provedor de IA e recebido dele, as retentat
   - status final (`ok|error|canceled`), status HTTP e mensagem de erro segura;
   - início, fim, duração e tempo até o primeiro byte;
   - tokens (os mesmos de `ai_usage`, que passa a apontar para a requisição) e o número de tentativas.
-- **Corpos, só com o registro ligado no provedor**: a flag `log_bodies`, desligada por padrão, ao ser ligada abre um aviso de que as requisições levam o conteúdo das conversas e dados financeiros. Com ela ligada, ficam gravados:
+- **Corpos, só com o registro ligado no provedor**: a flag `log_bodies`, desligada por padrão, ao ser ligada abre um aviso de que as requisições levam o conteúdo das conversas e dados financeiros (e de que um segredo digitado no texto da conversa vai junto no corpo). Com ela ligada, ficam gravados:
   - o corpo enviado, **completo, inclusive o base64** de imagens, PDFs e áudios;
   - os cabeçalhos enviados e recebidos;
   - a resposta montada (JSON final);
@@ -33,6 +33,8 @@ Registro de tudo o que é enviado ao provedor de IA e recebido dele, as retentat
   - com `log_bodies`, também o corpo da resposta de erro.
 - **Streaming**: só repete quando a falha veio antes do primeiro byte. Se o stream cai no meio, os deltas já foram ao SSE do console. Nesse caso a requisição termina em erro, e vale a regra de hoje: a execução volta à fila até `max_attempts` ([011](011-agentes-de-ia.md), Execução).
 - Esgotadas as tentativas, o erro segue como hoje (`LlmError` com `retryable`).
+- Cada tentativa espera os cabeçalhos da resposta por até 5 min (depois, `timeout` e nova tentativa). `AI_REQUEST_BACKOFF_MS` (padrão 1000) muda a base do backoff; os testes usam poucos milissegundos.
+- Uma chamada HTTP ao provedor = uma linha. Listar modelos com paginação grava uma linha por página; a última recebe o desfecho da chamada.
 
 ## Retenção
 - O prazo padrão vem de `AI_REQUEST_RETENTION_DAYS` (30). O admin pode mudá-lo na tela, gravando em `app_settings` (`ai.request_retention_days`, de 1 a 365), e **o banco vence a variável**. Sem valor no banco, vale a variável.
@@ -41,17 +43,17 @@ Registro de tudo o que é enviado ao provedor de IA e recebido dele, as retentat
 ## Telas (só admin)
 - **Lista de provedores**: o nome vira link para o **detalhe do provedor** (`/admin/ai/providers/:id`). O lápis de editar continua na lista.
 - **Detalhe do provedor**:
-  - **Cabeçalho**: nome, tipo, `base_url`, capacidades ([024](024-capacidades-dos-provedores.md)), ativo/arquivado, se registra corpos, a dica da chave e o botão **Editar** (o mesmo modal da lista).
+  - **Cabeçalho**: nome, tipo, `base_url`, capacidades ([024](024-capacidades-dos-provedores.md); entram com a F10), ativo/arquivado, se registra corpos, a dica da chave e o botão **Editar** (o mesmo modal da lista).
   - **Resumo de uso**: mês atual, últimos 30 dias e total; chamadas, tokens (entrada, saída, cache gravado e lido) e custo por moeda; separado por finalidade e por modelo, a partir de `ai_usage`.
   - **Saúde (7 dias)**: taxa de erro, latência p50/p95, tempo até o primeiro byte e média de tentativas.
   - **Requisições recentes**: as 50 últimas, com data, operação, finalidade, modelo, agente, usuário, status, tentativas, duração e tokens. Clicar abre o detalhe.
 - **Guia "Requisições"**, nova em /admin/ai, depois de Uso:
-  - a lista de todas as requisições, com filtros (período, provedor, agente, usuário, operação, finalidade, status, modelo) e paginação por cursor;
+  - a lista de todas as requisições, com filtros (período, provedor, agente, usuário, operação, finalidade, status, modelo) e paginação por cursor ("Carregar mais"; a lista nunca traz os corpos);
   - o campo "Retenção (dias)", que mostra se o valor vem do banco ou da variável, com o botão "Usar o padrão" (apaga o valor do banco).
 - **Detalhe da requisição** (gaveta):
   - resumo e links para a conversa e a execução (somente leitura);
   - a linha do tempo das tentativas;
-  - cabeçalhos e corpo enviados, num visualizador JSON. O base64 aparece recolhido com o tamanho, e imagem e áudio têm "ver/ouvir" e "baixar";
+  - cabeçalhos e corpo enviados, num visualizador JSON. O base64 aparece recolhido com o tamanho, e imagem e áudio têm "ver/ouvir" e "baixar" (PDF abre noutra aba). Uma parte acima de 8 MB não vem no detalhe: baixe pela rota `body`;
   - a resposta montada, com o stream bruto numa aba;
   - "Copiar como cURL", sem a chave.
 
@@ -66,19 +68,25 @@ Registro de tudo o que é enviado ao provedor de IA e recebido dele, as retentat
 - **`ai_providers.log_bodies`**: `boolean NOT NULL DEFAULT false`, auditada.
 - **`ai_usage.request_id`**: FK nula, `ON DELETE SET NULL`.
 - **`ai_requests_purge(dias, limite)`**: devolve quantas linhas apagou.
-- **Função `ai_provider_health(dias)`**: por provedor e modelo, nos últimos N dias (taxa de erro, p50/p95 de duração e de primeiro byte, média de tentativas).
+- **`ai_usage.request_id`**: a FK é `NOT VALID`. O dump leva só a estrutura das requisições e, validada, a FK derrubaria o `pg_restore` do uso que aponta para elas; as linhas novas continuam checadas. Mesmo provedor e mesma execução da requisição, senão `23514 ai_usage_links_check`.
+- **`ai_usage_unlink_missing_requests()`**: depois de restaurar um dump, anula os vínculos do uso com requisições que não vieram (idempotente, devolve quantos). O `dump.ts` chama depois de um `pg_restore` bem-sucedido.
+- **Função `ai_provider_health(dias = 7, provedor = NULL)`**: por provedor e modelo, nos últimos N dias (taxa de erro, p50/p95 de duração e de primeiro byte, média de tentativas, último erro); com o provedor, só ele (o detalhe do provedor).
 - **Backup**: `ai_requests` e `ai_request_attempts` ficam fora do JSON (são operacionais) e o dump do PostgreSQL leva só a estrutura delas (`--exclude-table-data`), porque trazem conversas e dados financeiros; `app_settings` entra.
 
 ## Aplicação (app)
 - Um invólucro único (`agents/llm/request-log.ts`) envolve **todas** as chamadas dos adaptadores e de `embedTexts`, com as tentativas e a gravação.
-  - Captura o corpo pelo `fetch` customizado do SDK (Anthropic e OpenAI aceitam `fetch`), sem montar o JSON duas vezes.
-  - Grava fora da transação do negócio: uma linha no início e um UPDATE no fim. Nunca segura transação durante a chamada.
+  - Captura o corpo pelo `fetch` customizado do SDK (Anthropic e OpenAI aceitam `fetch`), sem montar o JSON duas vezes. Um cliente do SDK por chamada, com o `fetch` daquela chamada.
+  - Grava fora da transação do negócio: uma linha no início e um UPDATE no fim (`finished_at` pelo relógio do banco, nunca antes do início). Nunca segura transação durante a chamada. Uma falha ao gravar o registro não derruba a chamada (vira aviso no log).
+  - A resposta é repassada ao SDK pedaço a pedaço (sem atrasar os deltas), contando bytes, o tempo até o primeiro byte e, com `log_bodies`, guardando o stream bruto.
+  - Os cabeçalhos de credencial (a lista fixa e qualquer nome com `key`, `token`, `secret`, `auth`…, como os `anthropic-*` de credencial) viram `[omitido]` antes de ir ao banco; parâmetros de URL com esses nomes também.
+  - Quem chama: o runner (chat dos agentes e dos fluxos, título), os embeddings (indexação e busca) e o "Testar conexão" (`test_connection`, com o usuário do admin). `ai_usage.request_id` recebe a requisição da chamada.
+- **Purga**: no laço de manutenção do worker, `ai_requests_purge(dias, 1000)` em lotes até um lote vir incompleto; os dias vêm de `app_settings` e, sem valor lá, de `AI_REQUEST_RETENTION_DAYS`.
 - **Rotas**:
   - `GET /api/admin/ai/requests` (filtros e cursor);
   - `GET /api/admin/ai/requests/:id`;
   - `GET /api/admin/ai/requests/:id/body?part=request|response|stream` (download);
   - `GET /api/admin/ai/providers/:id/summary`;
-  - `GET/PUT/DELETE /api/admin/settings/:key` (o `DELETE` é o "Usar o padrão").
+  - `GET/PUT/DELETE /api/admin/settings/:key` (o `DELETE` é o "Usar o padrão"). O `GET` devolve o valor em vigor, a origem (`database` ou `env`), o valor e o nome da variável; o `PUT` recebe `{ value }`, validado pelo banco (`app_settings_value_check`, traduzido em pt-BR). Chave desconhecida, 404.
 
 ## Testes
 - **Integração** (provedor falso):
@@ -89,3 +97,4 @@ Registro de tudo o que é enviado ao provedor de IA e recebido dele, as retentat
   - a purga respeita o prazo do banco e, sem ele, o da variável;
   - um não admin recebe 403 nas rotas.
 - **e2e**: abrir o detalhe do provedor, ver a requisição da conversa e as tentativas, e mudar a retenção.
+- Entregues em `apps/server/test/ai-requests.test.ts` (também o cancelamento cortando o `retry-after`, o 400 que não repete, testar conexão e embeddings registrados, as rotas de configuração e a exclusão do backup), `packages/shared/test/ai-requests.test.ts` (cURL e detecção do base64) e no `e2e/tests/agentes.spec.ts`.

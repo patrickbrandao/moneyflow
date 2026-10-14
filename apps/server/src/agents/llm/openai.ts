@@ -1,5 +1,6 @@
-import type { AssistantBlock, NeutralMessage } from '@moneyflow/shared';
+import type { AiRequestOperation, AiUsagePurpose, AssistantBlock, NeutralMessage } from '@moneyflow/shared';
 import OpenAI from 'openai';
+import { failureOutcome, type RequestLogBase, RequestRecorder } from './request-log';
 import { type LlmClient, type LlmCredentials, LlmError, type LlmRequest, type LlmStopReason } from './types';
 
 /*
@@ -70,21 +71,34 @@ async function toMessages(request: LlmRequest): Promise<ChatMessage[]> {
   return out;
 }
 
-export function openaiClient(credentials: LlmCredentials): LlmClient {
-  const client = new OpenAI({
+/** Cliente do SDK com o fetch do invólucro (spec 023): as tentativas são dele, não do SDK. */
+function openClient(credentials: LlmCredentials, recorder: RequestRecorder, timeout = 10 * 60 * 1000) {
+  return new OpenAI({
     apiKey: credentials.apiKey ?? 'sem-chave',
     baseURL: credentials.baseUrl ?? undefined,
-    maxRetries: 2,
-    timeout: 10 * 60 * 1000,
+    maxRetries: 0,
+    timeout,
+    fetch: recorder.fetch,
   });
+}
 
-  const wrap = (error: unknown): never => {
-    if (error instanceof OpenAI.APIError) {
-      const status = typeof error.status === 'number' ? error.status : null;
-      throw new LlmError(String(error.message).slice(0, 500), status, status === null || status === 429 || status >= 500);
-    }
-    throw error;
-  };
+/** Erro do SDK → LlmError (ou o abort, como veio); queda no meio do stream volta a execução à fila. */
+function wrapError(error: unknown, signal?: AbortSignal): never {
+  if (error instanceof OpenAI.APIError && !(error instanceof OpenAI.APIUserAbortError)) {
+    const status = typeof error.status === 'number' ? error.status : null;
+    throw new LlmError(
+      String(error.message).slice(0, 500),
+      status,
+      status === null || status === 408 || status === 409 || status === 429 || status >= 500,
+    );
+  }
+  if (signal?.aborted || (error as { name?: string })?.name === 'AbortError') throw error;
+  throw new LlmError(String(error instanceof Error ? error.message : error).slice(0, 500), null, true);
+}
+
+export function openaiClient(credentials: LlmCredentials, log: RequestLogBase = {}): LlmClient {
+  const recorderFor = (operation: AiRequestOperation, purpose: AiUsagePurpose | null, model: string | null) =>
+    new RequestRecorder({ ...log, baseUrl: credentials.baseUrl }, { operation, purpose, model });
 
   return {
     kind: 'openai',
@@ -114,6 +128,8 @@ export function openaiClient(credentials: LlmCredentials): LlmClient {
       let model = request.model;
       const calls = new Map<number, { id: string; name: string; args: string }>();
       const usage = { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 };
+      const recorder = recorderFor(request.operation ?? 'chat', request.purpose ?? 'chat', request.model);
+      const client = openClient(credentials, recorder);
       try {
         const stream = await client.chat.completions.create(body, { signal: request.signal });
         for await (const chunk of stream) {
@@ -143,7 +159,8 @@ export function openaiClient(credentials: LlmCredentials): LlmClient {
           }
         }
       } catch (error) {
-        return wrap(error);
+        await recorder.finish(failureOutcome(error, request.signal));
+        return wrapError(error, request.signal);
       }
 
       const content: AssistantBlock[] = [];
@@ -160,15 +177,22 @@ export function openaiClient(credentials: LlmCredentials): LlmClient {
         index += 1;
         content.push({ type: 'tool_use', id: call.id || `call_${Date.now()}_${index}`, name: call.name, input });
       }
-      return { content, stopReason: calls.size > 0 ? 'tool_use' : stopReason(finish), model, usage };
+      const result = { content, stopReason: calls.size > 0 ? ('tool_use' as const) : stopReason(finish), model, usage };
+      // Resposta montada (JSON final) para o registro com log_bodies.
+      const requestId = await recorder.finish({ status: 'ok', usage, responseBody: { model, finish_reason: finish, content } });
+      return { ...result, requestId };
     },
-    async listModels() {
+    async listModels(operation = 'list_models') {
+      const recorder = recorderFor(operation, null, null);
+      const client = openClient(credentials, recorder);
       try {
         const ids: string[] = [];
         for await (const model of client.models.list()) ids.push(model.id);
+        await recorder.finish({ status: 'ok' });
         return ids.sort();
       } catch (error) {
-        return wrap(error);
+        await recorder.finish(failureOutcome(error));
+        return wrapError(error);
       }
     },
   };
@@ -179,19 +203,24 @@ export async function embedTexts(
   credentials: LlmCredentials,
   model: string,
   texts: string[],
-): Promise<{ vectors: number[][]; tokens: number }> {
-  const client = new OpenAI({ apiKey: credentials.apiKey ?? 'sem-chave', baseURL: credentials.baseUrl ?? undefined, maxRetries: 2 });
+  log: RequestLogBase = {},
+): Promise<{ vectors: number[][]; tokens: number; requestId: string | null }> {
+  const recorder = new RequestRecorder({ ...log, baseUrl: credentials.baseUrl }, { operation: 'embedding', purpose: 'embedding', model });
+  const client = openClient(credentials, recorder);
   try {
     const response = await client.embeddings.create({
       model,
       input: texts,
       ...(/text-embedding-3/.test(model) ? { dimensions: 1536 } : {}),
     });
-    return {
-      vectors: response.data.sort((a, b) => a.index - b.index).map((d) => d.embedding as number[]),
-      tokens: response.usage?.prompt_tokens ?? 0,
-    };
+    const tokens = response.usage?.prompt_tokens ?? 0;
+    const requestId = await recorder.finish({
+      status: 'ok',
+      usage: { inputTokens: tokens, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 },
+    });
+    return { vectors: response.data.sort((a, b) => a.index - b.index).map((d) => d.embedding as number[]), tokens, requestId };
   } catch (error) {
+    await recorder.finish(failureOutcome(error));
     if (error instanceof OpenAI.APIError) throw new LlmError(String(error.message).slice(0, 500), error.status ?? null, true);
     throw error;
   }

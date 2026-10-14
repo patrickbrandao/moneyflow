@@ -80,6 +80,9 @@ export const auditStrings = {
     ai_tool_kit_tools: 'Tools dos kits',
     ai_agent_prompt_versions: 'Versões do prompt',
     user_ai_settings: 'Configurações de IA do usuário',
+    app_settings: 'Configurações do sistema',
+    ai_requests: 'Requisições ao provedor de IA',
+    ai_request_attempts: 'Tentativas das requisições',
   } as Record<string, string>,
   columns: {
     name: 'Nome',

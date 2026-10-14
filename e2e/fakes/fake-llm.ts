@@ -19,7 +19,10 @@ import type { AddressInfo } from 'node:net';
  *  - prompt de leitura de documento / de contrato / classificação / título → JSON ou título de teste
  *  - conversão de contrato em markdown → um markdown curto
  *  - qualquer outra coisa       → "Olá! Sou o agente de teste."
- * Os testes podem trocar o cérebro (`brain`) ou enfileirar respostas (`queue`).
+ * Os testes podem trocar o cérebro (`brain`) ou enfileirar respostas (`queue`),
+ * inclusive falhas: `{ status: 429, headers: { 'retry-after': '1' } }` (erro
+ * HTTP com cabeçalhos) e `{ dropAfter: 2 }` (o stream cai depois de 2 pedaços,
+ * com a resposta 200 já enviada) — para as tentativas da spec 023.
  */
 
 export type FakeToolCall = { name: string; input: Record<string, unknown> };
@@ -32,6 +35,10 @@ export type FakeReply = {
   usage?: { input: number; output: number; cacheWrite?: number; cacheRead?: number };
   /** Responde com erro HTTP (ex.: 500, 429). */
   status?: number;
+  /** Cabeçalhos extras da resposta de erro (ex.: retry-after, x-ratelimit-*). */
+  headers?: Record<string, string>;
+  /** Derruba a conexão depois de N pedaços do texto (queda no meio do stream). */
+  dropAfter?: number;
 };
 
 export type NeutralView = {
@@ -228,9 +235,15 @@ async function streamAnthropic(res: ServerResponse, body: any, reply: FakeReply)
   let index = 0;
   if (reply.text) {
     send('content_block_start', { type: 'content_block_start', index, content_block: { type: 'text', text: '' } });
+    let sent = 0;
     for (const chunk of split(reply.text, reply.chunks ?? 3)) {
       if (res.destroyed) return;
+      if (reply.dropAfter !== undefined && sent >= reply.dropAfter) {
+        res.destroy();
+        return;
+      }
       send('content_block_delta', { type: 'content_block_delta', index, delta: { type: 'text_delta', text: chunk } });
+      sent += 1;
       if (reply.delayMs) await sleep(reply.delayMs);
     }
     send('content_block_stop', { type: 'content_block_stop', index });
@@ -267,9 +280,15 @@ async function streamOpenAi(res: ServerResponse, body: any, reply: FakeReply) {
       `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model: body.model, choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`,
     );
   chunk({ role: 'assistant', content: '' });
+  let sent = 0;
   for (const piece of split(reply.text ?? '', reply.chunks ?? 3)) {
     if (res.destroyed) return;
+    if (reply.dropAfter !== undefined && sent >= reply.dropAfter) {
+      res.destroy();
+      return;
+    }
     chunk({ content: piece });
+    sent += 1;
     if (reply.delayMs) await sleep(reply.delayMs);
   }
   (reply.toolCalls ?? []).forEach((call, index) => {
@@ -329,8 +348,8 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
     try {
       const path = (req.url ?? '').split('?')[0]!;
       const body = req.method === 'POST' ? await readBody(req) : {};
-      const json = (status: number, data: unknown) => {
-        res.writeHead(status, { 'content-type': 'application/json' });
+      const json = (status: number, data: unknown, headers: Record<string, string> = {}) => {
+        res.writeHead(status, { 'content-type': 'application/json', ...headers });
         res.end(JSON.stringify(data));
       };
       if (req.method === 'GET' && path === '/v1/models') {
@@ -373,6 +392,7 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
         return json(
           reply.status,
           anthropic ? { type: 'error', error: { type: 'api_error', message: 'falha simulada' } } : { error: { message: 'falha simulada' } },
+          reply.headers,
         );
       }
       if (anthropic) await streamAnthropic(res, body, reply);

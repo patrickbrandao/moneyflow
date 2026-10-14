@@ -35,6 +35,12 @@ export type Config = {
   agentMaintenanceMs: number;
   /** Espera máxima da leitura de documento por IA, em ms. */
   aiDocumentTimeoutMs: number;
+  /** Requisições ao provedor (spec 023): tentativas do próprio MoneyFlow por chamada (padrão 3). */
+  aiRequestMaxAttempts: number;
+  /** Base do backoff entre as tentativas, em ms (1 s, 2 s, 4 s…; menor nos testes). */
+  aiRequestBackoffMs: number;
+  /** Retenção padrão das requisições, em dias (app_settings ai.request_retention_days vence). */
+  aiRequestRetentionDays: number;
   /** Backup (spec 019): conexão do dono do banco, só para pg_dump/pg_restore; null = dump e restauração desligados. */
   ownerDatabaseUrl: string | null;
   /** Pasta dos binários do cliente PostgreSQL (pg_dump, pg_restore); vazia = PATH. */
@@ -80,8 +86,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     agentConcurrency: Math.max(1, Number(env.AGENT_CONCURRENCY ?? 4)),
     agentMaintenanceMs: Number(env.AGENT_MAINTENANCE_MS ?? 5 * 60 * 1000),
     aiDocumentTimeoutMs: Number(env.AI_DOCUMENT_TIMEOUT_MS ?? 120_000),
+    aiRequestMaxAttempts: clampInt(env.AI_REQUEST_MAX_ATTEMPTS, 3, 1, 10),
+    aiRequestBackoffMs: clampInt(env.AI_REQUEST_BACKOFF_MS, 1000, 0, 60_000),
+    aiRequestRetentionDays: clampInt(env.AI_REQUEST_RETENTION_DAYS, 30, 1, 365),
     ownerDatabaseUrl: env.DATABASE_OWNER_URL?.trim() || null,
     pgBinDir: env.PG_BIN_DIR?.trim() || null,
     backupMaxUploadBytes: Math.max(1, Number(env.BACKUP_MAX_UPLOAD_MB ?? 512)) * 1024 * 1024,
   };
+}
+
+/** Inteiro da variável, dentro da faixa (vazia ou inválida = o padrão). */
+function clampInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const n = Number(raw);
+  if (raw === undefined || raw.trim() === '' || !Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
 }

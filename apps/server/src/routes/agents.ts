@@ -4,8 +4,11 @@ import {
   aiPriceInput,
   aiProviderCreateInput,
   aiProviderUpdateInput,
+  aiRequestBodyQuery,
+  aiRequestListQuery,
   aiUsageQuery,
   apiTokenCreateInput,
+  appSettingInput,
   confirmationDecisionInput,
   conversationCreateInput,
   conversationForkInput,
@@ -24,14 +27,16 @@ import {
 } from '@moneyflow/shared';
 import type { FastifyInstance } from 'fastify';
 import type { RunEventsHub } from '../agents/events-hub';
+import { AppError } from '../errors';
 import { param, parse, type Req } from '../http';
 import * as admin from '../services/ai-admin';
 import { suggestImportClassifications } from '../services/ai-flows';
+import * as requests from '../services/ai-requests';
 import * as aiSettings from '../services/ai-settings';
 import * as tokens from '../services/api-tokens';
 import * as conversations from '../services/conversations';
 import { decideSuggestions } from '../services/reconciliation';
-import { UPLOAD_BODY_LIMIT } from './attachments';
+import { contentDisposition, UPLOAD_BODY_LIMIT } from './attachments';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -40,6 +45,13 @@ declare module 'fastify' {
 }
 
 const FINAL = new Set(['completed', 'failed', 'canceled']);
+
+/** Chave de configuração na URL (`area.nome`); a lista das conhecidas fica no serviço (404 nas demais). */
+const settingKey = (r: Req) => {
+  const key = String((r.params as Record<string, string>).key ?? '');
+  if (!/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/.test(key)) throw new AppError(404, 'not_found', 'Configuração não encontrada.');
+  return key;
+};
 
 /* Agentes de IA (spec 011): conversas, execuções (SSE), administração, tokens e a IA nos fluxos. */
 export async function agentRoutes(app: FastifyInstance) {
@@ -208,4 +220,21 @@ export async function agentRoutes(app: FastifyInstance) {
   app.delete('/api/admin/ai/mcp-servers/:id', (r: Req) => admin.deleteMcpServer(r.ctx, id(r)));
   app.post('/api/admin/ai/mcp-servers/:id/refresh', (r: Req) => admin.refreshMcpServer(r.ctx, id(r)));
   app.get('/api/admin/ai/usage', (r: Req) => admin.usageReport(r.ctx, parse(aiUsageQuery, r.query)));
+
+  /* ---------------- requisições ao provedor e configurações (spec 023) ---------------- */
+  app.get('/api/admin/ai/requests', (r: Req) => requests.listRequests(r.ctx, parse(aiRequestListQuery, r.query)));
+  app.get('/api/admin/ai/requests/:id', (r: Req) => requests.getRequest(r.ctx, id(r)));
+  app.get('/api/admin/ai/requests/:id/body', async (r: Req, reply) => {
+    const file = await requests.requestBody(r.ctx, id(r), parse(aiRequestBodyQuery, r.query).part);
+    reply
+      .header('content-type', file.mime)
+      .header('content-disposition', contentDisposition(file.fileName))
+      .header('cache-control', 'private, no-store')
+      .header('x-content-type-options', 'nosniff');
+    return reply.send(file.body);
+  });
+  app.get('/api/admin/ai/providers/:id/summary', (r: Req) => requests.providerSummary(r.ctx, id(r)));
+  app.get('/api/admin/settings/:key', (r: Req) => requests.getSetting(r.ctx, settingKey(r)));
+  app.put('/api/admin/settings/:key', (r: Req) => requests.putSetting(r.ctx, settingKey(r), parse(appSettingInput, r.body).value));
+  app.delete('/api/admin/settings/:key', (r: Req) => requests.deleteSetting(r.ctx, settingKey(r)));
 }

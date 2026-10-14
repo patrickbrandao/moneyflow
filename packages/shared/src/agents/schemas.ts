@@ -43,6 +43,8 @@ export const aiProviderCreateInput = z.object({
     .or(z.literal(''))
     .transform((v) => v || null),
   isActive: z.boolean().default(true),
+  /** Registrar corpos e cabeçalhos das requisições (spec 023). */
+  logBodies: z.boolean().default(false),
   notes: optionalText(),
 });
 
@@ -67,6 +69,7 @@ export const aiProviderUpdateInput = z.object({
     .or(z.literal(''))
     .transform((v) => (v === undefined ? undefined : v || null)),
   isActive: z.boolean().optional(),
+  logBodies: z.boolean().optional(),
   notes: optionalText().optional(),
 });
 
@@ -232,6 +235,66 @@ export const aiUsageQuery = z.object({
     .regex(/^\d{4}-\d{2}$/)
     .optional(),
 });
+
+/* ---------------- requisições ao provedor (spec 023) ---------------- */
+
+export const AI_REQUEST_OPERATIONS = [
+  'chat',
+  'title',
+  'embedding',
+  'vision_describe',
+  'transcription',
+  'speech',
+  'test_connection',
+  'list_models',
+] as const;
+export const AI_REQUEST_STATUSES = ['running', 'ok', 'error', 'canceled'] as const;
+export const AI_USAGE_PURPOSES = [
+  'chat',
+  'title',
+  'embedding',
+  'document_reading',
+  'classify_lines',
+  'contract_reading',
+  'contract_markdown',
+] as const;
+
+const day = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .optional()
+  .or(z.literal('').transform(() => undefined));
+const optionalId = id.optional().or(z.literal('').transform(() => undefined));
+
+export const aiRequestListQuery = z.object({
+  /** Período (datas de início, no fuso de São Paulo, inclusivo). */
+  from: day,
+  to: day,
+  providerId: optionalId,
+  agentId: optionalId,
+  userId: optionalId,
+  runId: optionalId,
+  conversationId: optionalId,
+  operation: z
+    .enum(AI_REQUEST_OPERATIONS)
+    .optional()
+    .or(z.literal('').transform(() => undefined)),
+  purpose: z
+    .enum(AI_USAGE_PURPOSES)
+    .optional()
+    .or(z.literal('').transform(() => undefined)),
+  status: z
+    .enum(AI_REQUEST_STATUSES)
+    .optional()
+    .or(z.literal('').transform(() => undefined)),
+  model: z.string().trim().max(200).optional(),
+  cursor: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+export const aiRequestBodyQuery = z.object({ part: z.enum(['request', 'response', 'stream']) });
+
+export const appSettingInput = z.object({ value: z.unknown().refine((v) => v !== undefined, 'Informe o valor.') });
 
 /* ---------------- conversas ---------------- */
 

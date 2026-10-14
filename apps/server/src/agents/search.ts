@@ -28,7 +28,7 @@ const uuidArray = (ids: string[]) => `{${ids.join(',')}}`;
 export async function semanticSearch(ctx: ServiceContext, query: string, types: SearchType[] | null, limit: number) {
   const wanted = types?.length ? types : ALL;
   const caixaIds = await readableCaixas(ctx);
-  const creds = await embeddingCredentials(ctx.db);
+  const creds = await embeddingCredentials(ctx.db, ctx.config);
   if (creds) {
     const vector = await embedQuery(ctx.db, creds, query, ctx.access.actor.id);
     const result = await ctx.db.execute<{

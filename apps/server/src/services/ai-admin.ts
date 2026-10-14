@@ -50,8 +50,8 @@ import { iso } from './util';
 
 /* ---------------- provedores ---------------- */
 
-const PROVIDER_COLUMNS = sql`p.id, p.name, p.kind, p.base_url, p.api_key_hint, p.embedding_model, p.is_active, p.notes, p.archived_at,
-  p.created_at`;
+const PROVIDER_COLUMNS = sql`p.id, p.name, p.kind, p.base_url, p.api_key_hint, p.embedding_model, p.is_active, p.log_bodies, p.notes,
+  p.archived_at, p.created_at`;
 
 type ProviderRow = {
   id: string;
@@ -61,6 +61,7 @@ type ProviderRow = {
   api_key_hint: string | null;
   embedding_model: string | null;
   is_active: boolean;
+  log_bodies: boolean;
   notes: string | null;
   archived_at: unknown;
   created_at: unknown;
@@ -74,6 +75,7 @@ const providerDto = (r: ProviderRow): AiProviderDto => ({
   apiKeyHint: r.api_key_hint,
   embeddingModel: r.embedding_model,
   isActive: r.is_active,
+  logBodies: r.log_bodies,
   notes: r.notes,
   archivedAt: iso(r.archived_at),
   createdAt: iso(r.created_at)!,
@@ -87,7 +89,7 @@ export async function listProviders(ctx: ServiceContext): Promise<AiProviderDto[
   return result.rows.map(providerDto);
 }
 
-async function getProvider(db: Executor, id: string): Promise<AiProviderDto> {
+export async function getProvider(db: Executor, id: string): Promise<AiProviderDto> {
   const result = await db.execute<ProviderRow>(sql`SELECT ${PROVIDER_COLUMNS} FROM ai_providers p WHERE p.id = ${id}`);
   if (!result.rows[0]) throw notFound();
   return providerDto(result.rows[0]);
@@ -97,9 +99,9 @@ export async function createProvider(ctx: ServiceContext, input: z.output<typeof
   ctx.access.assertAdmin();
   const id = await withTx(ctx, async (tx) => {
     const result = await tx.execute<{ id: string }>(sql`
-      INSERT INTO ai_providers (name, kind, base_url, api_key, embedding_model, is_active, notes, created_by_user_id)
-      VALUES (${input.name}, ${input.kind}, ${input.baseUrl}, ${input.apiKey}, ${input.embeddingModel}, ${input.isActive}, ${input.notes},
-              ${ctx.access.actor.id})
+      INSERT INTO ai_providers (name, kind, base_url, api_key, embedding_model, is_active, log_bodies, notes, created_by_user_id)
+      VALUES (${input.name}, ${input.kind}, ${input.baseUrl}, ${input.apiKey}, ${input.embeddingModel}, ${input.isActive}, ${input.logBodies},
+              ${input.notes}, ${ctx.access.actor.id})
       RETURNING id`);
     return result.rows[0]!.id;
   });
@@ -116,6 +118,7 @@ export async function updateProvider(ctx: ServiceContext, id: string, input: z.o
   else if (input.apiKey) sets.push(sql`api_key = ${input.apiKey}`);
   if (input.embeddingModel !== undefined) sets.push(sql`embedding_model = ${input.embeddingModel}`);
   if (input.isActive !== undefined) sets.push(sql`is_active = ${input.isActive}`);
+  if (input.logBodies !== undefined) sets.push(sql`log_bodies = ${input.logBodies}`);
   if (input.notes !== undefined) sets.push(sql`notes = ${input.notes}`);
   if (sets.length > 0) {
     await withTx(ctx, (tx) => tx.execute(sql`UPDATE ai_providers SET ${sql.join(sets, sql`, `)} WHERE id = ${id}`));
@@ -146,9 +149,17 @@ async function adminCredentials(ctx: ServiceContext, provider: AiProviderDto) {
 export async function testProvider(ctx: ServiceContext, id: string): Promise<AiProviderTestResult> {
   ctx.access.assertAdmin();
   const provider = await getProvider(ctx.db, id);
-  const client = createLlmClient(await adminCredentials(ctx, provider));
+  // Registrado como test_connection (spec 023), com as tentativas do invólucro.
+  const client = createLlmClient(await adminCredentials(ctx, provider), {
+    db: ctx.db,
+    providerId: provider.id,
+    userId: ctx.access.actor.id,
+    logBodies: provider.logBodies,
+    maxAttempts: ctx.config.aiRequestMaxAttempts,
+    backoffMs: ctx.config.aiRequestBackoffMs,
+  });
   try {
-    const models = await client.listModels();
+    const models = await client.listModels('test_connection');
     return { ok: true, message: `Conexão ok: ${models.length} modelo(s) disponível(is).`, models };
   } catch (error) {
     const message = error instanceof LlmError ? error.message : error instanceof Error ? error.message : String(error);

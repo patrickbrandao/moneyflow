@@ -1,6 +1,7 @@
 import type { Database, Executor } from '@moneyflow/db';
 import { sql } from 'drizzle-orm';
-import { embedTexts, type LlmCredentials } from './llm';
+import type { Config } from '../config';
+import { embedTexts, type LlmCredentials, type RequestLogBase } from './llm';
 
 /*
  * Embeddings (pgvector, 1536 dimensões) para a busca semântica dos agentes.
@@ -12,34 +13,74 @@ import { embedTexts, type LlmCredentials } from './llm';
  * needs_reindex quando o texto muda; (2) calcula os vetores pendentes.
  */
 
-export type EmbeddingCredentials = LlmCredentials & { providerId: string; model: string };
+export type EmbeddingCredentials = LlmCredentials & {
+  providerId: string;
+  model: string;
+  /** Registro das requisições (spec 023): log_bodies do provedor e as tentativas da configuração. */
+  logBodies: boolean;
+  maxAttempts?: number;
+  backoffMs?: number;
+};
 
-export async function embeddingCredentials(db: Executor): Promise<EmbeddingCredentials | null> {
+export async function embeddingCredentials(
+  db: Executor,
+  config?: Pick<Config, 'aiRequestMaxAttempts' | 'aiRequestBackoffMs'>,
+): Promise<EmbeddingCredentials | null> {
   const result = await db.execute<{
     provider_id: string;
     kind: 'openai';
     base_url: string | null;
     api_key: string | null;
     embedding_model: string;
-  }>(sql`SELECT provider_id, kind, base_url, api_key, embedding_model FROM ai_embedding_credentials()`);
+    log_bodies: boolean | null;
+  }>(sql`
+    SELECT c.provider_id, c.kind, c.base_url, c.api_key, c.embedding_model, p.log_bodies
+      FROM ai_embedding_credentials() c LEFT JOIN ai_providers p ON p.id = c.provider_id`);
   const row = result.rows[0];
   if (!row) return null;
-  return { providerId: row.provider_id, kind: row.kind, baseUrl: row.base_url, apiKey: row.api_key, model: row.embedding_model };
+  return {
+    providerId: row.provider_id,
+    kind: row.kind,
+    baseUrl: row.base_url,
+    apiKey: row.api_key,
+    model: row.embedding_model,
+    logBodies: Boolean(row.log_bodies),
+    maxAttempts: config?.aiRequestMaxAttempts,
+    backoffMs: config?.aiRequestBackoffMs,
+  };
+}
+
+/** Atribuição das requisições de embeddings (sem agente; usuário opcional). */
+function requestLog(db: Executor, creds: EmbeddingCredentials, userId: string | null): RequestLogBase {
+  return {
+    db,
+    providerId: creds.providerId,
+    userId,
+    logBodies: creds.logBodies,
+    maxAttempts: creds.maxAttempts,
+    backoffMs: creds.backoffMs,
+  };
 }
 
 export const vectorLiteral = (vector: number[]) => `[${vector.map((v) => (Number.isFinite(v) ? v : 0)).join(',')}]`;
 
 /** Registra o uso de uma chamada de embeddings (sem agente; usuário opcional). */
-export async function recordEmbeddingUsage(db: Executor, creds: EmbeddingCredentials, tokens: number, userId: string | null) {
+export async function recordEmbeddingUsage(
+  db: Executor,
+  creds: EmbeddingCredentials,
+  tokens: number,
+  userId: string | null,
+  requestId: string | null = null,
+) {
   await db.execute(sql`
-    INSERT INTO ai_usage (provider_id, model, purpose, user_id, input_tokens)
-    VALUES (${creds.providerId}, ${creds.model}, 'embedding', ${userId}, ${tokens})`);
+    INSERT INTO ai_usage (provider_id, model, purpose, user_id, input_tokens, request_id)
+    VALUES (${creds.providerId}, ${creds.model}, 'embedding', ${userId}, ${tokens}, ${requestId})`);
 }
 
 /** Vetor de uma consulta (busca), com o uso atribuído ao usuário. */
 export async function embedQuery(db: Executor, creds: EmbeddingCredentials, text: string, userId: string) {
-  const { vectors, tokens } = await embedTexts(creds, creds.model, [text.slice(0, 8000)]);
-  await recordEmbeddingUsage(db, creds, tokens, userId);
+  const { vectors, tokens, requestId } = await embedTexts(creds, creds.model, [text.slice(0, 8000)], requestLog(db, creds, userId));
+  await recordEmbeddingUsage(db, creds, tokens, userId, requestId);
   return vectors[0]!;
 }
 
@@ -101,12 +142,13 @@ export async function embedPending(db: Database, creds: EmbeddingCredentials, ba
       SELECT id, source_text, source_hash FROM ai_embeddings
        WHERE needs_reindex AND model = ${creds.model} ORDER BY updated_at LIMIT ${batch}`);
     if (pending.rows.length === 0) break;
-    const { vectors, tokens } = await embedTexts(
+    const { vectors, tokens, requestId } = await embedTexts(
       creds,
       creds.model,
       pending.rows.map((r) => r.source_text.slice(0, 8000)),
+      requestLog(db, creds, null),
     );
-    await recordEmbeddingUsage(db, creds, tokens, null);
+    await recordEmbeddingUsage(db, creds, tokens, null, requestId);
     for (const [index, row] of pending.rows.entries()) {
       const vector = vectors[index];
       if (vector?.length !== 1536) continue;

@@ -40,6 +40,9 @@ export const EXCLUDED_TABLES = new Set([
   'ai_run_events',
   'ai_tool_confirmations',
   'ai_embeddings',
+  // Requisições ao provedor (spec 023): operacionais, com conversas e dados financeiros.
+  'ai_requests',
+  'ai_request_attempts',
 ]);
 
 /** Tabelas de cada recurso exportável (a primeira é a principal). */
@@ -158,6 +161,8 @@ export const COMPOSITE_KEYS: Record<string, string[]> = {
   ai_tool_kit_tools: ['kit_id', 'tool_name'],
   // Uma linha por usuário (spec 022): a chave é o próprio user_id.
   user_ai_settings: ['user_id'],
+  // Configurações do sistema (spec 023): a chave é o texto `area.nome`.
+  app_settings: ['key'],
 };
 
 /** Colunas que identificam a linha (id ou a chave composta). */
@@ -267,6 +272,7 @@ const LABEL_COLUMNS = [
   'description',
   'tool_name',
   'key_value',
+  'key',
   'value',
   'model',
   'pattern',

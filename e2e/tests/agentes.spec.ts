@@ -15,7 +15,10 @@ import { ADMIN_STATE, baseURL, loginAsAdmin } from '../support/session';
  *  - o kit de ferramentas (spec 021): criar marcando a categoria Conciliação,
  *    pôr uma escrita em ask, ligar ao agente e ver o cartão de aprovação;
  *  - o prompt do agente (spec 022): editar, ver o histórico e o diff, restaurar,
- *    as variáveis e o "Ver prompt montado"; e Minha conta → IA.
+ *    as variáveis e o "Ver prompt montado"; e Minha conta → IA;
+ *  - as requisições ao provedor (spec 023): um 429 seguido de 200 na conversa,
+ *    o detalhe do provedor pelo nome na lista, a gaveta com as duas tentativas,
+ *    o Editar do detalhe e a retenção (banco vence a variável; "Usar o padrão").
  *
  * O provedor falso (Anthropic Messages API) sobe aqui na porta E2E_LLM_PORT
  * (padrão 18082). O worker da pilha o alcança em E2E_LLM_BASE (padrão
@@ -539,4 +542,63 @@ test('Minha conta → IA: as instruções do usuário ficam salvas', async ({ pa
   await expect(page.getByTestId('account-ai').getByLabel('Minhas instruções')).toHaveValue(`Instruções do e2e ${tag}`);
   const res = await adminApi.put('/api/account/ai', { data: { instructions: '' } });
   expect(res.ok()).toBeTruthy();
+});
+
+test('requisições: detalhe do provedor, a requisição da conversa com as tentativas e a retenção (spec 023)', async ({ page }) => {
+  await enter(page);
+  // O provedor responde 429 na primeira tentativa: o MoneyFlow espera o retry-after e tenta de novo.
+  llm.queue.push({ status: 429, headers: { 'retry-after-ms': '50', 'anthropic-ratelimit-requests-remaining': '0' } });
+  const win = await newConversation(page);
+  await say(win, `requisições do e2e ${tag}`);
+  await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Olá! Sou o agente de teste.' })).toBeVisible({
+    timeout: 30_000,
+  });
+  const conversationId = await win.getAttribute('data-conversation-id');
+  const page1 = await (await adminApi.get(`/api/admin/ai/requests?providerId=${provider.id}&operation=chat&limit=50`)).json();
+  const request = page1.items.find((r: { conversationId: string }) => r.conversationId === conversationId);
+  expect(request).toMatchObject({ status: 'ok', attempts: 2 });
+
+  // Lista de provedores → o nome abre o detalhe.
+  await page.goto('/admin/ai');
+  await page
+    .getByTestId('provider-detail-link')
+    .filter({ hasText: `E2E falso ${tag}` })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`/admin/ai/providers/${provider.id}$`));
+  await expect(page.getByRole('heading', { name: `E2E falso ${tag}` })).toBeVisible();
+  await expect(page.getByTestId('provider-header')).toContainText('não registrados');
+  await expect(page.getByTestId('provider-usage')).toBeVisible();
+  await expect(page.getByTestId('provider-health')).toContainText('claude-sonnet-5-5');
+
+  // A requisição da conversa, com as duas tentativas (429 e 200).
+  await page.locator(`[data-request-id="${request.id}"]`).click();
+  const drawer = page.getByTestId('request-drawer');
+  await expect(drawer).toBeVisible();
+  const attempts = drawer.getByTestId('request-attempt');
+  await expect(attempts).toHaveCount(2);
+  await expect(attempts.first()).toContainText('429');
+  await expect(attempts.first()).toContainText('rate_limit');
+  await expect(attempts.nth(1)).toContainText('200');
+  await expect(drawer).toContainText('Corpos não registrados');
+  await drawer.getByRole('button', { name: 'Fechar' }).click();
+
+  // O botão Editar abre o mesmo modal da lista.
+  await page.getByTestId('provider-edit').click();
+  await expect(page.getByRole('dialog', { name: 'Editar provedor' })).toBeVisible();
+  await page.getByRole('dialog', { name: 'Editar provedor' }).getByRole('button', { name: 'Cancelar' }).click();
+
+  // Guia Requisições: a retenção salva no banco vence a variável; "Usar o padrão" volta para ela.
+  await page.goto('/admin/ai/requests');
+  await expect(page.getByTestId('request-row').first()).toBeVisible();
+  const source = page.getByTestId('retention-source');
+  await expect(source).toHaveAttribute('data-source', 'env');
+  await page.getByTestId('retention-input').fill('45');
+  await page.getByTestId('retention-save').click();
+  await expect(source).toHaveAttribute('data-source', 'database');
+  await page.reload();
+  await expect(page.getByTestId('retention-input')).toHaveValue('45');
+  await page.getByTestId('retention-default').click();
+  await expect(page.getByTestId('retention-source')).toHaveAttribute('data-source', 'env');
+  const setting = await (await adminApi.get('/api/admin/settings/ai.request_retention_days')).json();
+  expect(setting).toMatchObject({ source: 'env', value: 30 });
 });

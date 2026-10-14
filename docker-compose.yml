@@ -21,6 +21,9 @@ x-app: &app
     # TELEGRAM_API_BASE=http://host.docker.internal:18081 docker compose up -d
     TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-https://api.telegram.org}
     APP_URL: ${APP_URL:-}
+    # Requisições ao provedor de IA (spec 023): tentativas por chamada e a retenção padrão (dias), na API e no worker.
+    AI_REQUEST_MAX_ATTEMPTS: ${AI_REQUEST_MAX_ATTEMPTS:-3}
+    AI_REQUEST_RETENTION_DAYS: ${AI_REQUEST_RETENTION_DAYS:-30}
   # host.docker.internal também no Linux (a Bot API falsa dos e2e roda no host).
   extra_hosts:
     - "host.docker.internal:host-gateway"

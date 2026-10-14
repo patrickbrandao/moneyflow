@@ -220,6 +220,8 @@ const FLOW_PURPOSES = new Set(['document_reading', 'classify_lines', 'contract_r
  *   conversas dos fluxos em screen_context.purpose; a finalidade vem de lá.
  */
 function normalizeRow(table: string, data: BackupRow, state: { flowAgentTaken: boolean }): BackupRow {
+  // A requisição ao provedor nunca vem no arquivo (spec 023): o uso entra sem o vínculo, como sem a execução.
+  if (table === 'ai_usage' && data.request_id) return { ...data, request_id: null };
   if (table === 'ai_agents' && data.use_for_flows === true && state.flowAgentTaken) {
     return { ...data, use_for_flows: false };
   }

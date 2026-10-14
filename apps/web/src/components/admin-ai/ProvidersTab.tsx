@@ -1,11 +1,12 @@
 import { type AiProviderDto, type AiProviderKind, type AiProviderTestResult, t } from '@moneyflow/shared';
 import { Pencil, PlugZap, Plus, Server, Trash2 } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
 import { LoadError, SkelRows } from '../domain';
 import { FormError, ModalActions } from '../forms';
-import { Badge, Button, cx, EmptyRow, EmptyState, Field, Modal } from '../ui';
+import { Badge, Button, cx, EmptyRow, EmptyState, Field, Modal, useConfirm } from '../ui';
 import { ActiveBadge, useProviderModels, useRemove } from './shared';
 
 const p = t.agentsUi.admin.providers;
@@ -67,8 +68,20 @@ export function ProvidersTab() {
                 return (
                   <tr key={provider.id} className={cx(provider.archivedAt && 'is-off')}>
                     <td>
-                      <span className="row-title">{provider.name}</span>
+                      <Link
+                        to={`/admin/ai/providers/${provider.id}`}
+                        className="row-title"
+                        title={p.openDetail(provider.name)}
+                        data-testid="provider-detail-link"
+                      >
+                        {provider.name}
+                      </Link>
                       {provider.baseUrl && <span className="row-sub mono">{provider.baseUrl}</span>}
+                      {provider.logBodies && (
+                        <span className="mt-1 block">
+                          <Badge tone="warn">{p.logsBodies}</Badge>
+                        </span>
+                      )}
                       {result && result !== 'loading' && (
                         <span className={cx('row-sub', result.ok ? 'text-ok' : 'text-danger')}>
                           {result.ok ? p.testOk : `${p.testFail}: ${result.message}`}
@@ -137,7 +150,16 @@ export function ProvidersTab() {
   );
 }
 
-function ProviderFormModal({ provider, onClose, onSaved }: { provider: AiProviderDto | null; onClose: () => void; onSaved: () => void }) {
+/** Cadastro e edição do provedor (também usado pelo botão Editar do detalhe). */
+export function ProviderFormModal({
+  provider,
+  onClose,
+  onSaved,
+}: {
+  provider: AiProviderDto | null;
+  onClose: () => void;
+  onSaved: (saved: AiProviderDto) => void;
+}) {
   const [name, setName] = useState(provider?.name ?? '');
   const [kind, setKind] = useState<AiProviderKind>(provider?.kind ?? 'anthropic');
   const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? '');
@@ -145,7 +167,18 @@ function ProviderFormModal({ provider, onClose, onSaved }: { provider: AiProvide
   const [clearApiKey, setClearApiKey] = useState(false);
   const [embeddingModel, setEmbeddingModel] = useState(provider?.embeddingModel ?? '');
   const [isActive, setIsActive] = useState(provider?.isActive ?? true);
+  const [logBodies, setLogBodies] = useState(provider?.logBodies ?? false);
   const [notes, setNotes] = useState(provider?.notes ?? '');
+  const confirm = useConfirm();
+
+  /** Ligar o registro dos corpos pede confirmação (spec 023): leva conversas e dados financeiros. */
+  async function toggleLogBodies(next: boolean) {
+    if (next) {
+      const ok = await confirm({ title: p.logBodiesWarnTitle, description: p.logBodiesWarn, confirmLabel: p.logBodiesConfirm });
+      if (!ok) return;
+    }
+    setLogBodies(next);
+  }
   const [error, setError] = useState<string | null>(null);
   const { run, busy } = useAction();
 
@@ -157,6 +190,7 @@ function ProviderFormModal({ provider, onClose, onSaved }: { provider: AiProvide
       baseUrl: baseUrl.trim(),
       embeddingModel: kind === 'openai' ? embeddingModel.trim() : '',
       isActive,
+      logBodies,
       notes,
     };
     const saved = await run(
@@ -170,7 +204,7 @@ function ProviderFormModal({ provider, onClose, onSaved }: { provider: AiProvide
           : api.post<AiProviderDto>('/api/admin/ai/providers', { ...common, kind, apiKey: apiKey.trim() }),
       provider ? p.saved : p.created,
     );
-    if (saved) onSaved();
+    if (saved) onSaved(saved);
   }
 
   return (
@@ -230,6 +264,18 @@ function ProviderFormModal({ provider, onClose, onSaved }: { provider: AiProvide
           <label className="check">
             <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} /> {t.agentsUi.admin.active}
           </label>
+          <div>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={logBodies}
+                onChange={(e) => void toggleLogBodies(e.target.checked)}
+                data-testid="provider-log-bodies"
+              />{' '}
+              {p.logBodies}
+            </label>
+            <p className="mt-1 text-xs text-muted">{p.logBodiesHint}</p>
+          </div>
           <Field label={p.notes}>
             <textarea className="field" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
           </Field>

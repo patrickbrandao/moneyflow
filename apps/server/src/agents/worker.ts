@@ -2,6 +2,7 @@ import type { Database } from '@moneyflow/db';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config';
+import { requestRetentionDays } from '../services/ai-requests';
 import { embeddingCredentials, embedPending, type IndexState, syncEmbeddingSources } from './embeddings';
 import { type ClaimedRun, processRun } from './runner';
 
@@ -10,8 +11,25 @@ import { type ClaimedRun, processRun } from './runner';
  * LOCKED; também retoma as de um worker que caiu, até max_attempts) e roda até
  * AGENT_CONCURRENCY ao mesmo tempo. Num segundo ritmo, a manutenção: retenção
  * dos eventos de streaming, expiração de confirmações esquecidas, limpeza de
- * embeddings órfãos e indexação dos embeddings (só com provedor de embeddings).
+ * embeddings órfãos, a purga das requisições ao provedor (spec 023: prazo do
+ * banco ou de AI_REQUEST_RETENTION_DAYS, em lotes) e a indexação dos
+ * embeddings (só com provedor de embeddings).
  */
+
+const PURGE_BATCH = 1000;
+
+/** Purga as requisições mais velhas que o prazo, em lotes, até um lote vir incompleto. Devolve quantas. */
+export async function purgeAiRequests(db: Database, config: Config): Promise<number> {
+  const { days } = await requestRetentionDays(db, config);
+  let total = 0;
+  for (let round = 0; round < 1000; round += 1) {
+    const result = await db.execute<{ n: number }>(sql`SELECT ai_requests_purge(${days}::int, ${PURGE_BATCH}::int) AS n`);
+    const n = Number(result.rows[0]?.n ?? 0);
+    total += n;
+    if (n < PURGE_BATCH) break;
+  }
+  return total;
+}
 
 export type AgentWorkerOptions = { pollMs?: number; concurrency?: number; maintenanceMs?: number; staleAfter?: string };
 
@@ -60,7 +78,9 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
                ai_embeddings_purge_orphans() AS orphans`);
       const row = result.rows[0];
       if (row && (Number(row.purged) || Number(row.expired) || Number(row.orphans))) log.info(row, 'agente: manutenção');
-      const creds = await embeddingCredentials(db);
+      const requests = await purgeAiRequests(db, config);
+      if (requests) log.info({ requests }, 'agente: requisições ao provedor purgadas');
+      const creds = await embeddingCredentials(db, config);
       if (creds) {
         const sources = await syncEmbeddingSources(db, creds.model, indexState);
         const embedded = await embedPending(db, creds);

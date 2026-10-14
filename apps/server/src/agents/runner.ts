@@ -109,7 +109,19 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
       sql`SELECT kind, base_url, api_key, model FROM ai_run_provider_credentials(${runId}::uuid)`,
     );
     const cred = creds.rows[0]!;
-    const llm = createLlmClient({ kind: cred.kind, baseUrl: cred.base_url, apiKey: cred.api_key });
+    const logging = await db.execute<{ log_bodies: boolean }>(sql`SELECT log_bodies FROM ai_providers WHERE id = ${claimed.provider_id}`);
+    // Cada chamada vira uma requisição registrada (spec 023), com as tentativas do invólucro; o banco completa os vínculos pela execução.
+    const llm = createLlmClient(
+      { kind: cred.kind, baseUrl: cred.base_url, apiKey: cred.api_key },
+      {
+        db,
+        runId,
+        logBodies: Boolean(logging.rows[0]?.log_bodies),
+        maxAttempts: deps.config.aiRequestMaxAttempts,
+        backoffMs: deps.config.aiRequestBackoffMs,
+        log,
+      },
+    );
 
     // Tools internas pelo kit do agente (spec 021); fluxos (leitura de documento, sugestões de classificação) rodam sem tools.
     tools = await RunTools.forAgent(
@@ -164,6 +176,8 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
         params: agent.params,
         loadAttachment: (attachmentId) => loadAttachment(db, conversation.id, attachmentId),
         signal: abort.signal,
+        operation: 'chat',
+        purpose: purpose ?? 'chat',
       });
       if (lost) throw new LockLost();
 
@@ -171,9 +185,9 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
       await db.transaction(async (tx) => {
         const message = await insertMessage(tx, conversation.id, 'assistant', content, runId);
         await tx.execute(sql`
-          INSERT INTO ai_usage (run_id, message_id, purpose, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens)
+          INSERT INTO ai_usage (run_id, message_id, purpose, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, request_id)
           VALUES (${runId}, ${message.id}, ${purpose ?? 'chat'}, ${response.usage.inputTokens}, ${response.usage.outputTokens},
-                  ${response.usage.cacheWriteTokens}, ${response.usage.cacheReadTokens})`);
+                  ${response.usage.cacheWriteTokens}, ${response.usage.cacheReadTokens}, ${response.requestId})`);
         await appendEvent(tx, runId, { type: 'message', message: { ...messageOut(message), usage: [] } });
         const run = await loadRun(tx, runId);
         if (run) await appendEvent(tx, runId, { type: 'usage', run: runDto(run) });
@@ -459,11 +473,13 @@ async function autoTitle(db: Database, llm: LlmClient, runId: string, conversati
     tools: [],
     params: { max_tokens: 1024, reasoning_effort: 'low' },
     loadAttachment: async () => null,
+    operation: 'title',
+    purpose: 'title',
   });
   await db.execute(sql`
-    INSERT INTO ai_usage (run_id, purpose, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens)
+    INSERT INTO ai_usage (run_id, purpose, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, request_id)
     VALUES (${runId}, 'title', ${response.usage.inputTokens}, ${response.usage.outputTokens}, ${response.usage.cacheWriteTokens},
-            ${response.usage.cacheReadTokens})`);
+            ${response.usage.cacheReadTokens}, ${response.requestId})`);
   const title = blocksText(response.content)
     .replace(/["'«»“”]/g, '')
     .replace(/\s+/g, ' ')

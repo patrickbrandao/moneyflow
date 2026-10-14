@@ -19,6 +19,8 @@ export type AiProviderDto = {
   apiKeyHint: string | null;
   embeddingModel: string | null;
   isActive: boolean;
+  /** Registra corpos e cabeçalhos das requisições (spec 023). */
+  logBodies: boolean;
   notes: string | null;
   archivedAt: string | null;
   createdAt: string;
@@ -336,3 +338,124 @@ export type DocumentReadingDto = {
 };
 
 export type ClassificationSuggestResult = { queued: boolean; runId: string | null; lines: number };
+
+/* ---------------- requisições ao provedor (spec 023) ---------------- */
+
+export type AiRequestOperation =
+  | 'chat'
+  | 'title'
+  | 'embedding'
+  | 'vision_describe'
+  | 'transcription'
+  | 'speech'
+  | 'test_connection'
+  | 'list_models';
+
+export type AiRequestStatus = 'running' | 'ok' | 'error' | 'canceled';
+
+export type AiRequestListItem = {
+  id: string;
+  providerId: string | null;
+  providerName: string | null;
+  agentId: string | null;
+  agentName: string | null;
+  userId: string | null;
+  username: string | null;
+  conversationId: string | null;
+  runId: string | null;
+  operation: AiRequestOperation;
+  purpose: AiUsagePurpose | null;
+  model: string | null;
+  method: string;
+  path: string;
+  streaming: boolean;
+  status: AiRequestStatus;
+  httpStatus: number | null;
+  errorMessage: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  firstByteMs: number | null;
+  attempts: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
+  requestBytes: number | null;
+  responseBytes: number | null;
+};
+
+export type AiRequestPage = { items: AiRequestListItem[]; nextCursor: string | null };
+
+export type AiRequestAttemptDto = {
+  attempt: number;
+  startedAt: string;
+  durationMs: number | null;
+  httpStatus: number | null;
+  errorType: string | null;
+  errorMessage: string | null;
+  retryAfterMs: number | null;
+  rateLimitHeaders: Record<string, string> | null;
+  responseBody: string | null;
+};
+
+/** Uma parte do corpo no detalhe: o texto, ou só o tamanho quando passa do limite da tela (baixe pela rota body). */
+export type AiRequestBodyPart = { text: string | null; bytes: number; truncated: boolean };
+
+export type AiRequestDetail = AiRequestListItem & {
+  /** URL completa (origem do provedor + caminho), para o cURL. */
+  url: string;
+  providerKind: AiProviderKind | null;
+  logBodies: boolean;
+  conversationTitle: string | null;
+  requestHeaders: Record<string, string> | null;
+  responseHeaders: Record<string, string> | null;
+  requestBody: AiRequestBodyPart | null;
+  responseBody: AiRequestBodyPart | null;
+  responseStream: AiRequestBodyPart | null;
+  attemptList: AiRequestAttemptDto[];
+};
+
+export type AiUsageSlice = UsageTotals & { key: string };
+
+export type AiUsagePeriodSummary = {
+  totals: UsageTotals[];
+  byPurpose: AiUsageSlice[];
+  byModel: AiUsageSlice[];
+};
+
+export type AiProviderHealthRow = {
+  model: string | null;
+  requests: number;
+  ok: number;
+  errors: number;
+  canceled: number;
+  /** erros ÷ (ok + erros); null sem nenhuma. */
+  errorRate: number | null;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  p50FirstByteMs: number | null;
+  p95FirstByteMs: number | null;
+  avgAttempts: number | null;
+  lastErrorAt: string | null;
+};
+
+export type AiProviderSummary = {
+  provider: AiProviderDto;
+  usage: { month: AiUsagePeriodSummary; last30Days: AiUsagePeriodSummary; total: AiUsagePeriodSummary };
+  health: AiProviderHealthRow[];
+  recent: AiRequestListItem[];
+};
+
+/** Configuração do sistema (spec 023): o valor do banco vence a variável de ambiente. */
+export type AppSettingDto = {
+  key: string;
+  /** Valor em vigor (do banco ou, sem ele, da variável). */
+  value: unknown;
+  source: 'database' | 'env';
+  /** Valor da variável de ambiente (o "padrão"). */
+  envValue: unknown;
+  envName: string | null;
+  updatedAt: string | null;
+  updatedBy: string | null;
+};

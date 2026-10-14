@@ -307,6 +307,8 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   ai_agent_prompt_versions_restored_self_check: 'A versão restaurada precisa ser uma versão anterior.',
   user_ai_settings_primary_caixa_check: 'A caixa principal tem de ser uma caixa comum (não um cartão).',
   user_ai_settings_instructions_check: 'As instruções podem ter até 20 mil caracteres.',
+  app_settings_value_check: 'Valor inválido para esta configuração (a retenção das requisições aceita de 1 a 365 dias).',
+  app_settings_key_check: 'Chave de configuração inválida.',
   agent_mcp_servers_key: 'Esse servidor MCP já está vinculado ao agente.',
   agent_mcp_servers_enabled_tools_check: 'Lista de tools do servidor MCP inválida.',
   ai_conversations_title_check: 'Título inválido (até 200 caracteres).',

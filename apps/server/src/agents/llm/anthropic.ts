@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { AssistantBlock, NeutralMessage } from '@moneyflow/shared';
+import type { AiRequestOperation, AiUsagePurpose, AssistantBlock, NeutralMessage } from '@moneyflow/shared';
+import { failureOutcome, type RequestLogBase, RequestRecorder } from './request-log';
 import { type LlmClient, type LlmCredentials, LlmError, type LlmRequest, type LlmStopReason } from './types';
 
 /*
@@ -108,21 +109,32 @@ async function toParams(request: LlmRequest): Promise<Anthropic.MessageParam[]> 
   return out;
 }
 
-export function anthropicClient(credentials: LlmCredentials): LlmClient {
-  const client = new Anthropic({
-    apiKey: credentials.apiKey ?? 'sem-chave',
-    baseURL: credentials.baseUrl ?? undefined,
-    maxRetries: 2,
-    timeout: 10 * 60 * 1000,
-  });
+export function anthropicClient(credentials: LlmCredentials, log: RequestLogBase = {}): LlmClient {
+  // Um cliente por chamada: o fetch dele é o invólucro do registro (spec 023). As tentativas são do invólucro (maxRetries: 0).
+  const open = (recorder: RequestRecorder) =>
+    new Anthropic({
+      apiKey: credentials.apiKey ?? 'sem-chave',
+      baseURL: credentials.baseUrl ?? undefined,
+      maxRetries: 0,
+      timeout: 10 * 60 * 1000,
+      fetch: recorder.fetch,
+    });
+  const recorderFor = (operation: AiRequestOperation, purpose: AiUsagePurpose | null, model: string | null) =>
+    new RequestRecorder({ ...log, baseUrl: credentials.baseUrl }, { operation, purpose: purpose ?? null, model });
 
-  const wrap = (error: unknown): never => {
-    if (error instanceof Anthropic.APIError) {
+  const wrap = (error: unknown, signal?: AbortSignal): never => {
+    if (error instanceof Anthropic.APIError && !(error instanceof Anthropic.APIUserAbortError)) {
       const status = typeof error.status === 'number' ? error.status : null;
       const message = (error.error as { error?: { message?: string } } | undefined)?.error?.message ?? error.message;
-      throw new LlmError(String(message).slice(0, 500), status, status === null || status === 429 || status >= 500);
+      throw new LlmError(
+        String(message).slice(0, 500),
+        status,
+        status === null || status === 408 || status === 409 || status === 429 || status >= 500,
+      );
     }
-    throw error;
+    if (signal?.aborted || (error as { name?: string })?.name === 'AbortError') throw error;
+    // Queda no meio do stream (depois do primeiro byte, sem nova tentativa): a execução volta à fila (spec 023).
+    throw new LlmError(String(error instanceof Error ? error.message : error).slice(0, 500), null, true);
   };
 
   return {
@@ -163,6 +175,8 @@ export function anthropicClient(credentials: LlmCredentials): LlmClient {
       }
 
       let final: Anthropic.Message;
+      const recorder = recorderFor(request.operation ?? 'chat', request.purpose ?? 'chat', request.model);
+      const client = open(recorder);
       try {
         const stream = client.messages.stream(body, { signal: request.signal });
         stream.on('streamEvent', (event) => {
@@ -172,7 +186,8 @@ export function anthropicClient(credentials: LlmCredentials): LlmClient {
         });
         final = await stream.finalMessage();
       } catch (error) {
-        return wrap(error);
+        await recorder.finish(failureOutcome(error, request.signal));
+        return wrap(error, request.signal);
       }
 
       const content: AssistantBlock[] = [];
@@ -191,25 +206,25 @@ export function anthropicClient(credentials: LlmCredentials): LlmClient {
         else if (block.type === 'redacted_thinking')
           content.push({ type: 'redacted_thinking', data: block.data, provider: 'anthropic', model: request.model });
       }
-      const usage = final.usage;
-      return {
-        content,
-        stopReason: stopReason(final.stop_reason),
-        model: final.model ?? request.model,
-        usage: {
-          inputTokens: usage.input_tokens ?? 0,
-          outputTokens: usage.output_tokens ?? 0,
-          cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
-          cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-        },
+      const usage = {
+        inputTokens: final.usage.input_tokens ?? 0,
+        outputTokens: final.usage.output_tokens ?? 0,
+        cacheWriteTokens: final.usage.cache_creation_input_tokens ?? 0,
+        cacheReadTokens: final.usage.cache_read_input_tokens ?? 0,
       };
+      const requestId = await recorder.finish({ status: 'ok', usage, responseBody: final });
+      return { content, stopReason: stopReason(final.stop_reason), model: final.model ?? request.model, usage, requestId };
     },
-    async listModels() {
+    async listModels(operation = 'list_models') {
+      const recorder = recorderFor(operation, null, null);
+      const client = open(recorder);
       try {
         const ids: string[] = [];
         for await (const model of client.models.list({ limit: 100 })) ids.push(model.id);
+        await recorder.finish({ status: 'ok' });
         return ids;
       } catch (error) {
+        await recorder.finish(failureOutcome(error));
         return wrap(error);
       }
     },
