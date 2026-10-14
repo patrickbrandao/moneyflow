@@ -318,6 +318,182 @@ COMMENT ON FUNCTION public.ai_agent_params_valid(p_params jsonb) IS 'true se par
 
 
 --
+-- Name: ai_agent_prompt_versions_apply(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_prompt_versions_apply() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE ai_agents a SET system_prompt = NEW.content
+   WHERE a.id = NEW.agent_id AND a.system_prompt IS DISTINCT FROM NEW.content;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_agent_prompt_versions_apply(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_agent_prompt_versions_apply() IS 'A versão manda: copia o content da versão inserida (a última) para ai_agents.system_prompt.';
+
+
+--
+-- Name: ai_agent_prompt_versions_audit_row(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_prompt_versions_audit_row() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+  IF o IS NOT NULL THEN
+    o := (o - 'content') || jsonb_build_object('content_chars', length(OLD.content));
+  END IF;
+  IF n IS NOT NULL THEN
+    n := (n - 'content') || jsonb_build_object('content_chars', length(NEW.content));
+  END IF;
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_agent_prompt_versions_audit_row(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_agent_prompt_versions_audit_row() IS 'Trigger de auditoria de ai_agent_prompt_versions: grava a linha sem content (só content_chars); o texto do prompt fica na linha de auditoria do ai_agents (system_prompt antes/depois).';
+
+
+--
+-- Name: ai_agent_prompt_versions_before_insert(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_prompt_versions_before_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  next_version integer;
+BEGIN
+  PERFORM 1 FROM ai_agents a WHERE a.id = NEW.agent_id FOR NO KEY UPDATE;
+  IF NOT FOUND THEN
+    NEW.version := coalesce(NEW.version, 1);
+    RETURN NEW;  -- a FK reporta o erro (23503), não o NOT NULL do número.
+  END IF;
+  SELECT coalesce(max(v.version), 0) + 1 INTO next_version
+    FROM ai_agent_prompt_versions v WHERE v.agent_id = NEW.agent_id;
+  IF NEW.version IS NULL THEN
+    NEW.version := next_version;
+  ELSIF NEW.version <> next_version THEN
+    RAISE EXCEPTION 'ai_agent_prompt_versions: next version of agent % is %, got %', NEW.agent_id, next_version,
+      NEW.version
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_agent_prompt_versions_version_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: ai_agent_prompt_versions_guard(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agent_prompt_versions_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM ai_agents a WHERE a.id = OLD.agent_id) THEN
+      RAISE EXCEPTION 'ai_agent_prompt_versions: version % is immutable (it goes only with the agent)', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_agent_prompt_versions_immutable_check';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF NEW.id <> OLD.id OR NEW.agent_id <> OLD.agent_id OR NEW.version <> OLD.version OR NEW.content <> OLD.content
+     OR NEW.note IS DISTINCT FROM OLD.note
+     OR NEW.restored_from_version_id IS DISTINCT FROM OLD.restored_from_version_id
+     OR NEW.created_at <> OLD.created_at
+     OR (NEW.created_by_user_id IS DISTINCT FROM OLD.created_by_user_id AND NEW.created_by_user_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'ai_agent_prompt_versions: version % is immutable', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_agent_prompt_versions_immutable_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: ai_agents_prompt_version_init(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agents_prompt_version_init() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  INSERT INTO ai_agent_prompt_versions (agent_id, content, created_by_user_id)
+  SELECT a.id, a.system_prompt, a.created_by_user_id
+    FROM ai_agents a
+   WHERE a.id = NEW.id
+     AND NOT EXISTS (SELECT 1 FROM ai_agent_prompt_versions v WHERE v.agent_id = a.id);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_agents_prompt_version_init(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_agents_prompt_version_init() IS 'Constraint trigger adiado (ai_agents_prompt_version_init): no COMMIT (ou em SET CONSTRAINTS … IMMEDIATE), cria a versão 1 do agente inserido com o system_prompt atual, sem nota e com o autor = created_by_user_id, se ele ainda não tem versão. Agente excluído na mesma transação: nada.';
+
+
+--
+-- Name: ai_agents_system_prompt_guard(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_agents_system_prompt_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  latest text;
+BEGIN
+  IF NEW.system_prompt IS DISTINCT FROM OLD.system_prompt THEN
+    SELECT v.content INTO latest
+      FROM ai_agent_prompt_versions v WHERE v.agent_id = NEW.id ORDER BY v.version DESC LIMIT 1;
+    IF FOUND AND latest IS DISTINCT FROM NEW.system_prompt THEN
+      RAISE EXCEPTION 'ai_agents: system_prompt of agent % changes only by a new version (ai_agent_prompt_versions)', NEW.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_agents_system_prompt_version_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_agents_system_prompt_guard(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_agents_system_prompt_guard() IS 'Recusa (23514 ai_agents_system_prompt_version_check) UPDATE que deixe system_prompt diferente da última versão. Agente ainda sem versão (no meio da transação que o criou) aceita.';
+
+
+--
 -- Name: ai_conversation_fork(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5364,6 +5540,74 @@ $$;
 
 
 --
+-- Name: user_ai_settings_audit_row(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.user_ai_settings_audit_row() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed, coalesce(n ->> 'user_id', o ->> 'user_id')::uuid);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION user_ai_settings_audit_row(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.user_ai_settings_audit_row() IS 'Trigger de auditoria de user_ai_settings: grava com record_id = user_id (a linha não tem id).';
+
+
+--
+-- Name: user_ai_settings_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.user_ai_settings_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  caixa_kind text;
+BEGIN
+  IF NEW.primary_caixa_id IS NOT NULL
+     AND (TG_OP = 'INSERT' OR NEW.primary_caixa_id IS DISTINCT FROM OLD.primary_caixa_id) THEN
+    SELECT c.kind INTO caixa_kind FROM caixas c WHERE c.id = NEW.primary_caixa_id;
+    IF FOUND AND caixa_kind <> 'general' THEN
+      RAISE EXCEPTION 'user_ai_settings: primary caixa % must be general (got %)', NEW.primary_caixa_id, caixa_kind
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'user_ai_settings_primary_caixa_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION user_ai_settings_validate(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.user_ai_settings_validate() IS 'A caixa principal do usuário é general (o kind da caixa é imutável, então basta checar ao escolher).';
+
+
+--
 -- Name: user_api_tokens_validate(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5428,6 +5672,69 @@ COMMENT ON COLUMN public.agent_mcp_servers.enabled_tools IS 'Tools habilitadas d
 
 
 --
+-- Name: ai_agent_prompt_versions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_agent_prompt_versions (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    agent_id uuid NOT NULL,
+    version integer NOT NULL,
+    content text NOT NULL,
+    note text,
+    created_by_user_id uuid,
+    restored_from_version_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_agent_prompt_versions_content_check CHECK ((length(content) <= 200000)),
+    CONSTRAINT ai_agent_prompt_versions_note_check CHECK ((length(note) <= 500)),
+    CONSTRAINT ai_agent_prompt_versions_restored_self_check CHECK ((restored_from_version_id <> id)),
+    CONSTRAINT ai_agent_prompt_versions_version_check CHECK ((version >= 1))
+);
+
+
+--
+-- Name: TABLE ai_agent_prompt_versions; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_agent_prompt_versions IS 'Versões do prompt de sistema de um agente (spec 022): toda mudança de prompt é uma versão nova (version 1, 2, 3…; omita version e o banco atribui a próxima, travando o agente). A versão manda: o INSERT copia o content para ai_agents.system_prompt. O agente nasce com a versão 1 (ai_agents_prompt_version_init, no COMMIT). Imutáveis; somem só com o agente. A auditoria grava a linha sem o content (com content_chars).';
+
+
+--
+-- Name: COLUMN ai_agent_prompt_versions.version; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_prompt_versions.version IS 'Número da versão no agente, atribuído pelo banco quando omitido; se informado, tem de ser o próximo (max + 1).';
+
+
+--
+-- Name: COLUMN ai_agent_prompt_versions.content; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_prompt_versions.content IS 'Prompt de sistema desta versão (até 200 mil caracteres; pode ser vazio).';
+
+
+--
+-- Name: COLUMN ai_agent_prompt_versions.note; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_prompt_versions.note IS 'Nota opcional da gravação (até 500), ex.: "Restaurada da versão N".';
+
+
+--
+-- Name: COLUMN ai_agent_prompt_versions.created_by_user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_prompt_versions.created_by_user_id IS 'Autor (usuário excluído = nulo). Na versão 1 criada pelo banco, o created_by_user_id do agente.';
+
+
+--
+-- Name: COLUMN ai_agent_prompt_versions.restored_from_version_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_agent_prompt_versions.restored_from_version_id IS 'Versão (do mesmo agente) cujo conteúdo foi restaurado nesta.';
+
+
+--
 -- Name: ai_agents; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5472,7 +5779,7 @@ COMMENT ON TABLE public.ai_agents IS 'Agentes de IA, criados só pelo admin (spe
 -- Name: COLUMN ai_agents.system_prompt; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_agents.system_prompt IS 'Prompt de sistema (até 200 mil caracteres).';
+COMMENT ON COLUMN public.ai_agents.system_prompt IS 'Prompt de sistema (até 200 mil caracteres). Espelho da última versão (ai_agent_prompt_versions): muda só criando uma versão (UPDATE direto diferente dela dá 23514 ai_agents_system_prompt_version_check).';
 
 
 --
@@ -8241,7 +8548,11 @@ CREATE TABLE public.mcp_servers (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    instructions_mode text DEFAULT 'ignore'::text NOT NULL,
+    instructions_cache text,
     CONSTRAINT mcp_servers_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
+    CONSTRAINT mcp_servers_instructions_cache_check CHECK ((length(instructions_cache) <= 50000)),
+    CONSTRAINT mcp_servers_instructions_mode_check CHECK ((instructions_mode = ANY (ARRAY['ignore'::text, 'system'::text, 'user'::text]))),
     CONSTRAINT mcp_servers_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
     CONSTRAINT mcp_servers_secret_headers_check CHECK (public.mcp_headers_valid(secret_headers)),
     CONSTRAINT mcp_servers_tools_cache_check CHECK (((tools_cache IS NULL) OR ((jsonb_typeof(tools_cache) = 'array'::text) AND (tools_cached_at IS NOT NULL)))),
@@ -8308,6 +8619,20 @@ COMMENT ON COLUMN public.mcp_servers.tools_error IS 'Erro da última tentativa d
 
 
 --
+-- Name: COLUMN mcp_servers.instructions_mode; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.mcp_servers.instructions_mode IS 'O que fazer com as instructions do servidor (spec 022): ignore (padrão; texto de terceiros), system (no prompt de sistema, sob "Instruções do servidor MCP <nome>") ou user (bloco do papel user no início do histórico enviado, nunca gravado em ai_messages).';
+
+
+--
+-- Name: COLUMN mcp_servers.instructions_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.mcp_servers.instructions_cache IS 'Cache das instructions da resposta do initialize (até 50 mil caracteres), atualizado junto com tools_cache pelo "Atualizar tools". Nulo = o servidor não mandou ou nunca foi listado. Atualizá-lo não gera auditoria.';
+
+
+--
 -- Name: effective_agent_mcp_servers; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -8325,7 +8650,9 @@ CREATE VIEW public.effective_agent_mcp_servers WITH (security_invoker='true') AS
                FROM jsonb_array_elements(s.tools_cache) WITH ORDINALITY x(t, ord)
               WHERE ((x.t ->> 'name'::text) = ANY (l.enabled_tools))), '[]'::jsonb)
         END AS tools,
-    s.tools_cached_at
+    s.tools_cached_at,
+    s.instructions_mode,
+    s.instructions_cache
    FROM ((public.ai_agents a
      JOIN public.mcp_servers s ON ((s.is_active AND (s.archived_at IS NULL))))
      LEFT JOIN public.agent_mcp_servers l ON (((l.agent_id = a.id) AND (l.mcp_server_id = s.id))))
@@ -8336,7 +8663,7 @@ CREATE VIEW public.effective_agent_mcp_servers WITH (security_invoker='true') AS
 -- Name: VIEW effective_agent_mcp_servers; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.effective_agent_mcp_servers IS 'Servidores MCP efetivos de cada agente: os global ativos (sempre) mais os public/private vinculados e ativos. tools = tools_cache filtrado por enabled_tools (NULL = todas). Sem os cabeçalhos.';
+COMMENT ON VIEW public.effective_agent_mcp_servers IS 'Servidores MCP efetivos de cada agente: os global ativos (sempre) mais os public/private vinculados e ativos. tools = tools_cache filtrado por enabled_tools (NULL = todas); instructions_mode e instructions_cache do servidor (a aplicação usa o cache só fora do modo ignore). Sem os cabeçalhos.';
 
 
 --
@@ -9520,6 +9847,41 @@ COMMENT ON COLUMN public.transfers.settlement_id IS 'Baixa que originou a transf
 
 
 --
+-- Name: user_ai_settings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_ai_settings (
+    user_id uuid NOT NULL,
+    instructions text DEFAULT ''::text NOT NULL,
+    primary_caixa_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_ai_settings_instructions_check CHECK ((length(instructions) <= 20000))
+);
+
+
+--
+-- Name: TABLE user_ai_settings; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.user_ai_settings IS 'Configurações de IA de cada usuário (spec 022, Minha conta → IA): instruções para todos os agentes e a caixa principal escolhida. Só o próprio usuário edita; o admin lê (regra da aplicação). Some com o usuário.';
+
+
+--
+-- Name: COLUMN user_ai_settings.instructions; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_ai_settings.instructions IS 'Instruções do usuário (até 20 mil caracteres; vazio = nenhuma). Entram no prompt das conversas, nunca nas de fluxo.';
+
+
+--
+-- Name: COLUMN user_ai_settings.primary_caixa_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_ai_settings.primary_caixa_id IS 'Minha caixa principal: uma caixa general (user_ai_settings_primary_caixa_check). Alimenta o contexto automático e as variáveis {{usuario.caixa_principal}}/{{empresa.titular_principal}}. Que o usuário a lê é checado pela aplicação. Caixa excluída = nulo.';
+
+
+--
 -- Name: user_api_tokens; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -9668,6 +10030,30 @@ ALTER TABLE ONLY public.agent_mcp_servers
 
 ALTER TABLE ONLY public.agent_mcp_servers
     ADD CONSTRAINT agent_mcp_servers_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_agent_version_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_prompt_versions
+    ADD CONSTRAINT ai_agent_prompt_versions_agent_version_key UNIQUE (agent_id, version);
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_id_agent_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_prompt_versions
+    ADD CONSTRAINT ai_agent_prompt_versions_id_agent_key UNIQUE (id, agent_id);
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_prompt_versions
+    ADD CONSTRAINT ai_agent_prompt_versions_pkey PRIMARY KEY (id);
 
 
 --
@@ -10471,6 +10857,14 @@ ALTER TABLE ONLY public.transfers
 
 
 --
+-- Name: user_ai_settings user_ai_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_ai_settings
+    ADD CONSTRAINT user_ai_settings_pkey PRIMARY KEY (user_id);
+
+
+--
 -- Name: user_api_tokens user_api_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10515,6 +10909,20 @@ ALTER TABLE ONLY public.users
 --
 
 CREATE INDEX agent_mcp_servers_mcp_server_id_idx ON public.agent_mcp_servers USING btree (mcp_server_id);
+
+
+--
+-- Name: ai_agent_prompt_versions_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_agent_prompt_versions_created_by_user_id_idx ON public.ai_agent_prompt_versions USING btree (created_by_user_id);
+
+
+--
+-- Name: ai_agent_prompt_versions_restored_from_version_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_agent_prompt_versions_restored_from_version_id_idx ON public.ai_agent_prompt_versions USING btree (restored_from_version_id);
 
 
 --
@@ -11820,6 +12228,13 @@ CREATE INDEX transfers_to_account_id_idx ON public.transfers USING btree (to_acc
 
 
 --
+-- Name: user_ai_settings_primary_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX user_ai_settings_primary_caixa_id_idx ON public.user_ai_settings USING btree (primary_caixa_id);
+
+
+--
 -- Name: user_api_tokens_name_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11848,6 +12263,41 @@ CREATE TRIGGER agent_mcp_servers_set_updated_at BEFORE UPDATE ON public.agent_mc
 
 
 --
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_apply; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_prompt_versions_apply AFTER INSERT ON public.ai_agent_prompt_versions FOR EACH ROW EXECUTE FUNCTION public.ai_agent_prompt_versions_apply();
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_prompt_versions_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_agent_prompt_versions FOR EACH ROW EXECUTE FUNCTION public.ai_agent_prompt_versions_audit_row();
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_before_insert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_prompt_versions_before_insert BEFORE INSERT ON public.ai_agent_prompt_versions FOR EACH ROW EXECUTE FUNCTION public.ai_agent_prompt_versions_before_insert();
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_prompt_versions_guard BEFORE DELETE OR UPDATE ON public.ai_agent_prompt_versions FOR EACH ROW EXECUTE FUNCTION public.ai_agent_prompt_versions_guard();
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agent_prompt_versions_set_updated_at BEFORE UPDATE ON public.ai_agent_prompt_versions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
 -- Name: ai_agents ai_agents_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -11855,10 +12305,24 @@ CREATE TRIGGER ai_agents_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_age
 
 
 --
+-- Name: ai_agents ai_agents_prompt_version_init; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER ai_agents_prompt_version_init AFTER INSERT ON public.ai_agents DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.ai_agents_prompt_version_init();
+
+
+--
 -- Name: ai_agents ai_agents_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER ai_agents_set_updated_at BEFORE UPDATE ON public.ai_agents FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_agents ai_agents_system_prompt_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_agents_system_prompt_guard BEFORE UPDATE OF system_prompt ON public.ai_agents FOR EACH ROW EXECUTE FUNCTION public.ai_agents_system_prompt_guard();
 
 
 --
@@ -12586,7 +13050,7 @@ CREATE TRIGGER financial_accounts_validate_history BEFORE UPDATE OF caixa_id, op
 -- Name: mcp_servers mcp_servers_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER mcp_servers_audit AFTER INSERT OR DELETE OR UPDATE ON public.mcp_servers FOR EACH ROW EXECUTE FUNCTION public.audit_row('tools_cache,tools_cached_at,tools_error');
+CREATE TRIGGER mcp_servers_audit AFTER INSERT OR DELETE OR UPDATE ON public.mcp_servers FOR EACH ROW EXECUTE FUNCTION public.audit_row('tools_cache,tools_cached_at,tools_error,instructions_cache');
 
 
 --
@@ -13024,6 +13488,27 @@ CREATE TRIGGER transfers_set_updated_at BEFORE UPDATE ON public.transfers FOR EA
 
 
 --
+-- Name: user_ai_settings user_ai_settings_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER user_ai_settings_audit AFTER INSERT OR DELETE OR UPDATE ON public.user_ai_settings FOR EACH ROW EXECUTE FUNCTION public.user_ai_settings_audit_row();
+
+
+--
+-- Name: user_ai_settings user_ai_settings_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER user_ai_settings_set_updated_at BEFORE UPDATE ON public.user_ai_settings FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: user_ai_settings user_ai_settings_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER user_ai_settings_validate BEFORE INSERT OR UPDATE ON public.user_ai_settings FOR EACH ROW EXECUTE FUNCTION public.user_ai_settings_validate();
+
+
+--
 -- Name: user_api_tokens user_api_tokens_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -13079,6 +13564,30 @@ ALTER TABLE ONLY public.agent_mcp_servers
 
 ALTER TABLE ONLY public.agent_mcp_servers
     ADD CONSTRAINT agent_mcp_servers_mcp_server_id_fkey FOREIGN KEY (mcp_server_id) REFERENCES public.mcp_servers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_prompt_versions
+    ADD CONSTRAINT ai_agent_prompt_versions_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.ai_agents(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_prompt_versions
+    ADD CONSTRAINT ai_agent_prompt_versions_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_agent_prompt_versions ai_agent_prompt_versions_restored_from_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_agent_prompt_versions
+    ADD CONSTRAINT ai_agent_prompt_versions_restored_from_version_id_fkey FOREIGN KEY (restored_from_version_id, agent_id) REFERENCES public.ai_agent_prompt_versions(id, agent_id);
 
 
 --
@@ -14311,6 +14820,22 @@ ALTER TABLE ONLY public.transfers
 
 ALTER TABLE ONLY public.transfers
     ADD CONSTRAINT transfers_to_account_id_fkey FOREIGN KEY (to_account_id) REFERENCES public.financial_accounts(id);
+
+
+--
+-- Name: user_ai_settings user_ai_settings_primary_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_ai_settings
+    ADD CONSTRAINT user_ai_settings_primary_caixa_id_fkey FOREIGN KEY (primary_caixa_id) REFERENCES public.caixas(id) ON DELETE SET NULL;
+
+
+--
+-- Name: user_ai_settings user_ai_settings_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_ai_settings
+    ADD CONSTRAINT user_ai_settings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
