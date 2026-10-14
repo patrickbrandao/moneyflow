@@ -2415,6 +2415,350 @@ COMMENT ON FUNCTION public.ai_tool_list_valid(p_tools text[]) IS 'true se a list
 
 
 --
+-- Name: ai_attachment_derivatives; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_attachment_derivatives (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    attachment_id uuid,
+    message_id uuid,
+    block_index integer,
+    kind text NOT NULL,
+    provider_id uuid,
+    model text,
+    voice text,
+    content text,
+    result_attachment_id uuid,
+    status text DEFAULT 'pending'::text NOT NULL,
+    error text,
+    attempts smallint DEFAULT 0 NOT NULL,
+    locked_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    lock_token uuid,
+    conversation_id uuid,
+    CONSTRAINT ai_attachment_derivatives_attempts_check CHECK (((attempts >= 0) AND (attempts <= 100))),
+    CONSTRAINT ai_attachment_derivatives_block_index_check CHECK (((block_index >= 0) AND (block_index <= 9999))),
+    CONSTRAINT ai_attachment_derivatives_content_check CHECK ((length(content) <= 5000000)),
+    CONSTRAINT ai_attachment_derivatives_error_check CHECK (((length(error) <= 4000) AND ((status <> 'failed'::text) OR (error IS NOT NULL)))),
+    CONSTRAINT ai_attachment_derivatives_kind_check CHECK ((kind = ANY (ARRAY['description'::text, 'pdf_text'::text, 'transcription'::text, 'speech'::text]))),
+    CONSTRAINT ai_attachment_derivatives_lock_check CHECK ((((status = 'running'::text) = (locked_at IS NOT NULL)) AND ((status = 'running'::text) = (lock_token IS NOT NULL)))),
+    CONSTRAINT ai_attachment_derivatives_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
+    CONSTRAINT ai_attachment_derivatives_origin_check CHECK ((((attachment_id IS NULL) <> (message_id IS NULL)) AND ((message_id IS NULL) = (block_index IS NULL)) AND ((kind = 'speech'::text) = (message_id IS NOT NULL)))),
+    CONSTRAINT ai_attachment_derivatives_provider_check CHECK ((((kind = 'pdf_text'::text) = (provider_id IS NULL)) AND ((kind = 'pdf_text'::text) = (model IS NULL)))),
+    CONSTRAINT ai_attachment_derivatives_result_check CHECK ((((result_attachment_id IS NULL) OR (kind = 'speech'::text)) AND ((status <> 'done'::text) OR
+CASE
+    WHEN (kind = 'speech'::text) THEN (result_attachment_id IS NOT NULL)
+    ELSE (content IS NOT NULL)
+END))),
+    CONSTRAINT ai_attachment_derivatives_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'running'::text, 'done'::text, 'failed'::text]))),
+    CONSTRAINT ai_attachment_derivatives_voice_check CHECK (((voice IS NULL) OR ((kind = 'speech'::text) AND (voice ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'::text))))
+);
+
+
+--
+-- Name: TABLE ai_attachment_derivatives; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_attachment_derivatives IS 'Derivados (cache) de anexos e mensagens dos agentes (specs 024 e 025): description (o provedor de visão descreve o anexo para outro modelo de texto), pdf_text (camada de texto do PDF, extraída no servidor, sem provedor), transcription (áudio→texto) e speech (áudio gerado de uma mensagem). Um por origem, tipo, provedor, modelo e voz (ai_attachment_derivatives_key, NULLS NOT DISTINCT). Some com a origem; o áudio gerado aparece em attachment_links como ai_message_speech e é apagado com o derivado quando não tem outro vínculo. Fora da auditoria e do backup.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.attachment_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.attachment_id IS 'Origem anexo (description, pdf_text, transcription). Exatamente uma origem.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.message_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.message_id IS 'Origem mensagem (só speech), com block_index.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.block_index; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.block_index IS 'Parte da mensagem que virou áudio (0–9999, definida pela aplicação: o bloco de texto ou o trecho dividido no limite do provedor). Só com message_id.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.provider_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.provider_id IS 'Provedor que gerou (nulo só em pdf_text). Excluir o provedor leva o cache.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.model; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.model IS 'Modelo que gerou (nulo só em pdf_text).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.voice; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.voice IS 'Voz do TTS (só speech; opcional).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.content; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.content IS 'Texto gerado (descrição, texto do PDF, transcrição; até 5 milhões de caracteres). Obrigatório em done, menos no speech.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.result_attachment_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.result_attachment_id IS 'Áudio gerado (só speech; obrigatório em done). Entra em attachment_links (ai_message_speech, alvo = a mensagem); trocado ou com o derivado excluído, o anexo antigo é apagado se ficou sem vínculo.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.status IS 'pending (na fila), running (reservado: locked_at), done ou failed (com error).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.attempts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.attempts IS 'Tentativas feitas (0–100), para a fila desistir.';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.locked_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.locked_at IS 'Instante da reserva, só em running (reserva velha = worker caiu; ai_transcription_claim a retoma).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.lock_token; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.lock_token IS 'Cerca da reserva, só em running (gerada por ai_transcription_claim; exigida por ai_transcription_credentials, _complete e _fail).';
+
+
+--
+-- Name: COLUMN ai_attachment_derivatives.conversation_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_attachment_derivatives.conversation_id IS 'Conversa em que o derivado foi pedido (a transcrição no upload): o worker atribui uso e requisição ao dono e ao agente dela. Nula = sem atribuição (ou a conversa foi excluída: SET NULL, o cache do anexo fica).';
+
+
+--
+-- Name: ai_transcription_claim(integer, interval, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_transcription_claim(p_limit integer DEFAULT 1, p_stale_after interval DEFAULT '00:10:00'::interval, p_max_attempts integer DEFAULT 3) RETURNS SETOF public.ai_attachment_derivatives
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100
+     OR p_stale_after IS NULL OR p_stale_after < interval '30 seconds'
+     OR p_max_attempts IS NULL OR p_max_attempts NOT BETWEEN 1 AND 100 THEN
+    RAISE EXCEPTION 'ai_transcription_claim: limit must be 1..100, stale_after >= 30 seconds and max_attempts 1..100'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Sem tentativas restantes: reserva abandonada (worker caiu) ou pendente que já gastou o limite vira failed.
+  UPDATE ai_attachment_derivatives d
+     SET status = 'failed', locked_at = NULL, lock_token = NULL,
+         error = CASE WHEN d.status = 'running' THEN 'stale_lock: worker stopped and the transcription has no attempts left'
+                      ELSE 'max_attempts: the transcription has no attempts left' END
+   WHERE d.id IN (SELECT x.id FROM ai_attachment_derivatives x
+                   WHERE x.kind = 'transcription' AND x.attempts >= p_max_attempts
+                     AND (x.status = 'pending'
+                          OR (x.status = 'running' AND x.locked_at < clock_timestamp() - p_stale_after))
+                   FOR UPDATE SKIP LOCKED);
+
+  RETURN QUERY
+  UPDATE ai_attachment_derivatives d
+     SET status = 'running', locked_at = clock_timestamp(), lock_token = gen_random_uuid(),
+         attempts = d.attempts + 1, error = NULL
+   WHERE d.id IN (SELECT x.id FROM ai_attachment_derivatives x
+                   WHERE x.kind = 'transcription' AND x.attempts < p_max_attempts
+                     AND (x.status = 'pending'
+                          OR (x.status = 'running' AND x.locked_at < clock_timestamp() - p_stale_after))
+                   ORDER BY x.created_at, x.id
+                   LIMIT p_limit
+                   FOR UPDATE SKIP LOCKED)
+  RETURNING d.*;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_transcription_claim(p_limit integer, p_stale_after interval, p_max_attempts integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_transcription_claim(p_limit integer, p_stale_after interval, p_max_attempts integer) IS 'Reserva até p_limit transcrições (kind transcription: pending, ou running com reserva mais velha que p_stale_after = worker caiu), em ordem de criação, com FOR UPDATE SKIP LOCKED: status = running, locked_at = agora, lock_token novo, attempts + 1. Sem tentativas restantes (attempts >= p_max_attempts), a reserva velha ou a pendente vira failed com error stale_lock / max_attempts. Rode numa transação curta e faça COMMIT antes de chamar o provedor; guarde id e lock_token. Erro 22023: parâmetros inválidos (limite 1–100, reserva >= 30 s, tentativas 1–100).';
+
+
+--
+-- Name: ai_transcription_complete(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_transcription_complete(p_id uuid, p_lock_token uuid, p_content text) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE ai_attachment_derivatives d
+     SET status = 'done', content = p_content, error = NULL, locked_at = NULL, lock_token = NULL
+   WHERE d.id = p_id AND d.kind = 'transcription' AND d.status = 'running' AND d.lock_token = p_lock_token;
+  RETURN FOUND;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_transcription_complete(p_id uuid, p_lock_token uuid, p_content text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_transcription_complete(p_id uuid, p_lock_token uuid, p_content text) IS 'running → done com o texto (pode ser vazio; até 5 milhões de caracteres). Devolve false se a reserva se perdeu (a linha saiu com o anexo, outra reserva a retomou ou já terminou): descarte o resultado. Erros: 23514 ai_attachment_derivatives_result_check (texto nulo) ou _content_check (texto longo demais).';
+
+
+--
+-- Name: ai_transcription_credentials(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_transcription_credentials(p_id uuid, p_lock_token uuid) RETURNS TABLE(provider_id uuid, kind text, base_url text, api_key text, model text, attachment_id uuid, conversation_id uuid, user_id uuid, agent_id uuid)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  d public.ai_attachment_derivatives;
+  c public.ai_conversations;
+  p public.ai_providers;
+BEGIN
+  SELECT * INTO d FROM public.ai_attachment_derivatives x WHERE x.id = p_id AND x.kind = 'transcription';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_transcription_credentials: transcription % not found', p_id USING ERRCODE = 'no_data_found';
+  END IF;
+  IF d.status <> 'running' OR d.lock_token IS DISTINCT FROM p_lock_token THEN
+    RAISE EXCEPTION 'ai_transcription_credentials: reservation of transcription % was lost', p_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_attachment_derivatives_lock_check';
+  END IF;
+  IF d.conversation_id IS NOT NULL THEN
+    SELECT * INTO c FROM public.ai_conversations x WHERE x.id = d.conversation_id;
+    IF NOT EXISTS (SELECT 1 FROM public.users u WHERE u.id = c.user_id AND u.is_active)
+       OR NOT EXISTS (SELECT 1 FROM public.ai_agents a WHERE a.id = c.agent_id AND a.is_active AND a.archived_at IS NULL) THEN
+      RAISE EXCEPTION 'ai_transcription_credentials: owner or agent of conversation % is not active', c.id
+        USING ERRCODE = 'insufficient_privilege';
+    END IF;
+  END IF;
+  SELECT * INTO p FROM public.ai_providers x WHERE x.id = d.provider_id;
+  IF NOT p.is_active OR p.archived_at IS NOT NULL OR NOT ('transcription' = ANY (p.capabilities)) THEN
+    RAISE EXCEPTION 'ai_transcription_credentials: provider % is not active or lacks the transcription capability', p.id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
+  RETURN QUERY SELECT p.id, p.kind, p.base_url, p.api_key, d.model, d.attachment_id, c.id, c.user_id, c.agent_id;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_transcription_credentials(p_id uuid, p_lock_token uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_transcription_credentials(p_id uuid, p_lock_token uuid) IS 'Provedor, tipo, URL, chave e modelo da transcrição reservada, mais o anexo e a atribuição (conversa, usuário dono e agente dela; nulos sem conversa). Só para quem tem a reserva (lock_token de ai_transcription_claim). Erros: P0002 transcrição inexistente; 23514 ai_attachment_derivatives_lock_check reserva perdida; 42501 provedor inativo, arquivado ou sem a flag transcription, ou dono/agente da conversa inativo (o worker marca failed).';
+
+
+--
+-- Name: ai_transcription_enqueue(uuid, uuid, text, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_transcription_enqueue(p_attachment_id uuid, p_provider_id uuid, p_model text, p_conversation_id uuid DEFAULT NULL::uuid) RETURNS public.ai_attachment_derivatives
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  d ai_attachment_derivatives;
+BEGIN
+  INSERT INTO ai_attachment_derivatives (attachment_id, kind, provider_id, model, conversation_id)
+  VALUES (p_attachment_id, 'transcription', p_provider_id, p_model, p_conversation_id)
+  ON CONFLICT ON CONSTRAINT ai_attachment_derivatives_key DO NOTHING
+  RETURNING * INTO d;
+  IF d.id IS NULL THEN
+    SELECT * INTO d FROM ai_attachment_derivatives x
+     WHERE x.attachment_id = p_attachment_id AND x.kind = 'transcription'
+       AND x.provider_id = p_provider_id AND x.model = p_model;
+  END IF;
+  RETURN d;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_transcription_enqueue(p_attachment_id uuid, p_provider_id uuid, p_model text, p_conversation_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_transcription_enqueue(p_attachment_id uuid, p_provider_id uuid, p_model text, p_conversation_id uuid) IS 'Enfileira a transcrição do anexo com o provedor e o modelo (status pending) e devolve a linha; se já existe uma para o anexo, provedor e modelo, devolve a existente como está (done = cache; failed = use ai_transcription_retry). p_conversation_id atribui o uso. Erros: 23503 anexo, provedor ou conversa inexistente; 23514 ai_attachment_derivatives_provider_check (provedor ou modelo nulo) ou _model_check (formato do modelo).';
+
+
+--
+-- Name: ai_transcription_fail(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_transcription_fail(p_id uuid, p_lock_token uuid, p_error text) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE ai_attachment_derivatives d
+     SET status = 'failed', error = left(coalesce(nullif(btrim(p_error), ''), 'transcription failed'), 4000),
+         locked_at = NULL, lock_token = NULL
+   WHERE d.id = p_id AND d.kind = 'transcription' AND d.status = 'running' AND d.lock_token = p_lock_token;
+  RETURN FOUND;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_transcription_fail(p_id uuid, p_lock_token uuid, p_error text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_transcription_fail(p_id uuid, p_lock_token uuid, p_error text) IS 'running → failed com a mensagem (vazia = "transcription failed"; cortada em 4000). Definitiva: as novas tentativas de HTTP ficam no adaptador (spec 023); voltar à fila é ai_transcription_retry. Devolve false se a reserva se perdeu.';
+
+
+--
+-- Name: ai_transcription_retry(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_transcription_retry(p_id uuid) RETURNS public.ai_attachment_derivatives
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  d ai_attachment_derivatives;
+BEGIN
+  SELECT * INTO d FROM ai_attachment_derivatives x WHERE x.id = p_id AND x.kind = 'transcription' FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_transcription_retry: transcription % not found', p_id USING ERRCODE = 'no_data_found';
+  END IF;
+  IF d.status = 'failed' THEN
+    UPDATE ai_attachment_derivatives x SET status = 'pending', error = NULL, attempts = 0
+     WHERE x.id = p_id RETURNING * INTO d;
+  END IF;
+  RETURN d;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_transcription_retry(p_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_transcription_retry(p_id uuid) IS '"Tentar de novo": failed → pending com as tentativas zeradas e sem erro, e devolve a linha. Em pending, running ou done não muda nada e devolve a linha como está (clique repetido não erra). A permissão é da aplicação. Erro P0002: transcrição inexistente (ou id de outro tipo de derivado).';
+
+
+--
 -- Name: ai_usage_after_insert(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2740,12 +3084,14 @@ BEGIN
   IF TG_OP <> 'INSERT' THEN
     o := jsonb_build_object('id', OLD.id, 'file_name', OLD.file_name, 'mime_type', OLD.mime_type,
                             'size_bytes', OLD.size_bytes, 'sha256', OLD.sha256,
+                            'duration_ms', OLD.duration_ms, 'page_count', OLD.page_count,
                             'uploaded_by_user_id', OLD.uploaded_by_user_id,
                             'created_at', OLD.created_at, 'updated_at', OLD.updated_at);
   END IF;
   IF TG_OP <> 'DELETE' THEN
     n := jsonb_build_object('id', NEW.id, 'file_name', NEW.file_name, 'mime_type', NEW.mime_type,
                             'size_bytes', NEW.size_bytes, 'sha256', NEW.sha256,
+                            'duration_ms', NEW.duration_ms, 'page_count', NEW.page_count,
                             'uploaded_by_user_id', NEW.uploaded_by_user_id,
                             'created_at', NEW.created_at, 'updated_at', NEW.updated_at);
   END IF;
@@ -6715,130 +7061,6 @@ COMMENT ON COLUMN public.ai_agents.tool_kit_id IS 'Kit de ferramentas (spec 021)
 
 
 --
--- Name: ai_attachment_derivatives; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.ai_attachment_derivatives (
-    id uuid DEFAULT uuidv7() NOT NULL,
-    attachment_id uuid,
-    message_id uuid,
-    block_index integer,
-    kind text NOT NULL,
-    provider_id uuid,
-    model text,
-    voice text,
-    content text,
-    result_attachment_id uuid,
-    status text DEFAULT 'pending'::text NOT NULL,
-    error text,
-    attempts smallint DEFAULT 0 NOT NULL,
-    locked_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT ai_attachment_derivatives_attempts_check CHECK (((attempts >= 0) AND (attempts <= 100))),
-    CONSTRAINT ai_attachment_derivatives_block_index_check CHECK (((block_index >= 0) AND (block_index <= 9999))),
-    CONSTRAINT ai_attachment_derivatives_content_check CHECK ((length(content) <= 5000000)),
-    CONSTRAINT ai_attachment_derivatives_error_check CHECK (((length(error) <= 4000) AND ((status <> 'failed'::text) OR (error IS NOT NULL)))),
-    CONSTRAINT ai_attachment_derivatives_kind_check CHECK ((kind = ANY (ARRAY['description'::text, 'pdf_text'::text, 'transcription'::text, 'speech'::text]))),
-    CONSTRAINT ai_attachment_derivatives_lock_check CHECK (((status = 'running'::text) = (locked_at IS NOT NULL))),
-    CONSTRAINT ai_attachment_derivatives_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
-    CONSTRAINT ai_attachment_derivatives_origin_check CHECK ((((attachment_id IS NULL) <> (message_id IS NULL)) AND ((message_id IS NULL) = (block_index IS NULL)) AND ((kind = 'speech'::text) = (message_id IS NOT NULL)))),
-    CONSTRAINT ai_attachment_derivatives_provider_check CHECK ((((kind = 'pdf_text'::text) = (provider_id IS NULL)) AND ((kind = 'pdf_text'::text) = (model IS NULL)))),
-    CONSTRAINT ai_attachment_derivatives_result_check CHECK ((((result_attachment_id IS NULL) OR (kind = 'speech'::text)) AND ((status <> 'done'::text) OR
-CASE
-    WHEN (kind = 'speech'::text) THEN (result_attachment_id IS NOT NULL)
-    ELSE (content IS NOT NULL)
-END))),
-    CONSTRAINT ai_attachment_derivatives_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'running'::text, 'done'::text, 'failed'::text]))),
-    CONSTRAINT ai_attachment_derivatives_voice_check CHECK (((voice IS NULL) OR ((kind = 'speech'::text) AND (voice ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'::text))))
-);
-
-
---
--- Name: TABLE ai_attachment_derivatives; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.ai_attachment_derivatives IS 'Derivados (cache) de anexos e mensagens dos agentes (specs 024 e 025): description (o provedor de visão descreve o anexo para outro modelo de texto), pdf_text (camada de texto do PDF, extraída no servidor, sem provedor), transcription (áudio→texto) e speech (áudio gerado de uma mensagem). Um por origem, tipo, provedor, modelo e voz (ai_attachment_derivatives_key, NULLS NOT DISTINCT). Some com a origem; o áudio gerado aparece em attachment_links como ai_message_speech e é apagado com o derivado quando não tem outro vínculo. Fora da auditoria e do backup.';
-
-
---
--- Name: COLUMN ai_attachment_derivatives.attachment_id; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_attachment_derivatives.attachment_id IS 'Origem anexo (description, pdf_text, transcription). Exatamente uma origem.';
-
-
---
--- Name: COLUMN ai_attachment_derivatives.message_id; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_attachment_derivatives.message_id IS 'Origem mensagem (só speech), com block_index.';
-
-
---
--- Name: COLUMN ai_attachment_derivatives.block_index; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_attachment_derivatives.block_index IS 'Parte da mensagem que virou áudio (0–9999, definida pela aplicação: o bloco de texto ou o trecho dividido no limite do provedor). Só com message_id.';
-
-
---
--- Name: COLUMN ai_attachment_derivatives.provider_id; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_attachment_derivatives.provider_id IS 'Provedor que gerou (nulo só em pdf_text). Excluir o provedor leva o cache.';
-
-
---
--- Name: COLUMN ai_attachment_derivatives.model; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_attachment_derivatives.model IS 'Modelo que gerou (nulo só em pdf_text).';
-
-
---
--- Name: COLUMN ai_attachment_derivatives.voice; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_attachment_derivatives.voice IS 'Voz do TTS (só speech; opcional).';
-
-
---
--- Name: COLUMN ai_attachment_derivatives.content; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_attachment_derivatives.content IS 'Texto gerado (descrição, texto do PDF, transcrição; até 5 milhões de caracteres). Obrigatório em done, menos no speech.';
-
-
---
--- Name: COLUMN ai_attachment_derivatives.result_attachment_id; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_attachment_derivatives.result_attachment_id IS 'Áudio gerado (só speech; obrigatório em done). Entra em attachment_links (ai_message_speech, alvo = a mensagem); trocado ou com o derivado excluído, o anexo antigo é apagado se ficou sem vínculo.';
-
-
---
--- Name: COLUMN ai_attachment_derivatives.status; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_attachment_derivatives.status IS 'pending (na fila), running (reservado: locked_at), done ou failed (com error).';
-
-
---
--- Name: COLUMN ai_attachment_derivatives.attempts; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_attachment_derivatives.attempts IS 'Tentativas feitas (0–100), para a fila desistir.';
-
-
---
--- Name: COLUMN ai_attachment_derivatives.locked_at; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.ai_attachment_derivatives.locked_at IS 'Instante da reserva, só em running (reserva velha = worker caiu).';
-
-
---
 -- Name: ai_conversations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -8397,8 +8619,12 @@ CREATE TABLE public.attachments (
     uploaded_by_user_id uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    duration_ms integer,
+    page_count integer,
+    CONSTRAINT attachments_duration_ms_check CHECK (((duration_ms IS NULL) OR (((duration_ms >= 1) AND (duration_ms <= 86400000)) AND (mime_type ~ '^(audio|video)/'::text)))),
     CONSTRAINT attachments_file_name_check CHECK (((btrim(file_name) <> ''::text) AND (length(file_name) <= 255) AND (file_name !~ '[/\\[:cntrl:]]'::text))),
     CONSTRAINT attachments_mime_type_check CHECK (((mime_type ~ '^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$'::text) AND (length(mime_type) <= 127))),
+    CONSTRAINT attachments_page_count_check CHECK (((page_count IS NULL) OR (((page_count >= 1) AND (page_count <= 100000)) AND (mime_type = 'application/pdf'::text)))),
     CONSTRAINT attachments_size_check CHECK (((octet_length(content) >= 1) AND (octet_length(content) <= 20971520)))
 );
 
@@ -8443,6 +8669,20 @@ COMMENT ON COLUMN public.attachments.size_bytes IS 'Tamanho em bytes, calculado 
 --
 
 COMMENT ON COLUMN public.attachments.sha256 IS 'SHA-256 do conteúdo em hex minúsculo, calculado pelo banco; serve para achar o mesmo arquivo já enviado.';
+
+
+--
+-- Name: COLUMN attachments.duration_ms; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.attachments.duration_ms IS 'Duração do áudio em milissegundos (1 ms a 24 h; só com mime_type audio/* ou video/*). Opcional, preenchida pela aplicação no upload (spec 025).';
+
+
+--
+-- Name: COLUMN attachments.page_count; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.attachments.page_count IS 'Número de páginas do PDF (1 a 100 mil; só com mime_type application/pdf). Opcional, preenchido pela aplicação no upload (spec 025).';
 
 
 --
@@ -12467,6 +12707,13 @@ CREATE UNIQUE INDEX ai_agents_use_for_flows_key ON public.ai_agents USING btree 
 
 
 --
+-- Name: ai_attachment_derivatives_conversation_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_attachment_derivatives_conversation_id_idx ON public.ai_attachment_derivatives USING btree (conversation_id);
+
+
+--
 -- Name: ai_attachment_derivatives_message_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -15352,6 +15599,14 @@ ALTER TABLE ONLY public.ai_agents
 
 ALTER TABLE ONLY public.ai_attachment_derivatives
     ADD CONSTRAINT ai_attachment_derivatives_attachment_id_fkey FOREIGN KEY (attachment_id) REFERENCES public.attachments(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_attachment_derivatives ai_attachment_derivatives_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_attachment_derivatives
+    ADD CONSTRAINT ai_attachment_derivatives_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.ai_conversations(id) ON DELETE SET NULL;
 
 
 --

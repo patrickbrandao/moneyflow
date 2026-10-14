@@ -51,7 +51,8 @@ SELECT col_is_pk('ai_agent_inferences', ARRAY['agent_id', 'capability']);
 SELECT fk_ok('ai_agent_inferences', 'agent_id', 'ai_agents', 'id');
 SELECT fk_ok('ai_agent_inferences', 'provider_id', 'ai_providers', 'id');
 SELECT columns_are('ai_attachment_derivatives', ARRAY['id', 'attachment_id', 'message_id', 'block_index', 'kind', 'provider_id',
-  'model', 'voice', 'content', 'result_attachment_id', 'status', 'error', 'attempts', 'locked_at', 'created_at', 'updated_at']);
+  'model', 'voice', 'content', 'result_attachment_id', 'status', 'error', 'attempts', 'locked_at', 'created_at', 'updated_at',
+  'lock_token', 'conversation_id']);  -- lock_token e conversation_id: 0042
 SELECT fk_ok('ai_attachment_derivatives', 'attachment_id', 'attachments', 'id');
 SELECT fk_ok('ai_attachment_derivatives', 'message_id', 'ai_messages', 'id');
 SELECT fk_ok('ai_attachment_derivatives', 'provider_id', 'ai_providers', 'id');
@@ -434,9 +435,9 @@ SELECT is(pg_temp.err(c), e, 'derivado: ' || regexp_replace(c, '\s+', ' ', 'g'))
        ('00000000-0000-7000-8000-00000000d006', 'transcription', '00000000-0000-7000-8000-00000000f102', 'whisper-1',
         repeat('x', 5000001))$$, '23514 ai_attachment_derivatives_content_check'),
     -- Fila: reserva, falha com erro, nova tentativa e conclusão.
-    ($$UPDATE ai_attachment_derivatives SET status = 'running', locked_at = now(), attempts = attempts + 1
+    ($$UPDATE ai_attachment_derivatives SET status = 'running', locked_at = now(), lock_token = gen_random_uuid(), attempts = attempts + 1
         WHERE id = '00000000-0000-7000-8000-00000000d103'$$, 'ok'),
-    ($$UPDATE ai_attachment_derivatives SET status = 'failed', locked_at = NULL, error = 'HTTP 500'
+    ($$UPDATE ai_attachment_derivatives SET status = 'failed', locked_at = NULL, lock_token = NULL, error = 'HTTP 500'
         WHERE id = '00000000-0000-7000-8000-00000000d103'$$, 'ok'),
     ($$UPDATE ai_attachment_derivatives SET status = 'done', content = 'Pague a conta de luz.'
         WHERE id = '00000000-0000-7000-8000-00000000d103'$$, 'ok'),
