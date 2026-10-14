@@ -41,6 +41,10 @@ export type Config = {
   aiRequestBackoffMs: number;
   /** Retenção padrão das requisições, em dias (app_settings ai.request_retention_days vence). */
   aiRequestRetentionDays: number;
+  /** Limite por minuto (spec 028): execuções de IA por usuário nas sessões (app_settings ai.runs_per_minute vence). */
+  aiRunsPerMinute: number;
+  /** Execuções por minuto por usuário nos fluxos automáticos (app_settings ai.flow_runs_per_minute vence). */
+  aiFlowRunsPerMinute: number;
   /** Chat multimídia (spec 025): espera máxima da execução pelas transcrições pendentes da mensagem, em ms. */
   aiTranscriptionTimeoutMs: number;
   /** Backup (spec 019): conexão do dono do banco, só para pg_dump/pg_restore; null = dump e restauração desligados. */
@@ -91,6 +95,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     aiRequestMaxAttempts: clampInt(env.AI_REQUEST_MAX_ATTEMPTS, 3, 1, 10),
     aiRequestBackoffMs: clampInt(env.AI_REQUEST_BACKOFF_MS, 1000, 0, 60_000),
     aiRequestRetentionDays: clampInt(env.AI_REQUEST_RETENTION_DAYS, 30, 1, 365),
+    aiRunsPerMinute: clampInt(env.AI_RUNS_PER_MINUTE, 10, 1, 1000),
+    aiFlowRunsPerMinute: clampInt(env.AI_FLOW_RUNS_PER_MINUTE, 30, 1, 1000),
     aiTranscriptionTimeoutMs: clampInt(env.AI_TRANSCRIPTION_TIMEOUT_MS, 120_000, 0, 600_000),
     ownerDatabaseUrl: env.DATABASE_OWNER_URL?.trim() || null,
     pgBinDir: env.PG_BIN_DIR?.trim() || null,

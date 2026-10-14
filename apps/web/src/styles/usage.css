@@ -1,0 +1,241 @@
+/* ============================================================
+   Painel de uso da IA (spec 028): gráficos em SVG, tiles, barras
+   dos orçamentos. Só tokens; as séries usam --chart-N.
+   ============================================================ */
+
+.usage-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px 12px;
+  align-items: end;
+}
+
+.usage-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+}
+.usage-tile {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-surface);
+  padding: 12px 14px;
+  min-width: 0;
+}
+.usage-tile .label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.usage-tile .value {
+  margin-top: 4px;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.usage-tile .sub {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.usage-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  gap: 12px;
+}
+.usage-chart-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.usage-chart-head h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.usage-chart-head select {
+  width: auto;
+  min-width: 0;
+}
+
+.uc-chart {
+  margin: 0;
+  min-width: 0;
+}
+.uc-plot {
+  position: relative;
+  width: 100%;
+  min-height: 220px;
+}
+.uc-plot svg {
+  display: block;
+  overflow: visible;
+}
+.uc-plot svg:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-accent);
+  border-radius: 4px;
+}
+.uc-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+.uc-baseline {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+.uc-axis {
+  fill: var(--text-muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.uc-hit {
+  fill: transparent;
+  cursor: default;
+}
+.uc-col.is-hover path,
+.uc-col.is-hover rect:not(.uc-hit) {
+  filter: brightness(1.15);
+}
+.uc-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.uc-area {
+  opacity: 0.1;
+}
+.uc-dot {
+  stroke: var(--bg-elev);
+  stroke-width: 2;
+}
+.uc-cross {
+  stroke: var(--text-faint);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+.uc-tip {
+  position: absolute;
+  top: 4px;
+  z-index: 2;
+  min-width: 150px;
+  max-width: 220px;
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-float);
+  pointer-events: none;
+  font-size: 12px;
+}
+.uc-tip-head {
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.uc-tip-row {
+  display: grid;
+  grid-template-columns: 12px auto 1fr;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.6;
+}
+.uc-tip-row i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+.uc-tip-row i.line,
+.uc-legend i.line {
+  height: 2px;
+  border-radius: 1px;
+}
+.uc-tip-row strong {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.uc-tip-row span {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.uc-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.uc-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.uc-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+/* Orçamentos: barra do gasto com as marcas do aviso e do bloqueio. */
+.budget-meter {
+  position: relative;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--accent-tint);
+  overflow: visible;
+  min-width: 120px;
+}
+.budget-meter > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 4px;
+  background: var(--accent);
+}
+.budget-meter.alert {
+  background: var(--warn-tint);
+}
+.budget-meter.alert > i {
+  background: var(--warn);
+}
+.budget-meter.blocked {
+  background: var(--danger-tint);
+}
+.budget-meter.blocked > i {
+  background: var(--danger);
+}
+.budget-meter .mark {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: var(--text-muted);
+  border-radius: 1px;
+}
+.budget-meter .mark.block {
+  right: 0;
+  background: var(--danger);
+}
+.budget-row-text {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Coluna única que não estica com as tabelas largas (elas rolam dentro do .table-wrap). */
+.usage-stack {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.5rem;
+}

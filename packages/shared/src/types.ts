@@ -556,7 +556,7 @@ export type StatementImportDetail = StatementImportSummary & {
   /** Quantas linhas do arquivo já existiam (dedup) no momento do import. */
   skippedDuplicates?: number;
   /** Só na resposta do import: a sugestão do agente dos fluxos enfileirada para as linhas novas (a tela acompanha a execução). */
-  aiSuggestion?: { queued: boolean; runId: string | null; lines: number } | null;
+  aiSuggestion?: { queued: boolean; runId: string | null; lines: number; skippedReason?: string } | null;
 };
 
 export type StatementInspect = {
@@ -947,7 +947,8 @@ export type MessageEventKind =
   | 'contract_notice_deadline'
   | 'contract_ending'
   | 'contract_renewal_pending'
-  | 'contract_readjustment';
+  | 'contract_readjustment'
+  | 'ai_budget_alert';
 
 export type DestinationOwnerKind = 'user' | 'caixa' | 'global';
 
@@ -1012,6 +1013,7 @@ export type NotificationKind =
   | 'contract_readjustment'
   | 'agent_completed'
   | 'agent_message'
+  | 'ai_budget_alert'
   | 'mirror_pending'
   | 'mirror_disputed'
   | 'invoice_closed'

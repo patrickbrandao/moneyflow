@@ -1,4 +1,5 @@
 export * from './blocks';
+export * from './budgets';
 export * from './inferences';
 export * from './json-schema';
 export * from './media';

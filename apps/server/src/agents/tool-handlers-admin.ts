@@ -4,17 +4,20 @@ import { join } from 'node:path';
 import {
   type ADMIN_TOOLS,
   type AiAgentDto,
+  type AiBudgetDto,
   agentTool,
   aiAgentCreateInput,
   aiAgentUpdateInput,
   aiPriceInput,
   aiProviderCreateInput,
   aiProviderUpdateInput,
+  budgetScopeLabel,
   destinationCreateInput,
   destinationUpdateInput,
   diffRows,
   formatDate,
   formatFileSize,
+  formatMicros,
   type ImportReport,
   mcpServerCreateInput,
   mcpServerUpdateInput,
@@ -23,12 +26,15 @@ import {
   type ToolPreview,
   type ToolSecretField,
   t,
+  toMicros,
   userCreateInput,
   userUpdateInput,
 } from '@moneyflow/shared';
+import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
 import { badRequest, forbidden, notFound, unprocessable } from '../errors';
 import * as aiAdmin from '../services/ai-admin';
+import * as aiBudgets from '../services/ai-budgets';
 import * as aiRequests from '../services/ai-requests';
 import * as apiTokens from '../services/api-tokens';
 import * as audit from '../services/audit';
@@ -55,6 +61,28 @@ import { type GeneratedFile, type Handlers, nameOf, toolAttachment } from './too
  */
 
 type AdminToolName = (typeof ADMIN_TOOLS)[number]['name'];
+
+/* ---------------- orçamentos ---------------- */
+
+const BUDGET_WARNING =
+  'A 100% do valor, novas execuções que o orçamento cobre são recusadas até o mês seguinte (o administrador que aciona fica isento).';
+
+async function userName(ctx: ServiceContext, id: string) {
+  const r = await ctx.db.execute<{ username: string }>(sql`SELECT username FROM users WHERE id = ${id}`);
+  if (!r.rows[0]) throw notFound();
+  return r.rows[0].username;
+}
+async function agentNameOf(ctx: ServiceContext, id: string) {
+  const r = await ctx.db.execute<{ name: string }>(sql`SELECT name FROM ai_agents WHERE id = ${id}`);
+  if (!r.rows[0]) throw notFound(t.agents.errors.agentNotFound);
+  return r.rows[0].name;
+}
+const budgetPreviewValues = (b: AiBudgetDto) => ({
+  limit: formatMicros(b.monthlyLimitMicros, b.currency),
+  currency: b.currency,
+  alert: `${b.alertPercent}%`,
+  active: b.isActive,
+});
 
 const listed = (items: string[], max = 12) =>
   items.length > max ? `${items.slice(0, max).join(', ')} e mais ${items.length - max}` : items.join(', ') || '—';
@@ -960,6 +988,83 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
     run: (ctx, i) => (i.value === null ? aiRequests.deleteSetting(ctx, i.key) : aiRequests.putSetting(ctx, i.key, i.value)),
   },
   get_ai_usage: { run: (ctx, i) => aiAdmin.usageReport(ctx, { from: i.from, to: i.to }) },
+
+  /* ---- orçamentos de IA (spec 028) ---- */
+  list_ai_budgets: { run: (ctx) => aiBudgets.listBudgets(ctx) },
+  create_ai_budget: {
+    preview: async (ctx, i) => {
+      ctx.access.assertAdmin();
+      const username = i.userId ? await userName(ctx, i.userId) : null;
+      const agentName = i.agentId ? await agentNameOf(ctx, i.agentId) : null;
+      const label = budgetScopeLabel({ scope: i.scope, username, agentName });
+      return {
+        title: 'Criar orçamento de IA',
+        summary: label,
+        action: 'create',
+        rows: [
+          { label: 'Escopo', after: label },
+          { label: 'Valor mensal', after: formatMicros(toMicros(i.monthlyLimit), i.currency) },
+          { label: 'Aviso em', after: `${i.alertPercent}%` },
+          { label: 'Ativo', after: yesNo(i.isActive) },
+        ],
+        warnings: [BUDGET_WARNING],
+      };
+    },
+    run: (ctx, i) => aiBudgets.createBudget(ctx, i),
+  },
+  update_ai_budget: {
+    preview: async (ctx, i) => {
+      const budget = await aiBudgets.getBudget(ctx, i.budgetId);
+      const currency = i.changes.currency ?? budget.currency;
+      return {
+        title: 'Editar orçamento de IA',
+        summary: budgetScopeLabel(budget),
+        action: 'update',
+        rows: diffRows(
+          [
+            { key: 'limit', label: 'Valor mensal' },
+            { key: 'currency', label: 'Moeda' },
+            { key: 'alert', label: 'Aviso em' },
+            { key: 'active', label: 'Ativo', format: 'bool' },
+          ],
+          {
+            limit:
+              i.changes.monthlyLimit !== undefined || i.changes.currency !== undefined
+                ? formatMicros(
+                    i.changes.monthlyLimit !== undefined ? toMicros(i.changes.monthlyLimit) : budget.monthlyLimitMicros,
+                    currency,
+                  )
+                : undefined,
+            currency: i.changes.currency,
+            alert: i.changes.alertPercent !== undefined ? `${i.changes.alertPercent}%` : undefined,
+            active: i.changes.isActive,
+          },
+          budgetPreviewValues(budget),
+        ),
+        warnings: i.changes.isActive === false ? [] : [BUDGET_WARNING],
+      };
+    },
+    run: (ctx, i) => aiBudgets.updateBudget(ctx, i.budgetId, i.changes),
+  },
+  delete_ai_budget: {
+    preview: async (ctx, i) => {
+      const budget = await aiBudgets.getBudget(ctx, i.budgetId);
+      return {
+        title: 'Excluir orçamento de IA',
+        summary: budgetScopeLabel(budget),
+        action: 'delete',
+        rows: [
+          { label: 'Valor mensal', after: formatMicros(budget.monthlyLimitMicros, budget.currency) },
+          {
+            label: 'Gasto no mês',
+            after: budget.current ? formatMicros(budget.current.spentMicros, budget.currency) : '—',
+          },
+        ],
+        warnings: ['Para só suspender o orçamento, desative-o em vez de excluir.'],
+      };
+    },
+    run: (ctx, i) => aiBudgets.deleteBudget(ctx, i.budgetId),
+  },
   list_ai_requests: { run: (ctx, i) => aiRequests.listRequests(ctx, i) },
 
   /* ---- backup ---- */

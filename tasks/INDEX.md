@@ -5,7 +5,7 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 | Nº | Tarefa | Status | Tipo | Responsável | Origem |
 |---|---|---|---|---|---|
 | 030 | [Orçamentos, visões de uso e avisos no banco (F14)](030-orcamentos-e-limites-no-banco.md) (depois da F13) | concluida | banco | dba | usuario |
-| 031 | [Orçamentos com aviso e bloqueio, limite por minuto e painel de uso (F14)](031-orcamentos-e-limites-na-aplicacao.md) (depois da 030) | aberta | melhoria | app | usuario |
+| 031 | [Orçamentos com aviso e bloqueio, limite por minuto e painel de uso (F14)](031-orcamentos-e-limites-na-aplicacao.md) (depois da 030) | concluida | melhoria | app | usuario |
 | 032 | [Tarefas agendadas, conciliação com IA e Telegram de entrada no banco (F15)](032-fluxos-autonomos-no-banco.md) (depois da F14) | aberta | banco | dba | usuario |
 | 033 | [Tarefas agendadas, conciliação completa ao importar e conversa pelo Telegram (F15)](033-fluxos-autonomos-na-aplicacao.md) (depois da 032) | aberta | melhoria | app | usuario |
 | 029 | [Tools de controle total, lote F13b (administração e segredos)](029-tools-controle-total-lote-b.md) (depois da 028) | concluida | melhoria | app | usuario |

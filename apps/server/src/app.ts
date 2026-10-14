@@ -85,6 +85,7 @@ export async function buildApp({
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof AppError) {
+      if (error.headers) reply.headers(error.headers);
       return reply.status(error.status).send({ error: { code: error.code, message: error.message, details: error.details } });
     }
     const translated = translateDbError(error);

@@ -100,6 +100,7 @@ export const MESSAGE_EVENT_KINDS = [
   'contract_ending',
   'contract_renewal_pending',
   'contract_readjustment',
+  'ai_budget_alert',
 ] as const;
 
 const hhmm = z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9]$/, E.invalidTime);
@@ -125,6 +126,7 @@ export const messageParamsSchemas = {
   contract_ending: z.strictObject({ days_before: intList(0, 180), send_at: hhmm }),
   contract_renewal_pending: z.strictObject({ send_at: hhmm, repeat_every_days: z.number().int().min(1).max(30).optional() }),
   contract_readjustment: z.strictObject({ send_at: hhmm }),
+  ai_budget_alert: z.strictObject({}),
 } satisfies Record<(typeof MESSAGE_EVENT_KINDS)[number], z.ZodType>;
 
 /** Parâmetros padrão de cada evento ao assinar. */
@@ -142,6 +144,7 @@ export const DEFAULT_MESSAGE_PARAMS: Record<(typeof MESSAGE_EVENT_KINDS)[number]
   contract_ending: { days_before: [30, 7, 0], send_at: '08:00' },
   contract_renewal_pending: { send_at: '08:00', repeat_every_days: 7 },
   contract_readjustment: { send_at: '08:00' },
+  ai_budget_alert: {},
 };
 
 /** Token do bot: <id numérico>:<chave>. */

@@ -55,6 +55,7 @@ import {
   aiUsage,
   aiModelPrices,
   aiRequests,
+  aiBudgets,
   contractCycles,
   contracts,
   recurrenceRules,
@@ -104,6 +105,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   aiRequests: many(aiRequests),
   attachments: many(attachments),
   mcpServers: many(mcpServers),
+  aiBudgets: many(aiBudgets),
   messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
   aiProviders: many(aiProviders),
@@ -263,6 +265,7 @@ export const aiAgentsRelations = relations(aiAgents, ({ one, many }) => ({
   aiRuns: many(aiRuns),
   aiUsages: many(aiUsage),
   aiRequests: many(aiRequests),
+  aiBudgets: many(aiBudgets),
   aiConversations: many(aiConversations),
   aiAgentPromptVersions: many(aiAgentPromptVersions),
   aiAgentInferences: many(aiAgentInferences),
@@ -1018,6 +1021,17 @@ export const aiRequestsRelations = relations(aiRequests, ({ one, many }) => ({
     references: [users.id],
   }),
   aiRequestAttempts: many(aiRequestAttempts),
+}));
+
+export const aiBudgetsRelations = relations(aiBudgets, ({ one }) => ({
+  aiAgent: one(aiAgents, {
+    fields: [aiBudgets.agentId],
+    references: [aiAgents.id],
+  }),
+  user: one(users, {
+    fields: [aiBudgets.userId],
+    references: [users.id],
+  }),
 }));
 
 export const contractCyclesRelations = relations(contractCycles, ({ one, many }) => ({

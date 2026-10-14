@@ -72,6 +72,17 @@
   --port-11: #b39a6b;
   --port-12: #8a8f99;
 
+  /* séries dos gráficos (painel de uso, spec 028): ordem fixa validada pelo
+     dataviz (CVD e visão normal entre vizinhos) no cartão escuro; sem roxo.
+     "Outros" é o neutro. */
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #d55181;
+  --chart-6: #008300;
+  --chart-other: #6e717b;
+
   /* anel difuso de foco/hover e a única sombra "de verdade" (flutuantes) */
   --ring: 0 0 0 4px rgba(255, 255, 255, 0.06);
   --ring-accent: 0 0 0 3px rgba(47, 111, 214, 0.35);
@@ -127,6 +138,14 @@
   --port-10: #9e9010;
   --port-11: #8c7442;
   --port-12: #62666f;
+
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --chart-6: #008300;
+  --chart-other: #9a9da5;
 
   --ring: 0 0 0 4px rgba(17, 19, 25, 0.05);
   --ring-accent: 0 0 0 3px rgba(29, 90, 190, 0.25);

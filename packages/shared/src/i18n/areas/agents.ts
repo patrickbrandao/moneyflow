@@ -55,7 +55,19 @@ export const agentsStrings = {
     speechNoText: 'Esta mensagem não tem texto para ouvir.',
     transcriptionNotFound: 'Este anexo não tem transcrição.',
     notAudio: 'Este anexo não é um áudio.',
+    /** Orçamentos e limite por minuto (spec 028). */
+    budgetExceeded: (scope: string) => `Orçamento de IA do mês atingido: ${scope}`,
+    rateLimited: (limit: number, seconds: number) =>
+      `Limite de ${limit} execuç${limit === 1 ? 'ão' : 'ões'} de IA por minuto atingido. Tente de novo em ${seconds} s.`,
+    budgetNotFound: 'Orçamento não encontrado.',
     embeddingDimensions: (got: number) => `O modelo precisa produzir 1536 dimensões (devolveu ${got}).`,
+  },
+  /** Rótulo do escopo do orçamento (spec 028), no erro, no aviso e na tela. */
+  budgetScope: {
+    global: 'global',
+    flows: 'fluxos automáticos',
+    agent: (name: string | null) => `agente ${name ?? '(removido)'}`,
+    user: (username: string | null) => (username ? `usuário @${username}` : 'usuário (removido)'),
   },
   /** Capacidades dos provedores (spec 024), em ordem canônica. */
   capabilities: {

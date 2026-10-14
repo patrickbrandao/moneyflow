@@ -29,6 +29,8 @@ import { ADMIN_STATE, baseURL, loginAsAdmin } from '../support/session';
  *  - as capacidades (spec 024): cadastrar um provedor OpenAI-compatível falso
  *    com todas as flags, testar flag a flag e criar um agente que herda tudo
  *    pelo "Provedor padrão";
+ *  - os orçamentos (spec 028): orçamento baixo de um usuário na guia Uso, o
+ *    aviso no sino e a conversa recusada com o escopo no texto;
  *  - o chat multimídia (spec 025): anexar um áudio e ver a transcrição, tocar
  *    e trocar a velocidade para 2x, o modo áudio tocando uma resposta, as
  *    prévias de imagem (ampliar e navegar) e de PDF, o markdown bruto/renderizado
@@ -143,10 +145,14 @@ test.beforeAll(async () => {
     isActive: true,
     colorSlot: 5,
   });
+  // Limite por minuto (spec 028): o admin manda muitas mensagens neste arquivo; o valor do banco vence AI_RUNS_PER_MINUTE.
+  const limit = await adminApi.put('/api/admin/settings/ai.runs_per_minute', { data: { value: 1000 } });
+  expect(limit.ok(), await limit.text()).toBeTruthy();
 });
 
 test.afterAll(async () => {
   if (adminApi) {
+    await adminApi.delete('/api/admin/settings/ai.runs_per_minute');
     if (agent) await adminApi.patch(`/api/admin/ai/agents/${agent.id}`, { data: { isActive: false } });
     for (const id of extraAgents) await adminApi.patch(`/api/admin/ai/agents/${id}`, { data: { isActive: false } });
     if (provider) await adminApi.patch(`/api/admin/ai/providers/${provider.id}`, { data: { isActive: false } });
@@ -834,6 +840,92 @@ test('Minha conta → IA: as instruções do usuário ficam salvas', async ({ pa
   await expect(page.getByTestId('account-ai').getByLabel('Minhas instruções')).toHaveValue(`Instruções do e2e ${tag}`);
   const res = await adminApi.put('/api/account/ai', { data: { instructions: '' } });
   expect(res.ok()).toBeTruthy();
+});
+
+test('orçamentos (spec 028): orçamento baixo, aviso no sino e bloqueio na conversa', async ({ page, browser }) => {
+  // Um usuário comum (o admin que aciona fica isento do bloqueio) e um preço para o modelo do provedor falso.
+  const other = { username: `e2e-orcamento-${tag}`, password: `senha-e2e-${tag}` };
+  await postJson(adminApi, '/api/users', {
+    username: other.username,
+    email: `${other.username}@e2e.local`,
+    password: other.password,
+    role: 'user',
+  });
+  await postJson(adminApi, '/api/admin/ai/prices', {
+    providerId: provider.id,
+    model: 'claude-sonnet-5-5',
+    inputPricePerMillion: 100,
+    outputPricePerMillion: 100,
+  });
+  const otherApi = await apiLogin(other.username, other.password);
+  const userContext = await browser.newContext({ storageState: await otherApi.storageState() });
+  const userPage = await userContext.newPage();
+  let budgetId: string | null = null;
+  try {
+    // O admin cria o orçamento baixo do usuário na guia Uso.
+    await enter(page);
+    await page.goto('/admin/ai/usage');
+    await expect(page.getByTestId('usage-tiles')).toBeVisible();
+    await page.getByTestId('budget-new').click();
+    const form = page.getByTestId('budget-form');
+    await form.getByTestId('budget-scope').selectOption('user');
+    await form.getByTestId('budget-user').selectOption({ label: `@${other.username}` });
+    await form.getByTestId('budget-limit').fill('0,01');
+    await form.getByTestId('budget-alert').fill('50');
+    await form.getByTestId('budget-save').click();
+    await expect(page.getByText('Orçamento salvo.')).toBeVisible();
+    const row = page.getByTestId('budget-row').filter({ hasText: `usuário @${other.username}` });
+    await expect(row).toContainText('Dentro');
+    budgetId = await row.getAttribute('data-budget');
+
+    // O usuário conversa: a 1ª resposta custa mais que o orçamento (o bloqueio vale para a próxima execução).
+    await userPage.goto('/');
+    const win = await freshSession(userPage);
+    await say(win, `olá do orçamento ${tag}`);
+    await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Olá! Sou o agente de teste.' })).toBeVisible({
+      timeout: 30_000,
+    });
+
+    // O worker gera o aviso (dedup por orçamento, mês e limiar) no sino do usuário e no dos admins.
+    const title = `Orçamento de IA atingido: usuário @${other.username}`;
+    await expect
+      .poll(
+        async () => {
+          const list = await (await otherApi.get('/api/notifications?limit=30')).json();
+          return list.items.filter((n: { kind: string }) => n.kind === 'ai_budget_alert').map((n: { title: string }) => n.title);
+        },
+        { timeout: 90_000, intervals: [2_000] },
+      )
+      .toEqual([title]);
+    await userPage.getByRole('button', { name: /^Notificações/ }).click();
+    const bell = userPage.getByRole('dialog', { name: 'Notificações' });
+    await expect(bell).toContainText(title);
+    await expect(bell).toContainText('Novas execuções estão bloqueadas');
+    await userPage.getByRole('button', { name: /^Notificações/ }).click();
+    await expect(bell).toHaveCount(0);
+
+    // A próxima mensagem é recusada (429) com o escopo no texto.
+    await say(win, 'mais uma pergunta');
+    await expect(userPage.getByText(`Orçamento de IA do mês atingido: usuário @${other.username}`)).toBeVisible();
+
+    // Minha conta → IA mostra o uso do mês e o orçamento bloqueado.
+    await userPage.goto('/account');
+    await expect(userPage.getByTestId('account-budget')).toContainText(`usuário @${other.username}`);
+    await expect(userPage.getByTestId('account-budget').getByTestId('budget-meter')).toHaveAttribute('data-status', 'blocked');
+
+    // No painel do admin, a barra marca o bloqueio.
+    await page.reload();
+    await expect(
+      page
+        .getByTestId('budget-row')
+        .filter({ hasText: `usuário @${other.username}` })
+        .getByTestId('budget-meter'),
+    ).toHaveAttribute('data-status', 'blocked');
+  } finally {
+    if (budgetId) await adminApi.delete(`/api/admin/ai/budgets/${budgetId}`);
+    await userContext.close();
+    await otherApi.dispose();
+  }
 });
 
 test('requisições: detalhe do provedor, a requisição da conversa com as tentativas e a retenção (spec 023)', async ({ page }) => {

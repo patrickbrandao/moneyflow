@@ -14,6 +14,7 @@ import { extractJson } from '../agents/flows';
 import { loadMessages, loadRun } from '../agents/store';
 import type { ServiceContext } from '../context';
 import { AppError } from '../errors';
+import { assertCanStartRun } from './ai-budgets';
 import { assertUpload, storeAttachment } from './attachments';
 import { assertReadsImages, createConversation, sendMessage } from './conversations';
 import { getImport } from './statements';
@@ -63,6 +64,8 @@ export async function readDocumentWithAi(
   if (!agentId) throw new AppError(501, 'document_reader_unavailable', t.errors.documentReaderUnavailable);
   // Imagem com um agente dos fluxos sem visão: recusada antes de abrir a conversa (spec 024).
   await assertReadsImages(ctx.db, agentId, [file.mime]);
+  // Orçamento e limite por minuto (spec 028): a leitura devolve o erro antes de abrir a conversa.
+  await assertCanStartRun(ctx, agentId, true);
   const content = assertUpload(file.content);
   const conversation = await createConversation(
     ctx,
@@ -135,6 +138,16 @@ export async function suggestImportClassifications(
   if (!agentId) {
     if (opts.auto) return { queued: false, runId: null, lines: lines.length };
     throw new AppError(501, 'ai_unavailable', t.agents.errors.providerMissing);
+  }
+
+  // Orçamento atingido ou limite por minuto (spec 028): logo após importar, a sugestão é pulada (o aviso é o ai_budget_alert).
+  try {
+    await assertCanStartRun(ctx, agentId, true);
+  } catch (error) {
+    if (opts.auto && error instanceof AppError && error.status === 429) {
+      return { queued: false, runId: null, lines: lines.length, skippedReason: error.message };
+    }
+    throw error;
   }
 
   const lineIds = lines.map((l) => l.id);

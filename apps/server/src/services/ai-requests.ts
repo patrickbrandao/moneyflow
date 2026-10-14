@@ -37,6 +37,9 @@ type SettingDef = { env: string; envValue: (config: Config) => unknown };
 /** Chaves que a tela grava (a validação do valor é do banco: app_setting_valid). */
 const SETTINGS: Record<string, SettingDef> = {
   'ai.request_retention_days': { env: 'AI_REQUEST_RETENTION_DAYS', envValue: (config) => config.aiRequestRetentionDays },
+  // Limite por minuto (spec 028): execuções de IA por usuário.
+  'ai.runs_per_minute': { env: 'AI_RUNS_PER_MINUTE', envValue: (config) => config.aiRunsPerMinute },
+  'ai.flow_runs_per_minute': { env: 'AI_FLOW_RUNS_PER_MINUTE', envValue: (config) => config.aiFlowRunsPerMinute },
 };
 
 function settingDef(key: string): SettingDef {
@@ -106,6 +109,14 @@ export async function requestRetentionDays(db: Executor, config: Config): Promis
   const days = Number(row?.value);
   if (row && Number.isInteger(days) && days >= 1 && days <= 365) return { days, source: 'database' };
   return { days: config.aiRequestRetentionDays, source: 'env' };
+}
+
+/** Limites por minuto (spec 028): app_settings vence AI_RUNS_PER_MINUTE / AI_FLOW_RUNS_PER_MINUTE. */
+export async function runsPerMinute(db: Executor, config: Config, flow: boolean): Promise<{ limit: number; source: 'database' | 'env' }> {
+  const row = await readSetting(db, flow ? 'ai.flow_runs_per_minute' : 'ai.runs_per_minute');
+  const value = Number(row?.value);
+  if (row && Number.isInteger(value) && value >= 1 && value <= 1000) return { limit: value, source: 'database' };
+  return { limit: flow ? config.aiFlowRunsPerMinute : config.aiRunsPerMinute, source: 'env' };
 }
 
 /* ---------------- requisições ---------------- */

@@ -13,7 +13,15 @@ export type Harness = { app: FastifyInstance; db: Database; config: Config; clos
 export async function startApp(env: Record<string, string> = {}, databaseUrl = inject('databaseUrl')): Promise<Harness> {
   const pool = createPool(databaseUrl, 5);
   const db = createDb(pool);
-  const config = loadConfig({ DATABASE_URL: databaseUrl, LOOKUP_TIMEOUT_MS: '1500', LOGIN_RATE_LIMIT: '10000', ...env });
+  // Execuções de IA por minuto (spec 028) folgadas: os testes mandam muitas mensagens com o mesmo usuário.
+  const config = loadConfig({
+    DATABASE_URL: databaseUrl,
+    LOOKUP_TIMEOUT_MS: '1500',
+    LOGIN_RATE_LIMIT: '10000',
+    AI_RUNS_PER_MINUTE: '1000',
+    AI_FLOW_RUNS_PER_MINUTE: '1000',
+    ...env,
+  });
   const app = await buildApp({ db, config, logger: false });
   await app.ready();
   return {

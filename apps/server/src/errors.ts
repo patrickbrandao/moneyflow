@@ -8,6 +8,8 @@ export class AppError extends Error {
     public code: string,
     message: string,
     public details?: { path: string; message: string }[],
+    /** Cabeçalhos da resposta (ex.: retry-after no 429). */
+    public headers?: Record<string, string>,
   ) {
     super(message);
   }

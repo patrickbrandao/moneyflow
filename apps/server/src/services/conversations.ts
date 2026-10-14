@@ -45,6 +45,7 @@ import {
 import { executeSecretTool, internalTool } from '../agents/tools-runtime';
 import type { ServiceContext } from '../context';
 import { AppError, findPgError, forbidden, notFound, unprocessable } from '../errors';
+import { assertCanStartRun } from './ai-budgets';
 import { chatAttachments, mediaCapabilities, messageAttachmentIds } from './chat-media';
 import { withTx } from './tx';
 import { iso } from './util';
@@ -542,6 +543,8 @@ export async function sendMessage(ctx: ServiceContext, id: string, input: z.outp
     throw new AppError(409, 'session_finished', t.agents.errors.sessionFinished);
   }
   await assertAgentUsable(ctx.db, conversation.agent_id);
+  // Limite por minuto e orçamento do mês (spec 028): 429 antes de gravar a mensagem.
+  await assertCanStartRun(ctx, conversation.agent_id, conversation.purpose !== 'chat');
   const files = await assertAttachments(ctx, id, input.attachmentIds);
   await assertReadsImages(
     ctx.db,

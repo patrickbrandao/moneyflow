@@ -40,17 +40,31 @@ O uso de IA deixa de ser só medição. Entram orçamentos mensais com aviso e b
   - no máximo um ativo por (escopo, alvo, moeda), com `NULLS NOT DISTINCT` (alvo nulo em `flows` e `global`);
   - auditada e no backup.
 - **`ai_budget_status(mês)`**: gasto, percentual e situação (`ok|alert|blocked`) de cada orçamento ativo. Uma função `ai_budget_check(user, agent, is_flow)` devolve os orçamentos estourados que se aplicam.
-- **Visões de uso**: `ai_usage_daily` (dia em São Paulo × provedor × agente × usuário × finalidade × moeda) e o ranking de conversas por custo.
+- **Visões de uso**: `ai_usage_daily` (dia em São Paulo × provedor × **modelo** × agente × usuário × finalidade × moeda; o modelo serve à tabela "por modelo" num período qualquer, e quem não precisa dele soma) e o ranking de conversas por custo (`ai_usage_top_conversations`, top N por moeda).
 - **Notificação e mensagens**:
   - o tipo de notificação `ai_budget_alert`;
   - o evento `ai_budget_alert` em `message_subscriptions`, sem parâmetros.
 - **`app_setting_valid`**: aceita as duas chaves novas (inteiro de 1 a 1000).
 
 ## Aplicação (app)
-- Checagem do orçamento e do limite por minuto em `POST` de mensagem/execução, nos fluxos e no runner, antes de cada chamada.
-- O produtor de eventos do `message-worker` gera os avisos com dedup.
-- Telas: a seção Orçamentos na guia Uso e o painel novo.
-- Tools de agente (admin, categoria Configuração de IA, [027](027-tools-de-controle-total.md)): `list_ai_budgets`, `create_ai_budget`, `update_ai_budget`, `delete_ai_budget`.
+Entregue na tarefa 031 (serviço `apps/server/src/services/ai-budgets.ts`).
+- **Checagem**: toda execução nova passa por `assertCanStartRun` (limite por minuto, depois `ai_budget_check`) em `sendMessage` — o que cobre o chat, a leitura de documento, as sugestões da conciliação e os fluxos dos contratos; os fluxos checam também antes de abrir a conversa arquivada.
+  - Recusa: `429` com o código `budget_exceeded` e "Orçamento de IA do mês atingido: <escopo>" (o escopo da primeira linha: `global`, `fluxos automáticos`, `agente X` ou `usuário @fulano`), sem gravar mensagem nem execução.
+  - No runner, antes de cada chamada ao modelo: estourado, a execução termina `failed` (sem status novo em `ai_runs`), com o texto em `error` e o evento `error` com `code: 'budget_exceeded'`.
+  - As sugestões da conciliação logo após importar são puladas e o import devolve `aiSuggestion.skippedReason` (a tela mostra o aviso); o botão "Sugerir com IA" devolve o `429`.
+  - A isenção do admin é da aplicação: quem aciona com papel `admin` não consulta o orçamento.
+- **Limite por minuto**: conta as execuções do usuário em `ai_runs` no último minuto, separando sessões (`purpose = 'chat'`) e fluxos, sem tabela nova; `429 rate_limited` com `retry-after` em segundos (até a mais antiga sair da janela). Variáveis no `.env.example` e no compose.
+- **Avisos**: o produtor do `message-worker` lê `ai_budget_status()` e, para cada orçamento em `alert` ou `blocked`, gera o maior limiar alcançado (o percentual de aviso ou 100) com a chave `ai_budget_alert:<orçamento>:<AAAA-MM>:<limiar>`.
+  - Sino: o usuário do escopo `user` (link para Minha conta) e todos os admins ativos (link para a guia Uso).
+  - Destinos que assinam o evento: o global recebe todos; o pessoal de um admin, todos; o pessoal de outro usuário, só o orçamento `user` dele; o de caixa, nenhum ([013](013-mensagens-telegram.md)).
+- **API**: `GET/POST /api/admin/ai/budgets`, `PATCH/DELETE /api/admin/ai/budgets/:id` (o escopo e o alvo não mudam; o valor entra em unidades da moeda e é gravado em micros), `GET /api/admin/ai/usage/panel?from&to&providerId&agentId&userId&purpose` (datas de São Paulo, até 366 dias) e `GET /api/account/ai/usage`. Os limites por minuto usam as rotas de configuração (`/api/admin/settings/ai.runs_per_minute` e `ai.flow_runs_per_minute`).
+- **Painel (guia Uso)**: filtros numa linha (este mês, últimos 30 dias ou intervalo; provedor, agente, usuário e finalidade); totais (custo por moeda com "N chamadas sem preço", chamadas, tokens e acerto do cache); gráficos em SVG próprio, sem biblioteca, seguindo o `dataviz` (colunas ≤ 24 px com 2 px de fundo entre segmentos, linha de 2 px, dica no mouse e nas setas do teclado), com as cores `--chart-1…6` e `--chart-other` dos tokens (paleta validada nos dois temas, nada roxo):
+  - custo por dia empilhado por provedor ou agente (os 5 maiores e "Outros"; a cor segue a ordem do cadastro, não o ranking), numa moeda por vez;
+  - tokens por dia (entrada, saída, cache gravado e lido);
+  - acerto do cache por dia (linha, 0–100%).
+  - As tabelas (top 20 sessões por moeda com link para a sessão em leitura, por modelo com a saúde de `ai_provider_health` nos dias do período até hoje, e por finalidade) exportam CSV/PDF; a guia termina com a seção Orçamentos (barra com a marca do aviso e do bloqueio, criar, editar, desligar e excluir) e o limite por minuto (banco × variável, "Usar o padrão").
+- **Minha conta → IA**: o uso do mês (por moeda) e as barras dos orçamentos que cobrem o usuário (o dele e o global).
+- **Tools de agente** (admin, categoria Configuração de IA, [027](027-tools-de-controle-total.md)): `list_ai_budgets` (leitura), `create_ai_budget`, `update_ai_budget` e `delete_ai_budget` (escritas com prévia; a exclusão é destrutiva). `set_app_setting` aceita as duas chaves do limite por minuto.
 
 ## Testes
 - **Integração**:

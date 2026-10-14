@@ -479,6 +479,54 @@ describe('backup: recursos num sistema novo', () => {
     expect(await kitOf(free.id)).toBeNull();
   });
 
+  it('orçamentos de IA (spec 028): vão e voltam no JSON completo; reimportar não duplica; ativo repetido volta como conflito', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const a = client(h, adminA.cookie);
+    const agent = await a.post('/api/admin/ai/agents', { name: `Agente orçamento ${uid()}` });
+    const created = [
+      await a.post('/api/admin/ai/budgets', { scope: 'agent', agentId: agent.id, monthlyLimit: 25, alertPercent: 60 }),
+      await a.post('/api/admin/ai/budgets', { scope: 'flows', monthlyLimit: 7, isActive: false }),
+    ];
+    try {
+      const full = await h.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminA.cookie } });
+      expect(full.statusCode, full.body.slice(0, 300)).toBe(200);
+      const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+      const ids = created.map((x: any) => x.id);
+      const rows = json.tables.ai_budgets.filter((r: any) => ids.includes(r.id));
+      expect(rows.map((r: any) => [r.scope, r.monthly_limit_micros, r.is_active])).toEqual([
+        ['agent', 25_000_000, true],
+        ['flows', 7_000_000, false],
+      ]);
+      const agentRow = json.tables.ai_agents.find((r: any) => r.id === agent.id);
+      const file = { ...json, tables: { ai_agents: [agentRow], ai_budgets: rows }, references: {} };
+
+      const report = await importFile(b, adminB.cookie, 'full', file);
+      expect(failures(report)).toEqual([]);
+      expect(sum(report, 'ai_budgets').imported).toBe(2);
+      const listed = await client(b, adminB.cookie).get('/api/admin/ai/budgets');
+      expect(listed.find((x: any) => x.id === created[0].id)).toMatchObject({
+        scope: 'agent',
+        agentId: agent.id,
+        alertPercent: 60,
+        isActive: true,
+      });
+      const again = await importFile(b, adminB.cookie, 'full', file);
+      expect(failures(again)).toEqual([]);
+      expect(sum(again, 'ai_budgets').existing).toBe(2);
+
+      // Outro orçamento ativo do mesmo escopo, alvo e moeda: não entra e volta com o motivo.
+      const clash = await importFile(b, adminB.cookie, 'full', {
+        ...file,
+        tables: { ai_budgets: [{ ...rows[0], id: randomUUID() }] },
+      });
+      expect(sum(clash, 'ai_budgets').imported).toBe(0);
+      expect(issuesOf(clash, 'ai_budgets')[0]?.reason).toMatch(/orçamento ativo/);
+    } finally {
+      for (const x of created) await a.del(`/api/admin/ai/budgets/${x.id}`);
+    }
+  });
+
   it('prompt (spec 022): as versões do agente vão e voltam com números, notas e a restauração; arquivo sem versões ganha a 1', async () => {
     if (skip) return;
     const adminA = await userSession(h, 'admin');

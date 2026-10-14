@@ -14,6 +14,7 @@ import {
   subscriptionInput,
   userCreateInput,
 } from '../schemas';
+import { aiBudgetCreateInput, aiBudgetUpdateInput } from './budgets';
 import {
   AI_REQUEST_OPERATIONS,
   AI_REQUEST_STATUSES,
@@ -99,7 +100,7 @@ const userUpdateTool = z.object({
 });
 
 /** Chaves de app_settings que a tela (e as tools) gravam. */
-export const APP_SETTING_KEYS = ['ai.request_retention_days'] as const;
+export const APP_SETTING_KEYS = ['ai.request_retention_days', 'ai.runs_per_minute', 'ai.flow_runs_per_minute'] as const;
 
 const yearMonth = z
   .string()
@@ -608,7 +609,7 @@ export const ADMIN_TOOLS = [
     category: 'ai',
     title: 'Alterar configuração do sistema',
     description:
-      'Grava uma configuração do sistema (vence a variável de ambiente); value null volta ao padrão da variável. ai.request_retention_days = dias de retenção das requisições ao provedor (1–365).',
+      'Grava uma configuração do sistema (vence a variável de ambiente); value null volta ao padrão da variável. ai.request_retention_days = dias de retenção das requisições ao provedor (1–365); ai.runs_per_minute e ai.flow_runs_per_minute = execuções de IA por minuto por usuário nas sessões e nos fluxos (inteiro 1–1000).',
     kind: 'write',
     adminOnly: true,
     input: z.object({
@@ -624,6 +625,45 @@ export const ADMIN_TOOLS = [
     kind: 'read',
     adminOnly: true,
     input: z.object({ from: yearMonth.optional(), to: yearMonth.optional() }),
+  }),
+  define({
+    name: 'list_ai_budgets',
+    category: 'ai',
+    title: 'Listar orçamentos de IA',
+    description:
+      'Orçamentos mensais de IA (escopo user, agent, flows ou global; moeda; valor; percentual de aviso; ativo) com o gasto do mês corrente, o percentual e a situação (ok, alert, blocked).',
+    kind: 'read',
+    adminOnly: true,
+    input: z.object({}),
+  }),
+  define({
+    name: 'create_ai_budget',
+    category: 'ai',
+    title: 'Criar orçamento de IA',
+    description:
+      'Cria um orçamento mensal de IA: avisa no percentual de aviso e bloqueia novas execuções a 100% (o administrador que aciona fica isento). Escopos: user (userId), agent (agentId), flows e global. Um ativo por escopo, alvo e moeda.',
+    kind: 'write',
+    adminOnly: true,
+    input: aiBudgetCreateInput,
+  }),
+  define({
+    name: 'update_ai_budget',
+    category: 'ai',
+    title: 'Editar orçamento de IA',
+    description: 'Altera o valor mensal, a moeda, o percentual de aviso ou liga/desliga um orçamento de IA (o escopo e o alvo não mudam).',
+    kind: 'write',
+    adminOnly: true,
+    input: z.object({ budgetId: id, changes: aiBudgetUpdateInput }),
+  }),
+  define({
+    name: 'delete_ai_budget',
+    category: 'ai',
+    title: 'Excluir orçamento de IA',
+    description: 'Exclui um orçamento de IA (para só suspender, desative-o com update_ai_budget).',
+    kind: 'write',
+    destructive: true,
+    adminOnly: true,
+    input: z.object({ budgetId: id }),
   }),
   define({
     name: 'list_ai_requests',

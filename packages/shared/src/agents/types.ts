@@ -455,7 +455,7 @@ export type AiRunEvent =
   | { type: 'confirmation'; confirmations: ToolConfirmationDto[] }
   | { type: 'usage'; run: AiRunDto }
   | { type: 'title'; title: string }
-  | { type: 'error'; message: string }
+  | { type: 'error'; message: string; code?: string }
   | { type: 'done'; status: AiRunStatus; error?: string | null };
 
 export type ApiTokenDto = {
@@ -486,7 +486,13 @@ export type DocumentReadingDto = {
   conversationId?: string | null;
 };
 
-export type ClassificationSuggestResult = { queued: boolean; runId: string | null; lines: number };
+export type ClassificationSuggestResult = {
+  queued: boolean;
+  runId: string | null;
+  lines: number;
+  /** Pulada (spec 028): orçamento de IA atingido ou limite por minuto, com a mensagem. */
+  skippedReason?: string;
+};
 
 /* ---------------- requisições ao provedor (spec 023) ---------------- */
 

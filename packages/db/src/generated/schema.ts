@@ -64,8 +64,8 @@ export const users = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
   },
   (table) => [
-    unique('users_username_key').on(table.username),
     unique('users_email_key').on(table.email),
+    unique('users_username_key').on(table.username),
     check(
       'users_email_format_check',
       sql`(email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'::citext) AND (length((email)::text) <= 254)`,
@@ -1052,8 +1052,8 @@ export const cardInvoiceItems = pgTable(
       foreignColumns: [caixas.id],
       name: 'card_invoice_items_payer_caixa_id_fkey',
     }),
-    unique('card_invoice_items_purchase_installment_key').on(table.cardPurchaseId, table.installmentNumber),
     unique('card_invoice_items_carryover_key').on(table.carriedFromInvoiceId, table.payerCaixaId),
+    unique('card_invoice_items_purchase_installment_key').on(table.cardPurchaseId, table.installmentNumber),
     check('card_invoice_items_amount_cents_check', sql`amount_cents <> 0`),
     check('card_invoice_items_carried_self_check', sql`carried_from_invoice_id <> card_invoice_id`),
     check('card_invoice_items_installment_number_check', sql`(installment_number >= 1) AND (installment_number <= 99)`),
@@ -1709,33 +1709,6 @@ export const messageSubscriptionCaixas = pgTable(
   ],
 );
 
-export const messageSubscriptions = pgTable(
-  'message_subscriptions',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    destinationId: uuid('destination_id').notNull(),
-    eventKind: text('event_kind').notNull(),
-    params: jsonb().default({}).notNull(),
-    isActive: boolean('is_active').default(true).notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('message_subscriptions_event_kind_idx').using('btree', table.eventKind.asc().nullsLast().op('text_ops')).where(sql`is_active`),
-    foreignKey({
-      columns: [table.destinationId],
-      foreignColumns: [messageDestinations.id],
-      name: 'message_subscriptions_destination_id_fkey',
-    }).onDelete('cascade'),
-    unique('message_subscriptions_destination_event_key').on(table.destinationId, table.eventKind),
-    check(
-      'message_subscriptions_event_kind_check',
-      sql`event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text])`,
-    ),
-    check('message_subscriptions_params_check', sql`CHECK (message_subscription_params_valid(event_kind, params`),
-  ],
-);
-
 export const aiMessages = pgTable(
   'ai_messages',
   {
@@ -1767,6 +1740,33 @@ export const aiMessages = pgTable(
     check('ai_messages_content_check', sql`CHECK (ai_message_content_valid(role, content`),
     check('ai_messages_role_check', sql`role = ANY (ARRAY['user'::text, 'assistant'::text, 'tool'::text])`),
     check('ai_messages_seq_check', sql`seq >= 1`),
+  ],
+);
+
+export const messageSubscriptions = pgTable(
+  'message_subscriptions',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    destinationId: uuid('destination_id').notNull(),
+    eventKind: text('event_kind').notNull(),
+    params: jsonb().default({}).notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('message_subscriptions_event_kind_idx').using('btree', table.eventKind.asc().nullsLast().op('text_ops')).where(sql`is_active`),
+    foreignKey({
+      columns: [table.destinationId],
+      foreignColumns: [messageDestinations.id],
+      name: 'message_subscriptions_destination_id_fkey',
+    }).onDelete('cascade'),
+    unique('message_subscriptions_destination_event_key').on(table.destinationId, table.eventKind),
+    check(
+      'message_subscriptions_event_kind_check',
+      sql`event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text])`,
+    ),
+    check('message_subscriptions_params_check', sql`CHECK (message_subscription_params_valid(event_kind, params`),
   ],
 );
 
@@ -2054,6 +2054,7 @@ export const aiUsage = pgTable(
     index('ai_usage_provider_id_idx').using('btree', table.providerId.asc().nullsLast().op('uuid_ops')),
     index('ai_usage_request_id_idx').using('btree', table.requestId.asc().nullsLast().op('uuid_ops')),
     index('ai_usage_run_id_idx').using('btree', table.runId.asc().nullsLast().op('uuid_ops')),
+    index('ai_usage_sp_day_idx').using('btree', sql`(((created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date)`),
     index('ai_usage_user_id_idx').using(
       'btree',
       table.userId.asc().nullsLast().op('timestamptz_ops'),
@@ -2331,6 +2332,59 @@ export const mcpServers = pgTable(
   ],
 );
 
+export const aiBudgets = pgTable(
+  'ai_budgets',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    scope: text().notNull(),
+    userId: uuid('user_id'),
+    agentId: uuid('agent_id'),
+    currency: text().default('USD').notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    monthlyLimitMicros: bigint('monthly_limit_micros', { mode: 'number' }).notNull(),
+    alertPercent: integer('alert_percent').default(80).notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('ai_budgets_active_key')
+      .using(
+        'btree',
+        table.scope.asc().nullsLast().op('text_ops'),
+        table.userId.asc().nullsLast().op('text_ops'),
+        table.agentId.asc().nullsLast().op('uuid_ops'),
+        table.currency.asc().nullsLast().op('text_ops'),
+      )
+      .where(sql`is_active`),
+    index('ai_budgets_agent_id_idx').using('btree', table.agentId.asc().nullsLast().op('uuid_ops')),
+    index('ai_budgets_user_id_idx').using('btree', table.userId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.agentId],
+      foreignColumns: [aiAgents.id],
+      name: 'ai_budgets_agent_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'ai_budgets_user_id_fkey',
+    }).onDelete('cascade'),
+    check('ai_budgets_alert_percent_check', sql`(alert_percent >= 1) AND (alert_percent <= 99)`),
+    check('ai_budgets_currency_check', sql`currency = ANY (ARRAY['USD'::text, 'BRL'::text])`),
+    check('ai_budgets_monthly_limit_micros_check', sql`monthly_limit_micros > 0`),
+    check('ai_budgets_scope_check', sql`scope = ANY (ARRAY['user'::text, 'agent'::text, 'flows'::text, 'global'::text])`),
+    check(
+      'ai_budgets_target_check',
+      sql`CHECK (
+CASE scope
+    WHEN 'user'::text THEN ((user_id IS NOT NULL) AND (agent_id IS NULL))
+    WHEN 'agent'::text THEN ((agent_id IS NOT NULL) AND (user_id IS NULL))
+    ELSE ((user_id IS NULL) AND (agent_id IS NULL))
+END)`,
+    ),
+  ],
+);
+
 export const titles = pgTable(
   'titles',
   {
@@ -2556,7 +2610,7 @@ export const messageOutbox = pgTable(
     check('message_outbox_dedup_key_check', sql`(btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300)`),
     check(
       'message_outbox_event_kind_check',
-      sql`event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'test'::text])`,
+      sql`event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'test'::text])`,
     ),
     check('message_outbox_payload_check', sql`jsonb_typeof(payload) = 'object'::text`),
     check(
@@ -2615,7 +2669,7 @@ export const notifications = pgTable(
     check('notifications_dedup_key_check', sql`(btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300)`),
     check(
       'notifications_kind_check',
-      sql`kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text])`,
+      sql`kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text])`,
     ),
     check('notifications_link_check', sql`(link ~ '^/[^/]'::text) OR (link = '/'::text)`),
     check('notifications_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
@@ -3471,30 +3525,6 @@ export const aiRequestAttempts = pgTable(
     check('ai_request_attempts_retry_after_check', sql`retry_after_ms >= 0`),
   ],
 );
-export const aiUsageMonthlyByPurpose = pgView('ai_usage_monthly_by_purpose', {
-  month: date(),
-  purpose: text(),
-  currency: text(),
-  calls: integer(),
-  runs: integer(),
-  users: integer(),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  inputTokens: bigint('input_tokens', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  outputTokens: bigint('output_tokens', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  costMicros: bigint('cost_micros', { mode: 'number' }),
-  hasUnpriced: boolean('has_unpriced'),
-})
-  .with({ securityInvoker: true })
-  .as(
-    sql`SELECT date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date AS month, purpose, currency, count(*)::integer AS calls, count(DISTINCT run_id)::integer AS runs, count(DISTINCT user_id)::integer AS users, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced FROM ai_usage u GROUP BY (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date), purpose, currency`,
-  );
-
 export const titleBalances = pgView('title_balances', {
   titleId: uuid('title_id'),
   caixaId: uuid('caixa_id'),
@@ -3666,38 +3696,17 @@ export const aiMessageUsage = pgView('ai_message_usage', {
     sql`SELECT message_id, currency, count(*)::integer AS calls, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced FROM ai_usage u WHERE message_id IS NOT NULL GROUP BY message_id, currency`,
   );
 
-export const aiUsageMonthlyByUser = pgView('ai_usage_monthly_by_user', {
-  month: date(),
-  userId: uuid('user_id'),
-  currency: text(),
-  calls: integer(),
-  runs: integer(),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  inputTokens: bigint('input_tokens', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  outputTokens: bigint('output_tokens', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  costMicros: bigint('cost_micros', { mode: 'number' }),
-  hasUnpriced: boolean('has_unpriced'),
-})
-  .with({ securityInvoker: true })
-  .as(
-    sql`SELECT date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date AS month, user_id, currency, count(*)::integer AS calls, count(DISTINCT run_id)::integer AS runs, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced FROM ai_usage u GROUP BY (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date), user_id, currency`,
-  );
-
-export const aiUsageMonthlyByAgent = pgView('ai_usage_monthly_by_agent', {
-  month: date(),
-  agentId: uuid('agent_id'),
+export const aiUsageDaily = pgView('ai_usage_daily', {
+  day: date(),
   providerId: uuid('provider_id'),
   model: text(),
+  agentId: uuid('agent_id'),
+  userId: uuid('user_id'),
+  purpose: text(),
   currency: text(),
   calls: integer(),
   runs: integer(),
-  users: integer(),
+  conversations: integer(),
   // You can use { mode: "bigint" } if numbers are exceeding js number limitations
   inputTokens: bigint('input_tokens', { mode: 'number' }),
   // You can use { mode: "bigint" } if numbers are exceeding js number limitations
@@ -3706,13 +3715,16 @@ export const aiUsageMonthlyByAgent = pgView('ai_usage_monthly_by_agent', {
   cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
   // You can use { mode: "bigint" } if numbers are exceeding js number limitations
   cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
+  audioSeconds: numeric('audio_seconds'),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  characters: bigint({ mode: 'number' }),
   // You can use { mode: "bigint" } if numbers are exceeding js number limitations
   costMicros: bigint('cost_micros', { mode: 'number' }),
   hasUnpriced: boolean('has_unpriced'),
 })
   .with({ securityInvoker: true })
   .as(
-    sql`SELECT date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date AS month, agent_id, provider_id, model, currency, count(*)::integer AS calls, count(DISTINCT run_id)::integer AS runs, count(DISTINCT user_id)::integer AS users, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced FROM ai_usage u GROUP BY (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date), agent_id, provider_id, model, currency`,
+    sql`SELECT (created_at AT TIME ZONE 'America/Sao_Paulo'::text)::date AS day, provider_id, model, agent_id, user_id, purpose, currency, count(*)::integer AS calls, count(DISTINCT run_id)::integer AS runs, count(DISTINCT conversation_id)::integer AS conversations, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(audio_seconds) AS audio_seconds, sum(characters)::bigint AS characters, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced FROM ai_usage u GROUP BY ((created_at AT TIME ZONE 'America/Sao_Paulo'::text)::date), provider_id, model, agent_id, user_id, purpose, currency`,
   );
 
 export const effectiveAgentMcpServers = pgView('effective_agent_mcp_servers', {
@@ -3765,4 +3777,86 @@ export const aiEmbeddingIndexStats = pgView('ai_embedding_index_stats', {
   .with({ securityInvoker: true })
   .as(
     sql`SELECT x.provider_id, x.model, x.last_in_use_at, (EXISTS ( SELECT 1 FROM ai_embedding_pairs_in_use u WHERE u.provider_id = x.provider_id AND u.model = x.model)) AS in_use, count(e.id)::integer AS vectors, count(e.id) FILTER (WHERE NOT e.needs_reindex)::integer AS indexed, count(e.id) FILTER (WHERE e.needs_reindex)::integer AS pending FROM ai_embedding_indexes x LEFT JOIN ai_embeddings e ON e.provider_id = x.provider_id AND e.model = x.model GROUP BY x.provider_id, x.model, x.last_in_use_at`,
+  );
+
+export const aiUsageMonthlyByPurpose = pgView('ai_usage_monthly_by_purpose', {
+  month: date(),
+  purpose: text(),
+  currency: text(),
+  calls: integer(),
+  runs: integer(),
+  users: integer(),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  inputTokens: bigint('input_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  outputTokens: bigint('output_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  costMicros: bigint('cost_micros', { mode: 'number' }),
+  hasUnpriced: boolean('has_unpriced'),
+  audioSeconds: numeric('audio_seconds'),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  characters: bigint({ mode: 'number' }),
+})
+  .with({ securityInvoker: true })
+  .as(
+    sql`SELECT date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date AS month, purpose, currency, count(*)::integer AS calls, count(DISTINCT run_id)::integer AS runs, count(DISTINCT user_id)::integer AS users, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced, sum(audio_seconds) AS audio_seconds, sum(characters)::bigint AS characters FROM ai_usage u GROUP BY (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date), purpose, currency`,
+  );
+
+export const aiUsageMonthlyByUser = pgView('ai_usage_monthly_by_user', {
+  month: date(),
+  userId: uuid('user_id'),
+  currency: text(),
+  calls: integer(),
+  runs: integer(),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  inputTokens: bigint('input_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  outputTokens: bigint('output_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  costMicros: bigint('cost_micros', { mode: 'number' }),
+  hasUnpriced: boolean('has_unpriced'),
+  audioSeconds: numeric('audio_seconds'),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  characters: bigint({ mode: 'number' }),
+})
+  .with({ securityInvoker: true })
+  .as(
+    sql`SELECT date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date AS month, user_id, currency, count(*)::integer AS calls, count(DISTINCT run_id)::integer AS runs, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced, sum(audio_seconds) AS audio_seconds, sum(characters)::bigint AS characters FROM ai_usage u GROUP BY (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date), user_id, currency`,
+  );
+
+export const aiUsageMonthlyByAgent = pgView('ai_usage_monthly_by_agent', {
+  month: date(),
+  agentId: uuid('agent_id'),
+  providerId: uuid('provider_id'),
+  model: text(),
+  currency: text(),
+  calls: integer(),
+  runs: integer(),
+  users: integer(),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  inputTokens: bigint('input_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  outputTokens: bigint('output_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  costMicros: bigint('cost_micros', { mode: 'number' }),
+  hasUnpriced: boolean('has_unpriced'),
+  audioSeconds: numeric('audio_seconds'),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  characters: bigint({ mode: 'number' }),
+})
+  .with({ securityInvoker: true })
+  .as(
+    sql`SELECT date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date AS month, agent_id, provider_id, model, currency, count(*)::integer AS calls, count(DISTINCT run_id)::integer AS runs, count(DISTINCT user_id)::integer AS users, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced, sum(audio_seconds) AS audio_seconds, sum(characters)::bigint AS characters FROM ai_usage u GROUP BY (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date), agent_id, provider_id, model, currency`,
   );

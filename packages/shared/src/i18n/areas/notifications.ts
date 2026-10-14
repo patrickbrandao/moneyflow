@@ -23,6 +23,7 @@ export const notificationsStrings = {
     contract_ending: 'Contrato: fim da vigência',
     contract_renewal_pending: 'Contrato: renovação pendente',
     contract_readjustment: 'Contrato: reajuste',
+    ai_budget_alert: 'Orçamento de IA',
     system: 'Sistema',
   } as Record<string, string>,
   // Títulos e corpos criados pelo worker.
@@ -40,6 +41,10 @@ export const notificationsStrings = {
   cardLimitBody: (used: string, limit: string) => `Usado ${used} de ${limit}.`,
   divergence: (account: string) => `Extrato com saldo divergente: ${account}`,
   divergenceBody: (diff: string, date: string) => `Diferença de ${diff} em ${date}.`,
+  budgetAlert: (scope: string, threshold: number) =>
+    threshold >= 100 ? `Orçamento de IA atingido: ${scope}` : `Orçamento de IA em ${threshold}%: ${scope}`,
+  budgetAlertBody: (spent: string, limit: string, percent: string, blocked: boolean) =>
+    `Gasto no mês: ${spent} de ${limit} (${percent}).${blocked ? ' Novas execuções estão bloqueadas até o mês que vem.' : ''}`,
   messageFailed: (destination: string) => `Mensagem não enviada para ${destination}`,
   messageFailedBody: (error: string) => error,
 };

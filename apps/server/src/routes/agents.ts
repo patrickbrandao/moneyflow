@@ -4,11 +4,14 @@ import {
   agentThreadsQuery,
   aiAgentCreateInput,
   aiAgentUpdateInput,
+  aiBudgetCreateInput,
+  aiBudgetUpdateInput,
   aiPriceInput,
   aiProviderCreateInput,
   aiProviderUpdateInput,
   aiRequestBodyQuery,
   aiRequestListQuery,
+  aiUsagePanelQuery,
   aiUsageQuery,
   apiTokenCreateInput,
   appSettingInput,
@@ -33,6 +36,7 @@ import type { RunEventsHub } from '../agents/events-hub';
 import { AppError } from '../errors';
 import { param, parse, type Req } from '../http';
 import * as admin from '../services/ai-admin';
+import * as budgets from '../services/ai-budgets';
 import { suggestImportClassifications } from '../services/ai-flows';
 import * as requests from '../services/ai-requests';
 import * as aiSettings from '../services/ai-settings';
@@ -197,6 +201,8 @@ export async function agentRoutes(app: FastifyInstance) {
   app.get('/api/account/ai', (r: Req) => aiSettings.getMyAiSettings(r.ctx));
   app.put('/api/account/ai', (r: Req) => aiSettings.putMyAiSettings(r.ctx, parse(userAiSettingsInput, r.body)));
   app.get('/api/users/:id/ai', (r: Req) => aiSettings.getUserAiSettings(r.ctx, id(r)));
+  /** O próprio uso do mês e o orçamento que cobre o usuário (spec 028). */
+  app.get('/api/account/ai/usage', (r: Req) => budgets.myUsage(r.ctx));
 
   /* ---------------- tokens pessoais ---------------- */
   app.get('/api/account/api-tokens', (r: Req) => tokens.listApiTokens(r.ctx));
@@ -245,6 +251,13 @@ export async function agentRoutes(app: FastifyInstance) {
   app.delete('/api/admin/ai/mcp-servers/:id', (r: Req) => admin.deleteMcpServer(r.ctx, id(r)));
   app.post('/api/admin/ai/mcp-servers/:id/refresh', (r: Req) => admin.refreshMcpServer(r.ctx, id(r)));
   app.get('/api/admin/ai/usage', (r: Req) => admin.usageReport(r.ctx, parse(aiUsageQuery, r.query)));
+
+  /* ---------------- orçamentos e painel de uso (spec 028) ---------------- */
+  app.get('/api/admin/ai/usage/panel', (r: Req) => budgets.usagePanel(r.ctx, parse(aiUsagePanelQuery, r.query)));
+  app.get('/api/admin/ai/budgets', (r: Req) => budgets.listBudgets(r.ctx));
+  app.post('/api/admin/ai/budgets', (r: Req) => budgets.createBudget(r.ctx, parse(aiBudgetCreateInput, r.body)));
+  app.patch('/api/admin/ai/budgets/:id', (r: Req) => budgets.updateBudget(r.ctx, id(r), parse(aiBudgetUpdateInput, r.body)));
+  app.delete('/api/admin/ai/budgets/:id', (r: Req) => budgets.deleteBudget(r.ctx, id(r)));
 
   /* ---------------- requisições ao provedor e configurações (spec 023) ---------------- */
   app.get('/api/admin/ai/requests', (r: Req) => requests.listRequests(r.ctx, parse(aiRequestListQuery, r.query)));

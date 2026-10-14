@@ -23,6 +23,7 @@ import { extractJson } from '../agents/flows';
 import { loadMessages, loadRun } from '../agents/store';
 import type { ServiceContext } from '../context';
 import { AppError, notFound, unprocessable } from '../errors';
+import { assertCanStartRun } from './ai-budgets';
 import { flowAgentId, waitRun } from './ai-flows';
 import { assertUpload, cleanFileName, storeAttachment } from './attachments';
 import { contractReadMode, loadContract } from './contracts';
@@ -343,6 +344,8 @@ async function runFlow(
 ) {
   const agentId = await flowAgentId(ctx);
   if (!agentId) throw new AppError(501, 'document_reader_unavailable', t.errors.documentReaderUnavailable);
+  // Orçamento e limite por minuto (spec 028): o erro volta antes de abrir a conversa.
+  await assertCanStartRun(ctx, agentId, true);
   const conversation = await createConversation(
     ctx,
     { agentId, title: t.agents.flows.documentConversation(file.name).slice(0, 200) },

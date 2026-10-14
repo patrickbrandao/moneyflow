@@ -233,6 +233,7 @@ describe('registro, oferta e /mcp (spec 027)', () => {
     expect(catalog.find((x) => x.name === 'reopen_month')).toMatchObject({ category: 'closing', adminOnly: true, destructive: true });
     expect(catalog.find((x) => x.name === 'revoke_api_token')).toMatchObject({ category: 'users', adminOnly: false, destructive: true });
     expect(catalog.find((x) => x.name === 'import_backup')).toMatchObject({ destructive: true, adminOnly: true });
+    expect(catalog.find((x) => x.name === 'delete_ai_budget')).toMatchObject({ category: 'ai', adminOnly: true, destructive: true });
 
     await call(adminSession, 'list_users', { limit: 1 });
     const forAdmin = toolsSent();
@@ -250,7 +251,16 @@ describe('registro, oferta e /mcp (spec 027)', () => {
     expect(forViewer).toEqual(
       expect.arrayContaining(['close_month', 'list_notifications', 'list_api_tokens', 'create_message_destination']),
     );
-    for (const name of ['create_ai_provider', 'list_users', 'export_backup', 'reopen_month', 'create_entity_tag', 'set_caixa_member'])
+    for (const name of [
+      'create_ai_provider',
+      'list_users',
+      'export_backup',
+      'reopen_month',
+      'create_entity_tag',
+      'set_caixa_member',
+      'list_ai_budgets',
+      'create_ai_budget',
+    ])
       expect(forViewer).not.toContain(name);
     for (const name of [
       'list_users',
@@ -597,6 +607,41 @@ describe('configuração de IA', () => {
     expect(requests.items.length).toBeGreaterThan(0);
     expect(JSON.stringify(requests)).not.toContain('request_body');
     expect(requests.items[0]).not.toHaveProperty('requestBody');
+
+    // Orçamentos (spec 028): criar com prévia, listar com a situação do mês, editar e excluir.
+    const budget = await approved(adminSession, 'create_ai_budget', {
+      scope: 'agent',
+      agentId: agent.id,
+      currency: 'BRL',
+      monthlyLimit: 5000,
+      alertPercent: 70,
+    });
+    expect(rowsOf(budget.preview)).toMatchObject({
+      Escopo: expect.stringContaining('agente Agente F13b'),
+      'Aviso em': '70%',
+      Ativo: 'Sim',
+    });
+    expect(rowsOf(budget.preview)['Valor mensal']).toBe('R$ 5.000,00');
+    expect(budget.preview.warnings[0]).toContain('100%');
+    expect(budget.value).toMatchObject({
+      scope: 'agent',
+      agentId: agent.id,
+      currency: 'BRL',
+      monthlyLimitMicros: 5_000_000_000,
+      alertPercent: 70,
+    });
+    expect(await auditActor('ai_budgets', budget.value.id)).toMatchObject({ actor_kind: 'agent', agent_run_id: budget.runId });
+    const listedBudgets = (await call(adminSession, 'list_ai_budgets', {})).value;
+    expect(listedBudgets.find((b: any) => b.id === budget.value.id).current).toMatchObject({ status: 'ok', spentMicros: 0 });
+    const editedBudget = await approved(adminSession, 'update_ai_budget', {
+      budgetId: budget.value.id,
+      changes: { monthlyLimit: 10, alertPercent: 90 },
+    });
+    expect(rowsOf(editedBudget.preview)).toMatchObject({ 'Valor mensal': 'R$ 5.000,00 → R$ 10,00', 'Aviso em': '70% → 90%' });
+    expect(editedBudget.value).toMatchObject({ monthlyLimitMicros: 10_000_000, alertPercent: 90 });
+    const removedBudget = await approved(adminSession, 'delete_ai_budget', { budgetId: budget.value.id });
+    expect(removedBudget.preview.action).toBe('delete');
+    expect(removedBudget.value).toEqual({ deleted: true });
   });
 });
 

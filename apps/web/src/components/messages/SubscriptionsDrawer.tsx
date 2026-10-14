@@ -194,7 +194,8 @@ function SubscriptionEditor({
   const hasDays = kind === 'due_reminder' || kind === 'contract_notice_deadline' || kind === 'contract_ending';
   const hasRepeat = kind === 'overdue' || kind === 'contract_renewal_pending';
   const hasTime = hasDays || hasRepeat || kind === 'daily_summary' || kind === 'weekly_summary' || kind === 'contract_readjustment';
-  const scoped = kind !== 'agent_completed' && kind !== 'agent_message';
+  // Eventos sem caixa: os do agente e o orçamento de IA (spec 028).
+  const scoped = kind !== 'agent_completed' && kind !== 'agent_message' && kind !== 'ai_budget_alert';
 
   return (
     <div className={cx('sub-card well', enabled && 'on')}>

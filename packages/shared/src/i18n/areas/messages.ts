@@ -57,6 +57,7 @@ export const messagesStrings = {
     contract_ending: 'Contrato: fim da vigência',
     contract_renewal_pending: 'Contrato: renovação pendente',
     contract_readjustment: 'Contrato: data-base de reajuste',
+    ai_budget_alert: 'Orçamento de IA',
     test: 'Teste',
   } as Record<string, string>,
   eventHints: {
@@ -74,6 +75,8 @@ export const messagesStrings = {
     contract_renewal_pending:
       'Quando a tarefa de renovação abre e, se quiser, a cada N dias enquanto ela estiver aberta (inclusive vencida).',
     contract_readjustment: 'Na data-base do reajuste dos contratos com índice.',
+    ai_budget_alert:
+      'Quando um orçamento de IA passa do percentual de aviso e quando chega a 100%, uma vez por mês. Destino pessoal: só os orçamentos do dono (todos, se o dono é administrador); global: todos.',
   } as Record<string, string>,
   params: {
     days_before: 'Dias antes',
@@ -147,6 +150,10 @@ export const messagesStrings = {
     testDetail: (name: string, at: string) => `Destino "${name}" configurado corretamente (${at}).`,
     agentCompleted: 'Agente concluiu a tarefa',
     agentMessage: 'Mensagem do agente',
+    budgetAlert: (scope: string, threshold: number) =>
+      threshold >= 100 ? `Orçamento de IA atingido: ${scope}` : `Orçamento de IA em ${threshold}%: ${scope}`,
+    budgetAlertDetail: (spent: string, limit: string, percent: string) => `Gasto no mês: ${spent} de ${limit} (${percent}).`,
+    budgetBlocked: 'Novas execuções estão bloqueadas até o mês que vem (o administrador continua podendo usar).',
     contract: 'Contrato',
     contractNotice: (days: number) =>
       days === 0 ? 'Hoje é o último dia do aviso prévio' : `Aviso prévio termina em ${days} dia${days === 1 ? '' : 's'}`,

@@ -14,6 +14,7 @@ import { type Actor, loadAccess } from '../authz/access';
 import type { Config } from '../config';
 import type { ServiceContext } from '../context';
 import { findPgError } from '../errors';
+import { exceededBudget } from '../services/ai-budgets';
 import { applyFlowResult, FLOW_PURPOSES, type FlowPurpose } from './flows';
 import { createLlmClient, type LlmClient, LlmError, type LlmResponse } from './llm';
 import { assemblePrompt, loadPromptInputs } from './prompt';
@@ -179,6 +180,16 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
       if (iterations >= maxIterations) {
         if (purpose) break;
         await finish(db, runId, token, 'failed', t.agents.errors.maxIterations);
+        return;
+      }
+
+      // Orçamento do mês (spec 028), antes de cada chamada: estourado no meio, termina failed com budget_exceeded
+      // guardando o que já foi feito (o admin que aciona fica isento).
+      const blocked = await exceededBudget(db, actor, agent.id, conversation.purpose !== 'chat');
+      if (blocked) {
+        const message = t.agents.errors.budgetExceeded(blocked);
+        await appendEvent(db, runId, { type: 'error', message, code: 'budget_exceeded' });
+        await finish(db, runId, token, 'failed', message);
         return;
       }
 
