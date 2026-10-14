@@ -19,11 +19,12 @@ SELECT is_empty($$
      -- Estado de login, de interface e fila operacional ficam fora (0019–0021), assim como o volume dos
      -- agentes de IA: conversas, mensagens, execuções, eventos, confirmações, uso e embeddings (0026–0029),
      -- as requisições ao provedor com as tentativas (0040) e os caches da 0041 (derivados de anexo e índices de
-     -- embeddings por par).
+     -- embeddings por par), além dos disparos das tarefas agendadas e da dedup do webhook do Telegram (0045).
      AND c.relname NOT IN ('sessions', 'audit_log', 'schema_migrations', 'canvas_node_positions', 'notifications',
                            'message_outbox', 'ai_conversations', 'ai_messages', 'ai_message_attachments', 'ai_runs',
                            'ai_run_events', 'ai_tool_confirmations', 'ai_usage', 'ai_embeddings', 'ai_requests',
-                           'ai_request_attempts', 'ai_attachment_derivatives', 'ai_embedding_indexes')
+                           'ai_request_attempts', 'ai_attachment_derivatives', 'ai_embedding_indexes',
+                           'ai_scheduled_task_runs', 'telegram_updates_seen')
      AND NOT EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid = c.oid AND t.tgname = c.relname || '_audit')
 $$, 'todas as tabelas de negócio têm trigger <tabela>_audit');
 

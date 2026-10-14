@@ -198,7 +198,8 @@ ON CONFLICT (kind, parent_id, lower(name)) DO NOTHING;
 -- Sem provedor nem chave (segredos não entram em seed): nasce INATIVO. O admin escolhe o
 -- provedor e o modelo na tela de agentes e o ativa.
 -- Kit de ferramentas (spec 021) com todas as tools do registro (packages/shared/src/agents/tools.ts,
--- tools-operation.ts e tools-admin.ts: 145 tools, inclusive as das F13a/F13b) no modo sugerido de cada
+-- tools-operation.ts e tools-admin.ts: 154 tools, inclusive as das F13a/F13b, os orçamentos da F14 e as tarefas
+-- agendadas da F15) no modo sugerido de cada
 -- uma (suggestedMode): leituras, notify_user e refresh_mcp_tools em allow, as demais escritas em ask; as tools
 -- com segredos (digitados no cartão de aprovação) sempre em ask. Tool nova no registro entra aqui também. Kit já existente
 -- ganha as que faltam; as que já estão nele ficam no modo que o admin escolheu.
@@ -253,7 +254,10 @@ SELECT k.id, t.tool_name, t.mode
   ('list_mcp_servers', 'allow'), ('create_mcp_server', 'ask'), ('update_mcp_server', 'ask'),
   ('archive_mcp_server', 'ask'), ('refresh_mcp_tools', 'allow'), ('get_app_settings', 'allow'),
   ('set_app_setting', 'ask'), ('get_ai_usage', 'allow'), ('list_ai_requests', 'allow'), ('export_backup', 'ask'),
-  ('simulate_import', 'allow'), ('import_backup', 'ask')
+  ('simulate_import', 'allow'), ('import_backup', 'ask'), ('list_ai_budgets', 'allow'), ('create_ai_budget', 'ask'),
+  ('update_ai_budget', 'ask'), ('delete_ai_budget', 'ask'), ('list_agent_tasks', 'allow'),
+  ('create_agent_task', 'ask'), ('update_agent_task', 'ask'), ('delete_agent_task', 'ask'),
+  ('run_agent_task_now', 'ask')
        ) AS t (tool_name, mode)
  WHERE lower(k.name) = lower('Padrão')
 ON CONFLICT (kit_id, tool_name) DO NOTHING;

@@ -66,9 +66,10 @@ SELECT ok(has_column_privilege('moneyflow_app', 'message_destinations', c, 'SELE
                     'created_by_user_id', 'notes', 'archived_at', 'created_at', 'updated_at']) c;
 SELECT is_empty($$
   SELECT a.attname FROM pg_attribute a
-   WHERE a.attrelid = 'message_destinations'::regclass AND a.attnum > 0 AND NOT a.attisdropped AND a.attname <> 'bot_token'
+   WHERE a.attrelid = 'message_destinations'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+     AND a.attname NOT IN ('bot_token', 'webhook_secret_hash')
      AND NOT has_column_privilege('moneyflow_app', 'message_destinations', a.attname, 'SELECT')
-$$, 'app lê todas as colunas menos o token');
+$$, 'app lê todas as colunas menos os segredos (bot_token e, da 0045, webhook_secret_hash)');
 
 -- Assinaturas ----------------------------------------------------------------------------------------------------
 SELECT ok(message_subscription_params_valid(k, p::jsonb), 'parâmetros válidos: ' || k || ' ' || p)

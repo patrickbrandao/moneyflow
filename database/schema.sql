@@ -237,6 +237,39 @@ COMMENT ON FUNCTION public.admin_message_destination_token(p_destination_id uuid
 
 
 --
+-- Name: admin_message_destination_webhook_secret(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_message_destination_webhook_secret(p_destination_id uuid, p_actor_user_id uuid) RETURNS text
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  h text;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.users a
+                  WHERE a.id = p_actor_user_id AND a.role = 'admin' AND a.is_active) THEN
+    RAISE EXCEPTION 'admin_message_destination_webhook_secret: actor % is not an active admin', p_actor_user_id
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  SELECT d.webhook_secret_hash INTO h FROM public.message_destinations d WHERE d.id = p_destination_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'admin_message_destination_webhook_secret: destination % not found', p_destination_id
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  RETURN h;
+END
+$$;
+
+
+--
+-- Name: FUNCTION admin_message_destination_webhook_secret(p_destination_id uuid, p_actor_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.admin_message_destination_webhook_secret(p_destination_id uuid, p_actor_user_id uuid) IS 'Hash do segredo do webhook (webhook_secret_hash, nulo se nunca ligado) para o export de backup do admin. A importação traz o destino com inbound_enabled = false (o webhook é de outra instância e precisa ser religado, com um segredo novo). Erro 42501 se o ator não é admin ativo e P0002 se o destino não existe.';
+
+
+--
 -- Name: admin_reveal_password(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2408,6 +2441,455 @@ $$;
 
 
 --
+-- Name: ai_schedule_next_run(jsonb, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_schedule_next_run(p_schedule jsonb, p_after timestamp with time zone) RETURNS timestamp with time zone
+    LANGUAGE plpgsql STABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  d0 date;
+  d date;
+  t timestamptz;
+BEGIN
+  IF NOT ai_schedule_valid(p_schedule) OR p_after IS NULL THEN
+    RETURN NULL;
+  END IF;
+  d0 := (p_after AT TIME ZONE 'America/Sao_Paulo')::date;
+  FOR i IN 0..62 LOOP
+    d := d0 + i;
+    CONTINUE WHEN NOT ai_schedule_occurs_on(p_schedule, d);
+    t := (d + (p_schedule ->> 'time')::time) AT TIME ZONE 'America/Sao_Paulo';
+    IF t > p_after THEN
+      RETURN t;
+    END IF;
+  END LOOP;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_schedule_next_run(p_schedule jsonb, p_after timestamp with time zone); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_schedule_next_run(p_schedule jsonb, p_after timestamp with time zone) IS 'Próximo disparo da agenda estritamente depois de p_after, no fuso America/Sao_Paulo (dia 31 em mês curto = último dia do mês; "last" = último dia). NULL com agenda inválida.';
+
+
+--
+-- Name: ai_schedule_occurs_on(jsonb, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_schedule_occurs_on(p_schedule jsonb, p_day date) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT CASE p_schedule ->> 'kind'
+           WHEN 'daily' THEN true
+           WHEN 'weekly' THEN (p_schedule -> 'weekdays') @> to_jsonb(extract(isodow FROM p_day)::int)
+           WHEN 'monthly' THEN
+             extract(day FROM p_day)::int
+               = least(CASE WHEN p_schedule -> 'day' = '"last"'::jsonb THEN 31 ELSE (p_schedule ->> 'day')::int END,
+                       extract(day FROM (date_trunc('month', p_day) + interval '1 month - 1 day'))::int)
+           ELSE false
+         END
+$$;
+
+
+--
+-- Name: FUNCTION ai_schedule_occurs_on(p_schedule jsonb, p_day date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_schedule_occurs_on(p_schedule jsonb, p_day date) IS 'Interna: a agenda dispara no dia p_day (diária: todo dia; semanal: dia ISO na lista; mensal: o dia, limitado ao último dia do mês, ou o último dia com "last").';
+
+
+--
+-- Name: ai_schedule_prev_run(jsonb, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_schedule_prev_run(p_schedule jsonb, p_at timestamp with time zone) RETURNS timestamp with time zone
+    LANGUAGE plpgsql STABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  d0 date;
+  d date;
+  t timestamptz;
+BEGIN
+  IF NOT ai_schedule_valid(p_schedule) OR p_at IS NULL THEN
+    RETURN NULL;
+  END IF;
+  d0 := (p_at AT TIME ZONE 'America/Sao_Paulo')::date;
+  FOR i IN 0..62 LOOP
+    d := d0 - i;
+    CONTINUE WHEN NOT ai_schedule_occurs_on(p_schedule, d);
+    t := (d + (p_schedule ->> 'time')::time) AT TIME ZONE 'America/Sao_Paulo';
+    IF t <= p_at THEN
+      RETURN t;
+    END IF;
+  END LOOP;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_schedule_prev_run(p_schedule jsonb, p_at timestamp with time zone); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_schedule_prev_run(p_schedule jsonb, p_at timestamp with time zone) IS 'Último disparo da agenda em p_at ou antes, no fuso America/Sao_Paulo (o "disparo perdido" mais recente). NULL com agenda inválida.';
+
+
+--
+-- Name: ai_schedule_valid(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_schedule_valid(p_schedule jsonb) RETURNS boolean
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $_$
+DECLARE
+  allowed text[];
+BEGIN
+  IF p_schedule IS NULL OR jsonb_typeof(p_schedule) <> 'object' OR jsonb_typeof(p_schedule -> 'kind') <> 'string' THEN
+    RETURN false;
+  END IF;
+  CASE p_schedule ->> 'kind'
+    WHEN 'daily' THEN allowed := '{kind,time}';
+    WHEN 'weekly' THEN allowed := '{kind,time,weekdays}';
+    WHEN 'monthly' THEN allowed := '{kind,time,day}';
+    ELSE RETURN false;
+  END CASE;
+  IF EXISTS (SELECT 1 FROM jsonb_object_keys(p_schedule) k WHERE k <> ALL (allowed)) OR NOT (p_schedule ?& allowed) THEN
+    RETURN false;
+  END IF;
+  IF jsonb_typeof(p_schedule -> 'time') <> 'string' OR p_schedule ->> 'time' !~ '^([01][0-9]|2[0-3]):[0-5][0-9]$' THEN
+    RETURN false;
+  END IF;
+  IF p_schedule ? 'weekdays' AND (
+       jsonb_typeof(p_schedule -> 'weekdays') <> 'array'
+       OR jsonb_array_length(p_schedule -> 'weekdays') NOT BETWEEN 1 AND 7
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements(p_schedule -> 'weekdays') e
+                   WHERE jsonb_typeof(e) <> 'number' OR e::text !~ '^[1-7]$')
+       OR (SELECT count(DISTINCT e::text) FROM jsonb_array_elements(p_schedule -> 'weekdays') e)
+          <> jsonb_array_length(p_schedule -> 'weekdays')) THEN
+    RETURN false;
+  END IF;
+  IF p_schedule ? 'day' AND NOT (
+       (jsonb_typeof(p_schedule -> 'day') = 'number' AND (p_schedule -> 'day')::text ~ '^[0-9]{1,2}$'
+        AND (p_schedule ->> 'day')::int BETWEEN 1 AND 31)
+       OR p_schedule -> 'day' = '"last"'::jsonb) THEN
+    RETURN false;
+  END IF;
+  RETURN true;
+END
+$_$;
+
+
+--
+-- Name: FUNCTION ai_schedule_valid(p_schedule jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_schedule_valid(p_schedule jsonb) IS 'true se a agenda de uma tarefa agendada (spec 029) é válida: {"kind": "daily", "time": "HH:MM"}, {"kind": "weekly", "time", "weekdays": [1–7 distintos, ISO, 1 = segunda]} ou {"kind": "monthly", "time", "day": 1–31 ou "last"}; só essas chaves, todas obrigatórias. Horário em America/Sao_Paulo.';
+
+
+--
+-- Name: ai_scheduled_task_claim(integer, interval); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_scheduled_task_claim(p_limit integer DEFAULT 10, p_max_delay interval DEFAULT '06:00:00'::interval) RETURNS TABLE(task_run_id uuid, task_id uuid, user_id uuid, agent_id uuid, task_name text, instruction text, scheduled_for timestamp with time zone, trigger_kind text, status text, skip_reason text)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+DECLARE
+  v_now timestamptz := clock_timestamp();
+  t ai_scheduled_tasks;
+  s timestamptz;
+  reason text;
+  rid uuid;
+BEGIN
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 OR p_max_delay IS NULL OR p_max_delay < interval '1 minute' THEN
+    RAISE EXCEPTION 'ai_scheduled_task_claim: limit must be 1..100 and max_delay >= 1 minute'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  FOR t IN SELECT x.* FROM ai_scheduled_tasks x
+            WHERE x.is_active AND x.next_run_at <= v_now
+            ORDER BY x.next_run_at, x.id
+            LIMIT p_limit
+            FOR UPDATE SKIP LOCKED LOOP
+    -- O disparo perdido mais recente (vários perdidos com o worker parado viram um só).
+    s := greatest(t.next_run_at, coalesce(ai_schedule_prev_run(t.schedule, v_now), t.next_run_at));
+    reason := CASE WHEN v_now - s > p_max_delay THEN 'missed_window' ELSE ai_scheduled_task_skip_reason(t) END;
+
+    rid := NULL;
+    INSERT INTO ai_scheduled_task_runs AS r (task_id, scheduled_for, trigger_kind, status, skip_reason)
+    VALUES (t.id, s, 'schedule', CASE WHEN reason IS NULL THEN 'started' ELSE 'skipped' END, reason)
+    ON CONFLICT ON CONSTRAINT ai_scheduled_task_runs_task_scheduled_key DO NOTHING
+    RETURNING r.id INTO rid;
+
+    UPDATE ai_scheduled_tasks x
+       SET next_run_at = ai_schedule_next_run(x.schedule, greatest(v_now, t.next_run_at)),
+           last_run_at = CASE WHEN rid IS NOT NULL AND reason IS NULL THEN v_now ELSE x.last_run_at END
+     WHERE x.id = t.id;
+
+    IF rid IS NOT NULL THEN
+      RETURN QUERY SELECT rid, t.id, t.user_id, t.agent_id, t.name, t.instruction, s, 'schedule'::text,
+                          CASE WHEN reason IS NULL THEN 'started' ELSE 'skipped' END, reason;
+    END IF;
+  END LOOP;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_scheduled_task_claim(p_limit integer, p_max_delay interval); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_scheduled_task_claim(p_limit integer, p_max_delay interval) IS 'Reserva até p_limit tarefas ativas vencidas (next_run_at <= agora) com FOR UPDATE SKIP LOCKED e, para cada uma, grava o disparo do horário previsto mais recente (vários perdidos viram um) e avança next_run_at para depois de agora. O disparo sai skipped com missed_window se o atraso passa de p_max_delay (padrão 6 h), com user_inactive, agent_inactive ou previous_run_active; senão started (last_run_at = agora). Devolve os disparos gravados (started e skipped); um horário já gravado não se repete (único por tarefa e horário). Para cada started, a aplicação cria a sessão (purpose scheduled_task) e a execução, de preferência na mesma transação, e grava conversation_id e run_id; se não puder começar (orçamento, limite, erro), passa o disparo a skipped/failed com o motivo. 22023 com parâmetros inválidos.';
+
+
+--
+-- Name: ai_scheduled_task_run_now(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_scheduled_task_run_now(p_task_id uuid) RETURNS TABLE(task_run_id uuid, task_id uuid, user_id uuid, agent_id uuid, task_name text, instruction text, scheduled_for timestamp with time zone, trigger_kind text, status text, skip_reason text)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+DECLARE
+  t ai_scheduled_tasks;
+  s timestamptz := clock_timestamp();
+  reason text;
+  rid uuid;
+BEGIN
+  SELECT x.* INTO t FROM ai_scheduled_tasks x WHERE x.id = p_task_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_scheduled_task_run_now: task % not found', p_task_id USING ERRCODE = 'no_data_found';
+  END IF;
+  reason := ai_scheduled_task_skip_reason(t);
+
+  INSERT INTO ai_scheduled_task_runs AS r (task_id, scheduled_for, trigger_kind, status, skip_reason)
+  VALUES (t.id, s, 'manual', CASE WHEN reason IS NULL THEN 'started' ELSE 'skipped' END, reason)
+  RETURNING r.id INTO rid;
+  IF reason IS NULL THEN
+    UPDATE ai_scheduled_tasks x SET last_run_at = s WHERE x.id = t.id;
+  END IF;
+
+  RETURN QUERY SELECT rid, t.id, t.user_id, t.agent_id, t.name, t.instruction, s, 'manual'::text,
+                      CASE WHEN reason IS NULL THEN 'started' ELSE 'skipped' END, reason;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_scheduled_task_run_now(p_task_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_scheduled_task_run_now(p_task_id uuid) IS '"Rodar agora": grava um disparo manual (scheduled_for = agora), started ou skipped (user_inactive, agent_inactive, previous_run_active), e o devolve; vale também para tarefa desligada e não muda next_run_at. A aplicação segue como no claim. Quem pode (o dono ou o admin) é regra da aplicação. P0002 se a tarefa não existe.';
+
+
+--
+-- Name: ai_scheduled_task_runs_before_write(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_scheduled_task_runs_before_write() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  owner uuid;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.task_id <> OLD.task_id OR NEW.scheduled_for <> OLD.scheduled_for OR NEW.trigger_kind <> OLD.trigger_kind
+       OR NEW.created_at <> OLD.created_at
+       OR (OLD.conversation_id IS NOT NULL AND NEW.conversation_id IS NOT NULL
+           AND NEW.conversation_id <> OLD.conversation_id)
+       OR (OLD.run_id IS NOT NULL AND NEW.run_id IS NOT NULL AND NEW.run_id <> OLD.run_id) THEN
+      RAISE EXCEPTION 'ai_scheduled_task_runs: task, time, trigger and links of run % are immutable', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_task_runs_immutable_check';
+    END IF;
+    IF OLD.status <> 'started' AND (NEW.status, NEW.skip_reason) IS DISTINCT FROM (OLD.status, OLD.skip_reason) THEN
+      RAISE EXCEPTION 'ai_scheduled_task_runs: run % is % (final)', OLD.id, OLD.status
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_task_runs_status_transition_check';
+    END IF;
+  END IF;
+
+  IF NEW.conversation_id IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.conversation_id IS NULL) THEN
+    SELECT t.user_id INTO owner FROM ai_scheduled_tasks t WHERE t.id = NEW.task_id;
+    IF NOT EXISTS (SELECT 1 FROM ai_conversations c
+                    WHERE c.id = NEW.conversation_id AND c.user_id = owner AND c.purpose = 'scheduled_task') THEN
+      RAISE EXCEPTION 'ai_scheduled_task_runs: conversation % is not a scheduled_task session of the task owner',
+        NEW.conversation_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_task_runs_links_check';
+    END IF;
+  END IF;
+  IF NEW.run_id IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.run_id IS NULL) THEN
+    IF NEW.conversation_id IS NULL
+       OR NOT EXISTS (SELECT 1 FROM ai_runs r WHERE r.id = NEW.run_id AND r.conversation_id = NEW.conversation_id) THEN
+      RAISE EXCEPTION 'ai_scheduled_task_runs: run % does not belong to conversation %', NEW.run_id, NEW.conversation_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_task_runs_links_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: ai_scheduled_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_scheduled_tasks (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    user_id uuid NOT NULL,
+    agent_id uuid NOT NULL,
+    name text NOT NULL,
+    instruction text NOT NULL,
+    schedule jsonb NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    next_run_at timestamp with time zone,
+    last_run_at timestamp with time zone,
+    created_by_user_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_scheduled_tasks_instruction_check CHECK (((btrim(instruction) <> ''::text) AND (length(instruction) <= 20000))),
+    CONSTRAINT ai_scheduled_tasks_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
+    CONSTRAINT ai_scheduled_tasks_next_run_check CHECK ((is_active = (next_run_at IS NOT NULL))),
+    CONSTRAINT ai_scheduled_tasks_schedule_check CHECK (public.ai_schedule_valid(schedule))
+);
+
+
+--
+-- Name: TABLE ai_scheduled_tasks; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_scheduled_tasks IS 'Tarefas agendadas dos agentes (spec 029): a cada disparo, a instrução vai como mensagem do usuário numa sessão própria (purpose scheduled_task), rodando como o dono (user_id) com as permissões dele. No máximo 20 ativas por usuário (ai_scheduled_tasks_active_limit_check). Disparos em ai_scheduled_task_runs; reserva por ai_scheduled_task_claim, "Rodar agora" por ai_scheduled_task_run_now. Auditada (menos next_run_at/last_run_at).';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.user_id IS 'Dono: a tarefa roda como ele. Imutável (ai_scheduled_tasks_user_immutable_check).';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.agent_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.agent_id IS 'Agente que executa. Excluir o agente com tarefas dá 23503 (arquive). Agente inativo ou arquivado: o disparo é skipped com agent_inactive.';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.instruction; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.instruction IS 'Texto enviado como mensagem do usuário a cada disparo (até 20 mil).';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.schedule; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.schedule IS 'Agenda (ai_schedule_valid): {"kind": "daily", "time": "HH:MM"}, {"kind": "weekly", "time", "weekdays": [1–7, ISO]} ou {"kind": "monthly", "time", "day": 1–31 | "last"}. Fuso America/Sao_Paulo; dia que o mês não tem = último dia.';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.is_active; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.is_active IS 'Desligada não dispara e não conta no limite de 20.';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.next_run_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.next_run_at IS 'Próximo disparo, mantido pelo banco (ai_schedule_next_run a partir de agora, ao criar, ativar ou mudar a agenda; avançado pelo claim). Nulo se e somente se desativada.';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.last_run_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.last_run_at IS 'Último disparo que começou (started), agendado ou manual.';
+
+
+--
+-- Name: COLUMN ai_scheduled_tasks.created_by_user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_tasks.created_by_user_id IS 'Quem criou (o dono ou o admin).';
+
+
+--
+-- Name: ai_scheduled_task_skip_reason(public.ai_scheduled_tasks); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_scheduled_task_skip_reason(p_task public.ai_scheduled_tasks) RETURNS text
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT CASE
+           WHEN NOT EXISTS (SELECT 1 FROM users u WHERE u.id = p_task.user_id AND u.is_active) THEN 'user_inactive'
+           WHEN NOT EXISTS (SELECT 1 FROM ai_agents a
+                             WHERE a.id = p_task.agent_id AND a.is_active AND a.archived_at IS NULL) THEN 'agent_inactive'
+           WHEN EXISTS (SELECT 1 FROM ai_scheduled_task_runs r
+                          LEFT JOIN ai_runs ar ON ar.id = r.run_id
+                         WHERE r.task_id = p_task.id AND r.status = 'started'
+                           AND (ar.status IN ('queued', 'running', 'awaiting_confirmation')
+                                -- Disparo recém-reservado cuja execução a aplicação ainda vai criar.
+                                OR (r.run_id IS NULL AND r.conversation_id IS NULL
+                                    AND r.created_at > clock_timestamp() - interval '10 minutes'))) THEN
+             'previous_run_active'
+         END
+$$;
+
+
+--
+-- Name: FUNCTION ai_scheduled_task_skip_reason(p_task public.ai_scheduled_tasks); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_scheduled_task_skip_reason(p_task public.ai_scheduled_tasks) IS 'Interna: motivo para pular um disparo agora, ou NULL: user_inactive (dono desativado), agent_inactive (agente inativo ou arquivado), previous_run_active (um disparo anterior com execução queued/running/awaiting_confirmation, ou started há menos de 10 min ainda sem sessão nem execução).';
+
+
+--
+-- Name: ai_scheduled_tasks_before_write(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_scheduled_tasks_before_write() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.user_id <> OLD.user_id THEN
+    RAISE EXCEPTION 'ai_scheduled_tasks: owner of task % is immutable', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_tasks_user_immutable_check';
+  END IF;
+  IF NOT ai_schedule_valid(NEW.schedule) THEN
+    RAISE EXCEPTION 'ai_scheduled_tasks: invalid schedule %', NEW.schedule
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_tasks_schedule_check';
+  END IF;
+
+  -- No máximo 20 ativas por usuário. A trava por usuário serializa ativações concorrentes do mesmo dono.
+  IF NEW.is_active AND (TG_OP = 'INSERT' OR NOT OLD.is_active) THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended('ai_scheduled_tasks:' || NEW.user_id::text, 0));
+    IF (SELECT count(*) FROM ai_scheduled_tasks x
+         WHERE x.user_id = NEW.user_id AND x.is_active AND x.id <> NEW.id) >= 20 THEN
+      RAISE EXCEPTION 'ai_scheduled_tasks: user % already has 20 active tasks', NEW.user_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_scheduled_tasks_active_limit_check';
+    END IF;
+  END IF;
+
+  -- Próximo disparo: calculado pelo banco ao criar, ao ativar e ao mudar a agenda; nulo se desativada. O claim o
+  -- avança (sem mudar a agenda), e o valor dele fica.
+  IF NOT NEW.is_active THEN
+    NEW.next_run_at := NULL;
+  ELSIF TG_OP = 'INSERT' OR NOT OLD.is_active OR NEW.schedule IS DISTINCT FROM OLD.schedule
+        OR NEW.next_run_at IS NULL THEN
+    NEW.next_run_at := ai_schedule_next_run(NEW.schedule, now());
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: ai_text_sha256(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3307,6 +3789,12 @@ CREATE FUNCTION public.app_setting_valid(p_key text, p_value jsonb) RETURNS bool
                   THEN (p_value #>> '{}')::integer BETWEEN 1 AND 1000
                   ELSE false
              END
+           WHEN p_key = 'telegram.public_base_url' THEN
+             coalesce(jsonb_typeof(p_value) = 'string'
+                      AND length(p_value #>> '{}') <= 500
+                      AND p_value #>> '{}'
+                          ~ '^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._~%!$&()*+,;=:@-]+)*$',
+                      false)
            ELSE false
          END
 $_$;
@@ -3316,7 +3804,7 @@ $_$;
 -- Name: FUNCTION app_setting_valid(p_key text, p_value jsonb); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.app_setting_valid(p_key text, p_value jsonb) IS 'Valida o valor de uma configuração (app_settings_value_check). Chave desconhecida = inválida. Chaves: ai.request_retention_days (número inteiro de 1 a 365) e, na F14 (spec 028), ai.runs_per_minute e ai.flow_runs_per_minute (número inteiro de 1 a 1000), sempre sem aspas nem casas decimais. A fase 029 acrescenta chaves.';
+COMMENT ON FUNCTION public.app_setting_valid(p_key text, p_value jsonb) IS 'Valida o valor de uma configuração (app_settings_value_check). Chave desconhecida = inválida. Chaves: ai.request_retention_days (número inteiro de 1 a 365); na F14 (spec 028), ai.runs_per_minute e ai.flow_runs_per_minute (número inteiro de 1 a 1000), sempre sem aspas nem casas decimais; na F15 (spec 029), telegram.public_base_url (texto: URL https://host[:porta][/caminho], sem barra no fim, query nem fragmento, até 500; vence PUBLIC_BASE_URL).';
 
 
 --
@@ -3448,7 +3936,8 @@ CREATE FUNCTION public.audit_row() RETURNS trigger
     AS $$
 DECLARE
   quiet   text[] := coalesce(string_to_array(nullif(TG_ARGV[0], ''), ','), '{}');
-  secrets constant text[] := ARRAY['password', 'bot_token', 'api_key', 'secret_headers', 'token_hash'];
+  secrets constant text[] := ARRAY['password', 'bot_token', 'api_key', 'secret_headers', 'token_hash',
+                                   'webhook_secret_hash', 'code_hash'];
   o       jsonb;
   n       jsonb;
   changed text[];
@@ -3475,7 +3964,7 @@ $$;
 -- Name: FUNCTION audit_row(); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de auditoria. Remove os segredos (password, bot_token, api_key, secret_headers, token_hash): a troca aparece só em changed_columns, sem o valor. TG_ARGV[0] = colunas que sozinhas não geram linha.';
+COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de auditoria. Remove os segredos (password, bot_token, api_key, secret_headers, token_hash, webhook_secret_hash, code_hash): a troca aparece só em changed_columns, sem o valor. TG_ARGV[0] = colunas que sozinhas não geram linha.';
 
 
 --
@@ -5389,7 +5878,7 @@ CREATE TABLE public.message_outbox (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT message_outbox_attempts_check CHECK ((((max_attempts >= 1) AND (max_attempts <= 20)) AND ((attempts >= 0) AND (attempts <= max_attempts)))),
     CONSTRAINT message_outbox_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
-    CONSTRAINT message_outbox_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'test'::text]))),
+    CONSTRAINT message_outbox_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'test'::text]))),
     CONSTRAINT message_outbox_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
     CONSTRAINT message_outbox_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'sending'::text, 'sent'::text, 'failed'::text, 'canceled'::text]))),
     CONSTRAINT message_outbox_status_fields_check CHECK ((((status = 'sending'::text) = (locked_at IS NOT NULL)) AND ((status = 'sent'::text) = (sent_at IS NOT NULL)) AND ((status <> ALL (ARRAY['failed'::text, 'canceled'::text])) OR (last_error IS NOT NULL))))
@@ -5656,7 +6145,8 @@ BEGIN
     WHEN 'weekly_summary' THEN allowed := '{send_at,weekday}'; required := '{send_at,weekday}';
     WHEN 'card_limit' THEN allowed := '{thresholds_percent}'; required := '{thresholds_percent}';
     WHEN 'reconciliation_divergence' THEN allowed := '{min_difference_cents}'; required := '{}';
-    WHEN 'invoice_closed', 'agent_completed', 'agent_message', 'ai_budget_alert' THEN allowed := '{}'; required := '{}';
+    WHEN 'invoice_closed', 'agent_completed', 'agent_message', 'ai_budget_alert', 'ai_awaiting_approval' THEN
+      allowed := '{}'; required := '{}';
     WHEN 'contract_notice_deadline', 'contract_ending' THEN
       allowed := '{days_before,send_at}'; required := '{days_before,send_at}'; max_days := 180;
     WHEN 'contract_renewal_pending' THEN allowed := '{send_at,repeat_every_days}'; required := '{send_at}';
@@ -5715,7 +6205,7 @@ $_$;
 -- Name: FUNCTION message_subscription_params_valid(p_event_kind text, p_params jsonb); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.message_subscription_params_valid(p_event_kind text, p_params jsonb) IS 'true se params é válido para o evento (chaves permitidas e obrigatórias, HH:MM, dia ISO, listas de 1–10 inteiros distintos: days_before 0–60 no due_reminder e 0–180 em contract_notice_deadline/contract_ending, thresholds_percent 1–200; repeat_every_days 1–30; invoice_closed, agent_completed, agent_message e ai_budget_alert sem parâmetros). Usada no CHECK de message_subscriptions.';
+COMMENT ON FUNCTION public.message_subscription_params_valid(p_event_kind text, p_params jsonb) IS 'true se params é válido para o evento (chaves permitidas e obrigatórias, HH:MM, dia ISO, listas de 1–10 inteiros distintos: days_before 0–60 no due_reminder e 0–180 em contract_notice_deadline/contract_ending, thresholds_percent 1–200; repeat_every_days 1–30; invoice_closed, agent_completed, agent_message, ai_budget_alert e ai_awaiting_approval sem parâmetros). Usada no CHECK de message_subscriptions.';
 
 
 --
@@ -6644,6 +7134,246 @@ $$;
 
 
 --
+-- Name: telegram_links_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_links_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.destination_id <> OLD.destination_id OR NEW.user_id <> OLD.user_id OR NEW.chat_id <> OLD.chat_id
+     OR NEW.telegram_user_id <> OLD.telegram_user_id THEN
+    RAISE EXCEPTION 'telegram_links: destination, user and chat of link % are immutable (pair again)', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'telegram_links_immutable_check';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
+    RAISE EXCEPTION 'telegram_links: link % is revoked', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'telegram_links_revoked_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: telegram_pairing_code_create(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_pairing_code_create(p_user_id uuid, p_destination_id uuid, p_code text) RETURNS TABLE(id uuid, expires_at timestamp with time zone)
+    LANGUAGE plpgsql
+    AS $_$
+#variable_conflict use_column
+DECLARE
+  c text := upper(btrim(p_code));
+BEGIN
+  IF c IS NULL OR c !~ '^[A-Z0-9]{8}$' THEN
+    RAISE EXCEPTION 'telegram_pairing_code_create: the code must have 8 letters or digits'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  RETURN QUERY
+  INSERT INTO telegram_pairing_codes AS k (user_id, destination_id, code_hash)
+  VALUES (p_user_id, p_destination_id, telegram_secret_hash(c))
+  RETURNING k.id, k.expires_at;
+END
+$_$;
+
+
+--
+-- Name: FUNCTION telegram_pairing_code_create(p_user_id uuid, p_destination_id uuid, p_code text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_pairing_code_create(p_user_id uuid, p_destination_id uuid, p_code text) IS 'Grava um código de pareamento (só o hash do código em maiúsculas), válido por 10 min, e devolve id e expiração. 22023 se o código não tem 8 letras ou dígitos; 23514 telegram_pairing_codes_destination_check se o destino não está ativo com a entrada ligada; 23505 telegram_pairing_codes_code_hash_key se o código já foi emitido (gere outro). Quem pode usar o destino é regra da aplicação.';
+
+
+--
+-- Name: telegram_pairing_codes_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_pairing_codes_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NOT EXISTS (SELECT 1 FROM message_destinations d
+                    WHERE d.id = NEW.destination_id AND d.inbound_enabled AND d.is_active) THEN
+      RAISE EXCEPTION 'telegram_pairing_codes: destination % does not receive messages', NEW.destination_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'telegram_pairing_codes_destination_check';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.user_id <> OLD.user_id OR NEW.destination_id <> OLD.destination_id OR NEW.code_hash <> OLD.code_hash
+     OR NEW.expires_at <> OLD.expires_at OR NEW.created_at <> OLD.created_at
+     OR (OLD.used_at IS NOT NULL AND NEW.used_at IS DISTINCT FROM OLD.used_at)
+     OR (OLD.link_id IS NOT NULL AND NEW.link_id IS NOT NULL AND NEW.link_id <> OLD.link_id) THEN
+    RAISE EXCEPTION 'telegram_pairing_codes: code % is immutable and single-use', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'telegram_pairing_codes_immutable_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: telegram_pairing_consume(uuid, text, bigint, bigint, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_pairing_consume(p_destination_id uuid, p_code text, p_chat_id bigint, p_telegram_user_id bigint, p_username text DEFAULT NULL::text) RETURNS TABLE(link_id uuid, user_id uuid)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+#variable_conflict use_column
+DECLARE
+  k public.telegram_pairing_codes;
+  l public.telegram_links;
+  uname text := nullif(ltrim(btrim(p_username), '@'), '');
+BEGIN
+  IF p_chat_id IS NULL OR p_chat_id <= 0 OR p_telegram_user_id IS NULL OR p_telegram_user_id <= 0 THEN
+    RAISE EXCEPTION 'telegram_pairing_consume: only private chats pair (positive chat and user ids)'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_code IS NULL THEN
+    RETURN;
+  END IF;
+
+  SELECT c.* INTO k
+    FROM public.telegram_pairing_codes c
+    JOIN public.users u ON u.id = c.user_id AND u.is_active
+    JOIN public.message_destinations d ON d.id = c.destination_id AND d.inbound_enabled AND d.is_active
+   WHERE c.code_hash = public.telegram_secret_hash(upper(btrim(p_code)))
+     AND c.destination_id = p_destination_id
+     AND c.used_at IS NULL
+     AND c.expires_at > clock_timestamp()
+     FOR UPDATE OF c;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  -- Quem pareou é o dono do código (o webhook não tem sessão): o ator da auditoria no resto da transação.
+  IF nullif(current_setting('app.user_id', true), '') IS NULL THEN
+    PERFORM set_config('app.user_id', k.user_id::text, true);
+  END IF;
+
+  SELECT x.* INTO l FROM public.telegram_links x
+   WHERE x.destination_id = p_destination_id AND x.chat_id = p_chat_id AND x.revoked_at IS NULL
+     FOR UPDATE;
+  IF FOUND AND l.user_id <> k.user_id THEN
+    -- O chat passa para o dono do código: o vínculo anterior é desfeito.
+    UPDATE public.telegram_links x SET revoked_at = clock_timestamp() WHERE x.id = l.id;
+    l := NULL;
+  END IF;
+
+  IF l.id IS NULL THEN
+    INSERT INTO public.telegram_links AS x (destination_id, user_id, chat_id, telegram_user_id, username)
+    VALUES (p_destination_id, k.user_id, p_chat_id, p_telegram_user_id, uname)
+    RETURNING x.* INTO l;
+  ELSIF l.username IS DISTINCT FROM uname THEN
+    UPDATE public.telegram_links x SET username = uname WHERE x.id = l.id;
+  END IF;
+
+  UPDATE public.telegram_pairing_codes c SET used_at = clock_timestamp(), link_id = l.id WHERE c.id = k.id;
+  RETURN QUERY SELECT l.id, l.user_id;
+END
+$$;
+
+
+--
+-- Name: FUNCTION telegram_pairing_consume(p_destination_id uuid, p_code text, p_chat_id bigint, p_telegram_user_id bigint, p_username text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_pairing_consume(p_destination_id uuid, p_code text, p_chat_id bigint, p_telegram_user_id bigint, p_username text) IS '/start <código>: confere o código (maiúsculas, sem espaços nas pontas) contra os não usados e não expirados do destino, de dono ativo e destino ativo com a entrada ligada; marca o código usado e liga o chat ao dono (se o chat já estava ligado a outro usuário no destino, aquele vínculo é desfeito; se ao mesmo, é mantido). Devolve (link_id, user_id), ou nenhuma linha com código errado, expirado, usado ou de outro destino. Sem app.user_id na transação, define-o como o dono do código (ator da auditoria). 22023 se o chat ou o usuário do Telegram não é positivo (só chats privados pareiam).';
+
+
+--
+-- Name: telegram_secret_hash(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_secret_hash(p_value text) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+    AS $$
+  SELECT encode(sha256(convert_to(p_value, 'UTF8')), 'hex')
+$$;
+
+
+--
+-- Name: FUNCTION telegram_secret_hash(p_value text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_secret_hash(p_value text) IS 'SHA-256 (hex minúsculo) do texto em UTF-8: o formato de message_destinations.webhook_secret_hash e de telegram_pairing_codes.code_hash (igual a createHash(''sha256'').update(valor, ''utf8'').digest(''hex'') no Node).';
+
+
+--
+-- Name: telegram_update_seen(uuid, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_update_seen(p_destination_id uuid, p_update_id bigint) RETURNS boolean
+    LANGUAGE sql
+    AS $$
+  WITH ins AS (
+    INSERT INTO telegram_updates_seen (destination_id, update_id) VALUES (p_destination_id, p_update_id)
+    ON CONFLICT DO NOTHING
+    RETURNING 1
+  )
+  SELECT NOT EXISTS (SELECT 1 FROM ins)
+$$;
+
+
+--
+-- Name: FUNCTION telegram_update_seen(p_destination_id uuid, p_update_id bigint); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_update_seen(p_destination_id uuid, p_update_id bigint) IS 'Marca o update_id do destino como recebido. Devolve false na primeira vez (processe) e true se já tinha sido visto (ignore). Chame na mesma transação que processa a atualização, para uma falha não marcar o que não foi feito.';
+
+
+--
+-- Name: telegram_updates_seen_purge(interval); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_updates_seen_purge(p_keep interval DEFAULT '7 days'::interval) RETURNS bigint
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  n bigint;
+BEGIN
+  IF p_keep IS NULL OR p_keep < interval '1 hour' THEN
+    RAISE EXCEPTION 'telegram_updates_seen_purge: keep must be >= 1 hour' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  DELETE FROM telegram_updates_seen s WHERE s.created_at < clock_timestamp() - p_keep;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END
+$$;
+
+
+--
+-- Name: FUNCTION telegram_updates_seen_purge(p_keep interval); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_updates_seen_purge(p_keep interval) IS 'Apaga os update_id vistos há mais de p_keep (padrão 7 dias; o Telegram desiste de reentregar bem antes) e devolve quantos. 22023 com prazo nulo ou < 1 hora.';
+
+
+--
+-- Name: telegram_webhook_authenticate(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.telegram_webhook_authenticate(p_destination_id uuid, p_secret text) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+  SELECT coalesce((SELECT d.webhook_secret_hash = public.telegram_secret_hash(p_secret)
+                     FROM public.message_destinations d
+                    WHERE d.id = p_destination_id AND d.inbound_enabled AND d.is_active AND d.archived_at IS NULL),
+                  false)
+$$;
+
+
+--
+-- Name: FUNCTION telegram_webhook_authenticate(p_destination_id uuid, p_secret text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.telegram_webhook_authenticate(p_destination_id uuid, p_secret text) IS 'true se p_secret (o cabeçalho X-Telegram-Bot-Api-Secret-Token, como chegou) confere com o segredo do destino e o destino está ativo, não arquivado e com a entrada ligada; false em qualquer outro caso (destino inexistente, entrada desligada, segredo errado ou nulo). A API responde 401 com false.';
+
+
+--
 -- Name: title_settled_cents(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7478,7 +8208,7 @@ CREATE TABLE public.ai_conversations (
     CONSTRAINT ai_conversations_archived_reason_archived_check CHECK (((archived_reason IS NULL) OR (archived_at IS NOT NULL))),
     CONSTRAINT ai_conversations_archived_reason_check CHECK ((archived_reason = ANY (ARRAY['finished'::text, 'forked'::text, 'migrated_from_multi'::text, 'import_conflict'::text]))),
     CONSTRAINT ai_conversations_fork_check CHECK ((forked_from_conversation_id <> id)),
-    CONSTRAINT ai_conversations_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text]))),
+    CONSTRAINT ai_conversations_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'scheduled_task'::text, 'reconcile_statement'::text]))),
     CONSTRAINT ai_conversations_screen_context_check CHECK ((jsonb_typeof(screen_context) = 'object'::text)),
     CONSTRAINT ai_conversations_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 200))),
     CONSTRAINT ai_conversations_title_source_check CHECK ((title_source = ANY (ARRAY['auto'::text, 'user'::text])))
@@ -7552,7 +8282,7 @@ COMMENT ON COLUMN public.ai_conversations.last_message_at IS 'Instante da últim
 -- Name: COLUMN ai_conversations.purpose; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_conversations.purpose IS 'Finalidade, definida no INSERT e imutável: chat (conversa do usuário, padrão) ou o fluxo automático que a criou (document_reading, classify_lines, contract_reading, contract_markdown; mesmo vocabulário de ai_usage.purpose). Conversas de fluxo não entram na lista nem na busca e rodam sem tools. A bifurcação é sempre chat.';
+COMMENT ON COLUMN public.ai_conversations.purpose IS 'Finalidade, definida no INSERT e imutável: chat (sessão do usuário, padrão) ou o fluxo automático que a criou (document_reading, classify_lines, contract_reading, contract_markdown, scheduled_task = um disparo de tarefa agendada, reconcile_statement = conciliação completa de um lote de extrato; mesmo vocabulário de ai_usage.purpose). Conversas de fluxo ficam fora da sessão ativa (ai_conversations_active_chat_key), da lista e da busca; scheduled_task e reconcile_statement rodam com as tools do kit do agente, os demais fluxos sem tools. A bifurcação é sempre chat.';
 
 
 --
@@ -7872,7 +8602,7 @@ CREATE TABLE public.ai_usage (
     CONSTRAINT ai_usage_cost_check CHECK (((cost_micros >= 0) AND ((cost_micros IS NULL) = (currency IS NULL)) AND ((price_id IS NULL) OR (cost_micros IS NOT NULL)))),
     CONSTRAINT ai_usage_currency_check CHECK ((currency = ANY (ARRAY['USD'::text, 'BRL'::text]))),
     CONSTRAINT ai_usage_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
-    CONSTRAINT ai_usage_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text]))),
+    CONSTRAINT ai_usage_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'scheduled_task'::text, 'reconcile_statement'::text]))),
     CONSTRAINT ai_usage_tokens_check CHECK (((input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)))
 );
 
@@ -7895,7 +8625,7 @@ COMMENT ON COLUMN public.ai_usage.message_id IS 'Mensagem do assistente que a ch
 -- Name: COLUMN ai_usage.purpose; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_usage.purpose IS 'chat (loop do agente), title (título automático), embedding (indexação/busca semântica), vision_describe (descrição de anexo pelo provedor de visão), transcription (áudio→texto), speech (texto→áudio) ou a finalidade de um fluxo automático: document_reading (leitura de documento), classify_lines (sugestões da conciliação), contract_reading (leitura do PDF do contrato) e contract_markdown (PDF do contrato → markdown). chat numa conversa de fluxo vira a finalidade da conversa.';
+COMMENT ON COLUMN public.ai_usage.purpose IS 'chat (loop do agente), title (título automático), embedding (indexação/busca semântica), vision_describe (descrição de anexo pelo provedor de visão), transcription (áudio→texto), speech (texto→áudio) ou a finalidade de um fluxo automático: document_reading (leitura de documento), classify_lines (sugestões da conciliação), contract_reading (leitura do PDF do contrato), contract_markdown (PDF do contrato → markdown), scheduled_task (tarefa agendada) e reconcile_statement (conciliação completa ao importar). chat numa conversa de fluxo vira a finalidade da conversa.';
 
 
 --
@@ -8160,7 +8890,7 @@ CREATE TABLE public.ai_requests (
     CONSTRAINT ai_requests_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
     CONSTRAINT ai_requests_operation_check CHECK ((operation = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'test_connection'::text, 'list_models'::text]))),
     CONSTRAINT ai_requests_path_check CHECK (((path ~ '^[^[:space:]]+$'::text) AND (length(path) <= 2000))),
-    CONSTRAINT ai_requests_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text]))),
+    CONSTRAINT ai_requests_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'scheduled_task'::text, 'reconcile_statement'::text]))),
     CONSTRAINT ai_requests_purpose_null_check CHECK (((purpose IS NULL) = (operation = ANY (ARRAY['test_connection'::text, 'list_models'::text])))),
     CONSTRAINT ai_requests_status_check CHECK ((status = ANY (ARRAY['running'::text, 'ok'::text, 'error'::text, 'canceled'::text]))),
     CONSTRAINT ai_requests_tokens_check CHECK (((input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)))
@@ -8364,6 +9094,77 @@ COMMENT ON COLUMN public.ai_run_events.event_type IS 'Tipo do evento, definido p
 --
 
 COMMENT ON COLUMN public.ai_run_events.payload IS 'Dados do evento (objeto JSON). Nunca chaves, tokens ou senhas.';
+
+
+--
+-- Name: ai_scheduled_task_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_scheduled_task_runs (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    task_id uuid NOT NULL,
+    scheduled_for timestamp with time zone NOT NULL,
+    trigger_kind text DEFAULT 'schedule'::text NOT NULL,
+    status text NOT NULL,
+    skip_reason text,
+    conversation_id uuid,
+    run_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ai_scheduled_task_runs_reason_check CHECK ((((status = 'started'::text) = (skip_reason IS NULL)) AND ((length(skip_reason) >= 1) AND (length(skip_reason) <= 500)))),
+    CONSTRAINT ai_scheduled_task_runs_run_check CHECK (((status = 'started'::text) OR (run_id IS NULL))),
+    CONSTRAINT ai_scheduled_task_runs_status_check CHECK ((status = ANY (ARRAY['started'::text, 'skipped'::text, 'failed'::text]))),
+    CONSTRAINT ai_scheduled_task_runs_trigger_kind_check CHECK ((trigger_kind = ANY (ARRAY['schedule'::text, 'manual'::text])))
+);
+
+
+--
+-- Name: TABLE ai_scheduled_task_runs; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.ai_scheduled_task_runs IS 'Disparos das tarefas agendadas (spec 029): um por (tarefa, horário previsto) (ai_scheduled_task_runs_task_scheduled_key). Criados por ai_scheduled_task_claim (agendados) e ai_scheduled_task_run_now (manuais) como started ou skipped; a aplicação liga a sessão e a execução que criou, ou passa o started a skipped/failed (com o motivo) se não conseguiu começar. skipped e failed são finais. O resultado da execução está em ai_runs. Fora da auditoria e do backup (histórico operacional, como ai_runs).';
+
+
+--
+-- Name: COLUMN ai_scheduled_task_runs.scheduled_for; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_task_runs.scheduled_for IS 'Horário previsto do disparo (agendado) ou o instante do clique (manual). Imutável.';
+
+
+--
+-- Name: COLUMN ai_scheduled_task_runs.trigger_kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_task_runs.trigger_kind IS 'schedule (pelo worker) ou manual ("Rodar agora").';
+
+
+--
+-- Name: COLUMN ai_scheduled_task_runs.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_task_runs.status IS 'started (começou: a aplicação cria a sessão e a execução), skipped (pulado, com o motivo) ou failed (não conseguiu começar, com o erro). started pode virar skipped/failed enquanto não tem execução; skipped e failed são finais.';
+
+
+--
+-- Name: COLUMN ai_scheduled_task_runs.skip_reason; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_task_runs.skip_reason IS 'Motivo, obrigatório em skipped/failed e nulo em started (até 500). Do banco: missed_window (atraso acima do prazo, 6 h), previous_run_active (execução anterior ativa), user_inactive, agent_inactive. Da aplicação: os dela (ex.: budget_exceeded, rate_limited ou a mensagem de erro).';
+
+
+--
+-- Name: COLUMN ai_scheduled_task_runs.conversation_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_task_runs.conversation_id IS 'Sessão do disparo (purpose scheduled_task, do dono da tarefa: ai_scheduled_task_runs_links_check). Excluir a sessão anula o vínculo e o histórico fica.';
+
+
+--
+-- Name: COLUMN ai_scheduled_task_runs.run_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_scheduled_task_runs.run_id IS 'Execução do disparo (da conversa acima). Excluída a conversa, vira nula e o histórico fica.';
 
 
 --
@@ -9290,6 +10091,8 @@ CREATE TABLE public.caixas (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    ai_auto_reconcile boolean DEFAULT false NOT NULL,
+    CONSTRAINT caixas_ai_auto_reconcile_check CHECK (((NOT ai_auto_reconcile) OR (kind = 'credit_card'::text))),
     CONSTRAINT caixas_card_fields_check CHECK (
 CASE kind
     WHEN 'general'::text THEN ((default_payer_caixa_id IS NULL) AND (credit_limit_cents IS NULL) AND (closing_day IS NULL) AND (due_day IS NULL) AND (card_last4 IS NULL))
@@ -9368,6 +10171,13 @@ COMMENT ON COLUMN public.caixas.due_day IS 'Cartão: dia de vencimento (1–31).
 --
 
 COMMENT ON COLUMN public.caixas.card_last4 IS 'Cartão: 4 últimos dígitos.';
+
+
+--
+-- Name: COLUMN caixas.ai_auto_reconcile; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.caixas.ai_auto_reconcile IS '"Conciliar com IA ao importar" do cartão (spec 029): o import de extrato da fatura dispara a conciliação completa pelo agente dos fluxos (purpose reconcile_statement). Só em credit_card (caixas_ai_auto_reconcile_check).';
 
 
 --
@@ -11166,7 +11976,9 @@ CREATE TABLE public.financial_accounts (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    ai_auto_reconcile boolean DEFAULT false NOT NULL,
     CONSTRAINT financial_accounts_account_number_check CHECK ((account_number ~ '^[0-9]{1,20}(-[0-9A-Z])?$'::text)),
+    CONSTRAINT financial_accounts_ai_auto_reconcile_check CHECK (((NOT ai_auto_reconcile) OR (kind = ANY (ARRAY['checking'::text, 'savings'::text])))),
     CONSTRAINT financial_accounts_bank_code_check CHECK ((bank_code ~ '^[0-9]{3}$'::text)),
     CONSTRAINT financial_accounts_bank_fields_check CHECK (((kind = ANY (ARRAY['checking'::text, 'savings'::text])) OR ((bank_code IS NULL) AND (ispb IS NULL) AND (branch IS NULL) AND (account_number IS NULL)))),
     CONSTRAINT financial_accounts_branch_check CHECK ((branch ~ '^[0-9]{1,6}(-[0-9A-Z])?$'::text)),
@@ -11203,6 +12015,13 @@ COMMENT ON COLUMN public.financial_accounts.bank_code IS 'COMPE (3 dígitos); da
 --
 
 COMMENT ON COLUMN public.financial_accounts.opening_balance_cents IS 'Saldo inicial em centavos na opening_date (cash não pode ser negativo).';
+
+
+--
+-- Name: COLUMN financial_accounts.ai_auto_reconcile; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.financial_accounts.ai_auto_reconcile IS '"Conciliar com IA ao importar" (spec 029): o import de extrato desta conta dispara a conciliação completa pelo agente dos fluxos (purpose reconcile_statement). Só em checking/savings (financial_accounts_ai_auto_reconcile_check).';
 
 
 --
@@ -11307,13 +12126,18 @@ CREATE TABLE public.message_destinations (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    inbound_enabled boolean DEFAULT false NOT NULL,
+    inbound_agent_id uuid,
+    webhook_secret_hash text,
     CONSTRAINT message_destinations_active_check CHECK ((NOT (is_active AND (archived_at IS NOT NULL)))),
     CONSTRAINT message_destinations_bot_token_check CHECK ((bot_token ~ '^[0-9]{3,20}:[A-Za-z0-9_-]{20,100}$'::text)),
     CONSTRAINT message_destinations_channel_check CHECK ((channel = 'telegram'::text)),
     CONSTRAINT message_destinations_chat_id_check CHECK (((chat_id ~ '^-?[0-9]{1,20}$'::text) OR (chat_id ~ '^@[A-Za-z][A-Za-z0-9_]{3,31}$'::text))),
+    CONSTRAINT message_destinations_inbound_check CHECK (((NOT inbound_enabled) OR (is_active AND (inbound_agent_id IS NOT NULL) AND (webhook_secret_hash IS NOT NULL)))),
     CONSTRAINT message_destinations_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 120))),
     CONSTRAINT message_destinations_owner_check CHECK ((num_nonnulls(owner_user_id, owner_caixa_id) <= 1)),
-    CONSTRAINT message_destinations_telegram_check CHECK (((channel <> 'telegram'::text) OR ((bot_token IS NOT NULL) AND (chat_id IS NOT NULL))))
+    CONSTRAINT message_destinations_telegram_check CHECK (((channel <> 'telegram'::text) OR ((bot_token IS NOT NULL) AND (chat_id IS NOT NULL)))),
+    CONSTRAINT message_destinations_webhook_secret_hash_check CHECK ((webhook_secret_hash ~ '^[0-9a-f]{64}$'::text))
 );
 
 
@@ -11374,6 +12198,27 @@ COMMENT ON COLUMN public.message_destinations.is_active IS 'false = não recebe 
 
 
 --
+-- Name: COLUMN message_destinations.inbound_enabled; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.inbound_enabled IS '"Receber mensagens" (spec 029): o bot entrega as mensagens por webhook em /api/telegram/webhook/:id e o agente inbound_agent_id responde. Exige destino ativo, agente e segredo (message_destinations_inbound_check): desativar ou arquivar o destino desliga a entrada na mesma operação (e a aplicação chama deleteWebhook). Um destino com a entrada ligada por bot (message_destinations_inbound_bot_key, 23505). A importação do backup traz false.';
+
+
+--
+-- Name: COLUMN message_destinations.inbound_agent_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.inbound_agent_id IS 'Agente que responde às mensagens recebidas. Excluir o agente em uso dá 23503 (arquive).';
+
+
+--
+-- Name: COLUMN message_destinations.webhook_secret_hash; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_destinations.webhook_secret_hash IS 'SEGREDO: SHA-256 (hex, telegram_secret_hash) do secret_token enviado no setWebhook. moneyflow_app grava mas NÃO lê esta coluna; o webhook confere o cabeçalho X-Telegram-Bot-Api-Secret-Token por telegram_webhook_authenticate. Nunca vai para o audit_log; o backup o lê por admin_message_destination_webhook_secret.';
+
+
+--
 -- Name: message_subscription_caixas; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -11405,7 +12250,7 @@ CREATE TABLE public.message_subscriptions (
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT message_subscriptions_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text]))),
+    CONSTRAINT message_subscriptions_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text]))),
     CONSTRAINT message_subscriptions_params_check CHECK (public.message_subscription_params_valid(event_kind, params))
 );
 
@@ -11421,7 +12266,7 @@ COMMENT ON TABLE public.message_subscriptions IS 'Eventos que um destino recebe 
 -- Name: COLUMN message_subscriptions.event_kind; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.message_subscriptions.event_kind IS 'due_reminder (D-N), overdue (atrasados), daily_summary, weekly_summary, invoice_closed (fatura fechada, valor por pagadora), card_limit (limite acima de X%), reconciliation_divergence, agent_completed, agent_message; contratos (spec 020): contract_notice_deadline (D-N do fim do aviso prévio), contract_ending (D-N do fim do ciclo), contract_renewal_pending (ao abrir a tarefa e a cada N dias) e contract_readjustment (na data-base); ai_budget_alert (spec 028: orçamento de IA cruzou o aviso ou chegou a 100%; sem parâmetros).';
+COMMENT ON COLUMN public.message_subscriptions.event_kind IS 'due_reminder (D-N), overdue (atrasados), daily_summary, weekly_summary, invoice_closed (fatura fechada, valor por pagadora), card_limit (limite acima de X%), reconciliation_divergence, agent_completed, agent_message; contratos (spec 020): contract_notice_deadline (D-N do fim do aviso prévio), contract_ending (D-N do fim do ciclo), contract_renewal_pending (ao abrir a tarefa e a cada N dias) e contract_readjustment (na data-base); ai_budget_alert (spec 028: orçamento de IA cruzou o aviso ou chegou a 100%; sem parâmetros); ai_awaiting_approval (spec 029: uma tarefa agendada ou a conciliação com IA espera aprovação; sem parâmetros).';
 
 
 --
@@ -11498,7 +12343,7 @@ CREATE TABLE public.notifications (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT notifications_data_check CHECK ((jsonb_typeof(data) = 'object'::text)),
     CONSTRAINT notifications_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
-    CONSTRAINT notifications_kind_check CHECK ((kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text]))),
+    CONSTRAINT notifications_kind_check CHECK ((kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text]))),
     CONSTRAINT notifications_link_check CHECK (((link ~ '^/[^/]'::text) OR (link = '/'::text))),
     CONSTRAINT notifications_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 200)))
 );
@@ -11515,7 +12360,7 @@ COMMENT ON TABLE public.notifications IS 'Notificações do sino, por usuário. 
 -- Name: COLUMN notifications.kind; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.notifications.kind IS 'agent_completed, agent_message, mirror_pending, mirror_disputed, invoice_closed, due_reminder, overdue, card_limit, reconciliation_divergence, message_failed, system, contract_notice_deadline, contract_ending, contract_renewal_pending, contract_readjustment ou ai_budget_alert (spec 028; dedup por orçamento, mês e limiar).';
+COMMENT ON COLUMN public.notifications.kind IS 'agent_completed, agent_message, mirror_pending, mirror_disputed, invoice_closed, due_reminder, overdue, card_limit, reconciliation_divergence, message_failed, system, contract_notice_deadline, contract_ending, contract_renewal_pending, contract_readjustment, ai_budget_alert (spec 028; dedup por orçamento, mês e limiar) ou ai_awaiting_approval (spec 029: tarefa agendada ou conciliação com IA esperando aprovação).';
 
 
 --
@@ -11938,6 +12783,135 @@ CREATE VIEW public.statement_import_balances WITH (security_invoker='true') AS
 --
 
 COMMENT ON VIEW public.statement_import_balances IS 'Por lote: saldo informado pelo banco × saldo do app na mesma data (difference_cents = banco − app; 0 = sem divergência) e contagem de linhas por status. Saldo só para contas (não para cartão).';
+
+
+--
+-- Name: telegram_links; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.telegram_links (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    destination_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    chat_id bigint NOT NULL,
+    telegram_user_id bigint NOT NULL,
+    username text,
+    revoked_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT telegram_links_chat_id_check CHECK ((chat_id > 0)),
+    CONSTRAINT telegram_links_telegram_user_id_check CHECK ((telegram_user_id > 0)),
+    CONSTRAINT telegram_links_username_check CHECK ((username ~ '^[A-Za-z0-9_]{1,64}$'::text))
+);
+
+
+--
+-- Name: TABLE telegram_links; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.telegram_links IS 'Pareamento de um chat privado do Telegram com um usuário, por destino com entrada (spec 029). Criado por telegram_pairing_consume (/start <código>). Um ativo por (destino, chat) (telegram_links_active_key); desfazer = revoked_at (irreversível). Auditada e no backup.';
+
+
+--
+-- Name: COLUMN telegram_links.chat_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_links.chat_id IS 'id do chat privado (positivo; grupos e canais não pareiam).';
+
+
+--
+-- Name: COLUMN telegram_links.telegram_user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_links.telegram_user_id IS 'id do usuário do Telegram (no chat privado, igual ao chat_id).';
+
+
+--
+-- Name: COLUMN telegram_links.username; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_links.username IS '@username do Telegram, sem a arroba, quando houver (pode ser atualizado).';
+
+
+--
+-- Name: COLUMN telegram_links.revoked_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_links.revoked_at IS 'Desfeito em (irreversível; nulo = ativo).';
+
+
+--
+-- Name: telegram_pairing_codes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.telegram_pairing_codes (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    user_id uuid NOT NULL,
+    destination_id uuid NOT NULL,
+    code_hash text NOT NULL,
+    expires_at timestamp with time zone DEFAULT (now() + '00:10:00'::interval) NOT NULL,
+    used_at timestamp with time zone,
+    link_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT telegram_pairing_codes_code_hash_check CHECK ((code_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT telegram_pairing_codes_expires_at_check CHECK (((expires_at > created_at) AND (expires_at <= (created_at + '00:10:00'::interval)))),
+    CONSTRAINT telegram_pairing_codes_link_check CHECK (((link_id IS NULL) OR (used_at IS NOT NULL)))
+);
+
+
+--
+-- Name: TABLE telegram_pairing_codes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.telegram_pairing_codes IS 'Códigos de pareamento do Telegram (spec 029): 8 caracteres, válidos por 10 min, de uso único, para um destino com entrada. Só o hash é guardado. Crie por telegram_pairing_code_create e consuma por telegram_pairing_consume. Auditada (sem o hash); fora do backup.';
+
+
+--
+-- Name: COLUMN telegram_pairing_codes.code_hash; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_pairing_codes.code_hash IS 'SHA-256 (hex, telegram_secret_hash) do código em maiúsculas. moneyflow_app grava mas NÃO lê esta coluna. Nunca vai para o audit_log.';
+
+
+--
+-- Name: COLUMN telegram_pairing_codes.expires_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_pairing_codes.expires_at IS 'Expiração: no máximo 10 min depois da criação (padrão).';
+
+
+--
+-- Name: COLUMN telegram_pairing_codes.used_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_pairing_codes.used_at IS 'Usado em (uma vez só; nulo = ainda não usado).';
+
+
+--
+-- Name: COLUMN telegram_pairing_codes.link_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.telegram_pairing_codes.link_id IS 'Vínculo criado (ou mantido) com este código.';
+
+
+--
+-- Name: telegram_updates_seen; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.telegram_updates_seen (
+    destination_id uuid NOT NULL,
+    update_id bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT telegram_updates_seen_update_id_check CHECK ((update_id >= 0))
+);
+
+
+--
+-- Name: TABLE telegram_updates_seen; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.telegram_updates_seen IS 'update_id já recebidos por destino (spec 029), para o webhook ignorar a reentrega do Telegram. Marque por telegram_update_seen; purga por telegram_updates_seen_purge (7 dias). Fora da auditoria e do backup.';
 
 
 --
@@ -12366,6 +13340,30 @@ ALTER TABLE ONLY public.ai_runs
 
 ALTER TABLE ONLY public.ai_runs
     ADD CONSTRAINT ai_runs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_task_runs
+    ADD CONSTRAINT ai_scheduled_task_runs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_task_scheduled_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_task_runs
+    ADD CONSTRAINT ai_scheduled_task_runs_task_scheduled_key UNIQUE (task_id, scheduled_for);
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_tasks
+    ADD CONSTRAINT ai_scheduled_tasks_pkey PRIMARY KEY (id);
 
 
 --
@@ -13009,6 +14007,38 @@ ALTER TABLE ONLY public.statement_lines
 
 
 --
+-- Name: telegram_links telegram_links_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_links
+    ADD CONSTRAINT telegram_links_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_code_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_pairing_codes
+    ADD CONSTRAINT telegram_pairing_codes_code_hash_key UNIQUE (code_hash);
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_pairing_codes
+    ADD CONSTRAINT telegram_pairing_codes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: telegram_updates_seen telegram_updates_seen_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_updates_seen
+    ADD CONSTRAINT telegram_updates_seen_pkey PRIMARY KEY (destination_id, update_id);
+
+
+--
 -- Name: title_attachments title_attachments_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13444,6 +14474,48 @@ CREATE INDEX ai_runs_trigger_message_idx ON public.ai_runs USING btree (conversa
 --
 
 CREATE INDEX ai_runs_user_id_idx ON public.ai_runs USING btree (user_id, created_at);
+
+
+--
+-- Name: ai_scheduled_task_runs_conversation_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_scheduled_task_runs_conversation_id_idx ON public.ai_scheduled_task_runs USING btree (conversation_id);
+
+
+--
+-- Name: ai_scheduled_task_runs_run_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_scheduled_task_runs_run_id_idx ON public.ai_scheduled_task_runs USING btree (run_id);
+
+
+--
+-- Name: ai_scheduled_tasks_agent_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_scheduled_tasks_agent_id_idx ON public.ai_scheduled_tasks USING btree (agent_id);
+
+
+--
+-- Name: ai_scheduled_tasks_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_scheduled_tasks_created_by_user_id_idx ON public.ai_scheduled_tasks USING btree (created_by_user_id);
+
+
+--
+-- Name: ai_scheduled_tasks_due_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_scheduled_tasks_due_idx ON public.ai_scheduled_tasks USING btree (next_run_at) WHERE is_active;
+
+
+--
+-- Name: ai_scheduled_tasks_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_scheduled_tasks_user_id_idx ON public.ai_scheduled_tasks USING btree (user_id, created_at);
 
 
 --
@@ -14049,6 +15121,20 @@ CREATE INDEX message_destinations_created_by_user_id_idx ON public.message_desti
 
 
 --
+-- Name: message_destinations_inbound_agent_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_destinations_inbound_agent_id_idx ON public.message_destinations USING btree (inbound_agent_id);
+
+
+--
+-- Name: message_destinations_inbound_bot_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX message_destinations_inbound_bot_key ON public.message_destinations USING btree (bot_id) WHERE inbound_enabled;
+
+
+--
 -- Name: message_destinations_name_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -14438,6 +15524,55 @@ CREATE INDEX statement_lines_status_idx ON public.statement_lines USING btree (s
 --
 
 CREATE INDEX statement_lines_title_id_idx ON public.statement_lines USING btree (title_id);
+
+
+--
+-- Name: telegram_links_active_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX telegram_links_active_key ON public.telegram_links USING btree (destination_id, chat_id) WHERE (revoked_at IS NULL);
+
+
+--
+-- Name: telegram_links_destination_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX telegram_links_destination_id_idx ON public.telegram_links USING btree (destination_id);
+
+
+--
+-- Name: telegram_links_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX telegram_links_user_id_idx ON public.telegram_links USING btree (user_id, created_at);
+
+
+--
+-- Name: telegram_pairing_codes_destination_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX telegram_pairing_codes_destination_id_idx ON public.telegram_pairing_codes USING btree (destination_id);
+
+
+--
+-- Name: telegram_pairing_codes_link_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX telegram_pairing_codes_link_id_idx ON public.telegram_pairing_codes USING btree (link_id);
+
+
+--
+-- Name: telegram_pairing_codes_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX telegram_pairing_codes_user_id_idx ON public.telegram_pairing_codes USING btree (user_id, created_at);
+
+
+--
+-- Name: telegram_updates_seen_created_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX telegram_updates_seen_created_at_idx ON public.telegram_updates_seen USING btree (created_at);
 
 
 --
@@ -14879,6 +16014,41 @@ CREATE TRIGGER ai_runs_set_updated_at BEFORE UPDATE ON public.ai_runs FOR EACH R
 --
 
 CREATE TRIGGER ai_runs_validate BEFORE INSERT OR UPDATE ON public.ai_runs FOR EACH ROW EXECUTE FUNCTION public.ai_runs_validate();
+
+
+--
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_before_write; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_scheduled_task_runs_before_write BEFORE INSERT OR UPDATE ON public.ai_scheduled_task_runs FOR EACH ROW EXECUTE FUNCTION public.ai_scheduled_task_runs_before_write();
+
+
+--
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_scheduled_task_runs_set_updated_at BEFORE UPDATE ON public.ai_scheduled_task_runs FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_scheduled_tasks_audit AFTER INSERT OR DELETE OR UPDATE ON public.ai_scheduled_tasks FOR EACH ROW EXECUTE FUNCTION public.audit_row('next_run_at,last_run_at');
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_before_write; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_scheduled_tasks_before_write BEFORE INSERT OR UPDATE ON public.ai_scheduled_tasks FOR EACH ROW EXECUTE FUNCTION public.ai_scheduled_tasks_before_write();
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_scheduled_tasks_set_updated_at BEFORE UPDATE ON public.ai_scheduled_tasks FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -15862,6 +17032,48 @@ CREATE TRIGGER statement_lines_validate BEFORE INSERT OR UPDATE ON public.statem
 
 
 --
+-- Name: telegram_links telegram_links_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER telegram_links_audit AFTER INSERT OR DELETE OR UPDATE ON public.telegram_links FOR EACH ROW EXECUTE FUNCTION public.audit_row('username');
+
+
+--
+-- Name: telegram_links telegram_links_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER telegram_links_set_updated_at BEFORE UPDATE ON public.telegram_links FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: telegram_links telegram_links_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER telegram_links_validate BEFORE UPDATE ON public.telegram_links FOR EACH ROW EXECUTE FUNCTION public.telegram_links_validate();
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER telegram_pairing_codes_audit AFTER INSERT OR DELETE OR UPDATE ON public.telegram_pairing_codes FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER telegram_pairing_codes_set_updated_at BEFORE UPDATE ON public.telegram_pairing_codes FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER telegram_pairing_codes_validate BEFORE INSERT OR UPDATE ON public.telegram_pairing_codes FOR EACH ROW EXECUTE FUNCTION public.telegram_pairing_codes_validate();
+
+
+--
 -- Name: title_attachments title_attachments_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -16355,6 +17567,54 @@ ALTER TABLE ONLY public.ai_runs
 
 ALTER TABLE ONLY public.ai_runs
     ADD CONSTRAINT ai_runs_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_task_runs
+    ADD CONSTRAINT ai_scheduled_task_runs_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.ai_conversations(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_task_runs
+    ADD CONSTRAINT ai_scheduled_task_runs_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.ai_runs(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_scheduled_task_runs ai_scheduled_task_runs_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_task_runs
+    ADD CONSTRAINT ai_scheduled_task_runs_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.ai_scheduled_tasks(id) ON DELETE CASCADE;
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_tasks
+    ADD CONSTRAINT ai_scheduled_tasks_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.ai_agents(id);
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_tasks
+    ADD CONSTRAINT ai_scheduled_tasks_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: ai_scheduled_tasks ai_scheduled_tasks_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_scheduled_tasks
+    ADD CONSTRAINT ai_scheduled_tasks_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -16958,6 +18218,14 @@ ALTER TABLE ONLY public.message_destinations
 
 
 --
+-- Name: message_destinations message_destinations_inbound_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_destinations
+    ADD CONSTRAINT message_destinations_inbound_agent_id_fkey FOREIGN KEY (inbound_agent_id) REFERENCES public.ai_agents(id);
+
+
+--
 -- Name: message_destinations message_destinations_owner_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -17331,6 +18599,54 @@ ALTER TABLE ONLY public.statement_lines
 
 ALTER TABLE ONLY public.statement_lines
     ADD CONSTRAINT statement_lines_title_id_fkey FOREIGN KEY (title_id) REFERENCES public.titles(id);
+
+
+--
+-- Name: telegram_links telegram_links_destination_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_links
+    ADD CONSTRAINT telegram_links_destination_id_fkey FOREIGN KEY (destination_id) REFERENCES public.message_destinations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: telegram_links telegram_links_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_links
+    ADD CONSTRAINT telegram_links_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_destination_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_pairing_codes
+    ADD CONSTRAINT telegram_pairing_codes_destination_id_fkey FOREIGN KEY (destination_id) REFERENCES public.message_destinations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_link_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_pairing_codes
+    ADD CONSTRAINT telegram_pairing_codes_link_id_fkey FOREIGN KEY (link_id) REFERENCES public.telegram_links(id) ON DELETE SET NULL;
+
+
+--
+-- Name: telegram_pairing_codes telegram_pairing_codes_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_pairing_codes
+    ADD CONSTRAINT telegram_pairing_codes_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: telegram_updates_seen telegram_updates_seen_destination_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.telegram_updates_seen
+    ADD CONSTRAINT telegram_updates_seen_destination_id_fkey FOREIGN KEY (destination_id) REFERENCES public.message_destinations(id) ON DELETE CASCADE;
 
 
 --
