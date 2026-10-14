@@ -23,6 +23,18 @@
 - **Um** agente por vez pode ser ancorado como **painel lateral direito**, com o comportamento da sidebar esquerda: colapsar, expandir, alargar, minimizar (libera o espaço e volta a ser um agente minimizado na doca) e fechar (some até o usuário reabri-lo).
 - O ícone **Agentes** na topbar lista as conversas, para continuar uma anterior ou iniciar uma nova.
 
+## Mudanças planejadas (F7–F15)
+Especificadas em 2026-10-13. Esta spec descreve o que está entregue (F4b até a v0.1.7). Cada fase, ao ser entregue, reescreve aqui o trecho que substitui.
+- **F7** ([021](021-kit-de-ferramentas.md)): o **kit de ferramentas** substitui a lista de tools do agente (`enabled_tools`) e a confirmação por agente (`require_write_confirmation`, `confirm` fixo de cada tool). Cada tool fica em `allow`/`ask` no kit; agente sem kit tem todas em `allow`.
+- **F8** ([022](022-prompts-e-instrucoes.md)): instruções do usuário, contexto automático, variáveis e versões do prompt; `instructions` dos MCP por modo.
+- **F9** ([023](023-requisicoes-ao-provedor.md)): registro de requisições e as tentativas próprias, que substituem o retry interno do SDK; detalhe do provedor.
+- **F10** ([024](024-capacidades-dos-provedores.md)): flags de capacidade e modelos padrão no provedor; provedor por inferência no agente; o índice de embeddings deixa de ser único (um por modelo em uso).
+- **F11** ([025](025-chat-multimidia.md)): prévias, gravação e transcrição de áudio, modo áudio.
+- **F12** ([026](026-sessoes-dos-agentes.md)): as conversas viram sessões de um fio por usuário e agente (uma ativa); "fixar" sai.
+- **F13** ([027](027-tools-de-controle-total.md)): tools para todo o sistema, inclusive tags, configuração de IA, usuários e backup (revoga "criar, editar e arquivar tags fica fora dos agentes").
+- **F14** ([028](028-limites-e-uso.md)): orçamentos com bloqueio (revoga "só medição, sem teto") e limite por minuto.
+- **F15** ([029](029-fluxos-autonomos.md)): tarefas agendadas, conciliação completa ao importar (os fluxos passam a usar tools pelo kit) e Telegram de entrada.
+
 ## Decisões da implementação (F4b)
 
 ### Provedores, modelos e custo

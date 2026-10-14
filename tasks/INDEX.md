@@ -4,6 +4,24 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 
 | Nº | Tarefa | Status | Tipo | Responsável | Origem |
 |---|---|---|---|---|---|
+| 016 | [Kit de ferramentas no banco (F7)](016-kit-de-ferramentas-no-banco.md) (primeira da F7) | aberta | banco | dba | usuario |
+| 017 | [Kit de ferramentas na aplicação (F7)](017-kit-de-ferramentas-na-aplicacao.md) (depois da 016) | aberta | melhoria | app | usuario |
+| 018 | [Instruções do usuário, versões do prompt e instructions do MCP no banco (F8)](018-prompts-e-instrucoes-no-banco.md) (depois da F7 (017)) | aberta | banco | dba | usuario |
+| 019 | [Montagem do prompt, variáveis, versões e instructions do MCP na aplicação (F8)](019-prompts-e-instrucoes-na-aplicacao.md) (depois da 018) | aberta | melhoria | app | usuario |
+| 020 | [Requisições, tentativas e app_settings no banco (F9)](020-requisicoes-ao-provedor-no-banco.md) (depois da F8) | aberta | banco | dba | usuario |
+| 021 | [Registro de requisições, tentativas próprias e detalhe do provedor (F9)](021-requisicoes-ao-provedor-na-aplicacao.md) (depois da 020) | aberta | melhoria | app | usuario |
+| 022 | [Capacidades, inferências por agente, derivados de anexo e embeddings por modelo no banco (F10)](022-capacidades-dos-provedores-no-banco.md) (depois da F9) | aberta | banco | dba | usuario |
+| 023 | [Capacidades, Anthropic compatível, provedor por inferência e visão por descrição (F10)](023-capacidades-dos-provedores-na-aplicacao.md) (depois da 022) | aberta | melhoria | app | usuario |
+| 024 | [Áudio gerado por mensagem e metadados de anexo no banco (F11)](024-chat-multimidia-no-banco.md) (depois da F10) | aberta | banco | dba | usuario |
+| 025 | [Prévias, gravação, transcrição, player e modo áudio no chat (F11)](025-chat-multimidia-na-aplicacao.md) (depois da 024) | aberta | melhoria | app | usuario |
+| 026 | [Sessão ativa única por usuário e agente no banco (F12)](026-sessoes-dos-agentes-no-banco.md) (depois da F11) | aberta | banco | dba | usuario |
+| 027 | [Fio por agente, finalizar sessão e sessões anteriores (F12)](027-sessoes-dos-agentes-na-aplicacao.md) (depois da 026) | aberta | melhoria | app | usuario |
+| 028 | [Tools de controle total, lote F13a (operação)](028-tools-controle-total-lote-a.md) (depois da F12) | aberta | melhoria | app | usuario |
+| 029 | [Tools de controle total, lote F13b (administração e segredos)](029-tools-controle-total-lote-b.md) (depois da 028) | aberta | melhoria | app | usuario |
+| 030 | [Orçamentos, visões de uso e avisos no banco (F14)](030-orcamentos-e-limites-no-banco.md) (depois da F13) | aberta | banco | dba | usuario |
+| 031 | [Orçamentos com aviso e bloqueio, limite por minuto e painel de uso (F14)](031-orcamentos-e-limites-na-aplicacao.md) (depois da 030) | aberta | melhoria | app | usuario |
+| 032 | [Tarefas agendadas, conciliação com IA e Telegram de entrada no banco (F15)](032-fluxos-autonomos-no-banco.md) (depois da F14) | aberta | banco | dba | usuario |
+| 033 | [Tarefas agendadas, conciliação completa ao importar e conversa pelo Telegram (F15)](033-fluxos-autonomos-na-aplicacao.md) (depois da 032) | aberta | melhoria | app | usuario |
 | 004 | [Aviso de conclusão do agente com várias réplicas da API](004-aviso-de-conclusao-multi-replica.md) (escopo: `dedup_key` por evento; presença no banco adiada) | concluida | debito-tecnico | app | agente |
 | 006 | [Cobrir no e2e os fluxos do agente ainda sem teste contra a API real](006-front-sem-teste-contra-api-real.md) | concluida | debito-tecnico | app | agente |
 | 011 | [Gravar e mostrar o uso de IA por finalidade](011-gravar-e-mostrar-uso-ia-por-finalidade.md) (depois da 001 e da 013) | concluida | melhoria | app | agente |

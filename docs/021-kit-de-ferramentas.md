@@ -1,0 +1,83 @@
+# 021 — Kit de Ferramentas (F7)
+
+Perfis de ferramentas dos agentes de IA. O kit diz quais tools internas do MoneyFlow um agente pode usar e, para cada uma, se ela roda direto (`allow`) ou pede aprovação ao usuário (`ask`). Substitui a lista `enabled_tools` e a flag `require_write_confirmation` do agente ([011](011-agentes-de-ia.md)). Decisões da entrevista de 2026-10-13.
+
+## Regras
+- Um **kit** tem nome (único, sem distinção de maiúsculas, até 120), descrição opcional (até 2000) e a lista das tools que ele libera, cada uma com o modo `allow` (executa sem perguntar) ou `ask` (mostra o cartão "Aplicar?" com a prévia e espera a decisão do usuário).
+- Uma tool fora do kit **não existe** para o agente: ela não é enviada ao modelo.
+- O kit decide tudo, para leituras e escritas. Não há travas fixas: o "enviar mensagem" pode ficar em `allow`, e o "avisar o usuário" pode ficar em `ask`. Cada tool tem um **modo sugerido**, usado quando ela é marcada no kit:
+  - leituras e `notify_user`: `allow`;
+  - demais escritas: `ask`.
+- **Exceção, tools de segredo**: as tools com campo de segredo ([027](027-tools-de-controle-total.md)) ficam sempre em `ask`, com ou sem kit, porque o segredo é digitado pelo usuário no cartão de aprovação e nunca passa pelo modelo.
+- **Cardinalidade**: um agente tem no máximo um kit (`ai_agents.tool_kit_id`), e um kit pode servir a vários agentes. Alterar o kit vale na próxima chamada ao modelo de todas as execuções dos agentes ligados a ele.
+- **Agente sem kit = poder completo**: todas as tools internas, todas em `allow`, sem aprovação (menos as de segredo). As tools de MCP externo continuam com a regra delas, abaixo.
+- **Tools novas** do registro (F13 e seguintes) **não entram sozinhas** num kit, que funciona como lista de permissões. Elas aparecem na tela como "não incluída".
+- O kit vale só para as tools **internas**. Os servidores MCP externos continuam vinculados ao agente ([011](011-agentes-de-ia.md), seção MCP), com a regra de confirmação deles: as tools contam como escrita e pedem confirmação, salvo `readOnlyHint`.
+- O kit **não amplia permissões**. A tool continua passando por `Access` com as permissões de quem aciona o agente, e as tools só de administrador ([027](027-tools-de-controle-total.md)) nunca são oferecidas ao modelo quando quem aciona não é admin, mesmo que estejam no kit. O campo `adminOnly` do registro e esse filtro entram já na F7; como ainda não há tool de admin real, o teste usa uma tool registrada só no teste.
+- O kit não se aplica ao servidor `/mcp` próprio: os tokens pessoais continuam expondo todas as tools. Ele também não se aplica aos fluxos automáticos, que rodam sem tools até a [029](029-fluxos-autonomos.md).
+- **Excluir**: só o kit sem agentes ligados (inclusive os arquivados). O kit em uso mostra os agentes que o usam. Não há arquivamento.
+- O kit é **auditado** como o resto da configuração da IA.
+- O backup do admin ([019](019-backup-e-restauracao.md)) exporta e importa os kits. O agente aponta para o kit pelo nome (chave natural).
+
+## Categorias das tools
+O registro (`packages/shared/src/agents/tools.ts`) ganha o campo `category` em cada tool. As categorias são fixas no código, com nome e ordem em pt-BR, e as tools de cada uma são:
+
+| Categoria | Tools |
+|---|---|
+| Busca e consulta | `search_records`, `semantic_search`, `calendar` |
+| Caixas e contas | `list_caixas`, `get_caixa`, `list_accounts`, `get_account_statement`, `list_transfers`, `create_transfer` |
+| Entidades | `list_entities`, `list_entity_tags`, `get_entity`, `create_entity`, `update_entity`, `set_entity_tags`, `set_entity_favorite`, `add_pix_key` |
+| Títulos e baixas | `list_categories`, `list_titles`, `get_title`, `create_title`, `update_title`, `end_series`, `settle_title`, `reverse_settlement` |
+| Cartão de crédito | `get_card`, `get_invoice`, `list_card_purchases`, `create_card_purchase` |
+| Conciliação | `list_statement_imports`, `get_statement_import`, `list_line_candidates`, `match_statement_line`, `match_statement_lines`, `confirm_statement_lines`, `unmatch_statement_line`, `ignore_statement_lines`, `unignore_statement_lines`, `create_from_statement_line`, `create_from_statement_lines`, `classify_statement_lines`, `apply_classification_suggestions` |
+| Relatórios e canvas | `report_categories`, `report_entities`, `report_projection`, `flow_graph` |
+| Mensagens e avisos | `list_message_destinations`, `send_telegram_message`, `notify_user` |
+
+A [027](027-tools-de-controle-total.md) acrescenta as categorias Contratos, Importação, Categorias e regras, Configuração de IA, Usuários e permissões, Backup, e Fechamento e auditoria.
+
+## Banco (dba)
+- `ai_tool_kits`: `id`, `name`, `description`, `created_by_user_id`, `created_at` e `updated_at`.
+- `ai_tool_kit_tools`: `kit_id`, `tool_name` e `mode` (`allow|ask`), com chave primária (`kit_id`, `tool_name`). O nome segue o formato de `ai_tool_list_valid`, e a aplicação valida contra o registro.
+- `ai_agents.tool_kit_id`: FK nula para `ai_tool_kits`, `ON DELETE RESTRICT` (o kit em uso devolve `23503`, e a API traduz listando os agentes).
+- As colunas `ai_agents.enabled_tools` e `require_write_confirmation` saem.
+- **Migração** (ninguém ganha nem perde poder, com uma exceção anotada):
+  - a migration traz um retrato fixo das 49 tools da v0.1.7 (25 de leitura, 24 de escrita), escrito nela; nomes desconhecidos em `enabled_tools` são descartados;
+  - o nome do kit é truncado para caber em 120 caracteres (com sufixo numérico se colidir);
+  - o agente com `enabled_tools` não nulo, ou com `require_write_confirmation = true`, ganha o kit "Kit – <nome do agente>", com exatamente as tools que ele tinha (todas, se a lista era nula);
+  - nesse kit, `ask` vai para a escrita que pedia confirmação (`send_telegram_message`, sempre, e as demais escritas quando a flag era `true`), e `allow` para o resto;
+  - o agente com lista nula e flag `false` fica **sem kit**. Exceção: nele, o `send_telegram_message` deixa de pedir confirmação (poder completo).
+- As duas tabelas entram na auditoria.
+
+## Aplicação (app)
+- **API**:
+  - `/api/admin/ai/tool-kits`: CRUD, mais `duplicate`;
+  - `GET /api/admin/ai/tools` passa a devolver `category`, `kind`, `destructive` e o modo sugerido.
+- **Execução**:
+  - o `tools-runtime` monta as tools pelo kit do agente: com kit, só as dele; sem kit, todas;
+  - as tools de admin são tiradas quando o ator não é admin;
+  - `needsConfirmation` passa a usar o modo do kit (sem kit = `allow`);
+  - o modo é lido a cada chamada ao modelo, não só no início da execução.
+- **Tela "Kit de Ferramentas"**, nova guia em /admin/ai, entre Agentes e MCP:
+  - **Lista**: nome, quantas tools (leitura/escrita), quantas em `ask` e os agentes que usam o kit.
+  - **Edição**:
+    - tools agrupadas por categoria, em blocos recolhíveis;
+    - o checkbox da categoria (com estado intermediário) marca ou desmarca todas as tools dela. Exemplo: marcar "Conciliação" libera todas as tools de conciliação;
+    - cada linha mostra o título pt-BR e o nome técnico, um selo **Leitura** ou **Escrita** (e **Destrutiva**, quando for) e o seletor **allow / ask**;
+    - a categoria tem "todas allow" e "todas ask";
+    - há busca por nome e o filtro "só incluídas";
+    - "Duplicar kit" cria uma cópia para ajustar.
+- **Formulário do agente**: o campo "Kit de ferramentas" (lista de kits, ou "Sem kit — todas as ferramentas, sem aprovação") substitui a lista de tools e a flag de confirmação. A lista de agentes mostra o kit.
+- **Backup**: as duas tabelas entram no catálogo (`services/backup/catalog.ts`), com o kit por nome como chave natural.
+- **Textos**: em `i18n/areas/agents.ts`.
+
+## Testes
+- **Integração**:
+  - a tool fora do kit não chega ao modelo;
+  - em `allow`, a escrita executa sem `ai_tool_confirmations`;
+  - em `ask`, a leitura pede confirmação;
+  - sem kit, tudo roda direto;
+  - a tool de admin num kit, acionada por um usuário comum, não é oferecida;
+  - o kit em uso não é excluído;
+  - a migração reproduz o comportamento de cada agente;
+  - o backup faz a ida e volta do kit.
+- **e2e**: criar um kit marcando a categoria Conciliação, pôr uma escrita em `ask`, ligar o kit ao agente e ver o cartão de aprovação na conversa (provedor falso).
