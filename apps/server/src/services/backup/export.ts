@@ -19,6 +19,7 @@ import {
   keyColumns,
   loadCatalog,
   RESOURCE_TABLES,
+  ROW_FILTERS,
   SECRET_READERS,
   uuidArray,
 } from './catalog';
@@ -57,13 +58,15 @@ async function fetchRows(
   if (!meta) return [];
   const keys = keyColumns(table);
   const where: SQL[] = [];
+  if (ROW_FILTERS[table]) where.push(ROW_FILTERS[table]);
   if (options.ids) where.push(sql`id = ANY(${uuidArray(options.ids)})`);
   if (options.after) {
-    // Paginação pela chave (id, ou a chave composta como tupla).
+    // Paginação pela chave (id, ou a chave composta como tupla; as colunas que não são FK são texto).
     const after = options.after;
+    const uuidKeys = new Set(['id', ...meta.fks.map((fk) => fk.refColumn)]);
     where.push(
       sql`(${columnList(keys)}) > (${sql.join(
-        keys.map((k) => sql`${String(after[k])}::uuid`),
+        keys.map((k) => (uuidKeys.has(k) ? sql`${String(after[k])}::uuid` : sql`${String(after[k])}::text`)),
         sql`, `,
       )})`,
     );

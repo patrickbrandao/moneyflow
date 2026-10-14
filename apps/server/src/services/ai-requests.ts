@@ -1,5 +1,6 @@
 import type { Executor } from '@moneyflow/db';
 import type {
+  AiEmbeddingIndexDto,
   AiProviderHealthRow,
   AiProviderSummary,
   AiRequestBodyPart,
@@ -13,6 +14,7 @@ import type {
 } from '@moneyflow/shared';
 import { type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
+import { embeddingSourceTotal } from '../agents/embeddings';
 import { usageDto } from '../agents/store';
 import type { Config } from '../config';
 import type { ServiceContext } from '../context';
@@ -295,6 +297,8 @@ type UsageGroupRow = {
   cache_read_tokens: number;
   cost_micros: number | null;
   has_unpriced: boolean;
+  audio_seconds: string | number | null;
+  characters: string | number | null;
 };
 
 async function usagePeriod(db: Executor, providerId: string, period: SQL): Promise<AiUsagePeriodSummary> {
@@ -302,14 +306,19 @@ async function usagePeriod(db: Executor, providerId: string, period: SQL): Promi
     SELECT purpose, model, grouping(purpose)::int AS gp, grouping(model)::int AS gm, currency, count(*)::int AS calls,
            sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens,
            sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens,
-           sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced
+           sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced,
+           sum(audio_seconds)::float8 AS audio_seconds, sum(characters)::bigint AS characters
       FROM ai_usage
      WHERE provider_id = ${providerId} AND ${period}
      GROUP BY GROUPING SETS ((currency), (purpose, currency), (model, currency))
      ORDER BY calls DESC`);
   const out: AiUsagePeriodSummary = { totals: [], byPurpose: [], byModel: [] };
   for (const row of result.rows) {
-    const totals = usageDto(row as Parameters<typeof usageDto>[0]);
+    const totals = {
+      ...usageDto(row as Parameters<typeof usageDto>[0]),
+      audioSeconds: Number(row.audio_seconds ?? 0),
+      characters: Number(row.characters ?? 0),
+    };
     if (Number(row.gp) === 1 && Number(row.gm) === 1) out.totals.push(totals);
     else if (Number(row.gp) === 0) out.byPurpose.push({ ...totals, key: row.purpose ?? '' } satisfies AiUsageSlice);
     else out.byModel.push({ ...totals, key: row.model ?? '' } satisfies AiUsageSlice);
@@ -331,6 +340,11 @@ export async function providerSummary(ctx: ServiceContext, id: string): Promise<
   ]);
   const health = await ctx.db.execute<Record<string, unknown>>(sql`SELECT * FROM ai_provider_health(7, ${id}::uuid)`);
   const recent = await queryRequests(ctx.db, { providerId: id, limit: 50 });
+  // Progresso do índice de embeddings por modelo (spec 024): indexados / registros que a busca enxerga.
+  const indexes = await ctx.db.execute<{ model: string; in_use: boolean; last_in_use_at: unknown; indexed: number; pending: number }>(
+    sql`SELECT model, in_use, last_in_use_at, indexed, pending FROM ai_embedding_index_stats WHERE provider_id = ${id} ORDER BY model`,
+  );
+  const sourceTotal = indexes.rows.length > 0 ? await embeddingSourceTotal(ctx.db) : 0;
   return {
     provider,
     usage: { month, last30Days, total },
@@ -351,5 +365,15 @@ export async function providerSummary(ctx: ServiceContext, id: string): Promise<
       }),
     ),
     recent: recent.items,
+    embeddingIndexes: indexes.rows.map(
+      (x): AiEmbeddingIndexDto => ({
+        model: x.model,
+        inUse: Boolean(x.in_use),
+        lastInUseAt: iso(x.last_in_use_at),
+        indexed: Number(x.indexed),
+        pending: Number(x.pending),
+        total: sourceTotal,
+      }),
+    ),
   };
 }

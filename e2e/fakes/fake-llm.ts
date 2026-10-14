@@ -6,8 +6,11 @@ import type { AddressInfo } from 'node:net';
  * Provedor de LLM FALSO para testes (integração da API e e2e): fala o
  * suficiente da Anthropic Messages API (/v1/messages com streaming SSE,
  * /v1/models) e da OpenAI (/v1/chat/completions com streaming, /v1/models,
- * /v1/embeddings) para os SDKs oficiais, apontados por base_url. Nenhuma API
- * real é chamada.
+ * /v1/embeddings com `dimensions`, /v1/audio/transcriptions em multipart e
+ * /v1/audio/speech) para os SDKs oficiais, apontados por base_url. Nenhuma API
+ * real é chamada. Um modelo de embeddings com "768" no nome devolve 768
+ * dimensões (o teste da flag recusa); a transcrição devolve "transcrição de
+ * teste (<n> bytes)" e duration; a fala, bytes de um "mp3" falso.
  *
  * O "cérebro" padrão é determinístico, guiado pelo texto do usuário:
  *  - "listar caixas"            → chama a tool list_caixas
@@ -17,6 +20,7 @@ import type { AddressInfo } from 'node:net';
  *  - "devagar"                  → resposta longa e lenta (para testar o "parar")
  *  - resultado de tool          → "Pronto: <resumo do resultado>"
  *  - prompt de leitura de documento / de contrato / classificação / título → JSON ou título de teste
+ *  - descrição de anexo (visão por descrição, spec 024) → "Descrição de teste: …"
  *  - conversão de contrato em markdown → um markdown curto
  *  - qualquer outra coisa       → "Olá! Sou o agente de teste."
  * Os testes podem trocar o cérebro (`brain`) ou enfileirar respostas (`queue`),
@@ -65,6 +69,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function defaultBrain(view: NeutralView): FakeReply {
   if (/Gere um título curto/.test(view.system)) return { text: 'Conversa de teste' };
+  if (/Descreva o anexo para outro modelo/.test(view.system)) {
+    return { text: view.hasDocument ? 'Descrição de teste: boleto de R$ 123,45 com vencimento em 10/05/2030.' : 'Sem anexo.' };
+  }
   if (/ler o contrato anexado/.test(view.system)) {
     return {
       text: JSON.stringify({
@@ -328,11 +335,39 @@ export function fakeEmbedding(text: string): number[] {
   return out.slice(0, 1536);
 }
 
+/** Campos de um multipart/form-data (arquivos viram { fileName, contentType, bytes }). */
+function parseMultipart(raw: Buffer, contentType: string): Record<string, unknown> {
+  const boundary = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
+  if (!boundary) return {};
+  const marker = `--${boundary[1] ?? boundary[2]}`;
+  const out: Record<string, unknown> = {};
+  for (const part of raw.toString('latin1').split(marker)) {
+    const split = part.indexOf('\r\n\r\n');
+    if (split === -1) continue;
+    const head = part.slice(0, split);
+    const body = part.slice(split + 4).replace(/\r\n$/, '');
+    const name = /name="([^"]+)"/.exec(head)?.[1];
+    if (!name) continue;
+    const fileName = /filename="([^"]*)"/.exec(head)?.[1];
+    if (fileName !== undefined) {
+      out[name] = {
+        fileName,
+        contentType: /content-type:\s*([^\r\n]+)/i.exec(head)?.[1] ?? null,
+        bytes: Buffer.byteLength(body, 'latin1'),
+      };
+    } else out[name] = Buffer.from(body, 'latin1').toString('utf8');
+  }
+  return out;
+}
+
 async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
-  const raw = Buffer.concat(chunks).toString('utf8');
-  return raw ? JSON.parse(raw) : {};
+  const raw = Buffer.concat(chunks);
+  const type = String(req.headers['content-type'] ?? '');
+  if (/multipart\/form-data/i.test(type)) return parseMultipart(raw, type);
+  const text = raw.toString('utf8');
+  return text ? JSON.parse(text) : {};
 }
 
 export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm> {
@@ -346,7 +381,10 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
   };
   const server: Server = createServer(async (req, res) => {
     try {
-      const path = (req.url ?? '').split('?')[0]!;
+      let path = (req.url ?? '').split('?')[0]!;
+      // Prefixo /nolist: um compatível sem listagem de modelos (GET /v1/models dá 404; o resto funciona).
+      const noList = path.startsWith('/nolist/');
+      if (noList) path = path.slice('/nolist'.length);
       const body = req.method === 'POST' ? await readBody(req) : {};
       const json = (status: number, data: unknown, headers: Record<string, string> = {}) => {
         res.writeHead(status, { 'content-type': 'application/json', ...headers });
@@ -355,6 +393,7 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
       if (req.method === 'GET' && path === '/v1/models') {
         const anthropic = 'anthropic-version' in req.headers;
         fake.calls.push({ api: anthropic ? 'anthropic' : 'openai', path, headers: req.headers, body });
+        if (noList) return json(404, { type: 'error', error: { type: 'not_found_error', message: 'Not found' } });
         return anthropic
           ? json(200, {
               data: ['claude-sonnet-5-5', 'claude-opus-5-5'].map((id) => ({
@@ -375,12 +414,32 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
       if (req.method === 'POST' && path === '/v1/embeddings') {
         fake.calls.push({ api: 'openai', path, headers: req.headers, body });
         const inputs: string[] = Array.isArray(body.input) ? body.input : [body.input];
+        // Modelo com "768" no nome: devolve 768 dimensões (o MoneyFlow exige 1536).
+        const size = /768/.test(String(body.model)) ? 768 : 1536;
         return json(200, {
           object: 'list',
           model: body.model,
-          data: inputs.map((text, index) => ({ object: 'embedding', index, embedding: fakeEmbedding(String(text)) })),
+          data: inputs.map((text, index) => ({
+            object: 'embedding',
+            index,
+            embedding: fakeEmbedding(`${body.model}|${String(text)}`).slice(0, size),
+          })),
           usage: { prompt_tokens: inputs.join(' ').length, total_tokens: inputs.join(' ').length },
         });
+      }
+      if (req.method === 'POST' && path === '/v1/audio/transcriptions') {
+        fake.calls.push({ api: 'openai', path, headers: req.headers, body });
+        const file = body.file as { bytes?: number } | undefined;
+        return json(200, {
+          text: `transcrição de teste (${file?.bytes ?? 0} bytes)`,
+          usage: { type: 'duration', seconds: 1.5 },
+        });
+      }
+      if (req.method === 'POST' && path === '/v1/audio/speech') {
+        fake.calls.push({ api: 'openai', path, headers: req.headers, body });
+        res.writeHead(200, { 'content-type': 'audio/mpeg' });
+        res.end(Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xfb, 0x90, 0x00]));
+        return;
       }
       const anthropic = req.method === 'POST' && path === '/v1/messages';
       const openai = req.method === 'POST' && path === '/v1/chat/completions';

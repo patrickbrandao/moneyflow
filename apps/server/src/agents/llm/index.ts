@@ -3,7 +3,7 @@ import { openaiClient } from './openai';
 import type { RequestLogBase } from './request-log';
 import type { LlmClient, LlmCredentials } from './types';
 
-export { embedTexts } from './openai';
+export { embed, speak, type TranscribeResult, transcribe } from './openai';
 export { type RequestLogBase, RequestRecorder } from './request-log';
 export * from './types';
 

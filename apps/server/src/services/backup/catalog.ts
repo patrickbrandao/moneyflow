@@ -43,7 +43,20 @@ export const EXCLUDED_TABLES = new Set([
   // Requisições ao provedor (spec 023): operacionais, com conversas e dados financeiros.
   'ai_requests',
   'ai_request_attempts',
+  // Cache dos anexos (descrição, texto do PDF, transcrição, áudio gerado) e os índices de embeddings (spec 024).
+  'ai_attachment_derivatives',
+  'ai_embedding_indexes',
 ]);
+
+/**
+ * Linhas que ficam fora do backup: o áudio gerado de uma mensagem (spec 024)
+ * pertence ao derivado, que é cache e não vai; sem outro vínculo, não vai também.
+ */
+export const ROW_FILTERS: Record<string, SQL> = {
+  attachments: sql`(NOT EXISTS (SELECT 1 FROM ai_attachment_derivatives d WHERE d.result_attachment_id = attachments.id)
+                    OR EXISTS (SELECT 1 FROM attachment_links l
+                                WHERE l.attachment_id = attachments.id AND l.target_kind <> 'ai_message_speech'))`,
+};
 
 /** Tabelas de cada recurso exportável (a primeira é a principal). */
 export const RESOURCE_TABLES: Record<BackupResource, string[]> = {
@@ -113,8 +126,9 @@ export const OWNED_BY: Record<string, string[]> = {
   entity_tag_links: ['entity_id'],
   ai_model_prices: ['provider_id'],
   ai_tool_kit_tools: ['kit_id'],
-  // Agente já cadastrado fica com o histórico dele (spec 022).
+  // Agente já cadastrado fica com o histórico dele (spec 022) e com as inferências dele (spec 024).
   ai_agent_prompt_versions: ['agent_id'],
+  ai_agent_inferences: ['agent_id'],
   agent_mcp_servers: ['agent_id', 'mcp_server_id'],
   message_subscriptions: ['destination_id'],
   message_subscription_caixas: ['subscription_id'],
@@ -163,6 +177,8 @@ export const COMPOSITE_KEYS: Record<string, string[]> = {
   user_ai_settings: ['user_id'],
   // Configurações do sistema (spec 023): a chave é o texto `area.nome`.
   app_settings: ['key'],
+  // Provedor por inferência do agente (spec 024): a capacidade é texto.
+  ai_agent_inferences: ['agent_id', 'capability'],
 };
 
 /** Colunas que identificam a linha (id ou a chave composta). */

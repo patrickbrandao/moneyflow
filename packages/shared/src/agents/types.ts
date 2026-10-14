@@ -5,6 +5,12 @@ import type { AgentToolCategory, AgentToolKind, AgentToolMode } from './tools';
 /* DTOs da API dos agentes (spec 011). Segredos nunca aparecem: só dicas/nomes. */
 
 export type AiProviderKind = 'anthropic' | 'openai';
+/** Capacidades de um provedor (spec 024). */
+export type AiCapability = 'text' | 'vision' | 'embeddings' | 'transcription' | 'speech';
+/** Inferências do agente além do texto (o texto fica no próprio agente). */
+export type AiInferenceCapability = Exclude<AiCapability, 'text'>;
+/** Modelo padrão por capacidade ligada e a voz padrão do TTS (as chaves de ai_providers.default_models). */
+export type AiDefaultModels = Partial<Record<AiCapability | 'speech_voice', string>>;
 export type McpVisibility = 'global' | 'public' | 'private';
 export type McpInstructionsMode = 'ignore' | 'system' | 'user';
 export type AiRunStatus = 'queued' | 'running' | 'awaiting_confirmation' | 'completed' | 'failed' | 'canceled';
@@ -17,7 +23,12 @@ export type AiProviderDto = {
   baseUrl: string | null;
   /** "…abcd" (últimos 4); null = sem chave. A chave em si nunca sai da API. */
   apiKeyHint: string | null;
-  embeddingModel: string | null;
+  /** O que o provedor sabe fazer, em ordem canônica (spec 024). */
+  capabilities: AiCapability[];
+  defaultModels: AiDefaultModels;
+  /** Messages API: manda cache_control / thinking (desligados por padrão num compatível). */
+  promptCacheEnabled: boolean;
+  thinkingEnabled: boolean;
   isActive: boolean;
   /** Registra corpos e cabeçalhos das requisições (spec 023). */
   logBodies: boolean;
@@ -26,7 +37,23 @@ export type AiProviderDto = {
   createdAt: string;
 };
 
-export type AiProviderTestResult = { ok: boolean; message: string; models: string[] };
+/** Resultado de uma flag no "Testar conexão" (uma chamada mínima por flag ligada). */
+export type AiProviderCapabilityCheck = {
+  capability: AiCapability;
+  ok: boolean;
+  /** Modelo usado na chamada (null = sem modelo padrão para a flag: não testada). */
+  model: string | null;
+  message: string;
+};
+
+export type AiProviderTestResult = {
+  ok: boolean;
+  message: string;
+  models: string[];
+  /** O provedor não tem listagem de modelos (compatíveis): digite o modelo; não é erro. */
+  modelsUnavailable: boolean;
+  checks: AiProviderCapabilityCheck[];
+};
 
 export type AiPriceDto = {
   id: string;
@@ -38,6 +65,9 @@ export type AiPriceDto = {
   outputPricePerMillion: number;
   cacheWritePricePerMillion: number | null;
   cacheReadPricePerMillion: number | null;
+  /** Áudio: por minuto transcrito e por milhão de caracteres falados (spec 024); null = não cobra assim. */
+  audioInputPerMinute: number | null;
+  speechPerMillionChars: number | null;
   validFrom: string;
 };
 
@@ -48,6 +78,18 @@ export type AgentParams = {
   max_tool_iterations?: number;
   thinking_budget_tokens?: number;
   reasoning_effort?: 'minimal' | 'low' | 'medium' | 'high';
+};
+
+/** Provedor de uma inferência do agente (spec 024); modelo/voz nulos = os padrões do provedor. */
+export type AgentInferenceDto = {
+  capability: AiInferenceCapability;
+  providerId: string;
+  providerName: string;
+  model: string | null;
+  voice: string | null;
+  /** Modelo e voz em vigor (com os padrões do provedor); null = não configurado. */
+  effectiveModel: string | null;
+  effectiveVoice: string | null;
 };
 
 export type AgentMcpLinkDto = { mcpServerId: string; name: string; visibility: McpVisibility; enabledTools: string[] | null };
@@ -74,6 +116,8 @@ export type AiAgentDto = {
   archivedAt: string | null;
   createdAt: string;
   mcpServers: AgentMcpLinkDto[];
+  /** Inferências além do texto (visão, embeddings, áudio→texto, texto→áudio); sem linha = "Nenhum". */
+  inferences: AgentInferenceDto[];
 };
 
 /** Versão do prompt de um agente (spec 022): imutável; a última é o prompt atual. */
@@ -187,6 +231,9 @@ export type UsageTotals = {
   /** Milionésimos da moeda (null = sem preço cadastrado). */
   costMicros: number | null;
   hasUnpriced: boolean;
+  /** Áudio transcrito (s) e caracteres falados (spec 024); só onde a consulta soma (detalhe do provedor). */
+  audioSeconds?: number;
+  characters?: number;
 };
 
 /** Finalidade de uma chamada medida em ai_usage (as quatro últimas são os fluxos automáticos). */
@@ -197,7 +244,10 @@ export type AiUsagePurpose =
   | 'document_reading'
   | 'classify_lines'
   | 'contract_reading'
-  | 'contract_markdown';
+  | 'contract_markdown'
+  | 'vision_describe'
+  | 'transcription'
+  | 'speech';
 
 export type AiUsageReport = {
   byUser: (UsageTotals & { month: string; userId: string | null; username: string | null; runs: number })[];
@@ -445,6 +495,21 @@ export type AiProviderSummary = {
   usage: { month: AiUsagePeriodSummary; last30Days: AiUsagePeriodSummary; total: AiUsagePeriodSummary };
   health: AiProviderHealthRow[];
   recent: AiRequestListItem[];
+  /** Progresso do índice de embeddings por modelo (spec 024). */
+  embeddingIndexes: AiEmbeddingIndexDto[];
+};
+
+/** Um índice de embeddings (provedor, modelo): indexados / total. */
+export type AiEmbeddingIndexDto = {
+  model: string;
+  inUse: boolean;
+  lastInUseAt: string | null;
+  /** Vetores com o texto atual. */
+  indexed: number;
+  /** Na fila (texto novo ou alterado). */
+  pending: number;
+  /** Registros que a busca enxerga (entidades, títulos, compras de cartão, linhas de extrato). */
+  total: number;
 };
 
 /** Configuração do sistema (spec 023): o valor do banco vence a variável de ambiente. */

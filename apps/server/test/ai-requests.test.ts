@@ -3,7 +3,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
-import { embedTexts } from '../src/agents/llm';
+import { embed } from '../src/agents/llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { purgeAiRequests } from '../src/agents/worker';
 import { EXCLUDED_TABLES, fullTables, loadCatalog } from '../src/services/backup/catalog';
@@ -61,11 +61,18 @@ beforeAll(async () => {
   h = await startApp({ AI_REQUEST_BACKOFF_MS: '5', AI_REQUEST_MAX_ATTEMPTS: '3', AI_REQUEST_RETENTION_DAYS: '30' });
   adminCookie = (await userSession(h, 'admin')).cookie;
   admin = client(h, adminCookie);
-  provider = await admin.post('/api/admin/ai/providers', { name: `Req ${uid()}`, kind: 'anthropic', baseUrl: llm.url, apiKey: API_KEY });
+  provider = await admin.post('/api/admin/ai/providers', {
+    name: `Req ${uid()}`,
+    kind: 'anthropic',
+    baseUrl: llm.url,
+    apiKey: API_KEY,
+    defaultModels: { text: 'claude-sonnet-5-5' },
+  });
   agent = await admin.post('/api/admin/ai/agents', {
     name: `Agente req ${uid()}`,
     systemPrompt: 'Você ajuda nos testes de requisições.',
-    providerId: provider.id,
+    // Texto e visão no mesmo provedor: a imagem vai direto ao modelo (spec 024).
+    defaultProviderId: provider.id,
     model: 'claude-sonnet-5-5',
     params: { max_tokens: 1000 },
     isActive: true,
@@ -287,7 +294,8 @@ describe('corpos e segredos', () => {
   it('testar conexão e embeddings também viram requisições (test_connection sem finalidade; embedding ligado ao uso)', async () => {
     await admin.post(`/api/admin/ai/providers/${provider.id}/test`);
     const test = await h.db.execute<Record<string, any>>(sql`
-      SELECT * FROM ai_requests WHERE provider_id = ${provider.id} AND operation = 'test_connection' ORDER BY started_at DESC LIMIT 1`);
+      SELECT * FROM ai_requests WHERE provider_id = ${provider.id} AND operation = 'test_connection' AND method = 'GET'
+       ORDER BY started_at DESC LIMIT 1`);
     expect(test.rows[0]).toMatchObject({ status: 'ok', purpose: null, method: 'GET', path: '/v1/models?limit=100', streaming: false });
     expect(test.rows[0]!.user_id).toBeTruthy();
 
@@ -296,11 +304,11 @@ describe('corpos e segredos', () => {
       kind: 'openai',
       baseUrl: `${llm.url}/v1`,
       apiKey: 'sk-emb-SEGREDO',
-      embeddingModel: 'fake-embedding',
+      defaultModels: { embeddings: 'fake-embedding' },
       logBodies: true,
     });
     expect(openai.logBodies).toBe(true);
-    const out = await embedTexts({ kind: 'openai', baseUrl: `${llm.url}/v1`, apiKey: 'sk-emb-SEGREDO' }, 'fake-embedding', ['abc'], {
+    const out = await embed({ kind: 'openai', baseUrl: `${llm.url}/v1`, apiKey: 'sk-emb-SEGREDO' }, 'fake-embedding', ['abc'], {
       db: h.db,
       providerId: openai.id,
       logBodies: true,

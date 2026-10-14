@@ -188,6 +188,79 @@ describe('backup: recursos num sistema novo', () => {
     expect(prices.some((p: any) => p.providerId === provider.id && p.model === 'gpt-x')).toBe(true);
   });
 
+  it('capacidades e inferências vão no arquivo (sem os caches); arquivo antigo (embedding_model) migra como a 0041 (spec 024)', async () => {
+    if (skip) return;
+    const api = client(b, adminB.cookie);
+    const provider = await api.post('/api/admin/ai/providers', {
+      name: `Capacidades ${uid()}`,
+      kind: 'openai',
+      apiKey: `sk-${uid()}`,
+      capabilities: ['text', 'vision', 'embeddings'],
+      defaultModels: { text: 'gpt-x', embeddings: 'emb-x' },
+    });
+    const agent = await api.post('/api/admin/ai/agents', { name: `Inferências ${uid()}`, defaultProviderId: provider.id, model: 'gpt-x' });
+    const full = await b.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminB.cookie } });
+    expect(full.statusCode, full.body.slice(0, 300)).toBe(200);
+    const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+    const providerRow = json.tables.ai_providers.find((p: any) => p.id === provider.id);
+    expect(providerRow).toMatchObject({
+      capabilities: ['text', 'vision', 'embeddings'],
+      default_models: { text: 'gpt-x', embeddings: 'emb-x' },
+    });
+    expect(providerRow.embedding_model).toBeUndefined();
+    const inferences = json.tables.ai_agent_inferences.filter((i: any) => i.agent_id === agent.id);
+    expect(inferences.map((i: any) => i.capability).sort()).toEqual(['embeddings', 'vision']);
+    expect(json.tables.ai_attachment_derivatives).toBeUndefined();
+    expect(json.tables.ai_embedding_indexes).toBeUndefined();
+    // Reimportar: as inferências já cadastradas ficam.
+    const again = await importFile(b, adminB.cookie, 'full', {
+      ...json,
+      tables: { ai_providers: [providerRow], ai_agent_inferences: inferences },
+    });
+    expect(failures(again)).toEqual([]);
+    expect(sum(again, 'ai_agent_inferences').imported).toBe(0);
+
+    // Arquivo antigo: provedores sem as colunas novas, com embedding_model; agentes sem inferências.
+    const { capabilities: _c, default_models: _d, prompt_cache_enabled: _p, thinking_enabled: _t, ...legacy } = providerRow;
+    const embedder = { ...legacy, id: randomUUID(), name: `Antigo emb ${uid()}`, embedding_model: 'emb-antigo' };
+    const compat = {
+      ...legacy,
+      id: randomUUID(),
+      name: `Antigo compatível ${uid()}`,
+      kind: 'anthropic',
+      base_url: 'http://127.0.0.1:9',
+      api_key: null,
+      embedding_model: null,
+    };
+    const orphan = { ...compat, id: randomUUID(), name: `Antigo sem modelo ${uid()}` };
+    const agentRow = json.tables.ai_agents.find((a: any) => a.id === agent.id);
+    const oldAgent = { ...agentRow, id: randomUUID(), name: `Agente antigo ${uid()}`, provider_id: compat.id, model: 'claude-antigo' };
+    const report = await importFile(b, adminB.cookie, 'full', {
+      ...json,
+      tables: { ai_providers: [embedder, compat, orphan], ai_agents: [oldAgent] },
+      references: {},
+    });
+    // O compatível sem agente no arquivo não tem modelo de texto: volta como conflito, com o motivo.
+    expect(failures(report).map((i) => i.id)).toEqual([orphan.id]);
+    expect(failures(report)[0]!.reason).toContain('modelo de texto padrão');
+    const providers = await api.get('/api/admin/ai/providers');
+    expect(providers.find((p: any) => p.id === embedder.id)).toMatchObject({
+      capabilities: ['text', 'vision', 'embeddings', 'transcription', 'speech'],
+      defaultModels: { embeddings: 'emb-antigo' },
+    });
+    expect(providers.find((p: any) => p.id === compat.id)).toMatchObject({
+      capabilities: ['text', 'vision'],
+      defaultModels: { text: 'claude-antigo' },
+      promptCacheEnabled: false,
+      thinkingEnabled: false,
+    });
+    const agents = await api.get('/api/admin/ai/agents');
+    expect(agents.find((a: any) => a.id === oldAgent.id).inferences.map((i: any) => [i.capability, i.providerId])).toEqual([
+      ['vision', compat.id],
+      ['embeddings', embedder.id],
+    ]);
+  });
+
   it('agente dos fluxos entra sem a marca se já há um marcado; conversa de backup antigo ganha a finalidade do screen_context', async () => {
     if (skip) return;
     const api = client(b, adminB.cookie);

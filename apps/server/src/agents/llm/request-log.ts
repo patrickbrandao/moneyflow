@@ -183,7 +183,7 @@ function wait(ms: number, signal: AbortSignal | null | undefined): Promise<void>
 
 type BodyInfo = { text: string | null; bytes: number | null; replayable: boolean; streaming: boolean };
 
-function describeBody(body: RequestInit['body'] | undefined): BodyInfo {
+async function describeBody(body: RequestInit['body'] | undefined, logBodies: boolean): Promise<BodyInfo> {
   if (body === undefined || body === null) return { text: null, bytes: 0, replayable: true, streaming: false };
   if (typeof body === 'string') {
     let streaming = false;
@@ -199,22 +199,33 @@ function describeBody(body: RequestInit['body'] | undefined): BodyInfo {
     return { text: buffer.toString('utf8'), bytes: buffer.length, replayable: true, streaming: false };
   }
   if (typeof FormData !== 'undefined' && body instanceof FormData) {
-    const fields: Record<string, string> = {};
+    // Multipart (transcrição, spec 024): com log_bodies, o arquivo vai inteiro em base64; sem ele, só os metadados.
+    const fields: Record<string, unknown> = {};
     let bytes = 0;
     for (const [name, value] of body.entries()) {
       if (typeof value === 'string') {
         fields[name] = value;
         bytes += Buffer.byteLength(value);
       } else {
-        fields[name] = `[arquivo ${value.name || 'sem nome'} · ${value.type || 'binário'} · ${value.size} bytes]`;
         bytes += value.size;
+        fields[name] = logBodies
+          ? {
+              file_name: value.name || null,
+              content_type: value.type || null,
+              bytes: value.size,
+              base64: Buffer.from(await value.arrayBuffer()).toString('base64'),
+            }
+          : `[arquivo ${value.name || 'sem nome'} · ${value.type || 'binário'} · ${value.size} bytes]`;
       }
     }
-    return { text: JSON.stringify(fields), bytes, replayable: true, streaming: false };
+    return { text: logBodies ? JSON.stringify(fields) : null, bytes, replayable: true, streaming: false };
   }
   // Stream ou corpo de outro tipo: não dá para repetir nem gravar.
   return { text: null, bytes: null, replayable: false, streaming: false };
 }
+
+/** Resposta que não é texto (o áudio do TTS): guardada em base64, porque o text do banco não aceita bytes nulos. */
+const isBinary = (contentType: string | null) => Boolean(contentType) && !/json|text|event-stream|xml|javascript/i.test(contentType!);
 
 type Row = {
   id: string | null;
@@ -313,9 +324,11 @@ export class RequestRecorder {
   /** O `fetch` do SDK: registra, tenta de novo quando vale a pena e acompanha o corpo da resposta. */
   readonly fetch: Fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    // Sondas do SDK (ex.: fetch('data:,') antes de um upload multipart) não são chamadas ao provedor.
+    if (!/^https?:/i.test(url)) return this.realFetch(input, init);
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-    const body = describeBody(init?.body);
+    const body = await describeBody(init?.body, this.base.logBodies === true);
     const signal = init?.signal ?? null;
     const t0 = performance.now();
     const id = await this.insertRow(method, url, headers, body);
@@ -437,11 +450,21 @@ export class RequestRecorder {
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
     const capture = this.base.logBodies === true;
+    const contentType = response.headers.get('content-type');
+    const binary = isBinary(contentType);
+    const chunks: Buffer[] = [];
+    let captured = 0;
     let settled = false;
     const settle = async (error: unknown, kind: 'ok' | 'error' | 'canceled') => {
       if (settled) return;
       settled = true;
-      if (capture) row.responseRaw += decoder.decode();
+      if (capture && binary) {
+        row.responseRaw = JSON.stringify({
+          content_type: contentType,
+          bytes: row.responseBytes,
+          base64: Buffer.concat(chunks).toString('base64'),
+        });
+      } else if (capture) row.responseRaw += decoder.decode();
       if (kind !== 'ok') {
         row.failed = kind === 'error';
         if (kind === 'error') row.errorMessage = `Resposta interrompida: ${safeError(error)}`.slice(0, 500);
@@ -475,7 +498,12 @@ export class RequestRecorder {
         const value = chunk.value;
         if (row.firstByteMs === null) row.firstByteMs = Math.max(0, Math.round(performance.now() - row.t0));
         row.responseBytes += value.byteLength;
-        if (capture && row.responseRaw.length < MAX_CAPTURE_BYTES) row.responseRaw += decoder.decode(value, { stream: true });
+        if (capture && binary) {
+          if (captured < MAX_CAPTURE_BYTES) {
+            chunks.push(Buffer.from(value));
+            captured += value.byteLength;
+          }
+        } else if (capture && row.responseRaw.length < MAX_CAPTURE_BYTES) row.responseRaw += decoder.decode(value, { stream: true });
         controller.enqueue(value);
       },
       cancel: async (reason) => {

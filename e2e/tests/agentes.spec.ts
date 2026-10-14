@@ -18,7 +18,10 @@ import { ADMIN_STATE, baseURL, loginAsAdmin } from '../support/session';
  *    as variáveis e o "Ver prompt montado"; e Minha conta → IA;
  *  - as requisições ao provedor (spec 023): um 429 seguido de 200 na conversa,
  *    o detalhe do provedor pelo nome na lista, a gaveta com as duas tentativas,
- *    o Editar do detalhe e a retenção (banco vence a variável; "Usar o padrão").
+ *    o Editar do detalhe e a retenção (banco vence a variável; "Usar o padrão");
+ *  - as capacidades (spec 024): cadastrar um provedor OpenAI-compatível falso
+ *    com todas as flags, testar flag a flag e criar um agente que herda tudo
+ *    pelo "Provedor padrão".
  *
  * O provedor falso (Anthropic Messages API) sobe aqui na porta E2E_LLM_PORT
  * (padrão 18082). O worker da pilha o alcança em E2E_LLM_BASE (padrão
@@ -95,6 +98,9 @@ test.beforeAll(async () => {
     kind: 'anthropic',
     baseUrl: llmBase,
     apiKey: 'sk-e2e-fake-key',
+    // Anthropic compatível: o modelo de texto padrão é obrigatório; o cache, ligado à mão (spec 024).
+    defaultModels: { text: 'claude-sonnet-5-5' },
+    promptCacheEnabled: true,
   });
   // Kit com todas as tools no modo sugerido (escritas pedem aprovação): o cartão "Aplicar?" dos testes abaixo.
   const catalog: { name: string; suggestedMode: string }[] = await (await adminApi.get('/api/admin/ai/tools')).json();
@@ -105,7 +111,8 @@ test.beforeAll(async () => {
   agent = await postJson(adminApi, '/api/admin/ai/agents', {
     name: `E2E Agente ${tag}`,
     description: 'Agente de teste do e2e',
-    providerId: provider.id,
+    // Texto e visão no provedor falso (spec 024).
+    defaultProviderId: provider.id,
     model: 'claude-sonnet-5-5',
     toolKitId: kit.id,
     isActive: true,
@@ -601,4 +608,71 @@ test('requisições: detalhe do provedor, a requisição da conversa com as tent
   await expect(page.getByTestId('retention-source')).toHaveAttribute('data-source', 'env');
   const setting = await (await adminApi.get('/api/admin/settings/ai.request_retention_days')).json();
   expect(setting).toMatchObject({ source: 'env', value: 30 });
+});
+
+test('capacidades: provedor OpenAI-compatível falso com todas as flags e um agente que herda tudo (spec 024)', async ({ page }) => {
+  await enter(page);
+  const name = `E2E OpenAI falso ${tag}`;
+  await page.goto('/admin/ai');
+  await page.getByRole('button', { name: 'Novo provedor' }).first().click();
+  const form = page.getByRole('dialog', { name: 'Novo provedor' });
+  await form.getByLabel('Nome').fill(name);
+  await form.getByTestId('provider-kind').selectOption('openai');
+  await form.getByLabel('URL base').fill(`${llmBase}/v1`);
+  await form.getByLabel('Chave da API').fill('sk-e2e-openai-fake');
+  // O tipo OpenAI vem com todas as flags marcadas e as sugestões de modelo.
+  for (const capability of ['text', 'vision', 'embeddings', 'transcription', 'speech']) {
+    await expect(form.getByTestId(`provider-cap-${capability}`)).toBeChecked();
+  }
+  await expect(form.getByTestId('provider-model-embeddings')).toHaveValue('text-embedding-3-small');
+  await expect(form.getByTestId('provider-voice')).toHaveValue('alloy');
+  await form.getByTestId('provider-model-text').fill('fake-gpt');
+  await form.getByRole('button', { name: 'Salvar' }).click();
+  await expect(form).toBeHidden();
+
+  // Testar conexão: uma linha por flag, todas ok.
+  const row = page.getByRole('row').filter({ hasText: name });
+  await expect(row.locator('[data-capability]')).toHaveCount(5);
+  await row.getByRole('button', { name: 'Testar conexão' }).click();
+  await expect(row.getByTestId('provider-test-result')).toContainText('Conexão funcionando', { timeout: 30_000 });
+  const checks = row.getByTestId('provider-test-checks').locator('[data-capability]');
+  await expect(checks).toHaveCount(5);
+  await expect(row.getByTestId('provider-test-checks').locator('[data-ok="false"]')).toHaveCount(0);
+  const providers: { id: string; name: string }[] = await (await adminApi.get('/api/admin/ai/providers')).json();
+  const created = providers.find((x) => x.name === name)!;
+
+  // Agente: o provedor padrão preenche o texto, o modelo e as quatro inferências.
+  const agentName = `E2E Agente herda tudo ${tag}`;
+  await page.goto('/admin/ai/agents');
+  await page.getByRole('button', { name: 'Novo agente' }).first().click();
+  const agentForm = page.getByRole('dialog', { name: 'Novo agente' });
+  await agentForm.getByLabel('Nome', { exact: true }).fill(agentName);
+  await agentForm.getByTestId('agent-default-provider').selectOption({ label: name });
+  await expect(agentForm.getByTestId('agent-text-provider')).toHaveValue(created.id);
+  await expect(agentForm.getByTestId('agent-model')).toHaveValue('fake-gpt');
+  for (const capability of ['vision', 'embeddings', 'transcription', 'speech']) {
+    await expect(agentForm.getByTestId(`agent-inference-${capability}`)).toHaveValue(created.id);
+  }
+  await agentForm.getByRole('button', { name: 'Salvar' }).click();
+  await expect(agentForm).toBeHidden();
+  const agentRow = page.getByRole('row').filter({ hasText: agentName });
+  await expect(agentRow.getByTestId('agent-capabilities').locator('[data-capability]')).toHaveCount(5);
+  const agents: { id: string; name: string; inferences: { capability: string; providerId: string; model: string | null }[] }[] = await (
+    await adminApi.get('/api/admin/ai/agents')
+  ).json();
+  const saved = agents.find((a) => a.name === agentName)!;
+  extraAgents.push(saved.id);
+  expect(saved.inferences.map((i) => [i.capability, i.providerId, i.model])).toEqual([
+    ['vision', created.id, null],
+    ['embeddings', created.id, null],
+    ['transcription', created.id, null],
+    ['speech', created.id, null],
+  ]);
+
+  // Detalhe do provedor: as capacidades no cabeçalho.
+  await page.goto(`/admin/ai/providers/${created.id}`);
+  await expect(page.getByTestId('provider-detail-capabilities').locator(':scope > [data-capability]')).toHaveCount(5);
+  await expect(page.getByTestId('provider-embedding-indexes')).toBeVisible();
+  await adminApi.patch(`/api/admin/ai/agents/${saved.id}`, { data: { isActive: false } });
+  await adminApi.patch(`/api/admin/ai/providers/${created.id}`, { data: { isActive: false } });
 });

@@ -73,6 +73,8 @@ beforeAll(async () => {
     kind: 'anthropic',
     baseUrl: llm.url,
     apiKey: 'sk-ant-test-prompt-0001',
+    defaultModels: { text: 'claude-sonnet-5-5' },
+    promptCacheEnabled: true,
   });
   agent = await newAgent({ systemPrompt: 'PROMPT-DO-AGENTE para {{usuario.nome}} ({{usuario.email}}), sou {{agente.nome}}.' });
 });

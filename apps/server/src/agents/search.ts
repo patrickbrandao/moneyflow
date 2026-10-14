@@ -1,14 +1,19 @@
-import { normalizeDocument } from '@moneyflow/shared';
+import { normalizeDocument, t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
-import { embeddingCredentials, embedQuery, vectorLiteral } from './embeddings';
+import { type EmbeddingCredentials, embeddingSourceTotal, embedQuery, vectorLiteral } from './embeddings';
+import { inferenceCredentials } from './inferences';
 
 /*
- * Busca por significado da tool semantic_search: com provedor de embeddings,
+ * Busca por significado da tool semantic_search (spec 024): com o par
+ * (provedor, modelo) de embeddings do agente que a chamou,
  * ai_embeddings_search (sempre só com as caixas que o usuário lê, e cada
- * objeto é revalidado); sem ele, semelhança de texto (pg_trgm) e, nas
- * entidades, o prefixo do documento (CPF/CNPJ, inclusive alfanumérico), que
- * vale pontuação 1 para não ficar abaixo dos trigramas.
+ * objeto é revalidado). Enquanto o índice do par não está completo, usa o que
+ * já existe e completa com trigramas, avisando "índice em construção". Sem
+ * embeddings (agente sem a inferência, ou a busca fora de um agente, como o
+ * /mcp), semelhança de texto (pg_trgm) e, nas entidades, o prefixo do
+ * documento (CPF/CNPJ, inclusive alfanumérico), que vale pontuação 1 para não
+ * ficar abaixo dos trigramas.
  */
 
 export type SearchType = 'entity' | 'title' | 'card_purchase' | 'statement_line';
@@ -25,12 +30,42 @@ async function readableCaixas(ctx: ServiceContext): Promise<string[]> {
 
 const uuidArray = (ids: string[]) => `{${ids.join(',')}}`;
 
+/** Par de embeddings do agente da execução (null fora de um agente ou sem a inferência). */
+async function agentEmbeddings(ctx: ServiceContext): Promise<{ agentId: string; creds: EmbeddingCredentials } | null> {
+  if (!ctx.agentRunId) return null;
+  const run = await ctx.db.execute<{ agent_id: string }>(sql`SELECT agent_id FROM ai_runs WHERE id = ${ctx.agentRunId}`);
+  const agentId = run.rows[0]?.agent_id;
+  if (!agentId) return null;
+  const creds = await inferenceCredentials(ctx.db, agentId, 'embeddings', ctx.access.actor.id);
+  if (!creds?.model) return null;
+  return {
+    agentId,
+    creds: {
+      ...creds,
+      model: creds.model,
+      maxAttempts: ctx.config.aiRequestMaxAttempts,
+      backoffMs: ctx.config.aiRequestBackoffMs,
+    },
+  };
+}
+
+/** O índice do par está completo: registrado, sem fila e com todos os registros que a busca enxerga. */
+async function indexComplete(ctx: ServiceContext, creds: EmbeddingCredentials): Promise<boolean> {
+  const stats = await ctx.db.execute<{ indexed: number; pending: number }>(sql`
+    SELECT indexed, pending FROM ai_embedding_index_stats WHERE provider_id = ${creds.providerId} AND model = ${creds.model}`);
+  const row = stats.rows[0];
+  if (!row || Number(row.pending) > 0) return false;
+  return Number(row.indexed) >= (await embeddingSourceTotal(ctx.db));
+}
+
 export async function semanticSearch(ctx: ServiceContext, query: string, types: SearchType[] | null, limit: number) {
   const wanted = types?.length ? types : ALL;
   const caixaIds = await readableCaixas(ctx);
-  const creds = await embeddingCredentials(ctx.db, ctx.config);
-  if (creds) {
-    const vector = await embedQuery(ctx.db, creds, query, ctx.access.actor.id);
+  const pair = await agentEmbeddings(ctx);
+  if (pair) {
+    const { creds } = pair;
+    const complete = await indexComplete(ctx, creds);
+    const vector = await embedQuery(ctx.db, creds, query, ctx.access.actor.id, pair.agentId);
     const result = await ctx.db.execute<{
       object_type: SearchType;
       object_id: string;
@@ -38,15 +73,33 @@ export async function semanticSearch(ctx: ServiceContext, query: string, types: 
       source_text: string;
       distance: number;
     }>(
-      sql`SELECT * FROM ai_embeddings_search(${vectorLiteral(vector)}::vector, ${creds.model}, ${uuidArray(caixaIds)}::uuid[],
-                                              ${`{${wanted.join(',')}}`}::text[], ${limit})`,
+      sql`SELECT * FROM ai_embeddings_search(${vectorLiteral(vector)}::vector, ${creds.providerId}::uuid, ${creds.model},
+                                              ${uuidArray(caixaIds)}::uuid[], ${`{${wanted.join(',')}}`}::text[], ${limit})`,
     );
     const hits: SemanticHit[] = result.rows
       .filter((r) => r.caixa_id === null || ctx.access.canRead(r.caixa_id))
       .map((r) => ({ type: r.object_type, id: r.object_id, caixaId: r.caixa_id, text: r.source_text, score: 1 - Number(r.distance) }));
-    return { mode: 'embeddings' as const, hits };
+    if (complete) return { mode: 'embeddings' as const, hits };
+    // Índice em construção: o que já existe, completado pelos trigramas (sem repetir).
+    const seen = new Set(hits.map((h) => `${h.type}:${h.id}`));
+    const extra = (await trigramSearch(ctx, query, wanted, caixaIds, limit)).filter((h) => !seen.has(`${h.type}:${h.id}`));
+    return {
+      mode: 'embeddings' as const,
+      building: true,
+      notice: t.agents.search.indexBuilding,
+      hits: [...hits, ...extra].slice(0, limit),
+    };
   }
+  return { mode: 'trigram' as const, hits: await trigramSearch(ctx, query, wanted, caixaIds, limit) };
+}
 
+async function trigramSearch(
+  ctx: ServiceContext,
+  query: string,
+  wanted: SearchType[],
+  caixaIds: string[],
+  limit: number,
+): Promise<SemanticHit[]> {
   const caixaList = uuidArray(caixaIds);
   // Prefixo do documento, como na listagem de entidades (entities_document_prefix_idx); só com algum dígito,
   // para uma palavra comum não casar com o início de um CNPJ alfanumérico.
@@ -77,12 +130,9 @@ export async function semanticSearch(ctx: ServiceContext, query: string, types: 
                      FROM statement_lines l LEFT JOIN financial_accounts a ON a.id = l.financial_account_id
                     WHERE coalesce(a.caixa_id, l.card_caixa_id) = ANY (${caixaList}::uuid[])
                       AND (l.description % ${query} OR l.description ILIKE ${`%${query}%`})`);
-  if (parts.length === 0) return { mode: 'trigram' as const, hits: [] };
+  if (parts.length === 0) return [];
   const result = await ctx.db.execute<{ type: SearchType; id: string; caixa_id: string | null; text: string; score: number }>(
     sql`SELECT * FROM (${sql.join(parts, sql` UNION ALL `)}) x ORDER BY 5 DESC LIMIT ${limit}`,
   );
-  return {
-    mode: 'trigram' as const,
-    hits: result.rows.map((r) => ({ type: r.type, id: r.id, caixaId: r.caixa_id, text: r.text, score: Number(r.score) })),
-  };
+  return result.rows.map((r) => ({ type: r.type, id: r.id, caixaId: r.caixa_id, text: r.text, score: Number(r.score) }));
 }

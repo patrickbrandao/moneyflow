@@ -8,11 +8,10 @@ import {
   entityBankAccounts,
   entityPixKeys,
   entityLinks,
-  aiProviders,
-  aiModelPrices,
   caixas,
   caixaMembers,
   aiAgents,
+  aiProviders,
   aiToolKits,
   financialAccounts,
   caixaHiddenCategories,
@@ -52,8 +51,10 @@ import {
   appSettings,
   userApiTokens,
   aiEmbeddings,
-  aiRequests,
+  aiEmbeddingIndexes,
   aiUsage,
+  aiModelPrices,
+  aiRequests,
   contractCycles,
   contracts,
   recurrenceRules,
@@ -61,6 +62,7 @@ import {
   notifications,
   userAiSettings,
   aiAgentPromptVersions,
+  aiAttachmentDerivatives,
   contractDocuments,
   contractDocumentVersions,
   contractAmendments,
@@ -68,6 +70,7 @@ import {
   entityTagLinks,
   entityTags,
   aiToolKitTools,
+  aiAgentInferences,
   aiRequestAttempts,
 } from './schema';
 
@@ -98,13 +101,13 @@ export const usersRelations = relations(users, ({ many }) => ({
   aiToolConfirmations: many(aiToolConfirmations),
   aiToolKits: many(aiToolKits),
   appSettings: many(appSettings),
-  aiProviders: many(aiProviders),
   userApiTokens: many(userApiTokens),
-  aiRequests: many(aiRequests),
   aiUsages: many(aiUsage),
+  aiRequests: many(aiRequests),
   mcpServers: many(mcpServers),
   messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
+  aiProviders: many(aiProviders),
   userAiSettings: many(userAiSettings),
   aiAgentPromptVersions: many(aiAgentPromptVersions),
   contracts: many(contracts),
@@ -183,26 +186,6 @@ export const entityLinksRelations = relations(entityLinks, ({ one }) => ({
   }),
 }));
 
-export const aiModelPricesRelations = relations(aiModelPrices, ({ one, many }) => ({
-  aiProvider: one(aiProviders, {
-    fields: [aiModelPrices.providerId],
-    references: [aiProviders.id],
-  }),
-  aiUsages: many(aiUsage),
-}));
-
-export const aiProvidersRelations = relations(aiProviders, ({ one, many }) => ({
-  aiModelPrices: many(aiModelPrices),
-  aiAgents: many(aiAgents),
-  aiRuns: many(aiRuns),
-  user: one(users, {
-    fields: [aiProviders.createdByUserId],
-    references: [users.id],
-  }),
-  aiRequests: many(aiRequests),
-  aiUsages: many(aiUsage),
-}));
-
 export const caixasRelations = relations(caixas, ({ one, many }) => ({
   caixa: one(caixas, {
     fields: [caixas.defaultPayerCaixaId],
@@ -279,9 +262,25 @@ export const aiAgentsRelations = relations(aiAgents, ({ one, many }) => ({
   agentMcpServers: many(agentMcpServers),
   aiConversations: many(aiConversations),
   aiRuns: many(aiRuns),
-  aiRequests: many(aiRequests),
   aiUsages: many(aiUsage),
+  aiRequests: many(aiRequests),
   aiAgentPromptVersions: many(aiAgentPromptVersions),
+  aiAgentInferences: many(aiAgentInferences),
+}));
+
+export const aiProvidersRelations = relations(aiProviders, ({ one, many }) => ({
+  aiAgents: many(aiAgents),
+  aiRuns: many(aiRuns),
+  aiUsages: many(aiUsage),
+  aiRequests: many(aiRequests),
+  user: one(users, {
+    fields: [aiProviders.createdByUserId],
+    references: [users.id],
+  }),
+  aiModelPrices: many(aiModelPrices),
+  aiAttachmentDerivatives: many(aiAttachmentDerivatives),
+  aiEmbeddingIndexes: many(aiEmbeddingIndexes),
+  aiAgentInferences: many(aiAgentInferences),
 }));
 
 export const aiToolKitsRelations = relations(aiToolKits, ({ one, many }) => ({
@@ -456,6 +455,12 @@ export const attachmentsRelations = relations(attachments, ({ one, many }) => ({
   cardPurchaseAttachments: many(cardPurchaseAttachments),
   statementImports: many(statementImports),
   aiMessageAttachments: many(aiMessageAttachments),
+  aiAttachmentDerivatives_attachmentId: many(aiAttachmentDerivatives, {
+    relationName: 'aiAttachmentDerivatives_attachmentId_attachments_id',
+  }),
+  aiAttachmentDerivatives_resultAttachmentId: many(aiAttachmentDerivatives, {
+    relationName: 'aiAttachmentDerivatives_resultAttachmentId_attachments_id',
+  }),
   contractDocuments: many(contractDocuments),
 }));
 
@@ -769,8 +774,8 @@ export const aiConversationsRelations = relations(aiConversations, ({ one, many 
   aiMessages: many(aiMessages, {
     relationName: 'aiMessages_conversationId_aiConversations_id',
   }),
-  aiRequests: many(aiRequests),
   aiUsages: many(aiUsage),
+  aiRequests: many(aiRequests),
 }));
 
 export const aiMessagesRelations = relations(aiMessages, ({ one, many }) => ({
@@ -792,6 +797,7 @@ export const aiMessagesRelations = relations(aiMessages, ({ one, many }) => ({
   }),
   aiMessageAttachments: many(aiMessageAttachments),
   aiUsages: many(aiUsage),
+  aiAttachmentDerivatives: many(aiAttachmentDerivatives),
 }));
 
 export const periodClosingsRelations = relations(periodClosings, ({ one }) => ({
@@ -858,8 +864,8 @@ export const aiRunsRelations = relations(aiRuns, ({ one, many }) => ({
   }),
   aiRunEvents: many(aiRunEvents),
   aiToolConfirmations: many(aiToolConfirmations),
-  aiRequests: many(aiRequests),
   aiUsages: many(aiUsage),
+  aiRequests: many(aiRequests),
   contractDocumentVersions: many(contractDocumentVersions),
 }));
 
@@ -931,31 +937,18 @@ export const aiEmbeddingsRelations = relations(aiEmbeddings, ({ one }) => ({
     fields: [aiEmbeddings.caixaId],
     references: [caixas.id],
   }),
+  aiEmbeddingIndex: one(aiEmbeddingIndexes, {
+    fields: [aiEmbeddings.model],
+    references: [aiEmbeddingIndexes.providerId],
+  }),
 }));
 
-export const aiRequestsRelations = relations(aiRequests, ({ one, many }) => ({
-  aiAgent: one(aiAgents, {
-    fields: [aiRequests.agentId],
-    references: [aiAgents.id],
-  }),
-  aiConversation: one(aiConversations, {
-    fields: [aiRequests.conversationId],
-    references: [aiConversations.id],
-  }),
+export const aiEmbeddingIndexesRelations = relations(aiEmbeddingIndexes, ({ one, many }) => ({
+  aiEmbeddings: many(aiEmbeddings),
   aiProvider: one(aiProviders, {
-    fields: [aiRequests.providerId],
+    fields: [aiEmbeddingIndexes.providerId],
     references: [aiProviders.id],
   }),
-  aiRun: one(aiRuns, {
-    fields: [aiRequests.runId],
-    references: [aiRuns.id],
-  }),
-  user: one(users, {
-    fields: [aiRequests.userId],
-    references: [users.id],
-  }),
-  aiUsages: many(aiUsage),
-  aiRequestAttempts: many(aiRequestAttempts),
 }));
 
 export const aiUsageRelations = relations(aiUsage, ({ one }) => ({
@@ -991,6 +984,39 @@ export const aiUsageRelations = relations(aiUsage, ({ one }) => ({
     fields: [aiUsage.userId],
     references: [users.id],
   }),
+}));
+
+export const aiModelPricesRelations = relations(aiModelPrices, ({ one, many }) => ({
+  aiUsages: many(aiUsage),
+  aiProvider: one(aiProviders, {
+    fields: [aiModelPrices.providerId],
+    references: [aiProviders.id],
+  }),
+}));
+
+export const aiRequestsRelations = relations(aiRequests, ({ one, many }) => ({
+  aiUsages: many(aiUsage),
+  aiAgent: one(aiAgents, {
+    fields: [aiRequests.agentId],
+    references: [aiAgents.id],
+  }),
+  aiConversation: one(aiConversations, {
+    fields: [aiRequests.conversationId],
+    references: [aiConversations.id],
+  }),
+  aiProvider: one(aiProviders, {
+    fields: [aiRequests.providerId],
+    references: [aiProviders.id],
+  }),
+  aiRun: one(aiRuns, {
+    fields: [aiRequests.runId],
+    references: [aiRuns.id],
+  }),
+  user: one(users, {
+    fields: [aiRequests.userId],
+    references: [users.id],
+  }),
+  aiRequestAttempts: many(aiRequestAttempts),
 }));
 
 export const contractCyclesRelations = relations(contractCycles, ({ one, many }) => ({
@@ -1096,6 +1122,27 @@ export const aiAgentPromptVersionsRelations = relations(aiAgentPromptVersions, (
   }),
   aiAgentPromptVersions: many(aiAgentPromptVersions, {
     relationName: 'aiAgentPromptVersions_agentId_aiAgentPromptVersions_id',
+  }),
+}));
+
+export const aiAttachmentDerivativesRelations = relations(aiAttachmentDerivatives, ({ one }) => ({
+  attachment_attachmentId: one(attachments, {
+    fields: [aiAttachmentDerivatives.attachmentId],
+    references: [attachments.id],
+    relationName: 'aiAttachmentDerivatives_attachmentId_attachments_id',
+  }),
+  aiMessage: one(aiMessages, {
+    fields: [aiAttachmentDerivatives.messageId],
+    references: [aiMessages.id],
+  }),
+  aiProvider: one(aiProviders, {
+    fields: [aiAttachmentDerivatives.providerId],
+    references: [aiProviders.id],
+  }),
+  attachment_resultAttachmentId: one(attachments, {
+    fields: [aiAttachmentDerivatives.resultAttachmentId],
+    references: [attachments.id],
+    relationName: 'aiAttachmentDerivatives_resultAttachmentId_attachments_id',
   }),
 }));
 
@@ -1212,6 +1259,17 @@ export const aiToolKitToolsRelations = relations(aiToolKitTools, ({ one }) => ({
   aiToolKit: one(aiToolKits, {
     fields: [aiToolKitTools.kitId],
     references: [aiToolKits.id],
+  }),
+}));
+
+export const aiAgentInferencesRelations = relations(aiAgentInferences, ({ one }) => ({
+  aiAgent: one(aiAgents, {
+    fields: [aiAgentInferences.agentId],
+    references: [aiAgents.id],
+  }),
+  aiProvider: one(aiProviders, {
+    fields: [aiAgentInferences.providerId],
+    references: [aiProviders.id],
   }),
 }));
 

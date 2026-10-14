@@ -326,6 +326,53 @@ async function legacyAgentKits(ctx: ServiceContext, file: BackupFile): Promise<B
   };
 }
 
+/**
+ * Arquivo anterior às capacidades dos provedores (spec 024, migration 0041):
+ * - ai_providers sem `capabilities`: o `embedding_model` vira
+ *   default_models.embeddings e sai da linha; as flags, o cache e o raciocínio
+ *   ficam com os padrões do banco (pelo tipo e pela base_url); o Anthropic
+ *   compatível ganha o modelo de texto de um agente dele no arquivo (sem
+ *   nenhum, volta como conflito com o motivo);
+ * - os agentes do arquivo ganham, como na migration, a inferência de visão no
+ *   próprio provedor de texto e a de embeddings no provedor de embeddings
+ *   ativo do arquivo. Agentes já cadastrados ficam como estão (OWNED_BY).
+ */
+function legacyCapabilities(file: BackupFile): BackupFile {
+  const providers = file.tables.ai_providers ?? [];
+  const legacy = providers.filter((row) => row && typeof row === 'object' && !('capabilities' in row));
+  if (legacy.length === 0) return file;
+  const agents = (file.tables.ai_agents ?? []).filter((row) => row && typeof row === 'object');
+  const idOf = (value: unknown) => (typeof value === 'string' ? value.toLowerCase() : '');
+  const rows = providers.map((row) => {
+    if (!legacy.includes(row)) return row;
+    const { embedding_model: embeddingModel, ...rest } = row;
+    const models: Record<string, string> = {};
+    if (rest.kind === 'openai' && typeof embeddingModel === 'string' && embeddingModel) models.embeddings = embeddingModel;
+    if (rest.kind === 'anthropic' && rest.base_url) {
+      const agent = agents.find((a) => idOf(a.provider_id) === idOf(rest.id) && typeof a.model === 'string' && a.model);
+      if (agent) models.text = agent.model as string;
+    }
+    return { ...rest, default_models: models };
+  });
+  const tables: Record<string, BackupRow[]> = { ...file.tables, ai_providers: rows };
+  if (!(file.tables.ai_agent_inferences?.length ?? 0) && agents.length > 0) {
+    const legacyIds = new Set(legacy.map((p) => idOf(p.id)));
+    const embedder = legacy
+      .filter((p) => p.kind === 'openai' && p.is_active !== false && typeof p.embedding_model === 'string' && p.embedding_model)
+      .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))[0];
+    const inferences: BackupRow[] = [];
+    for (const agent of agents) {
+      if (typeof agent.id !== 'string') continue;
+      if (legacyIds.has(idOf(agent.provider_id))) {
+        inferences.push({ agent_id: agent.id, capability: 'vision', provider_id: agent.provider_id, model: null, voice: null });
+      }
+      if (embedder) inferences.push({ agent_id: agent.id, capability: 'embeddings', provider_id: embedder.id, model: null, voice: null });
+    }
+    if (inferences.length > 0) tables.ai_agent_inferences = inferences;
+  }
+  return { ...file, tables };
+}
+
 function describe(error: unknown): string {
   const translated = translateDbError(error);
   if (translated) return t.backup.reasons.db(translated.message);
@@ -336,7 +383,7 @@ function describe(error: unknown): string {
 export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, kind: BackupKind, dryRun: boolean): Promise<ImportReport> {
   ctx.access.assertAdmin();
   const started = Date.now();
-  const file = kind === 'full' ? await legacyAgentKits(ctx, uploaded) : uploaded;
+  const file = legacyCapabilities(kind === 'full' ? await legacyAgentKits(ctx, uploaded) : uploaded);
   const catalog = await loadCatalog(ctx.db);
   const ranks = tableRanks(catalog);
 

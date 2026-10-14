@@ -15,8 +15,9 @@ import type { Config } from '../config';
 import type { ServiceContext } from '../context';
 import { findPgError } from '../errors';
 import { applyFlowResult, FLOW_PURPOSES, type FlowPurpose } from './flows';
-import { createLlmClient, type LlmAttachment, type LlmClient, LlmError, type LlmResponse } from './llm';
+import { createLlmClient, type LlmClient, LlmError, type LlmResponse } from './llm';
 import { assemblePrompt, loadPromptInputs } from './prompt';
+import { RunAttachments } from './run-attachments';
 import {
   appendEvent,
   insertMessage,
@@ -109,14 +110,24 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
       sql`SELECT kind, base_url, api_key, model FROM ai_run_provider_credentials(${runId}::uuid)`,
     );
     const cred = creds.rows[0]!;
-    const logging = await db.execute<{ log_bodies: boolean }>(sql`SELECT log_bodies FROM ai_providers WHERE id = ${claimed.provider_id}`);
+    const flags = await db.execute<{ log_bodies: boolean; prompt_cache_enabled: boolean; thinking_enabled: boolean }>(
+      sql`SELECT log_bodies, prompt_cache_enabled, thinking_enabled FROM ai_providers WHERE id = ${claimed.provider_id}`,
+    );
+    const flag = flags.rows[0];
     // Cada chamada vira uma requisição registrada (spec 023), com as tentativas do invólucro; o banco completa os vínculos pela execução.
+    // Cache de prompt e raciocínio seguem os interruptores do provedor (spec 024).
     const llm = createLlmClient(
-      { kind: cred.kind, baseUrl: cred.base_url, apiKey: cred.api_key },
+      {
+        kind: cred.kind,
+        baseUrl: cred.base_url,
+        apiKey: cred.api_key,
+        promptCache: flag?.prompt_cache_enabled ?? true,
+        thinking: flag?.thinking_enabled ?? true,
+      },
       {
         db,
         runId,
-        logBodies: Boolean(logging.rows[0]?.log_bodies),
+        logBodies: Boolean(flag?.log_bodies),
         maxAttempts: deps.config.aiRequestMaxAttempts,
         backoffMs: deps.config.aiRequestBackoffMs,
         log,
@@ -138,6 +149,16 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
 
     // Instruções do usuário, contexto automático e instructions dos MCP: montados uma vez por execução (spec 022).
     const promptInputs = await loadPromptInputs(db, access, agent, purpose);
+
+    // Imagens e PDFs pela visão do agente: direta, por descrição ou pela camada de texto (spec 024).
+    const attachments = new RunAttachments(deps, {
+      runId,
+      conversationId: conversation.id,
+      agentId: agent.id,
+      userId: actor.id,
+      textProviderId: claimed.provider_id,
+      signal: abort.signal,
+    });
 
     await appendEvent(db, runId, { type: 'status', status: 'running' });
     const maxIterations = purpose ? 1 : (agent.params.max_tool_iterations ?? DEFAULT_MAX_ITERATIONS);
@@ -166,6 +187,8 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
       const messages: NeutralMessage[] = system.mcpUserBlock
         ? [{ role: 'user', content: [{ type: 'text', text: system.mcpUserBlock }] }, ...history]
         : history;
+      await attachments.prepare(messages);
+      if (lost) throw new LockLost();
       const response = await callModel(db, llm, runId, {
         model: claimed.model,
         system: system.stable,
@@ -174,7 +197,7 @@ export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise
         messages,
         tools: tools.list,
         params: agent.params,
-        loadAttachment: (attachmentId) => loadAttachment(db, conversation.id, attachmentId),
+        loadAttachment: attachments.load,
         signal: abort.signal,
         operation: 'chat',
         purpose: purpose ?? 'chat',
@@ -280,18 +303,6 @@ async function loadContext(db: Database, run: RunRow) {
     conversation: conversationResult.rows[0]!,
     actor: { id: user.id, username: user.username, email: user.email, role: user.role as Actor['role'], isActive: user.isActive } as Actor,
   };
-}
-
-async function loadAttachment(db: Database, conversationId: string, attachmentId: string): Promise<LlmAttachment | null> {
-  const result = await db.execute<{ file_name: string; mime_type: string; content: Buffer }>(sql`
-    SELECT a.file_name, a.mime_type, a.content
-      FROM attachments a
-      JOIN ai_message_attachments ma ON ma.attachment_id = a.id
-      JOIN ai_messages m ON m.id = ma.message_id
-     WHERE a.id = ${attachmentId} AND m.conversation_id = ${conversationId}
-     LIMIT 1`);
-  const row = result.rows[0];
-  return row ? { fileName: row.file_name, mime: row.mime_type, data: Buffer.from(row.content) } : null;
 }
 
 /** Chama o modelo com streaming: deltas de texto viram eventos (agrupados a cada ~120 ms). */

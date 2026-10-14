@@ -1,8 +1,12 @@
 import {
   type AgentParams,
+  AI_INFERENCE_CAPABILITIES,
   type AiAgentDto,
+  type AiCapability,
+  type AiInferenceCapability,
   type AiProviderDto,
   type AiToolKitDto,
+  inferencesFromProvider,
   type McpServerDto,
   scanPromptVariables,
   t,
@@ -17,7 +21,15 @@ import { LoadError, SkelRows } from '../domain';
 import { FormError, ModalActions } from '../forms';
 import { Badge, Button, cx, EmptyRow, EmptyState, Field, Modal } from '../ui';
 import { PromptHistory, PromptPreview, PromptVariables } from './AgentPrompt';
-import { ActiveBadge, ANTHROPIC_SUGGESTIONS, optionalNumber, useProviderModels, useRemove } from './shared';
+import {
+  ActiveBadge,
+  ANTHROPIC_SUGGESTIONS,
+  CAPABILITY_ICONS,
+  CapabilityIcons,
+  optionalNumber,
+  useProviderModels,
+  useRemove,
+} from './shared';
 
 const g = t.agentsUi.admin.agents;
 const mcpT = t.agentsUi.admin.mcp;
@@ -72,7 +84,18 @@ export function AgentsTab() {
                     </span>
                     {agent.description && <span className="row-sub">{agent.description}</span>}
                   </td>
-                  <td className="mono text-xs">{g.model_(agent.providerName, agent.model)}</td>
+                  <td className="mono text-xs">
+                    {g.model_(agent.providerName, agent.model)}
+                    <span className="mt-1 block">
+                      <CapabilityIcons
+                        capabilities={[
+                          ...(agent.providerId ? (['text'] as AiCapability[]) : []),
+                          ...agent.inferences.map((i) => i.capability),
+                        ]}
+                        testId="agent-capabilities"
+                      />
+                    </span>
+                  </td>
                   <td className="text-[12.5px] text-dim">
                     {g.toolsSummary(agent.toolKitName)}
                     {agent.mcpServers.length > 0 && ` · ${g.mcpSummary(agent.mcpServers.length)}`}
@@ -131,6 +154,22 @@ export function AgentsTab() {
 }
 
 type McpLink = { linked: boolean; restrict: boolean; tools: string[] };
+type InferenceForm = { providerId: string; model: string; voice: string };
+type InferencesForm = Record<AiInferenceCapability, InferenceForm>;
+
+const emptyInference: InferenceForm = { providerId: '', model: '', voice: '' };
+
+function initialInferences(agent: AiAgentDto | null): InferencesForm {
+  return Object.fromEntries(
+    AI_INFERENCE_CAPABILITIES.map((capability) => {
+      const current = agent?.inferences.find((i) => i.capability === capability);
+      return [
+        capability,
+        current ? { providerId: current.providerId, model: current.model ?? '', voice: current.voice ?? '' } : emptyInference,
+      ];
+    }),
+  ) as InferencesForm;
+}
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -170,6 +209,9 @@ function AgentFormModal({
   const scan = useMemo(() => scanPromptVariables(systemPrompt), [systemPrompt]);
   const promptChanged = systemPrompt !== (agent?.systemPrompt ?? '');
   const [providerId, setProviderId] = useState(agent?.providerId ?? '');
+  // Provedor padrão (spec 024): só preenche os campos; cada um pode ser trocado depois.
+  const [defaultProviderId, setDefaultProviderId] = useState(agent?.providerId ?? '');
+  const [inferences, setInferences] = useState<InferencesForm>(() => initialInferences(agent));
   const [model, setModel] = useState(agent?.model ?? '');
   const params = agent?.params ?? {};
   const [maxTokens, setMaxTokens] = useState(params.max_tokens?.toString() ?? '');
@@ -195,6 +237,28 @@ function AgentFormModal({
   const { run, busy } = useAction();
 
   const provider = providers.data?.find((x) => x.id === providerId);
+  /** Provedores ativos com a flag (e o escolhido, mesmo que não esteja mais). */
+  const withCapability = (capability: AiCapability, selected: string) =>
+    (providers.data ?? []).filter((x) => x.id === selected || (x.isActive && !x.archivedAt && x.capabilities.includes(capability)));
+
+  function chooseDefault(id: string) {
+    setDefaultProviderId(id);
+    const chosen = providers.data?.find((x) => x.id === id);
+    if (!chosen) return;
+    const filled = inferencesFromProvider(chosen);
+    if (filled.providerId) {
+      setProviderId(filled.providerId);
+      if (!model.trim() && chosen.defaultModels.text) setModel(chosen.defaultModels.text);
+    }
+    setInferences((current) => {
+      const next = { ...current };
+      for (const inference of filled.inferences) next[inference.capability] = { providerId: inference.providerId, model: '', voice: '' };
+      return next;
+    });
+  }
+
+  const setInference = (capability: AiInferenceCapability, patch: Partial<InferenceForm>) =>
+    setInferences((current) => ({ ...current, [capability]: { ...current[capability], ...patch } }));
   const suggestions = [...new Set([...(models[providerId] ?? []), ...(provider?.kind === 'anthropic' ? ANTHROPIC_SUGGESTIONS : [])])];
 
   function setLink(id: string, patch: Partial<McpLink>) {
@@ -249,6 +313,12 @@ function AgentFormModal({
       isActive,
       useForFlows,
       mcpServers,
+      inferences: AI_INFERENCE_CAPABILITIES.filter((capability) => inferences[capability].providerId).map((capability) => ({
+        capability,
+        providerId: inferences[capability].providerId,
+        model: inferences[capability].model.trim() || null,
+        voice: capability === 'speech' ? inferences[capability].voice.trim() || null : null,
+      })),
     };
     const saved = await run(
       () => (agent ? api.patch<AiAgentDto>(`/api/admin/ai/agents/${agent.id}`, body) : api.post<AiAgentDto>('/api/admin/ai/agents', body)),
@@ -348,18 +418,38 @@ function AgentFormModal({
               <input className="field" value={promptNote} onChange={(e) => setPromptNote(e.target.value)} maxLength={500} />
             </Field>
           )}
+          <Field label={g.defaultProvider} hint={g.defaultProviderHint}>
+            <select
+              className="field"
+              value={defaultProviderId}
+              onChange={(e) => chooseDefault(e.target.value)}
+              data-testid="agent-default-provider"
+            >
+              <option value="">{g.noProvider}</option>
+              {(providers.data ?? [])
+                .filter((x) => x.id === defaultProviderId || (x.isActive && !x.archivedAt))
+                .map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {x.name}
+                  </option>
+                ))}
+            </select>
+          </Field>
           <div className="form-grid cols-2">
-            <Field label={g.provider}>
-              <select className="field" value={providerId} onChange={(e) => setProviderId(e.target.value)}>
+            <Field label={g.textProvider}>
+              <select
+                className="field"
+                value={providerId}
+                onChange={(e) => setProviderId(e.target.value)}
+                data-testid="agent-text-provider"
+              >
                 <option value="">{g.noProvider}</option>
-                {(providers.data ?? [])
-                  .filter((x) => !x.archivedAt || x.id === providerId)
-                  .map((x) => (
-                    <option key={x.id} value={x.id}>
-                      {x.name}
-                      {x.isActive ? '' : ` (${t.agentsUi.admin.inactive})`}
-                    </option>
-                  ))}
+                {withCapability('text', providerId).map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {x.name}
+                    {x.isActive ? '' : ` (${t.agentsUi.admin.inactive})`}
+                  </option>
+                ))}
               </select>
             </Field>
             <Field label={g.model} hint={suggestions.length ? g.modelHint : undefined}>
@@ -369,7 +459,8 @@ function AgentFormModal({
                 onChange={(e) => setModel(e.target.value)}
                 list={listId}
                 spellCheck={false}
-                placeholder={provider?.kind === 'anthropic' ? 'claude-sonnet-5-5' : ''}
+                placeholder={provider?.defaultModels.text ?? (provider?.kind === 'anthropic' ? 'claude-sonnet-5-5' : '')}
+                data-testid="agent-model"
               />
               <datalist id={listId}>
                 {suggestions.map((m) => (
@@ -378,6 +469,67 @@ function AgentFormModal({
               </datalist>
             </Field>
           </div>
+
+          <Section title={g.inferences}>
+            <p className="hint !mt-0 mb-2">{g.inferencesHint}</p>
+            <div className="grid gap-2" data-testid="agent-inferences">
+              {AI_INFERENCE_CAPABILITIES.map((capability) => {
+                const current = inferences[capability];
+                const chosen = providers.data?.find((x) => x.id === current.providerId);
+                const inherited =
+                  chosen?.defaultModels[capability] ?? (capability === 'vision' ? chosen?.defaultModels.text : undefined) ?? null;
+                const Icon = CAPABILITY_ICONS[capability];
+                return (
+                  <div key={capability} className="capability-row" data-capability={capability}>
+                    <Field label={t.agents.capabilities[capability]!}>
+                      <select
+                        className="field"
+                        value={current.providerId}
+                        onChange={(e) => setInference(capability, { providerId: e.target.value })}
+                        data-testid={`agent-inference-${capability}`}
+                      >
+                        <option value="">{g.inferenceNone}</option>
+                        {withCapability(capability, current.providerId).map((x) => (
+                          <option key={x.id} value={x.id}>
+                            {x.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    {current.providerId ? (
+                      <Field label={g.inferenceModel}>
+                        <input
+                          className="field field-mono"
+                          value={current.model}
+                          onChange={(e) => setInference(capability, { model: e.target.value })}
+                          placeholder={g.inheritModel(inherited)}
+                          spellCheck={false}
+                        />
+                      </Field>
+                    ) : (
+                      <span className="flex items-center gap-1.5 pb-2 text-xs text-faint">
+                        <Icon size={12} />
+                      </span>
+                    )}
+                    {capability === 'speech' && current.providerId ? (
+                      <Field label={g.inferenceVoice}>
+                        <input
+                          className="field field-mono"
+                          value={current.voice}
+                          onChange={(e) => setInference(capability, { voice: e.target.value })}
+                          placeholder={chosen?.defaultModels.speech_voice ?? 'alloy'}
+                          spellCheck={false}
+                        />
+                      </Field>
+                    ) : (
+                      <span />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <p className="hint">{g.visionHint}</p>
+          </Section>
 
           <Section title={g.params}>
             <div className="form-grid cols-3">

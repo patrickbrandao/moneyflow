@@ -15,7 +15,7 @@ import { loadMessages, loadRun } from '../agents/store';
 import type { ServiceContext } from '../context';
 import { AppError } from '../errors';
 import { assertUpload, storeAttachment } from './attachments';
-import { createConversation, sendMessage } from './conversations';
+import { assertReadsImages, createConversation, sendMessage } from './conversations';
 import { getImport } from './statements';
 import { withTx } from './tx';
 
@@ -61,6 +61,8 @@ export async function readDocumentWithAi(
 ): Promise<DocumentReadingDto> {
   const agentId = await flowAgentId(ctx);
   if (!agentId) throw new AppError(501, 'document_reader_unavailable', t.errors.documentReaderUnavailable);
+  // Imagem com um agente dos fluxos sem visão: recusada antes de abrir a conversa (spec 024).
+  await assertReadsImages(ctx.db, agentId, [file.mime]);
   const content = assertUpload(file.content);
   const conversation = await createConversation(
     ctx,

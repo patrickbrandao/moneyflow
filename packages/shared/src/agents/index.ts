@@ -1,4 +1,5 @@
 export * from './blocks';
+export * from './inferences';
 export * from './json-schema';
 export * from './preview';
 export * from './prompt-vars';

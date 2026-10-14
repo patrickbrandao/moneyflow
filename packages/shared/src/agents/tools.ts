@@ -109,7 +109,7 @@ export const AGENT_TOOLS = [
     category: 'search',
     title: 'Busca por significado',
     description:
-      'Busca por significado (embeddings) em entidades, títulos, compras de cartão e linhas de extrato; sem provedor de embeddings, busca por semelhança de texto.',
+      'Busca por significado (embeddings do agente) em entidades, títulos, compras de cartão e linhas de extrato; sem embeddings, busca por semelhança de texto. Com o índice em construção, completa com a semelhança de texto e avisa (notice).',
     kind: 'read',
     input: z.object({
       query: z.string().trim().min(1).max(500),

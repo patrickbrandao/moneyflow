@@ -17,6 +17,8 @@ import {
 import { type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { FlowPurpose } from '../agents/flows';
+import { visionMode } from '../agents/inferences';
+import { isImageMime } from '../agents/run-attachments';
 import {
   appendEvent,
   conversationUsage,
@@ -259,8 +261,18 @@ export async function forkConversation(ctx: ServiceContext, id: string, input: z
 
 /* ---------------- anexos e mensagens ---------------- */
 
+/** Imagem num agente sem visão (spec 024): recusada ao anexar, inclusive nos fluxos (422). */
+export async function assertReadsImages(db: Executor, agentId: string, mimes: string[]) {
+  if (!mimes.some(isImageMime)) return;
+  const agent = await db.execute<{ provider_id: string | null }>(sql`SELECT provider_id FROM ai_agents WHERE id = ${agentId}`);
+  if ((await visionMode(db, agentId, agent.rows[0]?.provider_id ?? null)) === 'none') {
+    throw unprocessable(t.agents.errors.agentNoVision, 'agent_no_vision');
+  }
+}
+
 export async function uploadMessageAttachment(ctx: ServiceContext, id: string, file: { name: string; mime: string; content: unknown }) {
-  await loadConversation(ctx, id, 'own');
+  const conversation = await loadConversation(ctx, id, 'own');
+  await assertReadsImages(ctx.db, conversation.agent_id, [file.mime]);
   const content = assertUpload(file.content);
   const attachmentId = await withTx(ctx, (tx) => storeAttachment(tx, ctx, { name: file.name, mime: file.mime, content }));
   const result = await ctx.db.execute<Record<string, unknown>>(sql`
@@ -296,6 +308,11 @@ export async function sendMessage(ctx: ServiceContext, id: string, input: z.outp
   const conversation = await loadConversation(ctx, id, 'own');
   await assertAgentUsable(ctx.db, conversation.agent_id);
   const files = await assertAttachments(ctx, id, input.attachmentIds);
+  await assertReadsImages(
+    ctx.db,
+    conversation.agent_id,
+    files.map((f) => f.mime_type),
+  );
   const content = [
     ...files.map((f) => ({ type: 'attachment' as const, attachment_id: f.id, file_name: f.file_name, mime_type: f.mime_type })),
     ...(input.text.trim() ? [{ type: 'text' as const, text: input.text }] : []),

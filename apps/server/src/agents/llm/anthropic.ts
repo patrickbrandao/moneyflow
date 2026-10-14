@@ -9,6 +9,10 @@ import { type LlmClient, type LlmCredentials, LlmError, type LlmRequest, type Ll
  * parte estável do sistema e no fim da parte por usuário — 3 dos 4 que a API
  * aceita; a parte volátil vai depois) e entrada de imagem/PDF.
  *
+ * Num servidor compatível (base_url), os interruptores do provedor (spec 024)
+ * desligam o cache de prompt (nenhum cache_control) e o raciocínio (nem
+ * thinking nem output_config.effort), mesmo que o agente peça.
+ *
  * Raciocínio: nos modelos atuais (família 5.x) o pensamento é adaptativo e
  * não aceita budget_tokens nem temperature/top_p; thinking_budget_tokens > 0
  * liga o modo adaptativo com resumo visível, e os modelos 4.5 ou anteriores
@@ -55,6 +59,8 @@ async function toParams(request: LlmRequest): Promise<Anthropic.MessageParam[]> 
         const file = await request.loadAttachment(block.attachment_id);
         if (!file) {
           blocks.push({ type: 'text', text: `[anexo ${block.attachment_id} indisponível]` });
+        } else if ('text' in file) {
+          blocks.push({ type: 'text', text: file.text });
         } else if (IMAGE_TYPES.has(file.mime)) {
           blocks.push({
             type: 'image',
@@ -142,16 +148,19 @@ export function anthropicClient(credentials: LlmCredentials, log: RequestLogBase
     async chat(request) {
       const legacy = isLegacyModel(request.model);
       const params = request.params;
+      const cacheOn = credentials.promptCache !== false;
+      const thinkingAllowed = credentials.thinking !== false;
+      const cache = cacheOn ? { cache_control: { type: 'ephemeral' as const } } : {};
       const tools: Anthropic.Tool[] = request.tools.map((tool, index) => ({
         name: tool.name,
         description: tool.description,
         input_schema: tool.inputSchema as Anthropic.Tool.InputSchema,
-        ...(index === request.tools.length - 1 ? { cache_control: { type: 'ephemeral' as const } } : {}),
+        ...(index === request.tools.length - 1 ? cache : {}),
       }));
-      const system: Anthropic.TextBlockParam[] = [{ type: 'text', text: request.system, cache_control: { type: 'ephemeral' } }];
-      if (request.systemUser) system.push({ type: 'text', text: request.systemUser, cache_control: { type: 'ephemeral' } });
+      const system: Anthropic.TextBlockParam[] = [{ type: 'text', text: request.system, ...cache }];
+      if (request.systemUser) system.push({ type: 'text', text: request.systemUser, ...cache });
       if (request.systemVolatile) system.push({ type: 'text', text: request.systemVolatile });
-      const thinkingOn = (params.thinking_budget_tokens ?? 0) > 0;
+      const thinkingOn = thinkingAllowed && (params.thinking_budget_tokens ?? 0) > 0;
       const maxTokens = params.max_tokens ?? DEFAULT_MAX_TOKENS;
       const body: Anthropic.MessageStreamParams = {
         model: request.model,
@@ -169,7 +178,7 @@ export function anthropicClient(credentials: LlmCredentials, log: RequestLogBase
         if (params.temperature !== undefined) body.temperature = params.temperature;
         if (params.top_p !== undefined) body.top_p = params.top_p;
       }
-      if (!legacy && params.reasoning_effort) {
+      if (!legacy && thinkingAllowed && params.reasoning_effort) {
         const effort = params.reasoning_effort === 'minimal' ? 'low' : params.reasoning_effort;
         (body as { output_config?: unknown }).output_config = { effort };
       }

@@ -6,7 +6,7 @@ import { formatCost, formatInt } from '../agents/format';
 import { ProviderFormModal } from '../components/admin-ai/ProvidersTab';
 import { RequestDrawer } from '../components/admin-ai/RequestDrawer';
 import { RequestsTable } from '../components/admin-ai/RequestsTable';
-import { ActiveBadge } from '../components/admin-ai/shared';
+import { ActiveBadge, CapabilityIcons } from '../components/admin-ai/shared';
 import { LoadError, PageHead, SkelRows } from '../components/domain';
 import { Badge, Button, EmptyRow, Panel, Tabs } from '../components/ui';
 import { useUser } from '../lib/auth';
@@ -58,10 +58,34 @@ export function AdminAiProviderPage() {
               <dd className="mono">{provider.baseUrl ?? p.defaultBaseUrl}</dd>
               <dt>{p.key}</dt>
               <dd className="mono">{provider.apiKeyHint ?? p.noKey}</dd>
-              {provider.embeddingModel && (
+              <dt>{p.capabilities}</dt>
+              <dd>
+                <span className="grid gap-1" data-testid="provider-detail-capabilities">
+                  {provider.capabilities.map((capability) => (
+                    <span key={capability} className="flex flex-wrap items-center gap-2" data-capability={capability}>
+                      <CapabilityIcons capabilities={[capability]} />
+                      <span>{t.agents.capabilities[capability]}</span>
+                      {(provider.defaultModels[capability] ?? (capability === 'vision' ? provider.defaultModels.text : undefined)) && (
+                        <span className="mono text-xs text-dim">
+                          {provider.defaultModels[capability] ?? provider.defaultModels.text}
+                          {capability === 'speech' && provider.defaultModels.speech_voice && ` · ${provider.defaultModels.speech_voice}`}
+                        </span>
+                      )}
+                    </span>
+                  ))}
+                </span>
+              </dd>
+              {provider.kind === 'anthropic' && (
                 <>
-                  <dt>{p.embeddingModel}</dt>
-                  <dd className="mono">{provider.embeddingModel}</dd>
+                  <dt>{p.features}</dt>
+                  <dd className="flex flex-wrap gap-1.5">
+                    <Badge tone={provider.promptCacheEnabled ? 'ok' : 'outline'}>
+                      {(provider.promptCacheEnabled ? p.featureOn : p.featureOff)(t.agentsUi.admin.providers.promptCache)}
+                    </Badge>
+                    <Badge tone={provider.thinkingEnabled ? 'ok' : 'outline'}>
+                      {(provider.thinkingEnabled ? p.featureOn : p.featureOff)(t.agentsUi.admin.providers.thinking)}
+                    </Badge>
+                  </dd>
                 </>
               )}
               <dt>{t.common.status}</dt>
@@ -76,6 +100,50 @@ export function AdminAiProviderPage() {
           </Panel>
 
           <UsageSummary usage={data.usage} />
+
+          {provider.capabilities.includes('embeddings') && (
+            <section data-testid="provider-embedding-indexes">
+              <div className="mb-2 flex flex-wrap items-baseline gap-3">
+                <h2 className="text-h3">{p.embeddingIndexes}</h2>
+                <span className="text-xs text-faint">{p.embeddingIndexesHint}</span>
+              </div>
+              {data.embeddingIndexes.length === 0 ? (
+                <p className="text-[13px] text-muted">{p.noIndexes}</p>
+              ) : (
+                <div className="table-wrap">
+                  <table className="data">
+                    <thead>
+                      <tr>
+                        <th>{p.model}</th>
+                        <th>{p.embeddingIndexes}</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.embeddingIndexes.map((index) => {
+                        const share = index.total > 0 ? Math.min(1, index.indexed / index.total) : 1;
+                        return (
+                          <tr key={index.model} data-model={index.model}>
+                            <td className="mono text-xs">{index.model}</td>
+                            <td>
+                              <div className="flex flex-wrap items-center gap-3">
+                                <span className="index-progress" aria-hidden="true">
+                                  <span style={{ width: `${Math.round(share * 100)}%` }} />
+                                </span>
+                                <span className="mono text-xs">{p.indexProgress(index.indexed, index.total)}</span>
+                                {index.pending > 0 && <span className="text-xs text-faint">{p.indexPending(index.pending)}</span>}
+                              </div>
+                            </td>
+                            <td className="text-right">{!index.inUse && <Badge tone="outline">{p.indexIdle}</Badge>}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          )}
 
           <section>
             <h2 className="text-h3 mb-2">{p.health}</h2>
@@ -185,6 +253,14 @@ function UsageSummary({ usage }: { usage: AiProviderSummary['usage'] }) {
                   {p.input} {formatInt(row.inputTokens)} · {p.output} {formatInt(row.outputTokens)} · {p.cacheWrite}{' '}
                   {formatInt(row.cacheWriteTokens)} · {p.cacheRead} {formatInt(row.cacheReadTokens)}
                 </div>
+                {Boolean(row.audioSeconds || row.characters) && (
+                  <div className="mt-1 text-xs text-dim">
+                    {p.audio}:{' '}
+                    {[row.audioSeconds ? p.audioSeconds(row.audioSeconds) : null, row.characters ? p.characters(row.characters) : null]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </div>
+                )}
                 <div className="mt-1 text-xs">
                   {p.cost}: <Cost row={row} />
                 </div>

@@ -1294,3 +1294,59 @@ body.agent-resizing .agent-side-grip {
 .provider-kv {
   grid-template-columns: 140px minmax(0, 1fr);
 }
+
+/* ---- capacidades dos provedores e inferências do agente (spec 024) ---- */
+.capability-icons {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.capability-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+.capability-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 170px) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px 12px;
+  align-items: end;
+}
+.capability-row .check {
+  padding-bottom: 8px;
+}
+@media (max-width: 640px) {
+  .capability-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.provider-capabilities {
+  display: grid;
+  grid-template-columns: minmax(120px, 160px) minmax(0, 1fr);
+  gap: 8px 12px;
+  align-items: center;
+}
+.capability-checks {
+  display: grid;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 12.5px;
+}
+.index-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+  min-width: 120px;
+}
+.index-progress > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}

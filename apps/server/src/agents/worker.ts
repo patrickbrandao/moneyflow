@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config';
 import { requestRetentionDays } from '../services/ai-requests';
-import { embeddingCredentials, embedPending, type IndexState, syncEmbeddingSources } from './embeddings';
+import { type IndexState, indexEmbeddings, purgeEmbeddingIndexes } from './embeddings';
 import { type ClaimedRun, processRun } from './runner';
 
 /*
@@ -12,8 +12,9 @@ import { type ClaimedRun, processRun } from './runner';
  * AGENT_CONCURRENCY ao mesmo tempo. Num segundo ritmo, a manutenção: retenção
  * dos eventos de streaming, expiração de confirmações esquecidas, limpeza de
  * embeddings órfãos, a purga das requisições ao provedor (spec 023: prazo do
- * banco ou de AI_REQUEST_RETENTION_DAYS, em lotes) e a indexação dos
- * embeddings (só com provedor de embeddings).
+ * banco ou de AI_REQUEST_RETENTION_DAYS, em lotes) e os embeddings (spec
+ * 024): a indexação de cada par (provedor, modelo) em uso por algum agente
+ * ativo e a purga dos pares parados há mais de 7 dias.
  */
 
 const PURGE_BATCH = 1000;
@@ -80,12 +81,11 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
       if (row && (Number(row.purged) || Number(row.expired) || Number(row.orphans))) log.info(row, 'agente: manutenção');
       const requests = await purgeAiRequests(db, config);
       if (requests) log.info({ requests }, 'agente: requisições ao provedor purgadas');
-      const creds = await embeddingCredentials(db, config);
-      if (creds) {
-        const sources = await syncEmbeddingSources(db, creds.model, indexState);
-        const embedded = await embedPending(db, creds);
-        if (sources || embedded) log.info({ sources, embedded }, 'agente: embeddings');
-      }
+      const index = await indexEmbeddings(db, config, indexState);
+      if (index.sources || index.embedded) log.info({ sources: index.sources, embedded: index.embedded }, 'agente: embeddings');
+      for (const failure of index.errors) log.warn({ err: failure.error, ...failure.pair }, 'agente: indexação de embeddings falhou');
+      const purged = await purgeEmbeddingIndexes(db);
+      if (purged) log.info({ purged }, 'agente: índices de embeddings parados apagados');
     } catch (error) {
       log.error({ err: error }, 'agente: falha na manutenção');
     } finally {

@@ -22,31 +22,92 @@ const toolList = z
 
 export const AI_PROVIDER_KINDS = ['anthropic', 'openai'] as const;
 
-export const aiProviderCreateInput = z.object({
-  name: requiredText(120),
-  kind: z.enum(AI_PROVIDER_KINDS),
-  baseUrl: httpUrl
-    .max(500)
-    .nullish()
-    .or(z.literal(''))
-    .transform((v) => v || null),
-  /** Write-only: nunca devolvida. */
-  apiKey: z
-    .string()
-    .trim()
-    .max(1000)
-    .nullish()
-    .or(z.literal(''))
-    .transform((v) => v || null),
-  embeddingModel: modelName
-    .nullish()
-    .or(z.literal(''))
-    .transform((v) => v || null),
-  isActive: z.boolean().default(true),
-  /** Registrar corpos e cabeçalhos das requisições (spec 023). */
-  logBodies: z.boolean().default(false),
-  notes: optionalText(),
-});
+/* Capacidades dos provedores e inferências do agente (spec 024). */
+export const AI_CAPABILITIES = ['text', 'vision', 'embeddings', 'transcription', 'speech'] as const;
+export const AI_INFERENCE_CAPABILITIES = ['vision', 'embeddings', 'transcription', 'speech'] as const;
+/** O que cada tipo aceita (e o padrão dele): a Messages API não tem embeddings nem áudio. */
+export const AI_KIND_CAPABILITIES: Record<(typeof AI_PROVIDER_KINDS)[number], readonly (typeof AI_CAPABILITIES)[number][]> = {
+  anthropic: ['text', 'vision'],
+  openai: AI_CAPABILITIES,
+};
+/** Sugestões de modelo padrão na tela (visão: o mesmo modelo de texto). */
+export const AI_MODEL_SUGGESTIONS = {
+  embeddings: 'text-embedding-3-small',
+  transcription: 'gpt-4o-transcribe',
+  speech: 'gpt-4o-mini-tts',
+  speech_voice: 'alloy',
+} as const;
+/** Dimensão fixa dos vetores (ai_embeddings.embedding). */
+export const EMBEDDING_DIMENSIONS = 1536;
+
+const voiceName = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, 'Nome de voz inválido.');
+const optionalModel = modelName
+  .optional()
+  .or(z.literal(''))
+  .transform((v) => v || undefined);
+
+/** Modelo padrão por capacidade e a voz do TTS; vazio = sem padrão. As chaves de flags desligadas são descartadas. */
+export const aiDefaultModelsInput = z
+  .object({
+    text: optionalModel,
+    vision: optionalModel,
+    embeddings: optionalModel,
+    transcription: optionalModel,
+    speech: optionalModel,
+    speech_voice: voiceName
+      .optional()
+      .or(z.literal(''))
+      .transform((v) => v || undefined),
+  })
+  .strict()
+  .transform((v) => Object.fromEntries(Object.entries(v).filter(([, value]) => value !== undefined)) as Record<string, string>);
+
+const capabilityList = z
+  .array(z.enum(AI_CAPABILITIES))
+  .max(AI_CAPABILITIES.length)
+  .refine((list) => new Set(list).size === list.length, 'Capacidade repetida.');
+
+export const aiProviderCreateInput = z
+  .object({
+    name: requiredText(120),
+    kind: z.enum(AI_PROVIDER_KINDS),
+    baseUrl: httpUrl
+      .max(500)
+      .nullish()
+      .or(z.literal(''))
+      .transform((v) => v || null),
+    /** Write-only: nunca devolvida. */
+    apiKey: z
+      .string()
+      .trim()
+      .max(1000)
+      .nullish()
+      .or(z.literal(''))
+      .transform((v) => v || null),
+    /** Omitidas = o padrão do tipo (anthropic: texto e visão; openai: todas). */
+    capabilities: capabilityList.optional(),
+    defaultModels: aiDefaultModelsInput.default({}),
+    /** Omitidos = ligados na API oficial e desligados com base_url (spec 024). */
+    promptCacheEnabled: z.boolean().optional(),
+    thinkingEnabled: z.boolean().optional(),
+    isActive: z.boolean().default(true),
+    /** Registrar corpos e cabeçalhos das requisições (spec 023). */
+    logBodies: z.boolean().default(false),
+    notes: optionalText(),
+  })
+  .superRefine((input, issue) => {
+    const allowed = AI_KIND_CAPABILITIES[input.kind];
+    const caps = input.capabilities ?? allowed;
+    if (caps.some((c) => !allowed.includes(c))) {
+      issue.addIssue({ code: 'custom', path: ['capabilities'], message: ptBR.agents.errors.anthropicCapabilities });
+    }
+    if (input.kind === 'anthropic' && input.baseUrl && caps.includes('text') && !input.defaultModels.text) {
+      issue.addIssue({ code: 'custom', path: ['defaultModels', 'text'], message: ptBR.agents.errors.compatibleTextModel });
+    }
+  });
 
 export const aiProviderUpdateInput = z.object({
   name: requiredText(120).optional(),
@@ -64,10 +125,11 @@ export const aiProviderUpdateInput = z.object({
     .or(z.literal(''))
     .transform((v) => v || undefined),
   clearApiKey: z.boolean().default(false),
-  embeddingModel: modelName
-    .nullish()
-    .or(z.literal(''))
-    .transform((v) => (v === undefined ? undefined : v || null)),
+  capabilities: capabilityList.optional(),
+  /** Substitui o conjunto inteiro de modelos padrão. */
+  defaultModels: aiDefaultModelsInput.optional(),
+  promptCacheEnabled: z.boolean().optional(),
+  thinkingEnabled: z.boolean().optional(),
   isActive: z.boolean().optional(),
   logBodies: z.boolean().optional(),
   notes: optionalText().optional(),
@@ -91,6 +153,19 @@ export const aiPriceInput = z.object({
     .max(1e7)
     .nullish()
     .transform((v) => v ?? null),
+  /** Áudio (spec 024): por minuto transcrito e por milhão de caracteres falados. */
+  audioInputPerMinute: z
+    .number()
+    .min(0)
+    .max(1e7)
+    .nullish()
+    .transform((v) => v ?? null),
+  speechPerMillionChars: z
+    .number()
+    .min(0)
+    .max(1e7)
+    .nullish()
+    .transform((v) => v ?? null),
   validFrom: z.iso.datetime({ offset: true }).optional(),
 });
 
@@ -104,6 +179,22 @@ export const agentParamsInput = z
     reasoning_effort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
   })
   .strict();
+
+/** Inferência do agente além do texto (spec 024): sem a capacidade na lista = "Nenhum". */
+export const agentInferenceInput = z.object({
+  capability: z.enum(AI_INFERENCE_CAPABILITIES),
+  providerId: id,
+  /** Vazio/nulo = herda o modelo padrão do provedor. */
+  model: modelName
+    .nullish()
+    .or(z.literal(''))
+    .transform((v) => v || null),
+  /** Só no texto→áudio; vazio/nulo = a voz padrão do provedor. */
+  voice: voiceName
+    .nullish()
+    .or(z.literal(''))
+    .transform((v) => v || null),
+});
 
 export const agentMcpLinkInput = z.object({ mcpServerId: id, enabledTools: toolList.default(null) });
 
@@ -124,6 +215,11 @@ const agentFields = {
   /** Nota da versão do prompt criada nesta gravação (spec 022; só vale quando o prompt muda). */
   promptNote: optionalText(500),
   providerId: id.nullish().transform((v) => v ?? null),
+  /**
+   * Provedor padrão (spec 024): preenche o provedor de texto (se não veio) e as inferências que ele suporta e que não
+   * vieram em `inferences`.
+   */
+  defaultProviderId: id.optional(),
   model: modelName
     .nullish()
     .or(z.literal(''))
@@ -143,6 +239,12 @@ const agentFields = {
   /** Agente dos fluxos automáticos (leitura de documento, conciliação, contrato); só um por vez. */
   useForFlows: z.boolean(),
   mcpServers: z.array(agentMcpLinkInput).max(100).optional(),
+  /** Substitui o conjunto de inferências (visão, embeddings, áudio→texto, texto→áudio) quando vem. */
+  inferences: z
+    .array(agentInferenceInput)
+    .max(AI_INFERENCE_CAPABILITIES.length)
+    .refine((list) => new Set(list.map((x) => x.capability)).size === list.length, 'Inferência repetida.')
+    .optional(),
 };
 
 export const aiAgentCreateInput = z.object({
@@ -257,6 +359,9 @@ export const AI_USAGE_PURPOSES = [
   'classify_lines',
   'contract_reading',
   'contract_markdown',
+  'vision_describe',
+  'transcription',
+  'speech',
 ] as const;
 
 const day = z

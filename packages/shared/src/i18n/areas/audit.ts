@@ -83,6 +83,9 @@ export const auditStrings = {
     app_settings: 'Configurações do sistema',
     ai_requests: 'Requisições ao provedor de IA',
     ai_request_attempts: 'Tentativas das requisições',
+    ai_agent_inferences: 'Inferências do agente',
+    ai_attachment_derivatives: 'Derivados de anexo (IA)',
+    ai_embedding_indexes: 'Índices de embeddings',
   } as Record<string, string>,
   columns: {
     name: 'Nome',

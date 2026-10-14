@@ -1,10 +1,17 @@
 import { type Executor, type Tx, userColumns, users } from '@moneyflow/db';
 import {
+  type AgentInferenceDto,
   type AgentPromptPreviewDto,
   type AgentPromptVersionDto,
   type AgentToolInfo,
+  AI_INFERENCE_CAPABILITIES,
+  AI_KIND_CAPABILITIES,
   type AiAgentDto,
+  type AiCapability,
+  type AiDefaultModels,
+  type AiInferenceCapability,
   type AiPriceDto,
+  type AiProviderCapabilityCheck,
   type AiProviderDto,
   type AiProviderTestResult,
   type AiToolKitDto,
@@ -16,6 +23,7 @@ import {
   type aiProviderCreateInput,
   type aiProviderUpdateInput,
   type aiUsageQuery,
+  inferencesFromProvider,
   type McpInstructionsMode,
   type McpServerDto,
   type McpToolInfo,
@@ -28,7 +36,16 @@ import {
 } from '@moneyflow/shared';
 import { eq, type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { createLlmClient, LlmError } from '../agents/llm';
+import {
+  createLlmClient,
+  embed,
+  type LlmClient,
+  type LlmCredentials,
+  LlmError,
+  type RequestLogBase,
+  speak,
+  transcribe,
+} from '../agents/llm';
 import { connectMcp } from '../agents/mcp-client';
 import { assemblePrompt, loadPromptInputs, promptParts } from '../agents/prompt';
 import { usageDto } from '../agents/store';
@@ -50,8 +67,8 @@ import { iso } from './util';
 
 /* ---------------- provedores ---------------- */
 
-const PROVIDER_COLUMNS = sql`p.id, p.name, p.kind, p.base_url, p.api_key_hint, p.embedding_model, p.is_active, p.log_bodies, p.notes,
-  p.archived_at, p.created_at`;
+const PROVIDER_COLUMNS = sql`p.id, p.name, p.kind, p.base_url, p.api_key_hint, p.capabilities, p.default_models, p.prompt_cache_enabled,
+  p.thinking_enabled, p.is_active, p.log_bodies, p.notes, p.archived_at, p.created_at`;
 
 type ProviderRow = {
   id: string;
@@ -59,7 +76,10 @@ type ProviderRow = {
   kind: 'anthropic' | 'openai';
   base_url: string | null;
   api_key_hint: string | null;
-  embedding_model: string | null;
+  capabilities: AiCapability[];
+  default_models: AiDefaultModels | null;
+  prompt_cache_enabled: boolean;
+  thinking_enabled: boolean;
   is_active: boolean;
   log_bodies: boolean;
   notes: string | null;
@@ -73,7 +93,10 @@ const providerDto = (r: ProviderRow): AiProviderDto => ({
   kind: r.kind,
   baseUrl: r.base_url,
   apiKeyHint: r.api_key_hint,
-  embeddingModel: r.embedding_model,
+  capabilities: r.capabilities ?? [],
+  defaultModels: r.default_models ?? {},
+  promptCacheEnabled: r.prompt_cache_enabled,
+  thinkingEnabled: r.thinking_enabled,
   isActive: r.is_active,
   logBodies: r.log_bodies,
   notes: r.notes,
@@ -95,14 +118,68 @@ export async function getProvider(db: Executor, id: string): Promise<AiProviderD
   return providerDto(result.rows[0]);
 }
 
+const textArray = (items: readonly string[]) => `{${items.join(',')}}`;
+
+/** Modelos padrão só das flags ligadas (a voz, com texto→áudio): o banco recusa os demais (spec 024). */
+function modelsFor(models: AiDefaultModels, capabilities: readonly AiCapability[]): AiDefaultModels {
+  const out: AiDefaultModels = {};
+  for (const [key, value] of Object.entries(models) as [keyof AiDefaultModels, string | undefined][]) {
+    if (!value) continue;
+    const flag = key === 'speech_voice' ? 'speech' : key;
+    if (capabilities.includes(flag)) out[key] = value;
+  }
+  return out;
+}
+
+const sameModels = (a: AiDefaultModels, b: AiDefaultModels) =>
+  JSON.stringify(Object.entries(a).sort()) === JSON.stringify(Object.entries(b).sort());
+
+function assertKindCapabilities(kind: 'anthropic' | 'openai', capabilities: readonly AiCapability[]) {
+  if (capabilities.some((c) => !AI_KIND_CAPABILITIES[kind].includes(c))) throw badRequest(t.agents.errors.anthropicCapabilities);
+}
+
 export async function createProvider(ctx: ServiceContext, input: z.output<typeof aiProviderCreateInput>) {
   ctx.access.assertAdmin();
+  const capabilities = input.capabilities ?? AI_KIND_CAPABILITIES[input.kind];
+  assertKindCapabilities(input.kind, capabilities);
+  // Omitidos, as flags, o cache e o raciocínio ficam com o padrão do banco (pelo tipo e pela base_url).
+  const columns: SQL[] = [
+    sql`name`,
+    sql`kind`,
+    sql`base_url`,
+    sql`api_key`,
+    sql`default_models`,
+    sql`is_active`,
+    sql`log_bodies`,
+    sql`notes`,
+    sql`created_by_user_id`,
+  ];
+  const values: SQL[] = [
+    sql`${input.name}`,
+    sql`${input.kind}`,
+    sql`${input.baseUrl}`,
+    sql`${input.apiKey}`,
+    sql`${JSON.stringify(modelsFor(input.defaultModels, capabilities))}::jsonb`,
+    sql`${input.isActive}`,
+    sql`${input.logBodies}`,
+    sql`${input.notes}`,
+    sql`${ctx.access.actor.id}`,
+  ];
+  if (input.capabilities) {
+    columns.push(sql`capabilities`);
+    values.push(sql`${textArray(input.capabilities)}::text[]`);
+  }
+  if (input.promptCacheEnabled !== undefined) {
+    columns.push(sql`prompt_cache_enabled`);
+    values.push(sql`${input.promptCacheEnabled}`);
+  }
+  if (input.thinkingEnabled !== undefined) {
+    columns.push(sql`thinking_enabled`);
+    values.push(sql`${input.thinkingEnabled}`);
+  }
   const id = await withTx(ctx, async (tx) => {
     const result = await tx.execute<{ id: string }>(sql`
-      INSERT INTO ai_providers (name, kind, base_url, api_key, embedding_model, is_active, log_bodies, notes, created_by_user_id)
-      VALUES (${input.name}, ${input.kind}, ${input.baseUrl}, ${input.apiKey}, ${input.embeddingModel}, ${input.isActive}, ${input.logBodies},
-              ${input.notes}, ${ctx.access.actor.id})
-      RETURNING id`);
+      INSERT INTO ai_providers (${sql.join(columns, sql`, `)}) VALUES (${sql.join(values, sql`, `)}) RETURNING id`);
     return result.rows[0]!.id;
   });
   return getProvider(ctx.db, id);
@@ -110,13 +187,22 @@ export async function createProvider(ctx: ServiceContext, input: z.output<typeof
 
 export async function updateProvider(ctx: ServiceContext, id: string, input: z.output<typeof aiProviderUpdateInput>) {
   ctx.access.assertAdmin();
-  await getProvider(ctx.db, id);
+  const current = await getProvider(ctx.db, id);
   const sets: SQL[] = [];
   if (input.name !== undefined) sets.push(sql`name = ${input.name}`);
   if (input.baseUrl !== undefined) sets.push(sql`base_url = ${input.baseUrl}`);
   if (input.clearApiKey) sets.push(sql`api_key = NULL`);
   else if (input.apiKey) sets.push(sql`api_key = ${input.apiKey}`);
-  if (input.embeddingModel !== undefined) sets.push(sql`embedding_model = ${input.embeddingModel}`);
+  const capabilities = input.capabilities ?? current.capabilities;
+  if (input.capabilities !== undefined) {
+    assertKindCapabilities(current.kind, input.capabilities);
+    sets.push(sql`capabilities = ${textArray(input.capabilities)}::text[]`);
+  }
+  // Desmarcar uma flag tira o modelo dela no mesmo UPDATE (o banco exige).
+  const models = modelsFor(input.defaultModels ?? current.defaultModels, capabilities);
+  if (!sameModels(models, current.defaultModels)) sets.push(sql`default_models = ${JSON.stringify(models)}::jsonb`);
+  if (input.promptCacheEnabled !== undefined) sets.push(sql`prompt_cache_enabled = ${input.promptCacheEnabled}`);
+  if (input.thinkingEnabled !== undefined) sets.push(sql`thinking_enabled = ${input.thinkingEnabled}`);
   if (input.isActive !== undefined) sets.push(sql`is_active = ${input.isActive}`);
   if (input.logBodies !== undefined) sets.push(sql`log_bodies = ${input.logBodies}`);
   if (input.notes !== undefined) sets.push(sql`notes = ${input.notes}`);
@@ -139,32 +225,137 @@ export async function deleteProvider(ctx: ServiceContext, id: string) {
 }
 
 /** Credenciais para uma ação do admin (nunca saem da API). */
-async function adminCredentials(ctx: ServiceContext, provider: AiProviderDto) {
+async function adminCredentials(ctx: ServiceContext, provider: AiProviderDto): Promise<LlmCredentials> {
   const result = await ctx.db.execute<{ key: string | null }>(
     sql`SELECT admin_ai_provider_api_key(${provider.id}::uuid, ${ctx.access.actor.id}::uuid) AS key`,
   );
-  return { kind: provider.kind, baseUrl: provider.baseUrl, apiKey: result.rows[0]?.key ?? null };
+  return {
+    kind: provider.kind,
+    baseUrl: provider.baseUrl,
+    apiKey: result.rows[0]?.key ?? null,
+    promptCache: provider.promptCacheEnabled,
+    thinking: provider.thinkingEnabled,
+  };
+}
+
+/** PNG 1×1 (a chamada mínima da visão). */
+const TEST_IMAGE = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+/** WAV de 1 s de silêncio (16 kHz, mono, 16 bits): a chamada mínima da transcrição. */
+function silentWav(seconds = 1, rate = 16000): Buffer {
+  const samples = Math.round(seconds * rate);
+  const data = samples * 2;
+  const out = Buffer.alloc(44 + data);
+  out.write('RIFF', 0);
+  out.writeUInt32LE(36 + data, 4);
+  out.write('WAVE', 8);
+  out.write('fmt ', 12);
+  out.writeUInt32LE(16, 16);
+  out.writeUInt16LE(1, 20);
+  out.writeUInt16LE(1, 22);
+  out.writeUInt32LE(rate, 24);
+  out.writeUInt32LE(rate * 2, 28);
+  out.writeUInt16LE(2, 32);
+  out.writeUInt16LE(16, 34);
+  out.write('data', 36);
+  out.writeUInt32LE(data, 40);
+  return out;
+}
+
+const errorText = (error: unknown) =>
+  (error instanceof LlmError ? error.message : error instanceof Error ? error.message : String(error)).slice(0, 300);
+
+/** Listagem de modelos que o servidor não tem (compatíveis): "listagem indisponível", sem erro. */
+const listingMissing = (error: unknown) => error instanceof LlmError && [404, 405, 501].includes(error.status ?? 0);
+
+/** Uma chamada mínima por flag ligada (registrada como test_connection, spec 023). */
+async function testCapability(
+  credentials: LlmCredentials,
+  client: LlmClient,
+  log: RequestLogBase,
+  provider: AiProviderDto,
+  capability: AiCapability,
+): Promise<AiProviderCapabilityCheck> {
+  const models = provider.defaultModels;
+  const model = capability === 'vision' ? (models.vision ?? models.text ?? null) : (models[capability] ?? null);
+  if (!model) return { capability, ok: true, model: null, message: t.agentsUi.admin.providers.checkSkipped };
+  try {
+    if (capability === 'text' || capability === 'vision') {
+      await client.chat({
+        model,
+        system: 'Teste de conexão. Responda só "ok".',
+        messages: [
+          {
+            role: 'user',
+            content:
+              capability === 'vision'
+                ? [
+                    { type: 'attachment', attachment_id: 'teste', file_name: 'teste.png', mime_type: 'image/png' },
+                    { type: 'text', text: 'ok' },
+                  ]
+                : [{ type: 'text', text: 'ok' }],
+          },
+        ],
+        tools: [],
+        params: { max_tokens: 16 },
+        loadAttachment: async () => ({ fileName: 'teste.png', mime: 'image/png', data: TEST_IMAGE }),
+        operation: 'test_connection',
+      });
+    } else if (capability === 'embeddings') {
+      await embed(credentials, model, ['teste de conexão'], log, 'test_connection');
+    } else if (capability === 'transcription') {
+      await transcribe(credentials, model, { fileName: 'teste.wav', mime: 'audio/wav', data: silentWav() }, log, {
+        operation: 'test_connection',
+      });
+    } else {
+      await speak(credentials, model, models.speech_voice ?? 'alloy', 'ok', log, { operation: 'test_connection' });
+    }
+    return { capability, ok: true, model, message: t.agentsUi.admin.providers.checkOk };
+  } catch (error) {
+    return { capability, ok: false, model, message: errorText(error) };
+  }
 }
 
 export async function testProvider(ctx: ServiceContext, id: string): Promise<AiProviderTestResult> {
   ctx.access.assertAdmin();
   const provider = await getProvider(ctx.db, id);
+  const credentials = await adminCredentials(ctx, provider);
   // Registrado como test_connection (spec 023), com as tentativas do invólucro.
-  const client = createLlmClient(await adminCredentials(ctx, provider), {
+  const log: RequestLogBase = {
     db: ctx.db,
     providerId: provider.id,
     userId: ctx.access.actor.id,
     logBodies: provider.logBodies,
     maxAttempts: ctx.config.aiRequestMaxAttempts,
     backoffMs: ctx.config.aiRequestBackoffMs,
-  });
+  };
+  const client = createLlmClient(credentials, log);
+  let models: string[] = [];
+  let modelsUnavailable = false;
+  let listError: string | null = null;
   try {
-    const models = await client.listModels('test_connection');
-    return { ok: true, message: `Conexão ok: ${models.length} modelo(s) disponível(is).`, models };
+    models = await client.listModels('test_connection');
   } catch (error) {
-    const message = error instanceof LlmError ? error.message : error instanceof Error ? error.message : String(error);
-    return { ok: false, message: t.agents.errors.providerError(message.slice(0, 300)), models: [] };
+    if (listingMissing(error)) modelsUnavailable = true;
+    else listError = errorText(error);
   }
+  const checks: AiProviderCapabilityCheck[] = [];
+  // Sem conexão nenhuma (a listagem falhou de verdade), as flags não são testadas.
+  if (!listError)
+    for (const capability of provider.capabilities) checks.push(await testCapability(credentials, client, log, provider, capability));
+  const failed = checks.filter((c) => !c.ok);
+  const ok = !listError && failed.length === 0;
+  const message = listError
+    ? t.agents.errors.providerError(listError)
+    : failed.length > 0
+      ? t.agents.errors.providerError(failed.map((c) => `${t.agents.capabilities[c.capability]}: ${c.message}`).join(' · '))
+      : modelsUnavailable
+        ? t.agentsUi.admin.providers.modelsUnavailable
+        : `Conexão ok: ${models.length} modelo(s) disponível(is).`;
+  return { ok, message, models, modelsUnavailable, checks };
 }
 
 /* ---------------- preços ---------------- */
@@ -173,7 +364,8 @@ export async function listPrices(ctx: ServiceContext): Promise<AiPriceDto[]> {
   ctx.access.assertAdmin();
   const result = await ctx.db.execute<Record<string, unknown>>(sql`
     SELECT m.id, m.provider_id, p.name AS provider_name, m.model, m.currency, m.input_price_per_million, m.output_price_per_million,
-           m.cache_write_price_per_million, m.cache_read_price_per_million, m.valid_from
+           m.cache_write_price_per_million, m.cache_read_price_per_million, m.audio_input_per_minute, m.speech_per_million_chars,
+           m.valid_from
       FROM ai_model_prices m JOIN ai_providers p ON p.id = m.provider_id
      ORDER BY lower(p.name), m.model, m.valid_from DESC`);
   return result.rows.map((r) => ({
@@ -186,6 +378,8 @@ export async function listPrices(ctx: ServiceContext): Promise<AiPriceDto[]> {
     outputPricePerMillion: Number(r.output_price_per_million),
     cacheWritePricePerMillion: r.cache_write_price_per_million === null ? null : Number(r.cache_write_price_per_million),
     cacheReadPricePerMillion: r.cache_read_price_per_million === null ? null : Number(r.cache_read_price_per_million),
+    audioInputPerMinute: r.audio_input_per_minute === null ? null : Number(r.audio_input_per_minute),
+    speechPerMillionChars: r.speech_per_million_chars === null ? null : Number(r.speech_per_million_chars),
     validFrom: iso(r.valid_from)!,
   }));
 }
@@ -196,9 +390,11 @@ export async function createPrice(ctx: ServiceContext, input: z.output<typeof ai
   const id = await withTx(ctx, async (tx) => {
     const result = await tx.execute<{ id: string }>(sql`
       INSERT INTO ai_model_prices (provider_id, model, currency, input_price_per_million, output_price_per_million,
-                                   cache_write_price_per_million, cache_read_price_per_million, valid_from)
+                                   cache_write_price_per_million, cache_read_price_per_million, audio_input_per_minute,
+                                   speech_per_million_chars, valid_from)
       VALUES (${input.providerId}, ${input.model}, ${input.currency}, ${input.inputPricePerMillion}, ${input.outputPricePerMillion},
-              ${input.cacheWritePricePerMillion}, ${input.cacheReadPricePerMillion}, coalesce(${input.validFrom ?? null}::timestamptz, now()))
+              ${input.cacheWritePricePerMillion}, ${input.cacheReadPricePerMillion}, ${input.audioInputPerMinute},
+              ${input.speechPerMillionChars}, coalesce(${input.validFrom ?? null}::timestamptz, now()))
       RETURNING id`);
     return result.rows[0]!.id;
   });
@@ -267,6 +463,22 @@ async function loadAgents(db: Executor, where = sql`true`): Promise<AiAgentDto[]
   }>(sql`
     SELECT l.agent_id, l.mcp_server_id, s.name, s.visibility, l.enabled_tools
       FROM agent_mcp_servers l JOIN mcp_servers s ON s.id = l.mcp_server_id ORDER BY lower(s.name)`);
+  const inferences = await db.execute<{
+    agent_id: string;
+    capability: AiInferenceCapability;
+    provider_id: string;
+    provider_name: string;
+    model: string | null;
+    voice: string | null;
+    effective_model: string | null;
+    effective_voice: string | null;
+  }>(sql`
+    SELECT i.agent_id, i.capability, i.provider_id, p.name AS provider_name, i.model, i.voice,
+           coalesce(i.model, p.default_models ->> i.capability,
+                    CASE WHEN i.capability = 'vision' THEN p.default_models ->> 'text' END) AS effective_model,
+           CASE WHEN i.capability = 'speech' THEN coalesce(i.voice, p.default_models ->> 'speech_voice') END AS effective_voice
+      FROM ai_agent_inferences i JOIN ai_providers p ON p.id = i.provider_id
+     ORDER BY array_position(${textArray(AI_INFERENCE_CAPABILITIES)}::text[], i.capability)`);
   return result.rows.map((r) => ({
     id: r.id,
     name: r.name,
@@ -288,6 +500,19 @@ async function loadAgents(db: Executor, where = sql`true`): Promise<AiAgentDto[]
     mcpServers: links.rows
       .filter((l) => l.agent_id === r.id)
       .map((l) => ({ mcpServerId: l.mcp_server_id, name: l.name, visibility: l.visibility, enabledTools: l.enabled_tools })),
+    inferences: inferences.rows
+      .filter((i) => i.agent_id === r.id)
+      .map(
+        (i): AgentInferenceDto => ({
+          capability: i.capability,
+          providerId: i.provider_id,
+          providerName: i.provider_name,
+          model: i.model,
+          voice: i.voice,
+          effectiveModel: i.effective_model,
+          effectiveVoice: i.effective_voice,
+        }),
+      ),
   }));
 }
 
@@ -322,6 +547,41 @@ async function setLinks(tx: Tx, agentId: string, links: { mcpServerId: string; e
   }
 }
 
+type InferenceInput = NonNullable<z.output<typeof aiAgentCreateInput>['inferences']>[number];
+
+/**
+ * Provedor padrão (spec 024): preenche o texto (se não veio) e as inferências que o provedor suporta e que não
+ * vieram explicitamente.
+ */
+async function applyDefaultProvider(
+  db: Executor,
+  input: { defaultProviderId?: string; providerId?: string | null; inferences?: InferenceInput[] },
+): Promise<{ providerId: string | null | undefined; inferences: InferenceInput[] | undefined }> {
+  if (!input.defaultProviderId) return { providerId: input.providerId, inferences: input.inferences };
+  const provider = await getProvider(db, input.defaultProviderId);
+  const filled = inferencesFromProvider(provider);
+  const given = new Map((input.inferences ?? []).map((x) => [x.capability, x]));
+  for (const inference of filled.inferences) if (!given.has(inference.capability)) given.set(inference.capability, inference);
+  return { providerId: input.providerId ?? filled.providerId, inferences: [...given.values()] };
+}
+
+/** Substitui as inferências do agente (só o que mudou, para a auditoria contar a história certa). */
+async function setInferences(tx: Tx, agentId: string, inferences: InferenceInput[]) {
+  const keep = inferences.map((x) => x.capability);
+  await tx.execute(sql`
+    DELETE FROM ai_agent_inferences WHERE agent_id = ${agentId} AND NOT (capability = ANY (${textArray(keep)}::text[]))`);
+  for (const x of inferences) {
+    const voice = x.capability === 'speech' ? x.voice : null;
+    await tx.execute(sql`
+      INSERT INTO ai_agent_inferences (agent_id, capability, provider_id, model, voice)
+      VALUES (${agentId}, ${x.capability}, ${x.providerId}, ${x.model}, ${voice})
+      ON CONFLICT (agent_id, capability) DO UPDATE
+        SET provider_id = EXCLUDED.provider_id, model = EXCLUDED.model, voice = EXCLUDED.voice
+        WHERE (ai_agent_inferences.provider_id, ai_agent_inferences.model, ai_agent_inferences.voice)
+              IS DISTINCT FROM (EXCLUDED.provider_id, EXCLUDED.model, EXCLUDED.voice)`);
+  }
+}
+
 /** Só um agente atende os fluxos: desmarca o atual antes de marcar outro (na mesma transação). */
 async function clearFlowAgent(tx: Tx, exceptId: string | null) {
   await tx.execute(sql`UPDATE ai_agents SET use_for_flows = false WHERE use_for_flows ${exceptId ? sql`AND id <> ${exceptId}` : sql``}`);
@@ -330,12 +590,14 @@ async function clearFlowAgent(tx: Tx, exceptId: string | null) {
 export async function createAgent(ctx: ServiceContext, input: z.output<typeof aiAgentCreateInput>) {
   ctx.access.assertAdmin();
   await checkKit(ctx.db, input.toolKitId);
+  const filled = await applyDefaultProvider(ctx.db, input);
+  const providerId = filled.providerId ?? null;
   const id = await withTx(ctx, async (tx) => {
     if (input.useForFlows) await clearFlowAgent(tx, null);
     const result = await tx.execute<{ id: string }>(sql`
       INSERT INTO ai_agents (name, description, system_prompt, provider_id, model, params, tool_kit_id, color_slot, icon, is_active,
                              use_for_flows, created_by_user_id)
-      VALUES (${input.name}, ${input.description}, ${input.systemPrompt}, ${input.providerId}, ${input.model},
+      VALUES (${input.name}, ${input.description}, ${input.systemPrompt}, ${providerId}, ${input.model},
               ${JSON.stringify(input.params)}::jsonb, ${input.toolKitId}, ${input.colorSlot}, ${input.icon}, ${input.isActive},
               ${input.useForFlows}, ${ctx.access.actor.id})
       RETURNING id`);
@@ -343,6 +605,7 @@ export async function createAgent(ctx: ServiceContext, input: z.output<typeof ai
     // A versão 1 do prompt, com o autor e a nota (sem ela, o banco a criaria no COMMIT).
     await insertPromptVersion(tx, agentId, input.systemPrompt, input.promptNote, ctx.access.actor.id, null);
     if (input.mcpServers) await setLinks(tx, agentId, input.mcpServers);
+    if (filled.inferences) await setInferences(tx, agentId, filled.inferences);
     return agentId;
   });
   return getAgent(ctx.db, id);
@@ -352,12 +615,13 @@ export async function updateAgent(ctx: ServiceContext, id: string, input: z.outp
   ctx.access.assertAdmin();
   const current = await getAgent(ctx.db, id);
   await checkKit(ctx.db, input.toolKitId);
+  const filled = await applyDefaultProvider(ctx.db, input);
   // O prompt muda só criando uma versão (o banco copia o conteúdo para o agente; spec 022).
   const newPrompt = input.systemPrompt !== undefined && input.systemPrompt !== current.systemPrompt ? input.systemPrompt : null;
   const sets: SQL[] = [];
   if (input.name !== undefined) sets.push(sql`name = ${input.name}`);
   if (input.description !== undefined) sets.push(sql`description = ${input.description}`);
-  if (input.providerId !== undefined) sets.push(sql`provider_id = ${input.providerId}`);
+  if (filled.providerId !== undefined) sets.push(sql`provider_id = ${filled.providerId}`);
   if (input.model !== undefined) sets.push(sql`model = ${input.model}`);
   if (input.params !== undefined) sets.push(sql`params = ${JSON.stringify(input.params)}::jsonb`);
   if (input.toolKitId !== undefined) sets.push(sql`tool_kit_id = ${input.toolKitId}`);
@@ -372,6 +636,7 @@ export async function updateAgent(ctx: ServiceContext, id: string, input: z.outp
     if (newPrompt !== null) await insertPromptVersion(tx, id, newPrompt, input.promptNote, ctx.access.actor.id, null);
     if (sets.length > 0) await tx.execute(sql`UPDATE ai_agents SET ${sql.join(sets, sql`, `)} WHERE id = ${id}`);
     if (input.mcpServers) await setLinks(tx, id, input.mcpServers);
+    if (filled.inferences) await setInferences(tx, id, filled.inferences);
   });
   return getAgent(ctx.db, id);
 }

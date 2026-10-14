@@ -50,6 +50,9 @@ importers:
       openai:
         specifier: 7.32.0
         version: 7.32.0(undici@8.11.2)(zod@4.6.5)
+      pdfjs-dist:
+        specifier: 5.7.284
+        version: 5.7.284
       pino:
         specifier: 10.4.0
         version: 10.4.0

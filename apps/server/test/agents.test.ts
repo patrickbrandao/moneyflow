@@ -9,7 +9,7 @@ import pino from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
-import { embeddingCredentials, embedPending, type IndexState, syncEmbeddingSources } from '../src/agents/embeddings';
+import { type IndexState, indexEmbeddings } from '../src/agents/embeddings';
 import { mcpExposedName } from '../src/agents/mcp-client';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { registerInternalTool } from '../src/agents/tools-runtime';
@@ -94,7 +94,16 @@ beforeAll(async () => {
   h = await startApp();
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
-  provider = await admin.post('/api/admin/ai/providers', { name: `Falso ${uid()}`, kind: 'anthropic', baseUrl: llm.url, apiKey: API_KEY });
+  // Anthropic compatível (base_url): modelo de texto obrigatório; cache e raciocínio ligados à mão (spec 024).
+  provider = await admin.post('/api/admin/ai/providers', {
+    name: `Falso ${uid()}`,
+    kind: 'anthropic',
+    baseUrl: llm.url,
+    apiKey: API_KEY,
+    defaultModels: { text: 'claude-sonnet-5-5' },
+    promptCacheEnabled: true,
+    thinkingEnabled: true,
+  });
   await admin.post('/api/admin/ai/prices', {
     providerId: provider.id,
     model: 'claude-sonnet-5-5',
@@ -107,7 +116,8 @@ beforeAll(async () => {
   agent = await admin.post('/api/admin/ai/agents', {
     name: `Assistente teste ${uid()}`,
     systemPrompt: 'Você ajuda nos testes.',
-    providerId: provider.id,
+    // O provedor padrão preenche o texto e a visão (o mesmo provedor: anexos direto ao modelo).
+    defaultProviderId: provider.id,
     model: 'claude-sonnet-5-5',
     params: { max_tokens: 2000, max_tool_iterations: 6 },
     toolKitId: defaultKit.id,
@@ -225,7 +235,8 @@ describe('execução do agente', () => {
     expect(card).toMatchObject({ toolName: 'create_entity', status: 'pending' });
     expect(card.preview).toMatchObject({ title: 'Criar entidade', action: 'create' });
     expect(card.preview.rows).toEqual(expect.arrayContaining([{ label: 'Nome', after: name }]));
-    expect((await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).length).toBe(0);
+    // Pelo nome exato: a busca é por semelhança e acharia o "ACME Agente" de uma rodada anterior num banco reaproveitado.
+    expect((await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).filter((e: any) => e.name === name)).toHaveLength(0);
 
     // Outro usuário não decide.
     const other = client(h, (await userSession(h)).cookie);
@@ -235,7 +246,7 @@ describe('execução do agente', () => {
     expect(decided).toEqual({ decided: 1, pending: 0, runStatus: 'queued' });
     await drain();
     expect((await runStatus(sent.run.id)).status).toBe('completed');
-    const created = await admin.get(`/api/entities?q=${encodeURIComponent(name)}`);
+    const created = (await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).filter((e: any) => e.name === name);
     expect(created).toHaveLength(1);
     const audit = await h.db.execute<{ actor_kind: string; agent_run_id: string; user_id: string }>(
       sql`SELECT actor_kind, agent_run_id, user_id FROM audit_log WHERE table_name = 'entities' AND record_id = ${created[0].id}`,
@@ -253,7 +264,7 @@ describe('execução do agente', () => {
     await admin.post(`/api/runs/${sent.run.id}/confirmations`, { decision: 'rejected', reason: 'não quero' });
     await drain();
     expect((await runStatus(sent.run.id)).status).toBe('completed');
-    expect(await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).toHaveLength(0);
+    expect((await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).filter((e: any) => e.name === name)).toHaveLength(0);
     const detail = await admin.get(`/api/conversations/${conversation.id}`);
     const result = detail.messages.find((m: any) => m.role === 'tool').content[0];
     expect(result).toMatchObject({ is_error: true });
@@ -649,21 +660,32 @@ describe('embeddings', () => {
       kind: 'openai',
       baseUrl: `${llm.url}/v1`,
       apiKey: 'sk-embed-SEGREDO-03',
-      embeddingModel: 'fake-embedding',
+      capabilities: ['embeddings'],
+      defaultModels: { embeddings: 'fake-embedding' },
+    });
+    // O agente usa o texto do provedor Anthropic falso e os embeddings deste (spec 024).
+    const searcher = await admin.post('/api/admin/ai/agents', {
+      name: `Busca ${uid()}`,
+      providerId: provider.id,
+      model: 'claude-sonnet-5-5',
+      toolKitId: defaultKit.id,
+      isActive: true,
+      inferences: [{ capability: 'embeddings', providerId: embedder.id }],
     });
     try {
-      const creds = await embeddingCredentials(h.db);
-      expect(creds).toMatchObject({ providerId: embedder.id, kind: 'openai', model: 'fake-embedding' });
       const name = `Padaria Lua Azul ${uid()}`;
       const entity = await admin.post('/api/entities', { kind: 'company', name });
 
-      // Indexação (o que a manutenção do worker faz): textos-fonte e depois os vetores pendentes.
+      // Indexação (o que a manutenção do worker faz): registra o par, grava os textos-fonte e depois os vetores pendentes.
       const state: IndexState = { since: new Map() };
-      for (let i = 0; i < 100 && (await syncEmbeddingSources(h.db, creds!.model, state)) > 0; i += 1);
-      for (let i = 0; i < 100 && (await embedPending(h.db, creds!)) > 0; i += 1);
+      for (let i = 0; i < 100; i += 1) {
+        const round = await indexEmbeddings(h.db, h.config, state);
+        expect(round.errors).toEqual([]);
+        if (round.sources === 0 && round.embedded === 0) break;
+      }
       const indexed = await h.db.execute<{ source_text: string; needs_reindex: boolean; has_vector: boolean; caixa_id: string | null }>(sql`
         SELECT source_text, needs_reindex, embedding IS NOT NULL AS has_vector, caixa_id FROM ai_embeddings
-         WHERE object_type = 'entity' AND object_id = ${entity.id} AND model = 'fake-embedding'`);
+         WHERE object_type = 'entity' AND object_id = ${entity.id} AND provider_id = ${embedder.id} AND model = 'fake-embedding'`);
       expect(indexed.rows).toEqual([{ source_text: name, needs_reindex: false, has_vector: true, caixa_id: null }]);
       const embedCall = llm.calls.find((c) => c.path === '/v1/embeddings' && c.body.input.includes(name));
       expect(embedCall?.headers.authorization).toBe('Bearer sk-embed-SEGREDO-03');
@@ -674,7 +696,7 @@ describe('embeddings', () => {
       expect(indexUsage.rows[0]!.n).toBeGreaterThan(0);
 
       // A tool semantic_search vetoriza a consulta (uso atribuído ao usuário) e devolve a entidade.
-      const conversation = await admin.post('/api/conversations', { agentId: agent.id });
+      const conversation = await admin.post('/api/conversations', { agentId: searcher.id });
       const sent = await chat(
         admin,
         conversation.id,
@@ -697,6 +719,7 @@ describe('embeddings', () => {
       expect(JSON.stringify(await admin.get('/api/admin/ai/providers'))).not.toContain('sk-embed-SEGREDO-03');
     } finally {
       // Os demais testes usam o mesmo banco e esperam a busca por trigram.
+      await admin.patch(`/api/admin/ai/agents/${searcher.id}`, { isActive: false });
       await admin.patch(`/api/admin/ai/providers/${embedder.id}`, { isActive: false });
     }
   });

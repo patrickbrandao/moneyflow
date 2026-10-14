@@ -30,6 +30,34 @@ export const agentsStrings = {
     primaryCaixaNotGeneral: 'A caixa principal tem de ser uma caixa comum (não um cartão).',
     toolKitInUse: (agents: string[]) =>
       `O kit está em uso e não pode ser excluído. Agentes que o usam: ${agents.join(', ')}. Troque o kit deles antes.`,
+    anthropicCapabilities: 'O tipo Anthropic só tem texto e visão (a Messages API não tem embeddings nem áudio).',
+    compatibleTextModel: 'Informe o modelo de texto padrão: ele é obrigatório num servidor compatível com a Messages API.',
+    capabilityInUse: (agents: string) =>
+      `Esta capacidade está em uso e não pode ser desmarcada. Agentes que a usam: ${agents}. Troque o provedor deles antes.`,
+    inferenceProvider: (capability: string) => `Escolha um provedor ativo com a capacidade "${capability}".`,
+    agentNoVision: 'Este agente não lê imagens.',
+    embeddingDimensions: (got: number) => `O modelo precisa produzir 1536 dimensões (devolveu ${got}).`,
+  },
+  /** Capacidades dos provedores (spec 024), em ordem canônica. */
+  capabilities: {
+    text: 'Texto',
+    vision: 'Visão',
+    embeddings: 'Embeddings',
+    transcription: 'Áudio→texto',
+    speech: 'Texto→áudio',
+  } as Record<string, string>,
+  /** Como um anexo chega ao modelo de texto quando o agente não o lê direto (spec 024). */
+  attachments: {
+    imageDescription: (name: string, text: string) => `[Imagem "${name}" — descrição]: ${text}`,
+    documentDescription: (name: string, text: string) => `[PDF "${name}" — conteúdo extraído]: ${text}`,
+    pdfText: (name: string, text: string) => `[PDF "${name}" — camada de texto]:\n${text}`,
+    pdfNoText: (name: string) => `[PDF "${name}"]: PDF sem texto e o agente não tem visão.`,
+    imageUnreadable: (name: string) => `[Imagem "${name}"]: este agente não lê imagens.`,
+    describePrompt:
+      'Descreva o anexo para outro modelo que não consegue vê-lo. Transcreva todo o texto legível (valores, datas, nomes, documentos, códigos) e descreva o que não é texto (tabelas, gráficos, fotos) de forma objetiva. Responda só com a descrição, em português.',
+  },
+  search: {
+    indexBuilding: 'índice em construção: parte dos resultados veio da busca por semelhança de texto',
   },
   /** Categorias das tools (spec 021), na ordem de AGENT_TOOL_CATEGORIES. */
   toolCategories: {

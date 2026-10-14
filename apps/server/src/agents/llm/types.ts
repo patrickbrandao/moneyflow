@@ -9,7 +9,11 @@ import type { AgentParams, AiRequestOperation, AiUsagePurpose, AssistantBlock, J
 
 export type LlmTool = { name: string; description: string; inputSchema: JsonSchema };
 
-export type LlmAttachment = { fileName: string; mime: string; data: Buffer };
+/**
+ * Anexo como vai ao modelo: o arquivo (imagem/PDF direto, spec 024) ou o texto
+ * que o substitui (descrição do provedor de visão, camada de texto do PDF, aviso).
+ */
+export type LlmAttachment = { fileName: string; mime: string; data: Buffer } | { fileName: string; mime: string; text: string };
 
 export type LlmUsage = { inputTokens: number; outputTokens: number; cacheWriteTokens: number; cacheReadTokens: number };
 
@@ -45,7 +49,14 @@ export type LlmResponse = {
   requestId: string | null;
 };
 
-export type LlmCredentials = { kind: 'anthropic' | 'openai'; baseUrl: string | null; apiKey: string | null };
+export type LlmCredentials = {
+  kind: 'anthropic' | 'openai';
+  baseUrl: string | null;
+  apiKey: string | null;
+  /** Messages API (spec 024): false = não manda cache_control / thinking (padrão: manda). */
+  promptCache?: boolean;
+  thinking?: boolean;
+};
 
 export interface LlmClient {
   readonly kind: 'anthropic' | 'openai';
