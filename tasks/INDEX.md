@@ -4,7 +4,6 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 
 | Nº | Tarefa | Status | Tipo | Responsável | Origem |
 |---|---|---|---|---|---|
-| 026 | [Sessão ativa única por usuário e agente no banco (F12)](026-sessoes-dos-agentes-no-banco.md) (depois da F11) | aberta | banco | dba | usuario |
 | 027 | [Fio por agente, finalizar sessão e sessões anteriores (F12)](027-sessoes-dos-agentes-na-aplicacao.md) (depois da 026) | aberta | melhoria | app | usuario |
 | 028 | [Tools de controle total, lote F13a (operação)](028-tools-controle-total-lote-a.md) (depois da F12) | aberta | melhoria | app | usuario |
 | 029 | [Tools de controle total, lote F13b (administração e segredos)](029-tools-controle-total-lote-b.md) (depois da 028) | aberta | melhoria | app | usuario |
@@ -12,6 +11,7 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 | 031 | [Orçamentos com aviso e bloqueio, limite por minuto e painel de uso (F14)](031-orcamentos-e-limites-na-aplicacao.md) (depois da 030) | aberta | melhoria | app | usuario |
 | 032 | [Tarefas agendadas, conciliação com IA e Telegram de entrada no banco (F15)](032-fluxos-autonomos-no-banco.md) (depois da F14) | aberta | banco | dba | usuario |
 | 033 | [Tarefas agendadas, conciliação completa ao importar e conversa pelo Telegram (F15)](033-fluxos-autonomos-na-aplicacao.md) (depois da 032) | aberta | melhoria | app | usuario |
+| 026 | [Sessão ativa única por usuário e agente no banco (F12)](026-sessoes-dos-agentes-no-banco.md) (depois da F11) | concluida | banco | dba | usuario |
 | 025 | [Prévias, gravação, transcrição, player e modo áudio no chat (F11)](025-chat-multimidia-na-aplicacao.md) (depois da 024) | concluida | melhoria | app | usuario |
 | 024 | [Áudio gerado por mensagem e metadados de anexo no banco (F11)](024-chat-multimidia-no-banco.md) (depois da F10) | concluida | banco | dba | usuario |
 | 023 | [Capacidades, Anthropic compatível, provedor por inferência e visão por descrição (F10)](023-capacidades-dos-provedores-na-aplicacao.md) (depois da 022) | concluida | melhoria | app | usuario |

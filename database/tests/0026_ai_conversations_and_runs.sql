@@ -44,13 +44,14 @@ INSERT INTO attachments (id, file_name, mime_type, content) VALUES
   ('00000000-0000-7000-8000-0000000a7001', 'boleto.pdf', 'application/pdf', '\x25504446');
 
 -- Conversas ---------------------------------------------------------------------------------------------------------
-INSERT INTO ai_conversations (id, user_id, agent_id, title, screen_context) VALUES
+-- b0002 é uma sessão finalizada do mesmo par de b0001 (uma ativa por usuário e agente desde a 0043).
+INSERT INTO ai_conversations (id, user_id, agent_id, title, screen_context, archived_at) VALUES
   ('00000000-0000-7000-8000-0000000b0001', '00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001',
-   'Contas de energia', '{"route": "/caixas/x", "caixa_id": "x"}'),
+   'Contas de energia', '{"route": "/caixas/x", "caixa_id": "x"}', NULL),
   ('00000000-0000-7000-8000-0000000b0002', '00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001',
-   NULL, NULL),
+   NULL, NULL, now()),
   ('00000000-0000-7000-8000-0000000b0003', '00000000-0000-7000-8000-0000000000a3', '00000000-0000-7000-8000-0000000a3002',
-   'Notas fiscais de setembro', NULL);
+   'Notas fiscais de setembro', NULL, NULL);
 SELECT is((SELECT title_source FROM ai_conversations WHERE id = '00000000-0000-7000-8000-0000000b0001'), 'auto', 'título automático por padrão');
 SELECT throws_ok($$INSERT INTO ai_conversations (user_id, agent_id, title) VALUES
                    ('00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001', '   ')$$, '23514', NULL,
@@ -338,8 +339,9 @@ INSERT INTO ai_conversations (id, user_id, agent_id, screen_context, purpose, ar
    '{"purpose": "document_reading", "route": "/titulos"}', 'document_reading', now());
 INSERT INTO ai_messages (id, conversation_id, role, content) VALUES
   ('00000000-0000-7000-8000-0000000b1009', '00000000-0000-7000-8000-0000000b0009', 'user', '[{"type": "text", "text": "leia"}]');
+-- Com o Fiscal: bia já tem a sessão chat ativa com o Assistente (a bifurcação acima).
 SELECT lives_ok(format($$INSERT INTO ai_conversations (user_id, agent_id, purpose) VALUES
-                  ('00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001', %L)$$, p), 'finalidade aceita: ' || p)
+                  ('00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3002', %L)$$, p), 'finalidade aceita: ' || p)
   FROM unnest(ARRAY['chat', 'classify_lines', 'contract_reading', 'contract_markdown']) p;
 SELECT throws_ok($$INSERT INTO ai_conversations (user_id, agent_id, purpose) VALUES
                    ('00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000a3001', 'document')$$, '23514',

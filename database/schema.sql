@@ -698,6 +698,52 @@ COMMENT ON FUNCTION public.ai_capability_list_valid(p_capabilities text[]) IS 't
 
 
 --
+-- Name: ai_chat_sessions_consolidate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_chat_sessions_consolidate() RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  extras uuid[];
+BEGIN
+  -- Sem escrita concorrente nas conversas enquanto escolhe a ativa de cada par.
+  LOCK TABLE ai_conversations IN SHARE ROW EXCLUSIVE MODE;
+  SELECT coalesce(array_agg(x.id), '{}') INTO extras
+    FROM (SELECT c.id,
+                 row_number() OVER (PARTITION BY c.user_id, c.agent_id
+                                    ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC, c.id DESC) AS rn
+            FROM ai_conversations c
+           WHERE c.purpose = 'chat' AND c.archived_at IS NULL) x
+   WHERE x.rn > 1;
+  IF cardinality(extras) = 0 THEN
+    RETURN 0;
+  END IF;
+
+  -- Execuções ativas das que serão arquivadas: na fila ou esperando confirmação, canceladas na hora; rodando, com o
+  -- cancelamento pedido (o worker encerra como canceled no próximo heartbeat).
+  UPDATE ai_runs r
+     SET cancel_requested_at = coalesce(r.cancel_requested_at, now()),
+         status = CASE WHEN r.status = 'running' THEN r.status ELSE 'canceled' END
+   WHERE r.conversation_id = ANY (extras)
+     AND r.status IN ('queued', 'running', 'awaiting_confirmation');
+
+  UPDATE ai_conversations c
+     SET archived_at = now(), archived_reason = 'migrated_from_multi'
+   WHERE c.id = ANY (extras);
+  RETURN cardinality(extras);
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_chat_sessions_consolidate(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_chat_sessions_consolidate() IS 'Manutenção da migração 0043 (spec 026), idempotente: para cada (usuário, agente) com mais de uma conversa chat ativa, mantém a de last_message_at mais recente (nulos por último; empate por created_at e id) e arquiva as outras com archived_reason = migrated_from_multi, encerrando as execuções ativas delas (queued e awaiting_confirmation viram canceled; running recebe cancel_requested_at). Nada é apagado. Devolve quantas arquivou. Só o dono do banco.';
+
+
+--
 -- Name: ai_conversation_fork(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -716,6 +762,12 @@ BEGIN
     RAISE EXCEPTION 'ai_conversation_fork: message % not found', p_message_id USING ERRCODE = 'no_data_found';
   END IF;
   SELECT m.seq INTO upto FROM ai_messages m WHERE m.id = p_message_id;
+
+  -- Finaliza a sessão ativa do mesmo (usuário, agente), que pode ser a própria origem. Com execução ativa sem
+  -- cancelamento pedido, ai_conversations_archive_guard recusa (23514).
+  UPDATE ai_conversations c
+     SET archived_at = now(), archived_reason = 'forked'
+   WHERE c.user_id = p_user_id AND c.agent_id = src.agent_id AND c.purpose = 'chat' AND c.archived_at IS NULL;
 
   INSERT INTO ai_conversations (user_id, agent_id, title, title_source, forked_from_conversation_id,
                                 forked_from_message_id, screen_context, purpose)
@@ -738,7 +790,7 @@ $$;
 -- Name: FUNCTION ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text) IS 'Bifurca: cria uma conversa de p_user_id com o mesmo agente, copia as mensagens da origem até p_message_id (inclusive, mesmos seq, sem run_id; anexos religados) e devolve o id. Título = p_title ou o da origem. A cópia é sempre purpose chat (sem a chave purpose no screen_context), mesmo vinda de uma conversa de fluxo. Corte a bifurcação numa mensagem que não deixe tool_use sem tool_result (a aplicação escolhe). P0002 se a mensagem não existe.';
+COMMENT ON FUNCTION public.ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text) IS 'Bifurca: finaliza a sessão chat ativa de p_user_id com o agente da origem (archived_reason = forked; pode ser a própria origem) e cria a sessão nova, que vira a ativa, copiando as mensagens da origem até p_message_id (inclusive, mesmos seq, sem run_id; anexos religados); devolve o id. Título = p_title ou o da origem. A cópia é sempre purpose chat (sem a chave purpose no screen_context), mesmo vinda de uma conversa de fluxo. Corte a bifurcação numa mensagem que não deixe tool_use sem tool_result (a aplicação escolhe). P0002 se a mensagem não existe; 23514 ai_conversations_archive_active_run_check se a sessão ativa tem execução ativa sem cancelamento pedido; 23505 se outra transação criou a ativa do par ao mesmo tempo.';
 
 
 --
@@ -793,6 +845,38 @@ $$;
 --
 
 COMMENT ON FUNCTION public.ai_conversation_search(p_query text, p_user_id uuid, p_include_archived boolean, p_limit integer) IS 'Busca conversas pelo título (trigram: contém ou parecido) e pelo texto das mensagens (full-text em português, sintaxe de websearch: "frase", -excluir, OR). p_user_id nulo = de todos (só para admin; a aplicação aplica). Devolve a melhor mensagem e um trecho com o termo entre « ». Erro 22023 se a busca é vazia/longa ou o limite inválido.';
+
+
+--
+-- Name: ai_conversations_archive_guard(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_conversations_archive_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL THEN
+    RAISE EXCEPTION 'ai_conversations: session % is finished and cannot become active again (fork it instead)', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_conversations_unarchive_check';
+  END IF;
+  IF OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL
+     AND EXISTS (SELECT 1 FROM ai_runs r
+                  WHERE r.conversation_id = NEW.id
+                    AND r.status IN ('queued', 'running', 'awaiting_confirmation')
+                    AND r.cancel_requested_at IS NULL) THEN
+    RAISE EXCEPTION 'ai_conversations: session % has an active run; request its cancellation before finishing', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'ai_conversations_archive_active_run_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_conversations_archive_guard(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_conversations_archive_guard() IS 'Trigger das sessões chat (spec 026): arquivada não volta a ativa (23514 ai_conversations_unarchive_check); arquivar com execução ativa (queued, running, awaiting_confirmation) só com cancel_requested_at já preenchido (23514 ai_conversations_archive_active_run_check). Conversas de fluxo (purpose <> chat) ficam de fora.';
 
 
 --
@@ -7070,7 +7154,6 @@ CREATE TABLE public.ai_conversations (
     agent_id uuid NOT NULL,
     title text,
     title_source text DEFAULT 'auto'::text NOT NULL,
-    pinned_at timestamp with time zone,
     archived_at timestamp with time zone,
     forked_from_conversation_id uuid,
     forked_from_message_id uuid,
@@ -7079,6 +7162,9 @@ CREATE TABLE public.ai_conversations (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     purpose text DEFAULT 'chat'::text NOT NULL,
+    archived_reason text,
+    CONSTRAINT ai_conversations_archived_reason_archived_check CHECK (((archived_reason IS NULL) OR (archived_at IS NOT NULL))),
+    CONSTRAINT ai_conversations_archived_reason_check CHECK ((archived_reason = ANY (ARRAY['finished'::text, 'forked'::text, 'migrated_from_multi'::text, 'import_conflict'::text]))),
     CONSTRAINT ai_conversations_fork_check CHECK ((forked_from_conversation_id <> id)),
     CONSTRAINT ai_conversations_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text]))),
     CONSTRAINT ai_conversations_screen_context_check CHECK ((jsonb_typeof(screen_context) = 'object'::text)),
@@ -7091,7 +7177,7 @@ CREATE TABLE public.ai_conversations (
 -- Name: TABLE ai_conversations; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.ai_conversations IS 'Conversas do usuário com um agente (spec 011): título automático e editável, fixar, arquivar, excluir (apaga mensagens, execuções e eventos; o uso fica em ai_usage), buscar (ai_conversation_search) e bifurcar (ai_conversation_fork). O admin pode ler as de todos (a aplicação aplica). Fora da auditoria.';
+COMMENT ON TABLE public.ai_conversations IS 'Sessões do usuário com um agente (specs 011 e 026): purpose chat é o fio contínuo de (usuário, agente), com no máximo uma sessão ativa (ai_conversations_active_chat_key); finalizar = arquivar (archived_reason), sem volta; continuar de uma finalizada = bifurcar (ai_conversation_fork). Título automático e editável, excluir (apaga mensagens, execuções e eventos; o uso fica em ai_usage), buscar (ai_conversation_search). Conversas de fluxo (purpose <> chat) ficam fora da regra da sessão ativa. O admin pode ler as de todos (a aplicação aplica). Fora da auditoria.';
 
 
 --
@@ -7116,10 +7202,10 @@ COMMENT ON COLUMN public.ai_conversations.title_source IS 'auto (gerado pelo age
 
 
 --
--- Name: COLUMN ai_conversations.pinned_at; Type: COMMENT; Schema: public; Owner: -
+-- Name: COLUMN ai_conversations.archived_at; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_conversations.pinned_at IS 'Fixada desde (nulo = não fixada). Fixadas primeiro, mais recente primeiro.';
+COMMENT ON COLUMN public.ai_conversations.archived_at IS 'Arquivada (finalizada) desde; nula = ativa. Sessão chat: no máximo uma ativa por (user_id, agent_id) (ai_conversations_active_chat_key), não volta a ser ativa e só é arquivada sem execução ativa ou com o cancelamento dela já pedido (ai_conversations_archive_guard).';
 
 
 --
@@ -7155,6 +7241,13 @@ COMMENT ON COLUMN public.ai_conversations.last_message_at IS 'Instante da últim
 --
 
 COMMENT ON COLUMN public.ai_conversations.purpose IS 'Finalidade, definida no INSERT e imutável: chat (conversa do usuário, padrão) ou o fluxo automático que a criou (document_reading, classify_lines, contract_reading, contract_markdown; mesmo vocabulário de ai_usage.purpose). Conversas de fluxo não entram na lista nem na busca e rodam sem tools. A bifurcação é sempre chat.';
+
+
+--
+-- Name: COLUMN ai_conversations.archived_reason; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_conversations.archived_reason IS 'Por que a sessão foi finalizada (spec 026): finished (o usuário finalizou), forked (ai_conversation_fork abriu uma sessão nova do mesmo par), migrated_from_multi (a migração 0043 deixou uma ativa por usuário e agente) ou import_conflict (a importação do backup trazia uma segunda ativa para o par). Nula = arquivada antes da F12 ou sem motivo. Só com archived_at preenchido.';
 
 
 --
@@ -12742,6 +12835,20 @@ CREATE INDEX ai_attachment_derivatives_result_attachment_id_idx ON public.ai_att
 
 
 --
+-- Name: ai_conversations_active_chat_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ai_conversations_active_chat_key ON public.ai_conversations USING btree (user_id, agent_id) WHERE ((purpose = 'chat'::text) AND (archived_at IS NULL));
+
+
+--
+-- Name: INDEX ai_conversations_active_chat_key; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON INDEX public.ai_conversations_active_chat_key IS 'Sessão ativa única (spec 026): no máximo uma conversa chat não arquivada por (usuário, agente). 23505 ao criar a segunda; finalize (arquive) a ativa antes, ou use ai_conversation_fork, que faz isso.';
+
+
+--
 -- Name: ai_conversations_agent_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -14209,6 +14316,13 @@ CREATE TRIGGER ai_attachment_derivatives_release_result AFTER DELETE OR UPDATE O
 --
 
 CREATE TRIGGER ai_attachment_derivatives_set_updated_at BEFORE UPDATE ON public.ai_attachment_derivatives FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: ai_conversations ai_conversations_archive_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ai_conversations_archive_guard BEFORE UPDATE OF archived_at ON public.ai_conversations FOR EACH ROW WHEN (((old.purpose = 'chat'::text) AND (old.archived_at IS DISTINCT FROM new.archived_at))) EXECUTE FUNCTION public.ai_conversations_archive_guard();
 
 
 --
