@@ -197,15 +197,64 @@ ON CONFLICT (kind, parent_id, lower(name)) DO NOTHING;
 -- Agente de exemplo (spec 011) ------------------------------------------------------------
 -- Sem provedor nem chave (segredos não entram em seed): nasce INATIVO. O admin escolhe o
 -- provedor e o modelo na tela de agentes e o ativa.
--- Kit de ferramentas (spec 021) com todas as tools do retrato da v0.1.7 no modo sugerido:
--- leituras e notify_user em allow, as demais escritas em ask.
+-- Kit de ferramentas (spec 021) com todas as tools do registro (packages/shared/src/agents/tools.ts,
+-- tools-operation.ts e tools-admin.ts: 145 tools, inclusive as das F13a/F13b) no modo sugerido de cada
+-- uma (suggestedMode): leituras, notify_user e refresh_mcp_tools em allow, as demais escritas em ask; as tools
+-- com segredos (digitados no cartão de aprovação) sempre em ask. Tool nova no registro entra aqui também. Kit já existente
+-- ganha as que faltam; as que já estão nele ficam no modo que o admin escolheu.
 INSERT INTO ai_tool_kits (name, description)
 VALUES ('Padrão', 'Todas as ferramentas, com o modo sugerido: leituras e "avisar o usuário" direto, as demais escritas pedem aprovação.')
 ON CONFLICT ((lower(name))) DO NOTHING;
 
 INSERT INTO ai_tool_kit_tools (kit_id, tool_name, mode)
-SELECT k.id, r.tool_name, CASE WHEN r.kind = 'write' AND r.confirm <> 'never' THEN 'ask' ELSE 'allow' END
-  FROM ai_tool_kits k CROSS JOIN ai_legacy_tool_registry() r
+SELECT k.id, t.tool_name, t.mode
+  FROM ai_tool_kits k
+ CROSS JOIN (VALUES
+  ('search_records', 'allow'), ('semantic_search', 'allow'), ('list_caixas', 'allow'), ('get_caixa', 'allow'),
+  ('list_accounts', 'allow'), ('get_account_statement', 'allow'), ('list_entities', 'allow'),
+  ('list_entity_tags', 'allow'), ('get_entity', 'allow'), ('list_categories', 'allow'), ('list_titles', 'allow'),
+  ('get_title', 'allow'), ('list_transfers', 'allow'), ('get_card', 'allow'), ('get_invoice', 'allow'),
+  ('list_card_purchases', 'allow'), ('calendar', 'allow'), ('report_categories', 'allow'),
+  ('report_entities', 'allow'), ('report_projection', 'allow'), ('flow_graph', 'allow'),
+  ('list_statement_imports', 'allow'), ('get_statement_import', 'allow'), ('list_line_candidates', 'allow'),
+  ('list_message_destinations', 'allow'), ('create_entity', 'ask'), ('update_entity', 'ask'),
+  ('set_entity_tags', 'ask'), ('set_entity_favorite', 'ask'), ('add_pix_key', 'ask'), ('create_title', 'ask'),
+  ('update_title', 'ask'), ('end_series', 'ask'), ('settle_title', 'ask'), ('reverse_settlement', 'ask'),
+  ('create_transfer', 'ask'), ('create_card_purchase', 'ask'), ('match_statement_line', 'ask'),
+  ('match_statement_lines', 'ask'), ('confirm_statement_lines', 'ask'), ('unmatch_statement_line', 'ask'),
+  ('ignore_statement_lines', 'ask'), ('unignore_statement_lines', 'ask'), ('create_from_statement_line', 'ask'),
+  ('create_from_statement_lines', 'ask'), ('classify_statement_lines', 'ask'),
+  ('apply_classification_suggestions', 'ask'), ('send_telegram_message', 'ask'), ('notify_user', 'allow'),
+  ('list_contracts', 'allow'), ('get_contract', 'allow'), ('create_contract', 'ask'), ('update_contract', 'ask'),
+  ('activate_contract', 'ask'), ('add_contract_amendment', 'ask'), ('terminate_contract', 'ask'),
+  ('decide_contract_renewal', 'ask'), ('get_contract_document', 'allow'), ('save_contract_markdown', 'ask'),
+  ('convert_contract_pdf', 'ask'), ('import_statement', 'ask'), ('import_nfe', 'ask'), ('read_document', 'allow'),
+  ('parse_payment_code', 'allow'), ('attach_file', 'ask'), ('close_invoice', 'ask'), ('pay_invoice', 'ask'),
+  ('reopen_invoice', 'ask'), ('create_card_charge', 'ask'), ('refund_card_purchase', 'ask'), ('create_caixa', 'ask'),
+  ('update_caixa', 'ask'), ('archive_caixa', 'ask'), ('create_account', 'ask'), ('update_account', 'ask'),
+  ('archive_account', 'ask'), ('create_adjustment', 'ask'), ('cancel_title', 'ask'), ('archive_title', 'ask'),
+  ('delete_title', 'ask'), ('accept_mirror', 'ask'), ('dispute_mirror', 'ask'), ('delete_transfer', 'ask'),
+  ('create_category', 'ask'), ('update_category', 'ask'), ('archive_category', 'ask'),
+  ('list_classification_rules', 'allow'), ('create_classification_rule', 'ask'),
+  ('update_classification_rule', 'ask'), ('archive_classification_rule', 'ask'), ('create_entity_tag', 'ask'),
+  ('update_entity_tag', 'ask'), ('archive_entity_tag', 'ask'), ('list_message_subscriptions', 'allow'),
+  ('create_message_destination', 'ask'), ('update_message_destination', 'ask'),
+  ('archive_message_destination', 'ask'), ('set_message_subscriptions', 'ask'), ('send_test_message', 'ask'),
+  ('list_notifications', 'allow'), ('list_month_closings', 'allow'), ('close_month', 'ask'), ('reopen_month', 'ask'),
+  ('get_audit_history', 'allow'), ('list_users', 'allow'), ('create_user', 'ask'), ('update_user', 'ask'),
+  ('set_user_active', 'ask'), ('set_user_password', 'ask'), ('list_caixa_members', 'allow'),
+  ('set_caixa_member', 'ask'), ('remove_caixa_member', 'ask'), ('list_api_tokens', 'allow'),
+  ('revoke_api_token', 'ask'), ('list_ai_providers', 'allow'), ('create_ai_provider', 'ask'),
+  ('update_ai_provider', 'ask'), ('archive_ai_provider', 'ask'), ('test_provider', 'allow'),
+  ('list_provider_models', 'allow'), ('list_ai_prices', 'allow'), ('create_ai_price', 'ask'),
+  ('delete_ai_price', 'ask'), ('list_ai_agents', 'allow'), ('create_ai_agent', 'ask'), ('update_ai_agent', 'ask'),
+  ('archive_ai_agent', 'ask'), ('list_agent_tools', 'allow'), ('list_tool_kits', 'allow'),
+  ('create_tool_kit', 'ask'), ('update_tool_kit', 'ask'), ('duplicate_tool_kit', 'ask'), ('delete_tool_kit', 'ask'),
+  ('list_mcp_servers', 'allow'), ('create_mcp_server', 'ask'), ('update_mcp_server', 'ask'),
+  ('archive_mcp_server', 'ask'), ('refresh_mcp_tools', 'allow'), ('get_app_settings', 'allow'),
+  ('set_app_setting', 'ask'), ('get_ai_usage', 'allow'), ('list_ai_requests', 'allow'), ('export_backup', 'ask'),
+  ('simulate_import', 'allow'), ('import_backup', 'ask')
+       ) AS t (tool_name, mode)
  WHERE lower(k.name) = lower('Padrão')
 ON CONFLICT (kit_id, tool_name) DO NOTHING;
 

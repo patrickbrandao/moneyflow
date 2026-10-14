@@ -16,6 +16,8 @@ Lacuna entre o código atual (v0.1.7) e a spec [029](../docs/029-fluxos-autonomo
 
 Ordem: Depois da F14; depois vem a 033. A spec é a fonte da verdade: decisões que mudarem durante a execução atualizam a spec (e a [016](../docs/016-banco-de-dados.md), quando for banco) na mesma mudança.
 
+Acréscimo (2026-10-14): o kit "Padrão" de `database/seeds/dev.sql` deve ganhar as tools novas das F14 (orçamentos) e F15 (tarefas agendadas) no `suggestedMode`, como a 030 fez com as F13a/F13b.
+
 ## Como reproduzir
 Não se aplica (recurso novo). Critério de pronto: os testes listados na seção "Testes" da spec [029](../docs/029-fluxos-autonomos.md) que cabem a esta tarefa passam, junto com `pnpm lint`, `pnpm typecheck` e `pnpm test` (e `make -C database test` no banco).
 
