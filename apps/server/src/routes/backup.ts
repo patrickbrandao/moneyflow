@@ -7,24 +7,9 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { AppError, notFound, unprocessable } from '../errors';
 import type { Req } from '../http';
 import { backupStatus, createDumpZip, restoreDump } from '../services/backup/dump';
-import { exportFullZip, exportResource } from '../services/backup/export';
+import { exportFullZip, exportResource, backupStamp as stamp } from '../services/backup/export';
 import { importBackup, parseBackupUpload } from '../services/backup/import';
 import { contentDisposition } from './attachments';
-
-/** Carimbo do nome do arquivo, no fuso de São Paulo (AAAAMMDD-HHMM). */
-function stamp() {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Sao_Paulo',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(new Date());
-  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '00';
-  return `${get('year')}${get('month')}${get('day')}-${get('hour')}${get('minute')}`;
-}
 
 /** Gera um arquivo temporário com `produce` e o devolve como download, apagando-o no fim. */
 async function sendTempFile(reply: FastifyReply, fileName: string, produce: (path: string) => Promise<void>) {

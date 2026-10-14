@@ -18,7 +18,9 @@ import { ADMIN_STATE, baseURL, loginAsAdmin } from '../support/session';
  *  - o kit de ferramentas (spec 021): criar marcando a categoria Conciliação,
  *    pôr uma escrita em ask, ligar ao agente e ver o cartão de aprovação;
  *  - as tools de controle total (spec 027): anexar um OFX na conversa, pedir
- *    "importe e concilie" e aprovar o import e o lote de lançamentos;
+ *    "importe e concilie" e aprovar o import e o lote de lançamentos; o admin
+ *    pede "crie um kit só de leitura" e vê o kit na tela; e o cartão de segredo
+ *    (trocar a chave de um provedor falso digitando o valor no cartão);
  *  - o prompt do agente (spec 022): editar, ver o histórico e o diff, restaurar,
  *    as variáveis e o "Ver prompt montado"; e Minha conta → IA;
  *  - as requisições ao provedor (spec 023): um 429 seguido de 200 na conversa,
@@ -593,6 +595,94 @@ test('controle total (spec 027): anexar um OFX na conversa e pedir "importe e co
   } finally {
     llm.brain = previous;
   }
+});
+
+test('controle total, lote F13b (spec 027): o admin pede "crie um kit só de leitura" e vê o kit na tela', async ({ page }) => {
+  const kitName = `E2E Kit só leitura ${tag}`;
+  // Provedor falso roteirizado: lista as tools de leitura e cria o kit com elas (allow).
+  const previous = llm.brain;
+  llm.brain = (view) => {
+    if (view.lastRole === 'user' && /crie um kit só de leitura/i.test(view.lastText)) {
+      return { text: 'Vou ver as tools de leitura.', toolCalls: [{ name: 'list_agent_tools', input: { kind: 'read' } }] };
+    }
+    if (view.lastRole === 'tool' && !view.lastToolResults[0]?.isError) {
+      try {
+        const result = JSON.parse(view.lastToolResults[0]!.content);
+        if (Array.isArray(result) && result.length > 0 && result.every((x: { kind?: string }) => x.kind === 'read')) {
+          const tools = result.map((x: { name: string }) => ({ name: x.name, mode: 'allow' }));
+          return {
+            text: `Criando o kit com ${tools.length} tools.`,
+            toolCalls: [{ name: 'create_tool_kit', input: { name: kitName, tools } }],
+          };
+        }
+        if (result?.name === kitName) return { text: `Kit "${kitName}" criado.` };
+      } catch {
+        // resultado que não é JSON: segue o cérebro padrão
+      }
+    }
+    return previous(view);
+  };
+  try {
+    await enter(page);
+    const win = await freshSession(page);
+    await expect(win).toContainText('Chaves e senhas: o agente vai pedir no cartão de aprovação.');
+    await say(win, 'crie um kit só de leitura');
+    const card = win.getByTestId('agent-confirmation');
+    await expect(card).toBeVisible({ timeout: 30_000 });
+    await expect(card).toContainText('Criar kit de ferramentas');
+    await expect(card).toContainText(kitName);
+    await card.getByTestId('agent-approve').first().click();
+    await expect(win.getByTestId('agent-message-assistant').filter({ hasText: `Kit "${kitName}" criado.` })).toBeVisible({
+      timeout: 30_000,
+    });
+
+    // O kit aparece na tela de kits, só com leituras.
+    await page.goto('/admin/ai/tool-kits');
+    await expect(page.getByText(kitName).first()).toBeVisible();
+    const kits: { name: string; tools: { name: string; mode: string }[] }[] = await (await adminApi.get('/api/admin/ai/tool-kits')).json();
+    const kit = kits.find((k) => k.name === kitName)!;
+    const catalog: { name: string; kind: string }[] = await (await adminApi.get('/api/admin/ai/tools')).json();
+    const kinds = new Map(catalog.map((x) => [x.name, x.kind]));
+    expect(kit.tools.length).toBeGreaterThan(10);
+    expect(kit.tools.every((x) => kinds.get(x.name) === 'read' && x.mode === 'allow')).toBe(true);
+  } finally {
+    llm.brain = previous;
+  }
+});
+
+test('controle total, lote F13b (spec 027): trocar a chave de um provedor pelo cartão de segredo', async ({ page }) => {
+  const target = await postJson(adminApi, '/api/admin/ai/providers', {
+    name: `E2E Provedor da chave ${tag}`,
+    kind: 'anthropic',
+    baseUrl: llmBase,
+    apiKey: 'sk-e2e-chave-antiga-0000',
+    defaultModels: { text: 'claude-sonnet-5-5' },
+    isActive: false,
+  });
+  const newKey = `sk-e2e-chave-nova-${tag}-9Z7Q`;
+  await enter(page);
+  const win = await freshSession(page);
+  await say(win, `chamar update_ai_provider ${JSON.stringify({ providerId: target.id, changes: { notes: 'chave trocada pelo agente' } })}`);
+  const card = win.getByTestId('agent-confirmation');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect(card).toContainText('Editar provedor de IA');
+  const secrets = card.getByTestId('agent-secrets');
+  await expect(secrets).toContainText('Segredos (não vão ao agente)');
+  await expect(secrets).toContainText('Vazio mantém a chave atual.');
+  const input = secrets.getByLabel('Chave da API');
+  await expect(input).toHaveAttribute('type', 'password');
+  await input.fill(newKey);
+  await card.getByTestId('agent-approve').first().click();
+  await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Pronto:' })).toBeVisible({ timeout: 30_000 });
+  // O modelo recebeu só "segredo definido"; o valor não está em lugar nenhum da conversa.
+  await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'segredo definido' })).toBeVisible();
+  await expect(win).not.toContainText(newKey);
+  const providers: { id: string; apiKeyHint: string | null; notes: string | null }[] = await (
+    await adminApi.get('/api/admin/ai/providers')
+  ).json();
+  expect(providers.find((p) => p.id === target.id)).toMatchObject({ apiKeyHint: '…9Z7Q', notes: 'chave trocada pelo agente' });
+  const sent = JSON.stringify(llm.calls.map((c) => c.body));
+  expect(sent).not.toContain(newKey);
 });
 
 test('fluxos: "Usar nos fluxos automáticos" no admin; sugestões da conciliação aprovadas e descartadas em lote', async ({ page }) => {

@@ -16,6 +16,7 @@ import {
   transferCreateInput,
 } from '../schemas';
 import { type AgentToolDef, type AgentToolMode, date, define, limit, optionalDate } from './tool-def';
+import { ADMIN_TOOLS } from './tools-admin';
 import { OPERATION_TOOLS } from './tools-operation';
 
 /*
@@ -320,7 +321,7 @@ export const AGENT_TOOLS = [
     category: 'entities',
     title: 'Definir tags da entidade',
     description:
-      'Substitui o conjunto de tags de uma entidade (tagIds de list_entity_tags; só tags ativas; lista vazia remove todas). Criar ou arquivar tags não é feito por agentes.',
+      'Substitui o conjunto de tags de uma entidade (tagIds de list_entity_tags; só tags ativas; lista vazia remove todas). Criar, editar e arquivar tags: create_entity_tag, update_entity_tag e archive_entity_tag (só administrador).',
     kind: 'write',
     input: z.object({ entityId: id, tagIds: z.array(id).max(200) }),
   }),
@@ -527,8 +528,9 @@ export const AGENT_TOOLS = [
     }),
   }),
 
-  /* ---------------- controle total, lote F13a (spec 027) ---------------- */
+  /* ---------------- controle total, lotes F13a e F13b (spec 027) ---------------- */
   ...OPERATION_TOOLS,
+  ...ADMIN_TOOLS,
 ] as const satisfies readonly AgentToolDef[];
 
 export type AgentToolName = (typeof AGENT_TOOLS)[number]['name'];

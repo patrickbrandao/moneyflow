@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ADMIN_TOOLS,
   AGENT_TOOL_CATEGORIES,
   AGENT_TOOL_NAMES,
   AGENT_TOOLS,
@@ -36,10 +37,11 @@ describe('registro de tools', () => {
     expect(AGENT_TOOLS.filter((t) => t.kind === 'write').length).toBeGreaterThan(10);
   });
 
-  it('categorias e modo sugerido (spec 021): toda tool numa categoria com nome; leituras e notify_user allow, demais escritas ask', () => {
+  it('categorias e modo sugerido (spec 021): toda tool numa categoria com nome; leituras, notify_user e refresh_mcp_tools allow, demais escritas ask', () => {
+    const allowWrites = ['notify_user', 'refresh_mcp_tools'];
     for (const tool of AGENT_TOOLS) {
       expect(AGENT_TOOL_CATEGORIES).toContain(tool.category);
-      expect(tool.suggestedMode).toBe(tool.kind === 'read' || tool.name === 'notify_user' ? 'allow' : 'ask');
+      expect(tool.suggestedMode).toBe(tool.kind === 'read' || allowWrites.includes(tool.name) ? 'allow' : 'ask');
     }
     for (const category of AGENT_TOOL_CATEGORIES) {
       expect(t.agents.toolCategories[category]).toBeTruthy();
@@ -132,6 +134,69 @@ describe('registro de tools', () => {
     expect(mcpExposed({ secrets: ['apiKey'] }, true)).toBe(false);
     expect(mcpExposed({ producesFile: true }, true)).toBe(false);
     expect(mcpExposed(agentTool('import_statement')!, false)).toBe(true);
+  });
+
+  it('lote F13b (spec 027): administração, segredos fora do schema, arquivo gerado e destrutivas', () => {
+    const names = (list: readonly { name: string }[]) => list.map((tool) => tool.name).sort();
+    expect(ADMIN_TOOLS.every((tool) => AGENT_TOOLS.some((x) => x.name === tool.name))).toBe(true);
+    expect(names(AGENT_TOOLS.filter((tool) => 'secrets' in tool && tool.secrets?.length))).toEqual(
+      [
+        'create_message_destination',
+        'update_message_destination',
+        'create_user',
+        'set_user_password',
+        'create_ai_provider',
+        'update_ai_provider',
+        'create_mcp_server',
+        'update_mcp_server',
+      ].sort(),
+    );
+    // O segredo não está no schema que vai ao modelo.
+    const props = (name: string) => toolJsonSchema(agentTool(name)!).properties as Record<string, any>;
+    expect(Object.keys(props('create_ai_provider'))).not.toContain('apiKey');
+    expect(Object.keys(props('update_ai_provider').changes.properties)).not.toContain('apiKey');
+    expect(Object.keys(props('update_ai_provider').changes.properties)).toContain('clearApiKey');
+    expect(Object.keys(props('create_message_destination'))).not.toContain('botToken');
+    expect(Object.keys(props('update_message_destination').changes.properties)).not.toContain('botToken');
+    expect(Object.keys(props('create_user'))).not.toContain('password');
+    expect(Object.keys(props('set_user_password'))).toEqual(['userId']);
+    expect(Object.keys(props('create_mcp_server'))).not.toContain('headers');
+    expect(Object.keys(props('update_mcp_server').changes.properties)).not.toContain('setHeaders');
+    // Segredo: sempre ask e fora do /mcp; arquivo gerado: fora do /mcp.
+    for (const name of ['create_ai_provider', 'set_user_password', 'create_mcp_server']) {
+      expect(effectiveToolMode(agentTool(name)!, 'allow')).toBe('ask');
+      expect(mcpExposed(agentTool(name)!, true)).toBe(false);
+    }
+    expect(names(AGENT_TOOLS.filter((tool) => 'producesFile' in tool && tool.producesFile))).toEqual(['export_backup']);
+    expect(mcpExposed(agentTool('export_backup')!, true)).toBe(false);
+    expect(mcpExposed(agentTool('import_backup')!, true)).toBe(true);
+    expect(mcpExposed(agentTool('import_backup')!, false)).toBe(false);
+    // close_month é de quem edita a caixa (não destrutivo); reabrir é de admin e destrutivo.
+    expect(agentTool('close_month')).toMatchObject({ category: 'closing', kind: 'write' });
+    expect(agentTool('close_month')!.adminOnly).toBeUndefined();
+    expect(agentTool('close_month')!.destructive).toBeUndefined();
+    expect(agentTool('reopen_month')).toMatchObject({ adminOnly: true, destructive: true });
+    // Tokens pessoais: do próprio usuário (sem ser admin); criar token não existe.
+    expect(agentTool('list_api_tokens')!.adminOnly).toBeUndefined();
+    expect(agentTool('revoke_api_token')).toMatchObject({ destructive: true });
+    expect(agentTool('create_api_token')).toBeUndefined();
+    // Restaurar o dump não é tool; orçamentos e tarefas agendadas chegam na F14/F15.
+    expect(AGENT_TOOLS.some((tool) => /dump|budget|schedul/.test(tool.name))).toBe(false);
+    expect(names(ADMIN_TOOLS.filter((tool) => 'destructive' in tool && tool.destructive))).toEqual(
+      [
+        'archive_entity_tag',
+        'archive_message_destination',
+        'reopen_month',
+        'remove_caixa_member',
+        'revoke_api_token',
+        'archive_ai_provider',
+        'delete_ai_price',
+        'archive_ai_agent',
+        'delete_tool_kit',
+        'archive_mcp_server',
+        'import_backup',
+      ].sort(),
+    );
   });
 
   it('a entrada valida com o mesmo schema da API (defaults e transforms)', () => {

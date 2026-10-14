@@ -19,6 +19,7 @@ import {
   isImageMime,
   type messageSendInput,
   type SendMessageResult,
+  type ToolConfirmationDto,
   t,
 } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
@@ -36,10 +37,12 @@ import {
   messageDto,
   messageUsage,
   pendingToolUses,
+  preparedResults,
   RUN_COLUMNS,
   type RunRow,
   runDto,
 } from '../agents/store';
+import { executeSecretTool, internalTool } from '../agents/tools-runtime';
 import type { ServiceContext } from '../context';
 import { AppError, findPgError, forbidden, notFound, unprocessable } from '../errors';
 import { chatAttachments, mediaCapabilities, messageAttachmentIds } from './chat-media';
@@ -621,6 +624,13 @@ export async function cancelRun(ctx: ServiceContext, runId: string): Promise<AiR
   return runDto((await loadRun(ctx.db, runId))!);
 }
 
+/**
+ * Decide as confirmações de uma execução. As tools com segredo (spec 027)
+ * aprovadas aqui rodam NESTA requisição, com os valores digitados no cartão em
+ * memória (nunca gravados): o resultado, sem o segredo, vai ao worker pelo
+ * evento tool_result (`prepared`), e o worker nunca as executa. Uma decisão por
+ * vez por execução (trava consultiva), e cada tool de segredo roda uma vez só.
+ */
 export async function decideConfirmations(
   ctx: ServiceContext,
   runId: string,
@@ -628,6 +638,8 @@ export async function decideConfirmations(
 ): Promise<DecideResult> {
   await loadRunFor(ctx, runId, 'own');
   return withTx(ctx, async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`ai_run_decide:${runId}`}, 0))`);
+    if (input.decision === 'approved') await runSecretTools(ctx, tx, runId, input);
     const result = await tx.execute<{ decided: number; pending: number; run_status: DecideResult['runStatus'] }>(sql`
       SELECT * FROM ai_tool_confirmations_decide(${runId}::uuid, ${ctx.access.actor.id}::uuid, ${input.decision},
                                                  ${input.ids ? `{${input.ids.join(',')}}` : null}::uuid[], ${input.reason ?? null})`);
@@ -636,6 +648,50 @@ export async function decideConfirmations(
     if (row.run_status === 'queued') await appendEvent(tx, runId, { type: 'status', status: 'queued' });
     return { decided: Number(row.decided), pending: Number(row.pending), runStatus: row.run_status };
   });
+}
+
+/** Segredos de uma confirmação: só os campos que a prévia pediu; vazio = ausente (mantém o atual). */
+function secretsFor(confirmation: ToolConfirmationDto, typed: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const field of confirmation.preview?.secretFields ?? []) {
+    const value = typed?.[field.key];
+    if (typeof value === 'string' && value.trim() !== '') out[field.key] = value;
+  }
+  return out;
+}
+
+/** Executa as tools de segredo aprovadas nesta decisão (ver decideConfirmations). */
+async function runSecretTools(ctx: ServiceContext, tx: Executor, runId: string, input: z.output<typeof confirmationDecisionInput>) {
+  const status = await tx.execute<{ status: string }>(sql`SELECT status FROM ai_runs WHERE id = ${runId}`);
+  if (status.rows[0]?.status !== 'awaiting_confirmation') return;
+  const targets = (await loadConfirmations(tx, runId, true)).filter(
+    (c) => (!input.ids || input.ids.includes(c.id)) && Boolean(internalTool(c.toolName)?.secrets?.length),
+  );
+  if (targets.length === 0) return;
+  const done = await preparedResults(ctx.db, runId);
+  const agentCtx: ServiceContext = { ...ctx, actorKind: 'agent', agentRunId: runId };
+  for (const confirmation of targets) {
+    if (done.has(confirmation.toolUseId)) continue;
+    const tool = internalTool(confirmation.toolName)!;
+    await appendEvent(ctx.db, runId, { type: 'tool_start', toolUseId: confirmation.toolUseId, name: tool.name, title: tool.title });
+    const outcome = await executeSecretTool(
+      agentCtx,
+      tool.name,
+      confirmation.input,
+      { toolUseId: confirmation.toolUseId, runId, secrets: secretsFor(confirmation, input.secrets?.[confirmation.id]) },
+      confirmation.preview?.secretFields ?? [],
+    );
+    // Gravado fora da transação da decisão: se ela falhar, a tool não roda de novo.
+    await appendEvent(ctx.db, runId, {
+      type: 'tool_result',
+      toolUseId: confirmation.toolUseId,
+      name: tool.name,
+      isError: outcome.isError,
+      summary: outcome.summary,
+      prepared: true,
+      content: outcome.content,
+    });
+  }
 }
 
 /** Eventos de uma execução depois de `after` (SSE). */

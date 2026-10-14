@@ -9,12 +9,20 @@ import { formatBRL } from '../money';
 
 export type PreviewAction = 'create' | 'update' | 'delete' | 'send' | 'other';
 export type PreviewRow = { label: string; before?: string | null; after: string | null };
+/**
+ * Campo de segredo do cartão de aprovação (spec 027): só o nome e o rótulo,
+ * nunca o valor. `key` é a chave em `secrets` da decisão.
+ */
+export type ToolSecretField = { key: string; label: string; required: boolean; hint?: string };
+
 export type ToolPreview = {
   title: string;
   summary: string;
   action: PreviewAction;
   rows: PreviewRow[];
   warnings?: string[];
+  /** Tools com segredo: um campo de senha por item, digitado no cartão. */
+  secretFields?: ToolSecretField[];
 };
 
 export type PreviewField = {

@@ -26,7 +26,7 @@ O registro (`packages/shared/src/agents/tools.ts`) ganha o campo `category` em c
 |---|---|
 | Busca e consulta | `search_records`, `semantic_search`, `calendar` |
 | Caixas e contas | `list_caixas`, `get_caixa`, `list_accounts`, `get_account_statement`, `list_transfers`, `create_transfer`, `delete_transfer`, `create_caixa`, `update_caixa`, `archive_caixa` (admin), `create_account`, `update_account`, `archive_account`, `create_adjustment` |
-| Entidades | `list_entities`, `list_entity_tags`, `get_entity`, `create_entity`, `update_entity`, `set_entity_tags`, `set_entity_favorite`, `add_pix_key` |
+| Entidades | `list_entities`, `list_entity_tags`, `get_entity`, `create_entity`, `update_entity`, `set_entity_tags`, `set_entity_favorite`, `add_pix_key`, `create_entity_tag` (admin), `update_entity_tag` (admin), `archive_entity_tag` (admin) |
 | Títulos e baixas | `list_titles`, `get_title`, `create_title`, `update_title`, `end_series`, `settle_title`, `reverse_settlement`, `cancel_title`, `archive_title`, `delete_title`, `accept_mirror`, `dispute_mirror` |
 | Cartão de crédito | `get_card`, `get_invoice`, `list_card_purchases`, `create_card_purchase`, `close_invoice`, `pay_invoice`, `reopen_invoice`, `create_card_charge`, `refund_card_purchase` |
 | Contratos | `list_contracts`, `get_contract`, `create_contract`, `update_contract`, `activate_contract`, `add_contract_amendment`, `terminate_contract`, `decide_contract_renewal`, `get_contract_document`, `save_contract_markdown`, `convert_contract_pdf` |
@@ -34,9 +34,13 @@ O registro (`packages/shared/src/agents/tools.ts`) ganha o campo `category` em c
 | Importação | `import_statement`, `import_nfe`, `read_document`, `parse_payment_code`, `attach_file` |
 | Categorias e regras | `list_categories`, `create_category` (admin), `update_category` (admin), `archive_category` (admin), `list_classification_rules`, `create_classification_rule`, `update_classification_rule`, `archive_classification_rule` |
 | Relatórios e canvas | `report_categories`, `report_entities`, `report_projection`, `flow_graph` |
-| Mensagens e avisos | `list_message_destinations`, `send_telegram_message`, `notify_user` |
+| Mensagens e avisos | `list_message_destinations`, `send_telegram_message`, `notify_user`, `list_message_subscriptions`, `create_message_destination` (segredo), `update_message_destination` (segredo), `archive_message_destination`, `set_message_subscriptions`, `send_test_message`, `list_notifications` |
+| Fechamento e auditoria | `list_month_closings`, `close_month`, `reopen_month` (admin), `get_audit_history` |
+| Usuários e permissões | `list_users` (admin), `create_user` (admin, segredo), `update_user` (admin), `set_user_active` (admin), `set_user_password` (admin, segredo), `list_caixa_members`, `set_caixa_member` (admin), `remove_caixa_member` (admin), `list_api_tokens`, `revoke_api_token` |
+| Configuração de IA | todas de admin: `list_ai_providers`, `create_ai_provider` (segredo), `update_ai_provider` (segredo), `archive_ai_provider`, `test_provider`, `list_provider_models`, `list_ai_prices`, `create_ai_price`, `delete_ai_price`, `list_ai_agents`, `create_ai_agent`, `update_ai_agent`, `archive_ai_agent`, `list_agent_tools`, `list_tool_kits`, `create_tool_kit`, `update_tool_kit`, `duplicate_tool_kit`, `delete_tool_kit`, `list_mcp_servers`, `create_mcp_server` (segredo), `update_mcp_server` (segredo), `archive_mcp_server`, `refresh_mcp_tools`, `get_app_settings`, `set_app_setting`, `get_ai_usage`, `list_ai_requests` |
+| Backup | todas de admin: `export_backup` (gera arquivo), `simulate_import`, `import_backup` |
 
-As tools do lote F13a ([027](027-tools-de-controle-total.md)) entraram nas categorias acima, com as novas Contratos, Importação e Categorias e regras (`list_categories` saiu de Títulos e baixas para Categorias e regras). O lote F13b acrescenta as categorias Configuração de IA, Usuários e permissões (com os tokens pessoais), Backup, e Fechamento e auditoria.
+As tools do lote F13a ([027](027-tools-de-controle-total.md)) entraram nas categorias acima, com as novas Contratos, Importação e Categorias e regras (`list_categories` saiu de Títulos e baixas para Categorias e regras). O lote F13b acrescentou as categorias Fechamento e auditoria, Usuários e permissões (com os tokens pessoais, do próprio usuário, sem ser admin), Configuração de IA e Backup, nessa ordem depois de Mensagens e avisos, e as tags de entidade em Entidades. "(segredo)" marca as tools com campo de segredo: sempre em `ask`, com o valor digitado no cartão. O modo sugerido é `allow` nas leituras, em `notify_user` e em `refresh_mcp_tools` (só atualiza o cache de tools do servidor MCP); as demais escritas, `ask`.
 
 ## Banco (dba)
 - `ai_tool_kits`: `id`, `name`, `description`, `created_by_user_id`, `created_at` e `updated_at`.

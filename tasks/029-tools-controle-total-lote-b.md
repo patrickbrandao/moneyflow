@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: usuario
 autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-10-14
-commit:
+commit: (pendente: entregue sem commit, a pedido; branch spec/f7-agentes-ia)
 ---
 
 # Tools de controle total, lote F13b (administração e segredos)
@@ -63,3 +63,31 @@ Specs revisadas em 2026-10-14: os "pontos para a revisão da spec" foram resolvi
 5. (027, Configuração de IA) As tools de orçamentos e de tarefas agendadas vêm antes das tabelas delas (F14/F15). Recomendação: movê-las para a 031 e a 033.
 
 ## Resolução (executor)
+Executor: app, 2026-10-14.
+
+**Decisão dos segredos (aprovada pelo usuário, opção a)**: a decisão é da API e as tools aprovadas rodam no worker (outro processo), então o valor não chega em memória ao worker. A API executa a tool de segredo **na própria requisição de decisão** (`decideConfirmations` → `runSecretTools` → `executeSecretTool`), com o valor em memória e o ator `agent` da execução, antes de devolver a execução à fila. O resultado (sem o segredo) vai ao worker pelo evento `tool_result` com `prepared: true` e `content` em `ai_run_events`; sem mudança no banco. O worker nunca executa tool de segredo: sem resultado gravado, devolve "Esta ação precisa de um segredo: abra o console…". Consequências registradas na 027 e na 011: ordem (a de segredo roda na decisão, antes das outras da mesma resposta), falha parcial (o evento é gravado fora da transação da decisão; nova aprovação não reexecuta; decisões serializadas por trava consultiva da execução) e campo vazio mantém o segredo (obrigatório vazio volta "Informe … no cartão de aprovação"; "Aprovar tudo" fica desabilitado enquanto faltar um obrigatório).
+
+**Tools criadas (55)**, em `packages/shared/src/agents/tools-admin.ts` e `apps/server/src/agents/tool-handlers-admin.ts`, sobre os serviços das rotas (com `Access`), escritas com prévia:
+- **Entidades** (admin): `create_entity_tag`, `update_entity_tag`, `archive_entity_tag` (destrutiva). A descrição de `set_entity_tags` foi atualizada.
+- **Mensagens e avisos**: `list_message_subscriptions`, `create_message_destination` e `update_message_destination` (token do bot = segredo), `archive_message_destination` (destrutiva), `set_message_subscriptions`, `send_test_message`, `list_notifications`.
+- **Fechamento e auditoria** (categoria nova `closing`): `list_month_closings`, `close_month` (quem edita a caixa; não destrutiva), `reopen_month` (admin, destrutiva), `get_audit_history`.
+- **Usuários e permissões** (categoria nova `users`): `list_users`, `create_user` e `set_user_password` (senha = segredo), `update_user`, `set_user_active` (admin); `list_caixa_members` (quem lê a caixa); `set_caixa_member`, `remove_caixa_member` (admin; a última destrutiva); `list_api_tokens` e `revoke_api_token` (destrutiva) sobre os tokens do próprio usuário, sem ser admin. Criar token fica fora.
+- **Configuração de IA** (categoria nova `ai`, tudo admin): `list_ai_providers`, `create_ai_provider`/`update_ai_provider` (chave = segredo; `clearApiKey`), `archive_ai_provider`, `test_provider`, `list_provider_models` (serviço novo `listProviderModels`), `list_ai_prices`, `create_ai_price`, `delete_ai_price`, `list_ai_agents`, `create_ai_agent`, `update_ai_agent`, `archive_ai_agent`, `list_agent_tools` (catálogo para montar kits), `list_tool_kits`, `create_tool_kit`, `update_tool_kit`, `duplicate_tool_kit`, `delete_tool_kit`, `list_mcp_servers`, `create_mcp_server`/`update_mcp_server` (nomes dos cabeçalhos na entrada, valores = segredo), `archive_mcp_server`, `refresh_mcp_tools` (sugerido `allow`), `get_app_settings` (serviço novo `listSettings`), `set_app_setting`, `get_ai_usage`, `list_ai_requests` (só metadados). Orçamentos e tarefas agendadas ficaram para a F14/F15.
+- **Backup** (categoria nova `backup`, admin): `export_backup` (`producesFile`; recurso em JSON, `full` ou `dump` em .zip; prévia avisa que leva segredos), `simulate_import` (leitura) e `import_backup` (destrutiva; prévia = simulação), a partir de anexo da sessão. A restauração do dump fica fora.
+
+**Segredos (como ficaram)**: o campo não está no schema do modelo (`secrets` no registro; `ToolPreview.secretFields` com chave, rótulo, obrigatório e dica); o cartão abre um campo de senha por segredo (`ConversationPane`), e o valor vai em `secrets` na decisão (`confirmationDecisionInput`). O handler recebe `meta.secrets`; o modelo recebe o resultado do serviço com `secrets: { rótulo: "segredo definido" | "segredo mantido (campo vazio)" }`, e qualquer ocorrência do valor no resultado vira "[segredo]". Sempre `ask`, fora do `/mcp`. O chat avisa "Chaves e senhas: o agente vai pedir no cartão de aprovação" (sessão vazia e dica do campo). Um backup anexado no chat (.zip ou .json `moneyflow-backup`) nunca vai ao modelo (`run-attachments.ts`), porque leva chaves e senhas.
+
+**Arquivo gerado (`producesFile`)**: o handler devolve `{ file }`; `RunTools.execute` grava o anexo (do usuário; acima de 20 MB, erro que manda usar a tela) e o runner o liga à mensagem `tool` da sessão (`ai_message_attachments`); o modelo recebe só `{ attachmentId, fileName, mime, sizeBytes }`. O console mostra o link de download no bloco da tool. O arquivo serve de entrada às tools de importação da mesma sessão.
+
+**Outras mudanças**: categorias `closing`, `users`, `ai`, `backup` em `tool-def.ts` (e nomes em `t.agents.toolCategories`); `AGENT_TOOL_MODES` importado de `tool-def.ts` em `agents/schemas.ts` (quebra o ciclo com o registro); `formatFileSize` (shared); `backupStamp` movido para `services/backup/export.ts`; `preparedResults` em `store.ts`.
+
+**Testes**: `apps/server/test/agent-tools-admin.test.ts` (9 casos, provedor falso, MCP falso e Bot API falsa): registro e oferta (segredo fora do schema enviado ao modelo, tools de admin ausentes para não admin, `/mcp` sem segredo nem arquivo e só admin com as de admin), tags, mensagens (token digitado, mantido com campo vazio, trocado, usado no envio de teste; viewer negado), fechamento (editor fecha, admin reabre, viewer negado), usuários (senha do cartão confere por `auth_login`, senha curta recusada sem expor o valor, acessos, tokens do próprio usuário), configuração de IA (chave conferida por `admin_ai_provider_api_key`, testar e listar modelos com a chave gravada, preços, kits, agentes, MCP com o cabeçalho digitado provado pelo `refresh_mcp_tools`, configurações, uso e requisições), backup (export como anexo da mensagem da tool, download, simulação na mesma sessão e recusa noutra, import a partir de anexo, conteúdo do backup fora do que vai ao modelo) e segredos (worker recusa a tool de segredo aprovada fora da API; nenhum valor digitado em `ai_messages`, `ai_run_events`, `ai_tool_confirmations`, `audit_log` ou `ai_requests`, com corpos registrados). Unitário do registro F13b em `packages/shared/test/agents.test.ts`. e2e em `e2e/tests/agentes.spec.ts`: "crie um kit só de leitura" (o kit aparece em /admin/ai/tool-kits) e o cartão de segredo trocando a chave de um provedor falso. `agent-tools.test.ts` passou a tolerar resultado truncado (banco reaproveitado).
+
+**Verificação**: `pnpm lint`, `pnpm typecheck`, `pnpm test` (Testcontainers: 134 unitários e 185 de integração) e `pnpm build` passaram; `agentes.spec.ts` passou inteiro (18) contra a pilha (`TELEGRAM_API_BASE=http://host.docker.internal:18081 docker compose up --build -d`), parada no fim. Um aviso no rodapé do composer mudava a altura da janela e quebrava o e2e das prévias de PDF; o aviso foi para a sessão vazia e a dica do campo.
+
+**Specs atualizadas**: 027 (segredos: onde executa, ordem, falha parcial, campo vazio; arquivos gerados; nomes e regras das tools do F13b; F13b entregue), 021 (categorias novas e a tabela), 011 (registro, leituras e escritas do F13b, segredos, arquivos gerados, backup fora do modelo), 019 (backup pelos agentes) e `docs/INDEX.md`; `AGENTS.md`.
+
+**Pendências**
+- Seed de dev (dba): o kit "Padrão" de `database/seeds/dev.sql` não traz as tools do F13a nem do F13b (monta a partir de `ai_legacy_tool_registry()`), como já anotado na 028.
+- Telegram de entrada (F15, tarefa 033): a aprovação de tool de segredo pelo Telegram já cai no erro "abra o console" do worker; falta só a mensagem do botão.
+- Commit: as mudanças estão na branch `spec/f7-agentes-ia`, sem commit (pedido do coordenador).

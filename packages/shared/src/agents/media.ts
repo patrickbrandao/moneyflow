@@ -191,3 +191,10 @@ export function splitSpeech(text: string, limit = SPEECH_CHAR_LIMIT): string[] {
   if (rest) chunks.push(rest);
   return chunks.filter(Boolean);
 }
+
+/** Tamanho de arquivo legível (B, KB, MB), em pt-BR. */
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} KB`;
+  return `${(bytes / (1024 * 1024)).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} MB`;
+}

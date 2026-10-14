@@ -3,6 +3,7 @@ import {
   type AiMessageDto,
   type ChatAttachmentDto,
   formatDateTime,
+  formatFileSize,
   isAudioMime,
   isImageMime,
   type PreviewRow,
@@ -18,6 +19,8 @@ import {
   CheckCheck,
   ChevronRight,
   CircleSlash,
+  Download,
+  KeyRound,
   Loader2,
   Paperclip,
   SendHorizontal,
@@ -43,6 +46,7 @@ import { MAX_ATTACHMENT_BYTES } from '../components/attachments/AttachmentsPanel
 import { LoadError } from '../components/domain';
 import { useToast } from '../components/Toast';
 import { Badge, Button, cx, Skel } from '../components/ui';
+import { attachmentUrl } from '../lib/upload';
 import { useAgents } from './AgentsProvider';
 import { AttachmentPreview, MediaProvider, SpeechButton, TranscriptionBadge } from './AttachmentPreview';
 import { RecordButton, RecorderPanel, useAudioRecorder } from './AudioRecorder';
@@ -204,7 +208,15 @@ function Messages({ state, detail, audioMode }: { state: ConversationState; deta
         stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
       }}
     >
-      {visible.length === 0 && !state.busy && <p className="agent-empty">{u.chat.empty}</p>}
+      {visible.length === 0 && !state.busy && (
+        <div className="agent-empty">
+          <p>{u.chat.empty}</p>
+          {/* Segredos (spec 027): nunca no texto livre; o agente pede no cartão de aprovação. */}
+          <p className="agent-composer-note" data-testid="agent-secrets-notice">
+            <KeyRound /> {u.chat.secretsNotice}
+          </p>
+        </div>
+      )}
       {visible.map((message) => (
         <MessageView
           key={message.id}
@@ -365,6 +377,7 @@ function ToolView({
       <Wrench />
     );
   const result = outcome?.content ?? '';
+  const file = toolFile(outcome);
   return (
     <details className={cx('agent-tool', `is-${status}`)} data-testid="agent-tool" data-status={status} data-tool={block.name}>
       <summary>
@@ -384,8 +397,26 @@ function ToolView({
           </>
         )}
       </div>
+      {file && (
+        <a className="agent-tool-file" href={attachmentUrl(file.attachmentId)} download={file.fileName} data-testid="agent-tool-file">
+          <Download /> {u.tool.file(file.fileName, formatFileSize(file.sizeBytes))}
+        </a>
+      )}
     </details>
   );
+}
+
+type ToolFile = { attachmentId: string; fileName: string; sizeBytes: number };
+
+/** Arquivo gerado pela tool (spec 027): o resultado traz só id, nome e tamanho. */
+function toolFile(outcome?: ToolOutcome): ToolFile | null {
+  if (!outcome || outcome.isError || !outcome.content.includes('"attachmentId"')) return null;
+  try {
+    const file = (JSON.parse(outcome.content) as { file?: ToolFile }).file;
+    return file && typeof file.attachmentId === 'string' ? file : null;
+  } catch {
+    return null;
+  }
 }
 
 /* ---------------- confirmações ("Aplicar?") ---------------- */
@@ -395,13 +426,22 @@ function Confirmations({ state, detail }: { state: ConversationState; detail: Pa
   const [busy, setBusy] = useState(false);
   const [rejecting, setRejecting] = useState<string | 'all' | null>(null);
   const [reason, setReason] = useState('');
+  // Segredos digitados (spec 027): só na memória do cartão; vão na decisão e são descartados.
+  const [secrets, setSecrets] = useState<Record<string, Record<string, string>>>({});
   const toast = useToast();
   if (pending.length === 0) return null;
+
+  const missingSecret = (c: ToolConfirmationDto) =>
+    (c.preview?.secretFields ?? []).some((f) => f.required && !secrets[c.id]?.[f.key]?.trim());
+  const setSecret = (id: string, key: string, value: string) => setSecrets((all) => ({ ...all, [id]: { ...all[id], [key]: value } }));
 
   async function decide(decision: 'approved' | 'rejected', ids?: string[], why?: string) {
     setBusy(true);
     try {
-      await state.decide(decision, ids, why);
+      const targets = ids ?? pending.map((c) => c.id);
+      const typed = Object.fromEntries(targets.filter((id) => secrets[id]).map((id) => [id, secrets[id]!]));
+      await state.decide(decision, ids, why, decision === 'approved' ? typed : undefined);
+      setSecrets((all) => Object.fromEntries(Object.entries(all).filter(([id]) => !targets.includes(id))));
       setRejecting(null);
       setReason('');
     } catch (error) {
@@ -446,7 +486,12 @@ function Confirmations({ state, detail }: { state: ConversationState; detail: Pa
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => setRejecting('all')}>
               {u.confirm.rejectAll}
             </Button>
-            <Button size="sm" disabled={busy} onClick={() => void decide('approved')} data-testid="agent-approve-all">
+            <Button
+              size="sm"
+              disabled={busy || pending.some(missingSecret)}
+              onClick={() => void decide('approved')}
+              data-testid="agent-approve-all"
+            >
               <CheckCheck /> {u.confirm.approveAll}
             </Button>
           </span>
@@ -471,6 +516,33 @@ function Confirmations({ state, detail }: { state: ConversationState; detail: Pa
                 {warning}
               </p>
             ))}
+            {c.preview?.secretFields && c.preview.secretFields.length > 0 && (
+              <fieldset className="agent-secrets" data-testid="agent-secrets">
+                <legend>
+                  <KeyRound /> {u.confirm.secretsTitle}
+                </legend>
+                {c.preview.secretFields.map((field) => (
+                  <label key={field.key} className="agent-secret">
+                    <span>
+                      {field.label}
+                      {field.required && <em> · {u.confirm.secretRequired}</em>}
+                    </span>
+                    <input
+                      type="password"
+                      className="field field-sm"
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      value={secrets[c.id]?.[field.key] ?? ''}
+                      onChange={(e) => setSecret(c.id, field.key, e.target.value)}
+                      aria-label={field.label}
+                      data-testid="agent-secret-input"
+                    />
+                    {field.hint && <span className="hint">{field.hint}</span>}
+                  </label>
+                ))}
+                <p className="hint">{u.confirm.secretsHint}</p>
+              </fieldset>
+            )}
             {rejecting === c.id ? (
               rejectForm([c.id])
             ) : (
@@ -478,7 +550,12 @@ function Confirmations({ state, detail }: { state: ConversationState; detail: Pa
                 <Button size="sm" variant="ghost" disabled={busy} onClick={() => setRejecting(c.id)}>
                   {u.confirm.reject}
                 </Button>
-                <Button size="sm" disabled={busy} onClick={() => void decide('approved', [c.id])} data-testid="agent-approve">
+                <Button
+                  size="sm"
+                  disabled={busy || missingSecret(c)}
+                  onClick={() => void decide('approved', [c.id])}
+                  data-testid="agent-approve"
+                >
                   <Check /> {u.confirm.approve}
                 </Button>
               </div>
@@ -669,6 +746,7 @@ function Composer({ state, ref, transcribes }: { state: ConversationState; ref: 
           onKeyDown={onKeyDown}
           placeholder={state.busy ? u.chat.placeholderBusy : u.chat.placeholder}
           aria-label={u.chat.composer}
+          title={u.chat.secretsNotice}
           disabled={disabled}
           data-testid="agent-composer"
         />

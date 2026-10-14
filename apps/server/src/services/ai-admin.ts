@@ -358,6 +358,26 @@ export async function testProvider(ctx: ServiceContext, id: string): Promise<AiP
   return { ok, message, models, modelsUnavailable, checks };
 }
 
+/** Modelos que o provedor oferece (a listagem dele, registrada como list_models; tool list_provider_models). */
+export async function listProviderModels(ctx: ServiceContext, id: string): Promise<{ models: string[]; unavailable: boolean }> {
+  ctx.access.assertAdmin();
+  const provider = await getProvider(ctx.db, id);
+  const client = createLlmClient(await adminCredentials(ctx, provider), {
+    db: ctx.db,
+    providerId: provider.id,
+    userId: ctx.access.actor.id,
+    logBodies: provider.logBodies,
+    maxAttempts: ctx.config.aiRequestMaxAttempts,
+    backoffMs: ctx.config.aiRequestBackoffMs,
+  });
+  try {
+    return { models: await client.listModels('list_models'), unavailable: false };
+  } catch (error) {
+    if (listingMissing(error)) return { models: [], unavailable: true };
+    throw unprocessable(t.agents.errors.providerError(errorText(error)), 'provider_error');
+  }
+}
+
 /* ---------------- preços ---------------- */
 
 export async function listPrices(ctx: ServiceContext): Promise<AiPriceDto[]> {

@@ -35,6 +35,21 @@ import {
 
 const BATCH = 500;
 
+/** Carimbo do nome do arquivo, no fuso de São Paulo (AAAAMMDD-HHMM). */
+export function backupStamp() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '00';
+  return `${get('year')}${get('month')}${get('day')}-${get('hour')}${get('minute')}`;
+}
+
 export async function schemaVersion(db: Executor): Promise<string | null> {
   const result = await db.execute<{ v: string | null }>(sql`SELECT app_schema_version() AS v`);
   return result.rows[0]?.v ?? null;

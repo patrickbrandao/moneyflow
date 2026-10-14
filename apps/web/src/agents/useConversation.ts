@@ -287,7 +287,13 @@ export function useConversation(target: PaneTarget) {
   }, [run]);
 
   const decide = useCallback(
-    async (decision: 'approved' | 'rejected', ids?: string[], reason?: string) => {
+    async (
+      decision: 'approved' | 'rejected',
+      ids?: string[],
+      reason?: string,
+      /** Segredos digitados no cartão (spec 027): id da confirmação → campo → valor; nunca guardados aqui. */
+      secrets?: Record<string, Record<string, string>>,
+    ) => {
       const pending = detail?.confirmations.filter((c) => c.status === 'pending') ?? [];
       const targetRun = pending[0]?.runId ?? run?.id;
       if (!targetRun) return null;
@@ -295,6 +301,7 @@ export function useConversation(target: PaneTarget) {
         decision,
         ...(ids ? { ids } : {}),
         ...(reason ? { reason } : {}),
+        ...(decision === 'approved' && secrets && Object.keys(secrets).length > 0 ? { secrets } : {}),
       });
       const decidedIds = new Set(ids ?? pending.map((c) => c.id));
       setDetail((d) =>

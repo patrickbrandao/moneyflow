@@ -501,6 +501,58 @@ body.agent-resizing .shell {
   font-weight: 500;
 }
 
+/* segredos no cartão (spec 027) */
+.agent-secrets {
+  margin: 8px 0 0;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.agent-secrets legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.agent-secrets legend svg,
+.agent-composer-note svg,
+.agent-tool-file svg {
+  width: 13px;
+  height: 13px;
+}
+.agent-secret {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+.agent-secret em {
+  font-style: normal;
+  color: var(--text-muted);
+}
+.agent-composer-note {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.agent-tool-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 12px 8px;
+  font-size: 12px;
+  color: var(--accent-soft);
+}
+
 /* composer */
 .agent-composer {
   flex: none;

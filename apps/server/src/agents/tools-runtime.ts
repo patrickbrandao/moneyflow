@@ -2,19 +2,24 @@ import {
   AGENT_TOOLS,
   type AgentToolDef,
   type AgentToolMode,
+  formatFileSize,
   kitTools,
   type McpToolInfo,
   type ToolPreview,
+  type ToolSecretField,
   t,
   toolJsonSchema,
 } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { ZodError } from 'zod';
 import type { ServiceContext } from '../context';
-import { AppError, translateDbError } from '../errors';
+import { AppError, translateDbError, unprocessable } from '../errors';
+import { storeAttachment } from '../services/attachments';
+import { withTx } from '../services/tx';
 import type { LlmTool } from './llm';
 import { connectMcp, type McpSession, mcpExposedName } from './mcp-client';
 import { TOOL_HANDLERS, type ToolCallMeta } from './tool-handlers';
+import type { GeneratedFile } from './tool-helpers';
 
 /*
  * Conjunto de tools de uma execução (specs 011 e 021):
@@ -82,7 +87,69 @@ export type ResolvedTool =
       destructive: boolean;
     };
 
-export type ToolOutcome = { content: string; isError: boolean; summary: string; raw?: unknown };
+/** `files` = anexos gerados (producesFile), ligados à mensagem da tool pelo runner. */
+export type ToolOutcome = { content: string; isError: boolean; summary: string; raw?: unknown; files?: string[] };
+
+const errorOutcome = (message: string): ToolOutcome => ({ content: message, isError: true, summary: message.slice(0, 200) });
+
+/** Limite dos anexos (o banco recusa acima de 20 MB). */
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Grava o arquivo gerado por uma tool (spec 027) como anexo do usuário e
+ * devolve o valor para o modelo com só id, nome, tipo e tamanho.
+ */
+async function storeGeneratedFile(ctx: ServiceContext, value: unknown): Promise<{ value: unknown; files: string[] }> {
+  if (!value || typeof value !== 'object' || !('file' in value)) return { value, files: [] };
+  const { file, ...rest } = value as { file: GeneratedFile } & Record<string, unknown>;
+  if (file.content.length > MAX_FILE_BYTES) {
+    throw unprocessable(t.agents.errors.fileTooLarge(formatFileSize(file.content.length)), 'file_too_large');
+  }
+  const attachmentId = await withTx(ctx, (tx) => storeAttachment(tx, ctx, { name: file.fileName, mime: file.mime, content: file.content }));
+  return {
+    value: { ...rest, file: { attachmentId, fileName: file.fileName, mime: file.mime, sizeBytes: file.content.length } },
+    files: [attachmentId],
+  };
+}
+
+/** Troca qualquer ocorrência dos segredos por "[segredo]" (defesa: nenhum resultado os carrega). */
+function scrubSecrets(outcome: ToolOutcome, secrets: Readonly<Record<string, string>>): ToolOutcome {
+  const values = Object.values(secrets).filter((v) => v.length >= 4);
+  if (values.length === 0) return outcome;
+  const scrub = (text: string) => values.reduce((acc, v) => acc.split(v).join('[segredo]'), text);
+  return { ...outcome, content: scrub(outcome.content), summary: scrub(outcome.summary), raw: undefined };
+}
+
+/**
+ * Executa uma tool com segredo (spec 027) na requisição de decisão da API,
+ * com os segredos em memória. O worker nunca executa essas tools: ele usa o
+ * resultado que esta função produz (gravado no evento tool_result). O modelo
+ * recebe o resultado do serviço e, por campo, "segredo definido" ou
+ * "segredo mantido" — nunca o valor.
+ */
+export async function executeSecretTool(
+  ctx: ServiceContext,
+  name: string,
+  input: Record<string, unknown>,
+  meta: ToolCallMeta,
+  fields: readonly ToolSecretField[],
+): Promise<ToolOutcome> {
+  const secrets = meta.secrets ?? {};
+  const def = internalTool(name);
+  if (!def?.secrets?.length) return errorOutcome(t.agents.errors.toolUnknown(name));
+  try {
+    const missing = fields.find((f) => f.required && !secrets[f.key]);
+    if (missing) return errorOutcome(t.agents.errors.secretRequired(missing.label));
+    const parsed = def.input.parse(input);
+    const value = await handlerFor(name).run(ctx, parsed, meta);
+    const status = Object.fromEntries(fields.map((f) => [f.label, secrets[f.key] ? t.agents.secrets.set : t.agents.secrets.kept] as const));
+    const out =
+      value && typeof value === 'object' && !Array.isArray(value) ? { secrets: status, ...value } : { secrets: status, result: value };
+    return scrubSecrets({ content: resultText(out), isError: false, summary: summarize(value) }, secrets);
+  } catch (error) {
+    return scrubSecrets(errorOutcome(toolErrorMessage(error)), secrets);
+  }
+}
 
 /** Texto do resultado para o modelo (JSON compacto, truncado). */
 export function resultText(value: unknown): string {
@@ -230,9 +297,12 @@ export class RunTools {
         const result = await session.callTool(tool.toolName, input);
         return { content: resultText(result.text), isError: result.isError, summary: result.isError ? result.text.slice(0, 200) : 'ok' };
       }
+      // Tools com segredo só rodam na decisão da API (executeSecretTool), com o valor digitado no cartão.
+      if (tool.def.secrets?.length) return errorOutcome(t.agents.errors.secretNeedsConsole);
       const parsed = tool.def.input.parse(input);
-      const value = await handlerFor(tool.name).run(ctx, parsed, meta);
-      return { content: resultText(value), isError: false, summary: summarize(value), raw: value };
+      const ran = await handlerFor(tool.name).run(ctx, parsed, meta);
+      const { value, files } = tool.def.producesFile ? await storeGeneratedFile(ctx, ran) : { value: ran, files: [] };
+      return { content: resultText(value), isError: false, summary: summarize(value), raw: value, ...(files.length ? { files } : {}) };
     } catch (error) {
       const message =
         tool.source === 'mcp' && !(error instanceof AppError)

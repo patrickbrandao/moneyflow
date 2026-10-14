@@ -19,6 +19,12 @@ export const agentsStrings = {
     invoiceAdvanceCharges: 'Encargos (charges) só entram no pagamento parcial de uma fatura fechada.',
     alreadyArchived: 'O registro já está arquivado.',
     titleAlreadyCanceled: 'O título já está cancelado.',
+    /** Segredos (spec 027): digitados no cartão de aprovação do console, nunca pelo modelo. */
+    secretNeedsConsole: 'Esta ação precisa de um segredo: abra o console para digitar o segredo no cartão de aprovação.',
+    secretRequired: (label: string) => `Informe ${label} no cartão de aprovação.`,
+    /** Arquivo gerado por uma tool (spec 027): vira anexo da sessão, até 20 MB. */
+    fileTooLarge: (size: string) =>
+      `O arquivo gerado tem ${size}, acima do limite de 20 MB dos anexos. Gere-o pela tela (Administração → Backup e restauração).`,
     toolInvalidInput: (detail: string) => `Entrada inválida para a tool: ${detail}`,
     confirmationRejected: (reason: string | null) =>
       reason ? `O usuário recusou esta ação. Motivo: ${reason}` : 'O usuário recusou esta ação.',
@@ -72,8 +78,16 @@ export const agentsStrings = {
     audioTranscript: (name: string, duration: string | null, text: string) =>
       `[Áudio "${name}"${duration ? ` (${duration})` : ''} — transcrição]: ${text}`,
     audioNoTranscript: (name: string) => `[Áudio "${name}" sem transcrição]`,
+    /** Arquivo de backup (leva chaves e senhas): o conteúdo nunca vai ao modelo (spec 027). */
+    backupWithheld: (name: string) =>
+      `[Backup "${name}": o conteúdo não é enviado ao modelo (leva chaves e senhas); use simulate_import ou import_backup com o attachmentId.]`,
     describePrompt:
       'Descreva o anexo para outro modelo que não consegue vê-lo. Transcreva todo o texto legível (valores, datas, nomes, documentos, códigos) e descreva o que não é texto (tabelas, gráficos, fotos) de forma objetiva. Responda só com a descrição, em português.',
+  },
+  /** Resultado de uma tool com segredo para o modelo (o valor nunca vai). */
+  secrets: {
+    set: 'segredo definido',
+    kept: 'segredo mantido (campo vazio)',
   },
   search: {
     indexBuilding: 'índice em construção: parte dos resultados veio da busca por semelhança de texto',
@@ -91,6 +105,10 @@ export const agentsStrings = {
     categories: 'Categorias e regras',
     reports: 'Relatórios e canvas',
     messages: 'Mensagens e avisos',
+    closing: 'Fechamento e auditoria',
+    users: 'Usuários e permissões',
+    ai: 'Configuração de IA',
+    backup: 'Backup',
   } as Record<string, string>,
   toolKits: {
     copyName: (name: string) => `Cópia de ${name}`,

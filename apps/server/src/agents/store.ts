@@ -234,3 +234,19 @@ export function pendingToolUses(rows: MessageRow[]) {
     (b): b is Extract<AiBlock, { type: 'tool_use' }> => b.type === 'tool_use' && !answered.has(b.id),
   );
 }
+
+/**
+ * Resultados das tools com segredo já executadas pela API na decisão (spec
+ * 027): o evento tool_result com `prepared` traz o conteúdo para o modelo.
+ */
+export async function preparedResults(db: Executor, runId: string) {
+  const rows = await db.execute<{ payload: { toolUseId: string; content?: string; isError: boolean; summary: string } }>(sql`
+    SELECT payload FROM ai_run_events
+     WHERE run_id = ${runId} AND event_type = 'tool_result' AND (payload ->> 'prepared')::boolean IS TRUE`);
+  return new Map(
+    rows.rows.map((r) => [
+      r.payload.toolUseId,
+      { content: r.payload.content ?? r.payload.summary, isError: Boolean(r.payload.isError), summary: r.payload.summary },
+    ]),
+  );
+}

@@ -25,6 +25,7 @@ import {
   loadMessages,
   loadRun,
   pendingToolUses,
+  preparedResults,
   type RunRow,
   runDto,
   toNeutral,
@@ -338,9 +339,14 @@ async function callModel(db: Database, llm: LlmClient, runId: string, request: P
   }
 }
 
-async function insertToolResults(db: Database, runId: string, conversationId: string, results: ToolResultBlock[]) {
+/** Grava os resultados das tools; os arquivos gerados (producesFile) viram anexos desta mensagem da sessão (spec 027). */
+async function insertToolResults(db: Database, runId: string, conversationId: string, results: ToolResultBlock[], files: string[] = []) {
   await db.transaction(async (tx) => {
     const message = await insertMessage(tx, conversationId, 'tool', results, runId);
+    for (const attachmentId of files) {
+      await tx.execute(sql`
+        INSERT INTO ai_message_attachments (message_id, attachment_id) VALUES (${message.id}, ${attachmentId}) ON CONFLICT DO NOTHING`);
+    }
     await appendEvent(tx, runId, { type: 'message', message: { ...messageOut(message), usage: [] } });
   });
 }
@@ -401,33 +407,46 @@ async function resolvePending(
   const started = await db.execute<{ tool_use_id: string }>(sql`
     SELECT payload ->> 'toolUseId' AS tool_use_id FROM ai_run_events WHERE run_id = ${runId} AND event_type = 'tool_start'`);
   const alreadyStarted = new Set(started.rows.map((r) => r.tool_use_id));
+  // Tools com segredo (spec 027): a API já as executou na decisão; aqui só o resultado gravado.
+  const prepared = await preparedResults(db, runId);
 
   const results: ToolResultBlock[] = [];
+  const files: string[] = [];
   for (const use of pending) {
     const tool = tools.resolve(use.name);
     const confirmation = confirmations.get(use.id);
-    let outcome: { content: string; isError: boolean; summary: string };
+    const secret = tool?.source === 'internal' && Boolean(tool.def.secrets?.length);
+    let outcome: { content: string; isError: boolean; summary: string; files?: string[] };
+    let announce = true;
     if (!tool) outcome = errorOutcome(t.agents.errors.toolUnknown(use.name));
     else if (preErrors.has(use.id)) outcome = errorOutcome(preErrors.get(use.id)!);
     else if (confirmation && confirmation.status === 'rejected')
       outcome = errorOutcome(t.agents.errors.confirmationRejected(confirmation.reason));
     else if (confirmation && confirmation.status === 'expired') outcome = errorOutcome(t.agents.errors.confirmationExpired);
-    else if (!confirmation && tool.write && alreadyStarted.has(use.id))
+    else if (secret) {
+      // O worker nunca executa uma tool de segredo: sem o resultado da decisão, pede o console.
+      const ready = prepared.get(use.id);
+      outcome = ready ?? errorOutcome(t.agents.errors.secretNeedsConsole);
+      announce = !ready;
+    } else if (!confirmation && tool.write && alreadyStarted.has(use.id))
       outcome = errorOutcome('A execução foi interrompida durante esta ação; confira o resultado antes de repetir.');
     else {
       await appendEvent(db, runId, { type: 'tool_start', toolUseId: use.id, name: use.name, title: tool.title });
       outcome = await tools.execute(ctx, tool, use.input, { toolUseId: use.id, runId });
     }
-    await appendEvent(db, runId, {
-      type: 'tool_result',
-      toolUseId: use.id,
-      name: use.name,
-      isError: outcome.isError,
-      summary: outcome.summary,
-    });
+    if (announce) {
+      await appendEvent(db, runId, {
+        type: 'tool_result',
+        toolUseId: use.id,
+        name: use.name,
+        isError: outcome.isError,
+        summary: outcome.summary,
+      });
+    }
+    files.push(...(outcome.files ?? []));
     results.push({ type: 'tool_result', tool_use_id: use.id, content: outcome.content, ...(outcome.isError ? { is_error: true } : {}) });
   }
-  await insertToolResults(db, runId, conversationId, results);
+  await insertToolResults(db, runId, conversationId, results, files);
   return 'done';
 }
 

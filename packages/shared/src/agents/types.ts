@@ -438,7 +438,19 @@ export type AiRunEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'thinking_delta'; text: string }
   | { type: 'tool_start'; toolUseId: string; name: string; title: string }
-  | { type: 'tool_result'; toolUseId: string; name: string; isError: boolean; summary: string }
+  | {
+      type: 'tool_result';
+      toolUseId: string;
+      name: string;
+      isError: boolean;
+      summary: string;
+      /**
+       * Tool com segredo (spec 027): executada pela API na decisão; `content` é o
+       * resultado para o modelo (sem o segredo), que o worker usa ao retomar.
+       */
+      prepared?: boolean;
+      content?: string;
+    }
   | { type: 'message'; message: AiMessageDto }
   | { type: 'confirmation'; confirmations: ToolConfirmationDto[] }
   | { type: 'usage'; run: AiRunDto }

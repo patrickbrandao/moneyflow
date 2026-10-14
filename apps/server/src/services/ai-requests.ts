@@ -68,6 +68,14 @@ async function settingDto(ctx: ServiceContext, key: string): Promise<AppSettingD
   };
 }
 
+/** Todas as configurações que a tela grava (tool get_app_settings). */
+export async function listSettings(ctx: ServiceContext): Promise<AppSettingDto[]> {
+  ctx.access.assertAdmin();
+  const out: AppSettingDto[] = [];
+  for (const key of Object.keys(SETTINGS)) out.push(await settingDto(ctx, key));
+  return out;
+}
+
 export async function getSetting(ctx: ServiceContext, key: string): Promise<AppSettingDto> {
   ctx.access.assertAdmin();
   return settingDto(ctx, key);

@@ -116,6 +116,8 @@ export const agentsUiStrings = {
       account: 'conta',
     } as Record<string, string>,
     contextHint: (label: string) => `Contexto: ${label}`,
+    /** Segredos (spec 027): nunca no texto livre. */
+    secretsNotice: 'Chaves e senhas: o agente vai pedir no cartão de aprovação.',
   },
 
   /* ---------------- blocos de tool ---------------- */
@@ -130,6 +132,8 @@ export const agentsUiStrings = {
     result: 'Resultado',
     details: 'Detalhes',
     mcp: (server: string) => `MCP ${server}`,
+    /** Arquivo gerado pela tool (spec 027): anexo da sessão. */
+    file: (name: string, size: string) => `${name} (${size})`,
   },
 
   /* ---------------- confirmação ("Aplicar?") ---------------- */
@@ -146,6 +150,10 @@ export const agentsUiStrings = {
     before: 'Antes',
     after: 'Depois',
     noPreview: 'Sem prévia para esta ação.',
+    /** Campos de segredo do cartão (spec 027): o valor vai direto ao sistema, nunca ao agente. */
+    secretsTitle: 'Segredos (não vão ao agente)',
+    secretsHint: 'O valor vai direto ao sistema: o agente recebe só "segredo definido".',
+    secretRequired: 'Obrigatório',
     approved: 'Aprovada',
     rejected: 'Recusada',
     expired: 'Expirada',

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { ptBR } from '../i18n/pt-BR';
 import { id, optionalText, queryBool, requiredText } from '../schemas/common';
 import { scanPromptVariables } from './prompt-vars';
-import { AGENT_TOOL_MODES } from './tools';
+import { AGENT_TOOL_MODES } from './tool-def';
 
 /* Entradas da API dos agentes (spec 011): administração, conversas e tokens. */
 
@@ -468,6 +468,12 @@ export const confirmationDecisionInput = z.object({
   decision: z.enum(['approved', 'rejected']),
   /** Omitido = todas as pendentes ("aprovar tudo"). */
   ids: z.array(id).min(1).max(500).optional(),
+  /**
+   * Segredos digitados no cartão (spec 027): id da confirmação → campo
+   * (`secretFields[].key` da prévia) → valor. Vão direto ao serviço, na mesma
+   * requisição, e nunca são gravados. Vazio = mantém o segredo atual.
+   */
+  secrets: z.record(id, z.record(z.string().max(200), z.string().max(8000))).optional(),
   reason: z.string().trim().max(2000).optional(),
 });
 

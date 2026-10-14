@@ -117,8 +117,17 @@ async function call(
     attachmentIds: ids,
     preview: confirmation?.preview,
     error: result?.is_error ? (result.content as string) : null,
-    value: result && !result.is_error ? JSON.parse(result.content) : null,
+    value: result && !result.is_error ? parseResult(result.content) : null,
   };
+}
+
+/** Resultado para o modelo (num banco de teste reaproveitado, uma lista grande vem truncada: aí, o texto). */
+function parseResult(content: string): any {
+  try {
+    return JSON.parse(content);
+  } catch {
+    return content;
+  }
 }
 
 /** Escrita aprovada: a prévia e o valor devolvido. */

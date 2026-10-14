@@ -25,6 +25,10 @@ export const AGENT_TOOL_CATEGORIES = [
   'categories',
   'reports',
   'messages',
+  'closing',
+  'users',
+  'ai',
+  'backup',
 ] as const;
 export type AgentToolCategory = (typeof AGENT_TOOL_CATEGORIES)[number];
 
@@ -40,7 +44,12 @@ export type AgentToolDef<S extends z.ZodType = z.ZodType> = {
   destructive?: boolean;
   /** Só administrador: fora da lista quando quem aciona não é admin (mesmo no kit). */
   adminOnly?: boolean;
-  /** Campos de segredo da entrada (digitados no cartão de aprovação): a tool é sempre ask. */
+  /**
+   * Segredos da tool (spec 027): NÃO fazem parte do schema enviado ao modelo.
+   * A prévia diz os campos (`secretFields`); o usuário digita os valores no
+   * cartão de aprovação e eles vão na decisão direto ao serviço (o handler os
+   * recebe em `meta.secrets`). A tool é sempre ask e fica fora do /mcp.
+   */
   secrets?: readonly string[];
   /** Gera um arquivo (vira anexo de uma mensagem do agente na sessão): fora do /mcp, que não tem sessão. */
   producesFile?: boolean;

@@ -8,5 +8,6 @@ export * from './requests';
 export * from './schemas';
 export * from './sse';
 export * from './tools';
+export * from './tools-admin';
 export * from './tools-operation';
 export type * from './types';

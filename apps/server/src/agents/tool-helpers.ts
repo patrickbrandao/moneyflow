@@ -11,7 +11,23 @@ import { assertReadable } from '../services/attachments';
  * prévias (respeitando a permissão) e o anexo usado como entrada (spec 027).
  */
 
-export type ToolCallMeta = { toolUseId: string; runId: string | null };
+export type ToolCallMeta = {
+  toolUseId: string;
+  runId: string | null;
+  /**
+   * Segredos digitados no cartão de aprovação (spec 027), só nas tools com
+   * `secrets`: chave = `secretFields[].key` da prévia. Chegam da requisição de
+   * decisão, em memória, e nunca são gravados nem devolvidos.
+   */
+  secrets?: Readonly<Record<string, string>>;
+};
+
+/**
+ * Arquivo gerado por uma tool (`producesFile`, spec 027): o handler devolve
+ * `{ file, ...resto }`; o runtime grava o anexo, liga-o à mensagem da tool na
+ * sessão e entrega ao modelo só id, nome, tipo e tamanho.
+ */
+export type GeneratedFile = { fileName: string; mime: string; content: Buffer };
 
 export type Handler<N extends AgentToolName> = {
   run: (ctx: ServiceContext, input: AgentToolInput<N>, meta: ToolCallMeta) => Promise<unknown>;

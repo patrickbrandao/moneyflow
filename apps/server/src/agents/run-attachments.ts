@@ -1,5 +1,5 @@
 import type { Database } from '@moneyflow/db';
-import { blocksText, formatDuration, isAudioMime, isImageMime, type NeutralMessage, t } from '@moneyflow/shared';
+import { BACKUP_FORMAT, blocksText, formatDuration, isAudioMime, isImageMime, type NeutralMessage, t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config';
@@ -112,6 +112,8 @@ export class RunAttachments {
     const file = await this.file(attachmentId);
     if (!file) return null;
     if (isAudioMime(file.mime)) return this.audio(attachmentId, file);
+    // Backup do MoneyFlow (leva chaves e senhas, spec 027): o conteúdo nunca vai ao modelo.
+    if (isBackupFile(file)) return { fileName: file.fileName, mime: file.mime, text: t.agents.attachments.backupWithheld(file.fileName) };
     const image = isImageMime(file.mime);
     if (!image && file.mime !== PDF) return file;
     const mode = await this.visionMode();
@@ -253,4 +255,11 @@ export class RunAttachments {
       ON CONFLICT ON CONSTRAINT ai_attachment_derivatives_key DO NOTHING`);
     return text;
   }
+}
+
+/** Arquivo de backup do MoneyFlow (.json com o formato no começo, ou .zip): não vai ao modelo. */
+function isBackupFile(file: { fileName: string; mime: string; data: Buffer }): boolean {
+  if (file.data[0] === 0x50 && file.data[1] === 0x4b) return true;
+  if (!/json|text\/plain|octet-stream/.test(file.mime) && !/\.json$/i.test(file.fileName)) return false;
+  return file.data.subarray(0, 4096).toString('utf8').includes(`"${BACKUP_FORMAT}"`);
 }
