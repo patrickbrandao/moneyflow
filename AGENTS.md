@@ -16,6 +16,12 @@ Tudo o que é banco (PostgreSQL 18 + pgvector) fica em `database/` e é responsa
 
 Achados do usuário e pedidos de revisão/correção entre agentes viram arquivos `tasks/nnn-titulo.md` com status no cabeçalho, listados em [tasks/INDEX.md](tasks/INDEX.md). Toda tarefa tem um agente designado: o subagente **triage** analisa, reproduz e designa o executor — **dba** para `database/`, **app** para o resto —, que corrige com testes e fecha a tarefa. Se você encontrar algo fora do seu escopo, abra uma tarefa em vez de contornar. Detalhes em [docs/017-tarefas-entre-agentes.md](docs/017-tarefas-entre-agentes.md). Versões e publicação: [docs/018-versoes-e-publicacao.md](docs/018-versoes-e-publicacao.md).
 
+## Verificação (dois níveis)
+
+- **Rápida, o padrão** enquanto se desenvolve e ao concluir uma tarefa: `pnpm verify:quick`. Olha só o que mudou desde o ponto em que o branch saiu do `main` (commits, alterações e arquivos novos): Biome nos arquivos alterados, typecheck dos pacotes afetados e dos que dependem deles, testes do shared relacionados, testes de integração dos arquivos tocados (`test/x.test.ts` alterado, ou o de mesmo nome de `src/.../x.ts`) contra o Postgres local, sem container, e o pgTAP dos testes de `database/tests/` alterados. Não roda build, e2e nem a suíte inteira. Se a heurística não achar o teste certo, passe-o: `pnpm verify:quick -- test/contracts.test.ts -t "renovação"`. Toda mudança continua vindo com o teste que a cobre; o que muda é quanto da suíte roda.
+- **Completa, só quando o usuário pedir** ("verificação completa", "rode tudo"), antes de abrir PR e antes de release: `pnpm verify:full` (lint, typecheck, todos os testes com Testcontainers, build e todo o pgTAP; `--e2e` acrescenta o Playwright com a pilha no ar, `--local` roda a integração no Postgres local). O CI roda sempre o completo.
+- Modo local dos testes de integração (`MONEYFLOW_TEST_DB=local`, `pnpm test:local`): usa o Postgres de desenvolvimento (`make -C database up`, porta 5432); as migrations ficam no banco modelo `moneyflow_it_tpl`, refeito quando `database/migrations` muda, e cada execução recria `moneyflow_it` por cópia dele (começa limpo). Não usa `moneyflow_test`, que é do pgTAP. Duas execuções locais ao mesmo tempo disputam o mesmo banco.
+
 ## Comandos
 
 Node 22.12+ e pnpm 9 (`corepack enable`). Copie `.env.example` para `.env` na raiz.
@@ -30,6 +36,9 @@ pnpm typecheck                  # tsc em todos os pacotes
 pnpm test                       # unitários (shared) + integração da API
 pnpm test:unit                  # só packages/shared
 pnpm test:integration           # API contra Postgres 18 real: o Testcontainers builda database/docker e aplica as migrations
+pnpm test:local                 # a mesma integração no Postgres local (5432), sem container: banco limpo copiado de um modelo migrado
+pnpm verify:quick               # verificação rápida do que mudou no branch (o padrão; veja Verificação)
+pnpm verify:full                # verificação completa (só quando pedido, antes de PR e release; --e2e, --local)
 pnpm build                      # SPA (apps/web/dist) + bundle da API/worker (apps/server/dist/main.mjs)
 pnpm db:pull                    # regenera packages/db/src/generated depois de uma migration nova (nunca edite à mão)
 docker compose up --build -d    # pilha completa: Postgres (5433), migrations, api (http://localhost:3000, serve o SPA) e worker
@@ -48,7 +57,8 @@ make release                    # build multi-arch e push de tmsoftbrasil/moneyf
 Teste isolado:
 
 ```bash
-pnpm --filter @moneyflow/server exec vitest run test/titles.test.ts -t "estorno"   # integração, um caso
+pnpm --filter @moneyflow/server exec vitest run test/titles.test.ts -t "estorno"   # integração, um caso (Testcontainers)
+pnpm --filter @moneyflow/server test:local test/titles.test.ts -t "estorno"       # o mesmo no Postgres local, em segundos
 pnpm --filter @moneyflow/shared exec vitest run test/documents.test.ts           # unitário, um arquivo
 MONEYFLOW_TEST_DATABASE_URL=postgres://moneyflow_app:moneyflow_app@localhost:5432/moneyflow_test pnpm test:integration  # banco já migrado, sem Testcontainers
 pnpm --filter @moneyflow/e2e exec playwright test -g "baixa"                     # um e2e

@@ -47,7 +47,7 @@ O que mudou, testes que cobrem, specs atualizadas.
 
 1. O autor cria o arquivo com `status: aberta` e acrescenta a linha em `tasks/INDEX.md`.
 2. A triagem muda para `em-analise`, preenche "Análise", `responsavel` e `tipo`, e passa para `em-andamento` ao entregar ao executor (ou `rejeitada`, com o motivo, quando não procede).
-3. O executor corrige com testes, roda as verificações do `AGENTS.md`, preenche "Resolução" e `commit` e muda para `concluida`.
+3. O executor corrige com testes, roda a verificação rápida do `AGENTS.md` (a completa quando pedida), preenche "Resolução" e `commit` e muda para `concluida`.
 4. Tarefas concluídas e rejeitadas **continuam na pasta** como histórico. `tasks/INDEX.md` lista todas, com as abertas primeiro.
 
 Uma tarefa resolve um assunto; achados diferentes viram tarefas diferentes. Tarefas que mexem no banco e na aplicação são feitas em sequência: primeiro o `dba`, depois o `app`.

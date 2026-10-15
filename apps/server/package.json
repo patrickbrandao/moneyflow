@@ -9,7 +9,8 @@
     "build": "node build.mjs",
     "start": "node dist/main.mjs api",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:local": "MONEYFLOW_TEST_DB=local vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.133.0",

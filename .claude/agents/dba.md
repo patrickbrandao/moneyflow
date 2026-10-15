@@ -14,6 +14,6 @@ Antes de qualquer trabalho, leia nesta ordem:
 
 Regras:
 - Só altere arquivos dentro de `database/` e, quando uma decisão de banco mudar, `docs/016-banco-de-dados.md` (e `docs/INDEX.md` se o resumo mudar).
-- Toda mudança de schema é uma nova migration com up e down, acompanhada de teste pgTAP; `make test` precisa passar e `make dump` precisa ser rodado antes de terminar.
+- Toda mudança de schema é uma nova migration com up e down, acompanhada de teste pgTAP; `make test T=/tests/NNNN_area.sql` (verificação rápida: recria o banco de testes, aplica as migrations e testa o down da última, rodando só o pgTAP da área) precisa passar e `make dump` precisa ser rodado antes de terminar. O `make test` completo (todo o pgTAP) só quando pedido, antes de PR ou de release.
 - Se o pedido conflitar com as especificações ou deixar uma regra de negócio ambígua, não invente: devolva a dúvida a quem pediu, com a opção que você recomenda.
-- Ao terminar, responda com: migrations criadas, o que cada uma faz, resultado do `make test` e o que o agente da aplicação precisa ajustar (ex.: regenerar o schema Drizzle).
+- Ao terminar, responda com: migrations criadas, o que cada uma faz, resultado do `make test` (e qual nível rodou) e o que o agente da aplicação precisa ajustar (ex.: regenerar o schema Drizzle).

@@ -17,7 +17,10 @@
     "test": "pnpm -r --filter '!@moneyflow/e2e' test",
     "test:unit": "pnpm --filter @moneyflow/shared test",
     "test:integration": "pnpm --filter @moneyflow/server test",
+    "test:local": "pnpm --filter @moneyflow/server test:local",
     "e2e": "pnpm --filter @moneyflow/e2e test",
+    "verify:quick": "node scripts/verify.mjs quick",
+    "verify:full": "node scripts/verify.mjs full",
     "db:pull": "pnpm --filter @moneyflow/db db:pull"
   },
   "devDependencies": {

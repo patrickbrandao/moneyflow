@@ -1,5 +1,6 @@
 import { GenericContainer, type StartedTestContainer, Wait } from 'testcontainers';
 import type { TestProject } from 'vitest/node';
+import { prepareLocalDatabase } from './local-db';
 import { DATABASE_DIR, migrate } from './migrate';
 
 declare module 'vitest' {
@@ -17,6 +18,12 @@ export async function setup(project: TestProject) {
   if (external) {
     project.provide('databaseUrl', external);
     project.provide('ownerDatabaseUrl', process.env.MONEYFLOW_TEST_OWNER_URL ?? '');
+    return;
+  }
+  if (process.env.MONEYFLOW_TEST_DB === 'local') {
+    const { ownerUrl, appUrl } = await prepareLocalDatabase();
+    project.provide('databaseUrl', appUrl);
+    project.provide('ownerDatabaseUrl', ownerUrl);
     return;
   }
   const image = await GenericContainer.fromDockerfile(DATABASE_DIR, 'docker/Dockerfile')

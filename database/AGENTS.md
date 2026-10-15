@@ -24,8 +24,8 @@ make up                  # sobe o Postgres (cria .env a partir de .env.example)
 make migrate             # aplica migrations pendentes no banco de desenvolvimento
 make rollback            # desfaz a última migration
 make new NAME=create_x   # cria migrations/NNNN_create_x.sql
-make test                # recria <db>_test, migra, testa o down da última migration, migra de novo e roda todo o pgTAP
-make test T=/tests/0003_entities.sql   # roda um arquivo de teste só (caminho dentro do container)
+make test T=/tests/0003_entities.sql   # rápido: recria <db>_test, migra, testa o down da última, migra de novo e roda só o(s) arquivo(s) dados (caminho no container; vários: T="/tests/a.sql /tests/b.sql")
+make test                # completo: o mesmo, rodando todo o pgTAP (só quando pedido, antes de PR ou de release)
 make dump                # regrava schema.sql
 make seed                # carrega seeds/dev.sql
 make psql                # console no banco de desenvolvimento
@@ -36,9 +36,15 @@ make reset               # APAGA o banco de desenvolvimento e recria do zero
 
 1. `make new NAME=...` e escreva o `-- migrate:up` e um `-- migrate:down` que desfaça tudo.
 2. Escreva ou atualize o teste pgTAP da área.
-3. `make test` precisa passar.
-4. `make dump` e commite `schema.sql` junto com a migration e o teste.
+3. Rode o nível rápido: `make test T=/tests/NNNN_area.sql` com o(s) arquivo(s) pgTAP da área tocada precisa passar. Ele ainda recria o banco de testes, aplica todas as migrations e testa o down da última; só não roda todo o pgTAP.
+4. `make dump` (obrigatório quando o schema muda) e commite `schema.sql` junto com a migration e o teste.
 5. Informe ao agente da aplicação o que mudou, para ele regenerar o schema Drizzle (ver 016).
+
+## Níveis de verificação
+
+- **Rápido** (padrão enquanto se desenvolve): o passo 3 acima. Na raiz, `pnpm verify:quick` roda sozinho o pgTAP dos arquivos de `database/tests/` alterados no branch.
+- **Completo**: `make test` sem `T` (todo o pgTAP), só quando o usuário pedir "verificação completa", antes de abrir PR ou de release. É o que o `pnpm verify:full` e o CI rodam.
+- Os testes de integração da API no modo rápido (`MONEYFLOW_TEST_DB=local`) usam o Postgres de desenvolvimento (porta 5432) com os bancos `moneyflow_it_tpl` (modelo migrado, refeito quando `database/migrations` muda) e `moneyflow_it` (cópia a cada execução). Não tocam em `moneyflow_test`, que continua sendo do pgTAP.
 
 Nunca edite uma migration que já está na branch `main`; crie uma nova. Antes disso, migrations ainda não mescladas podem ser reescritas.
 

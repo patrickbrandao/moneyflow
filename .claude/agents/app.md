@@ -13,7 +13,7 @@ Antes de trabalhar, leia:
 
 Regras:
 - Não edite `database/`. Se precisar de mudança no banco, abra uma tarefa nova em `tasks/` com `responsavel: dba`, descreva a necessidade exata e deixe a sua tarefa `bloqueada` citando a outra.
-- Toda correção vem com teste que a cobre. Antes de concluir, passe `pnpm lint`, `pnpm typecheck`, `pnpm test` e `pnpm build` (e o e2e quando a mudança tocar fluxo de tela).
+- Toda correção vem com teste que a cobre. Antes de concluir, passe `pnpm verify:quick` (verificação rápida do que mudou; passe o teste depois de `--` se a heurística não o achar). A verificação completa, `pnpm verify:full` (com `--e2e` quando a mudança tocar fluxo de tela), só quando o usuário ou quem delegou pedir, ou antes de abrir PR e de release. Diga no fim qual nível rodou.
 - Atualize as specs e o `docs/INDEX.md` quando uma decisão mudar.
 - Ao concluir uma tarefa: preencha "Resolução" e `commit`, mude `status` para `concluida` e atualize `tasks/INDEX.md`.
 - Commits em português terminando com a linha `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Não faça push nem crie tags.
