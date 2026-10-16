@@ -8,6 +8,7 @@ import { useAction } from '../../lib/hooks';
 import { caixaTab } from '../../lib/links';
 import { Money } from '../domain';
 import { CategorySelect, FormError, ModalActions, MoneyInput } from '../forms';
+import { ImportRecipesHint } from '../reconciliation/RecipesPanel';
 import { Badge, Button, EmptyRow, Field, Modal, useConfirm } from '../ui';
 
 type Kind = (typeof ACCOUNT_KINDS)[number];
@@ -253,6 +254,7 @@ function AccountFormModal({
               {t.agentsUi.reconcile.auto}
             </label>
             <p className="hint">{t.agentsUi.reconcile.autoHint}</p>
+            {account && <ImportRecipesHint accountId={account.id} />}
           </div>
         )}
         <div className="span-all">

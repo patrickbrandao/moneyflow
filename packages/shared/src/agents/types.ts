@@ -165,6 +165,8 @@ export type AgentOptionDto = {
   colorSlot: number;
   icon: string | null;
   isActive: boolean;
+  /** Tem kit de ferramentas (sem kit: lança sem pedir aprovação; aviso das receitas, spec 030). */
+  hasKit?: boolean;
 };
 
 export type AgentToolInfo = {

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { aiAgentCreateInput, aiAgentUpdateInput, renderPromptVariables, scanPromptVariables, volatilePromptValues } from '../src';
+import {
+  aiAgentCreateInput,
+  aiAgentUpdateInput,
+  renderPromptVariables,
+  renderRecipeVariables,
+  scanPromptVariables,
+  scanRecipeVariables,
+  volatilePromptValues,
+} from '../src';
 
 /* Variáveis no prompt do agente (spec 022). */
 
@@ -39,5 +47,13 @@ describe('variáveis do prompt', () => {
     expect(created.success).toBe(false);
     expect(created.error?.issues[0]?.message).toContain('{{usuario.cpf}}');
     expect(aiAgentUpdateInput.safeParse({ systemPrompt: 'Oi {{usuario.nome}} \\{{livre}}' }).success).toBe(true);
+  });
+
+  it('receitas (spec 030): as variáveis do lote valem só na instrução da receita', () => {
+    expect(scanPromptVariables('{{lote.arquivo}}').unknown).toEqual(['lote.arquivo']);
+    expect(scanRecipeVariables('{{lote.arquivo}} {{linhas.total}} {{data}}').unknown).toEqual([]);
+    expect(renderRecipeVariables('{{lote.arquivo}}: {{linhas.total}} {{x}}', { 'lote.arquivo': 'a.ofx', 'linhas.total': '3' })).toBe(
+      'a.ofx: 3 {{x}}',
+    );
   });
 });

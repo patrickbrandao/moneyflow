@@ -14,4 +14,9 @@ export type ServiceContext = {
   /** Quem age nas escritas (padrão human). */
   actorKind?: 'human' | 'agent';
   agentRunId?: string | null;
+  /**
+   * Execução de uma receita de conciliação (spec 030): as linhas do extrato no
+   * escopo. As tools de conciliação recusam qualquer linha fora dele.
+   */
+  recipeLineIds?: ReadonlySet<string> | null;
 };

@@ -4,6 +4,8 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 
 | Nº | Tarefa | Status | Tipo | Responsável | Origem |
 |---|---|---|---|---|---|
+| 035 | [Receitas de conciliação no banco (F16)](035-receitas-de-conciliacao-no-banco.md) | concluida | banco | dba | usuario |
+| 036 | [Receitas de conciliação na aplicação (F16)](036-receitas-de-conciliacao-na-aplicacao.md) (depois da 035) | concluida | melhoria | app | usuario |
 | 030 | [Orçamentos, visões de uso e avisos no banco (F14)](030-orcamentos-e-limites-no-banco.md) (depois da F13) | concluida | banco | dba | usuario |
 | 031 | [Orçamentos com aviso e bloqueio, limite por minuto e painel de uso (F14)](031-orcamentos-e-limites-na-aplicacao.md) (depois da 030) | concluida | melhoria | app | usuario |
 | 032 | [Tarefas agendadas, conciliação com IA e Telegram de entrada no banco (F15)](032-fluxos-autonomos-no-banco.md) (depois da F14) | concluida | banco | dba | usuario |

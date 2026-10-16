@@ -65,6 +65,8 @@ import {
   aiScheduledTaskRuns,
   telegramPairingCodes,
   telegramLinks,
+  aiReconcileRecipeRuns,
+  aiReconcileRecipes,
   userAiSettings,
   aiAgentPromptVersions,
   aiAttachmentDerivatives,
@@ -72,6 +74,7 @@ import {
   contractDocumentVersions,
   contractAmendments,
   contractRenewalTasks,
+  aiReconcileRecipeTargets,
   telegramUpdatesSeen,
   entityTagLinks,
   entityTags,
@@ -123,6 +126,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   }),
   telegramPairingCodes: many(telegramPairingCodes),
   telegramLinks: many(telegramLinks),
+  aiReconcileRecipeRuns: many(aiReconcileRecipeRuns),
   userAiSettings: many(userAiSettings),
   aiAgentPromptVersions: many(aiAgentPromptVersions),
   contracts: many(contracts),
@@ -130,6 +134,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   contractDocumentVersions: many(contractDocumentVersions),
   contractAmendments: many(contractAmendments),
   contractRenewalTasks: many(contractRenewalTasks),
+  aiReconcileRecipes: many(aiReconcileRecipes),
 }));
 
 export const entityContactsRelations = relations(entityContacts, ({ one }) => ({
@@ -259,6 +264,8 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
   contracts_counterpartyCaixaId: many(contracts, {
     relationName: 'contracts_counterpartyCaixaId_caixas_id',
   }),
+  aiReconcileRecipes: many(aiReconcileRecipes),
+  aiReconcileRecipeTargets: many(aiReconcileRecipeTargets),
 }));
 
 export const aiAgentsRelations = relations(aiAgents, ({ one, many }) => ({
@@ -283,6 +290,7 @@ export const aiAgentsRelations = relations(aiAgents, ({ one, many }) => ({
   aiConversations: many(aiConversations),
   messageDestinations: many(messageDestinations),
   aiAgentPromptVersions: many(aiAgentPromptVersions),
+  aiReconcileRecipes: many(aiReconcileRecipes),
   aiAgentInferences: many(aiAgentInferences),
 }));
 
@@ -377,6 +385,7 @@ export const financialAccountsRelations = relations(financialAccounts, ({ one, m
     fields: [financialAccounts.caixaId],
     references: [caixas.id],
   }),
+  aiReconcileRecipeTargets: many(aiReconcileRecipeTargets),
 }));
 
 export const titlesRelations = relations(titles, ({ one, many }) => ({
@@ -702,6 +711,7 @@ export const statementImportsRelations = relations(statementImports, ({ one, man
     references: [users.id],
   }),
   statementLines: many(statementLines),
+  aiReconcileRecipeRuns: many(aiReconcileRecipeRuns),
 }));
 
 export const classificationRulesRelations = relations(classificationRules, ({ one, many }) => ({
@@ -822,6 +832,7 @@ export const aiRunsRelations = relations(aiRuns, ({ one, many }) => ({
   aiUsages: many(aiUsage),
   aiRequests: many(aiRequests),
   aiScheduledTaskRuns: many(aiScheduledTaskRuns),
+  aiReconcileRecipeRuns: many(aiReconcileRecipeRuns),
   contractDocumentVersions: many(contractDocumentVersions),
 }));
 
@@ -846,6 +857,7 @@ export const aiConversationsRelations = relations(aiConversations, ({ one, many 
     references: [users.id],
   }),
   aiScheduledTaskRuns: many(aiScheduledTaskRuns),
+  aiReconcileRecipeRuns: many(aiReconcileRecipeRuns),
   aiAttachmentDerivatives: many(aiAttachmentDerivatives),
 }));
 
@@ -1194,6 +1206,46 @@ export const telegramLinksRelations = relations(telegramLinks, ({ one, many }) =
   }),
 }));
 
+export const aiReconcileRecipeRunsRelations = relations(aiReconcileRecipeRuns, ({ one }) => ({
+  aiConversation: one(aiConversations, {
+    fields: [aiReconcileRecipeRuns.conversationId],
+    references: [aiConversations.id],
+  }),
+  statementImport: one(statementImports, {
+    fields: [aiReconcileRecipeRuns.importId],
+    references: [statementImports.id],
+  }),
+  aiReconcileRecipe: one(aiReconcileRecipes, {
+    fields: [aiReconcileRecipeRuns.recipeId],
+    references: [aiReconcileRecipes.id],
+  }),
+  aiRun: one(aiRuns, {
+    fields: [aiReconcileRecipeRuns.runId],
+    references: [aiRuns.id],
+  }),
+  user: one(users, {
+    fields: [aiReconcileRecipeRuns.userId],
+    references: [users.id],
+  }),
+}));
+
+export const aiReconcileRecipesRelations = relations(aiReconcileRecipes, ({ one, many }) => ({
+  aiReconcileRecipeRuns: many(aiReconcileRecipeRuns),
+  aiAgent: one(aiAgents, {
+    fields: [aiReconcileRecipes.agentId],
+    references: [aiAgents.id],
+  }),
+  caixa: one(caixas, {
+    fields: [aiReconcileRecipes.caixaId],
+    references: [caixas.id],
+  }),
+  user: one(users, {
+    fields: [aiReconcileRecipes.createdByUserId],
+    references: [users.id],
+  }),
+  aiReconcileRecipeTargets: many(aiReconcileRecipeTargets),
+}));
+
 export const userAiSettingsRelations = relations(userAiSettings, ({ one }) => ({
   caixa: one(caixas, {
     fields: [userAiSettings.primaryCaixaId],
@@ -1340,6 +1392,21 @@ export const contractRenewalTasksRelations = relations(contractRenewalTasks, ({ 
   user: one(users, {
     fields: [contractRenewalTasks.decidedBy],
     references: [users.id],
+  }),
+}));
+
+export const aiReconcileRecipeTargetsRelations = relations(aiReconcileRecipeTargets, ({ one }) => ({
+  caixa: one(caixas, {
+    fields: [aiReconcileRecipeTargets.cardCaixaId],
+    references: [caixas.id],
+  }),
+  financialAccount: one(financialAccounts, {
+    fields: [aiReconcileRecipeTargets.financialAccountId],
+    references: [financialAccounts.id],
+  }),
+  aiReconcileRecipe: one(aiReconcileRecipes, {
+    fields: [aiReconcileRecipeTargets.recipeId],
+    references: [aiReconcileRecipes.id],
   }),
 }));
 

@@ -4,6 +4,7 @@ import { type FormEvent, useState } from 'react';
 import { api } from '../lib/api';
 import { useAction, useApi } from '../lib/hooks';
 import { type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from './forms';
+import { ImportRecipesHint } from './reconciliation/RecipesPanel';
 import { Button, Field, Modal, Tabs } from './ui';
 
 type Kind = 'general' | 'credit_card';
@@ -149,6 +150,7 @@ export function CaixaFormModal({
                   {t.agentsUi.reconcile.auto}
                 </label>
                 <p className="hint">{t.agentsUi.reconcile.autoHint}</p>
+                <ImportRecipesHint cardCaixaId={caixa.id} />
               </div>
             )}
           </div>

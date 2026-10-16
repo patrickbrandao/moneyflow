@@ -15,6 +15,7 @@ import {
   titleUpdateInput,
   transferCreateInput,
 } from '../schemas';
+import { RECIPE_TOOLS } from './recipes';
 import { type AgentToolDef, type AgentToolMode, date, define, limit, optionalDate } from './tool-def';
 import { ADMIN_TOOLS } from './tools-admin';
 import { OPERATION_TOOLS } from './tools-operation';
@@ -531,6 +532,8 @@ export const AGENT_TOOLS = [
   /* ---------------- controle total, lotes F13a e F13b (spec 027) ---------------- */
   ...OPERATION_TOOLS,
   ...ADMIN_TOOLS,
+  /* ---------------- receitas de conciliação (spec 030) ---------------- */
+  ...RECIPE_TOOLS,
 ] as const satisfies readonly AgentToolDef[];
 
 export type AgentToolName = (typeof AGENT_TOOLS)[number]['name'];

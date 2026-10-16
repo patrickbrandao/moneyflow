@@ -562,7 +562,14 @@ export type StatementImportDetail = StatementImportSummary & {
   /** Só na resposta do import: a sugestão do agente dos fluxos enfileirada para as linhas novas (a tela acompanha a execução). */
   aiSuggestion?: { queued: boolean; runId: string | null; lines: number; skippedReason?: string } | null;
   /** Só na resposta do import, com "Conciliar com IA ao importar" ligado (spec 029): a conciliação enfileirada. */
-  aiReconcile?: { queued: boolean; runId: string | null; conversationId: string | null; lines: number; skippedReason?: string } | null;
+  aiReconcile?: {
+    queued: boolean;
+    runId: string | null;
+    conversationId: string | null;
+    lines: number;
+    skippedReason?: string;
+    recipes?: number;
+  } | null;
 };
 
 export type StatementInspect = {

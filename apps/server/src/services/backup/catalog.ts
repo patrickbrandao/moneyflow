@@ -51,6 +51,8 @@ export const EXCLUDED_TABLES = new Set([
   'ai_scheduled_task_runs',
   'telegram_pairing_codes',
   'telegram_updates_seen',
+  // Receitas de conciliação (spec 030): as execuções são a fila e o histórico (operacionais, como ai_runs).
+  'ai_reconcile_recipe_runs',
 ]);
 
 /**
@@ -146,6 +148,8 @@ export const OWNED_BY: Record<string, string[]> = {
   user_api_tokens: ['user_id'],
   user_ai_settings: ['user_id'],
   canvas_node_positions: ['user_id'],
+  // Receita já cadastrada fica com as contas dela (spec 030).
+  ai_reconcile_recipe_targets: ['recipe_id'],
 };
 
 /**
@@ -171,6 +175,9 @@ export const DEFERRED_CLUSTER = new Set([
   // entram juntos, senão o SET CONSTRAINTS de outra unidade criaria a versão 1 antes e a do arquivo seria recusada.
   'ai_agents',
   'ai_agent_prompt_versions',
+  // Receitas de conciliação (spec 030): "rodar ao importar" exige um alvo no COMMIT; a receita e os alvos entram juntos.
+  'ai_reconcile_recipes',
+  'ai_reconcile_recipe_targets',
 ]);
 
 /**

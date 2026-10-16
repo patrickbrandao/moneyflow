@@ -4,6 +4,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config';
 import { tasksTick } from '../services/agent-tasks';
 import { requestRetentionDays } from '../services/ai-requests';
+import { recipesTick } from '../services/reconcile-recipes';
 import { type IndexState, indexEmbeddings, purgeEmbeddingIndexes } from './embeddings';
 import { type ClaimedRun, processRun } from './runner';
 import { claimTranscriptions, processTranscription } from './transcriptions';
@@ -20,6 +21,8 @@ import { claimTranscriptions, processTranscription } from './transcriptions';
  * fila de execuções, a fila das transcrições (spec 025: ai_transcription_claim,
  * até TRANSCRIPTION_CONCURRENCY ao mesmo tempo). E o laço das tarefas agendadas
  * (spec 029, AGENT_TASK_INTERVAL_MS) e a purga da dedup do webhook do Telegram.
+ * No ritmo da fila e ao fim de cada execução, a fila das receitas de conciliação
+ * ao importar (spec 030, recipesTick).
  */
 
 const TRANSCRIPTION_CONCURRENCY = 2;
@@ -68,6 +71,8 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
           .catch((error) => log.error({ err: error, runId: run.id }, 'agente: erro inesperado'))
           .finally(() => {
             active.delete(job);
+            // Uma execução terminou: a fila das receitas do lote (spec 030) pode andar.
+            void recipes();
             void claim();
           });
         active.add(job);
@@ -103,12 +108,33 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
     }
   };
 
+  // Fila das receitas de conciliação ao importar (spec 030): fecha o status das execuções terminadas e começa a
+  // próxima receita de cada lote livre (uma por vez por lote).
+  let recipesRunning = false;
+  const recipes = async () => {
+    if (recipesRunning || stopped) return;
+    recipesRunning = true;
+    try {
+      const result = await recipesTick(db, config, log);
+      if (result.started) {
+        log.info(result, 'agente: receitas de conciliação');
+        void claim();
+      }
+    } catch (error) {
+      log.error({ err: error }, 'agente: falha na fila das receitas de conciliação');
+    } finally {
+      recipesRunning = false;
+    }
+  };
+
   const pollTimer = setInterval(() => {
     void claim();
     void claimTranscription();
+    void recipes();
   }, pollMs);
   void claim();
   void claimTranscription();
+  void recipes();
 
   const indexState: IndexState = { since: new Map() };
   let maintaining = false;
