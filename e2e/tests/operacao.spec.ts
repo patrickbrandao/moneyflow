@@ -83,6 +83,9 @@ test('importar OFX de exemplo e conciliar', async ({ page }) => {
     .getByRole('button', { name: 'Lançar' })
     .click();
   const createDialog = page.getByRole('dialog', { name: 'Lançar a linha' });
+  // Com um agente dos fluxos configurado (outros testes), a linha pode chegar com a entidade sugerida e travada.
+  const swapEntity = createDialog.getByRole('button', { name: 'Trocar entidade' });
+  if (await swapEntity.isVisible()) await swapEntity.click();
   await createDialog.getByLabel('Entidade', { exact: true }).fill(customer.name);
   await createDialog.getByRole('option', { name: new RegExp(customer.name) }).click();
   await createDialog.getByLabel('Categoria', { exact: true }).selectOption({ label: income.name });

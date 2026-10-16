@@ -490,7 +490,7 @@ test('kit de ferramentas: marcar a Conciliação, pôr uma escrita em ask, ligar
   await form.getByLabel('Nome').fill(kitName);
   await form.getByRole('checkbox', { name: 'Incluir todas as tools de Conciliação' }).check();
   const category = form.getByTestId('kit-category-reconciliation');
-  await expect(category).toContainText('13 de 13');
+  await expect(category).toContainText('18 de 18');
   await category.getByRole('button', { name: 'todas allow' }).click();
   const tool = form.getByTestId('kit-tool-ignore_statement_lines');
   await expect(tool.getByRole('radio', { name: 'allow' })).toHaveAttribute('aria-checked', 'true');
