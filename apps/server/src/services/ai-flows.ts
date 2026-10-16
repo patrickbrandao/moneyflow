@@ -21,6 +21,7 @@ import { assertCanStartRun } from './ai-budgets';
 import { assertUpload, storeAttachment } from './attachments';
 import { updateAccount, updateCaixa } from './caixas';
 import { assertReadsImages, createConversation, sendMessage } from './conversations';
+import { enqueueImportRecipes, importBusy, insertReconcileSession, lockImport, recipeNameOf, startNextRecipe } from './reconcile-recipes';
 import { getImport } from './statements';
 import { withTx } from './tx';
 
@@ -243,19 +244,34 @@ export async function reconcileImportWithAi(
     if (opts.auto) return none(0);
     throw new AppError(422, 'nothing_to_reconcile', t.agents.reconcile.noLines);
   }
+  // Ao importar com receitas "rodar ao importar" da conta/cartão (spec 030): a fila delas, em vez da conciliação genérica.
+  if (opts.auto) {
+    const recipes = await enqueueImportRecipes(ctx, importId);
+    if (recipes > 0) {
+      await startNextRecipe(ctx.db, ctx.config, importId);
+      const started = await ctx.db.execute<{ run_id: string | null; conversation_id: string | null }>(sql`
+        SELECT run_id, conversation_id FROM ai_reconcile_recipe_runs
+         WHERE import_id = ${importId} AND trigger_kind = 'import' AND run_id IS NOT NULL
+         ORDER BY position, id LIMIT 1`);
+      const first = started.rows[0];
+      return { queued: true, runId: first?.run_id ?? null, conversationId: first?.conversation_id ?? null, lines, recipes };
+    }
+  }
   const agentId = await flowAgentId(ctx);
   if (!agentId) {
     if (opts.auto) return none(lines, t.agents.reconcile.noAgent);
     throw new AppError(501, 'ai_unavailable', t.agents.reconcile.noAgent);
   }
-  const previous = await reconcileConversation(ctx.db, importId);
-  if (previous) {
-    const active = await ctx.db.execute<{ id: string }>(sql`
-      SELECT id FROM ai_runs WHERE conversation_id = ${previous} AND status IN ('queued', 'running', 'awaiting_confirmation')`);
-    if (active.rows[0]) {
-      if (opts.auto) return { queued: false, runId: active.rows[0].id, conversationId: previous, lines };
-      throw new AppError(409, 'run_active', t.agents.errors.runActive);
+  if (await importBusy(ctx.db, importId)) {
+    if (opts.auto) {
+      const previous = await reconcileConversation(ctx.db, importId);
+      const active = previous
+        ? await ctx.db.execute<{ id: string }>(sql`
+            SELECT id FROM ai_runs WHERE conversation_id = ${previous} AND status IN ('queued', 'running', 'awaiting_confirmation')`)
+        : { rows: [] };
+      return { queued: false, runId: active.rows[0]?.id ?? null, conversationId: previous, lines };
     }
+    throw new AppError(409, 'run_active', t.agents.errors.runActive);
   }
   try {
     await assertCanStartRun(ctx, agentId, true);
@@ -263,16 +279,22 @@ export async function reconcileImportWithAi(
     if (opts.auto && error instanceof AppError && error.status === 429) return none(lines, error.message);
     throw error;
   }
-  const conversation = await createConversation(
-    ctx,
-    { agentId, title: t.agents.flows.reconcileConversation(detail.fileName).slice(0, 200) },
-    { purpose: 'reconcile_statement', screenContext: { importId }, archived: true },
-  );
-  const sent = await sendMessage(ctx, conversation.id, {
-    text: t.agents.flows.reconcileMessage(detail.fileName, importId, lines),
-    attachmentIds: [],
+  // A checagem (lock do lote + ai_reconcile_import_busy) e a criação da execução na mesma transação (spec 030).
+  const created = await withTx(ctx, async (tx) => {
+    if (await lockImport(tx, importId)) return null;
+    return insertReconcileSession(tx, {
+      userId: ctx.access.actor.id,
+      agentId,
+      title: t.agents.flows.reconcileConversation(detail.fileName),
+      screenContext: { importId },
+      text: t.agents.flows.reconcileMessage(detail.fileName, importId, lines),
+    });
   });
-  return { queued: true, runId: sent.run.id, conversationId: conversation.id, lines };
+  if (!created) {
+    if (opts.auto) return none(lines);
+    throw new AppError(409, 'run_active', t.agents.errors.runActive);
+  }
+  return { queued: true, runId: created.runId, conversationId: created.conversationId, lines };
 }
 
 /** O estado da conciliação com IA do lote: interruptor, agente dos fluxos, execução e as ações propostas. */
@@ -298,8 +320,16 @@ export async function reconcileAiState(ctx: ServiceContext, importId: string): P
       userId = row.user_id;
     }
   }
+  const screen = conversationId
+    ? (
+        await ctx.db.execute<{ screen_context: Record<string, unknown> | null }>(
+          sql`SELECT screen_context FROM ai_conversations WHERE id = ${conversationId}`,
+        )
+      ).rows[0]?.screen_context
+    : null;
   return {
     autoEnabled: await autoReconcileOf(ctx.db, detail),
+    recipeName: await recipeNameOf(ctx.db, screen),
     agent: agent ? { id: agent.id, name: agent.name, hasKit: Boolean(agent.has_kit) } : null,
     conversationId,
     run,

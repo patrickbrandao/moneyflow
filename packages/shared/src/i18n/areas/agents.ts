@@ -156,6 +156,28 @@ export const agentsStrings = {
     noAgent: 'Nenhum agente dos fluxos ativo: configure um agente em Administração → IA.',
     accountKind: 'Só conta corrente, poupança e cartão concilia com IA.',
   },
+  /* Receitas de conciliação (spec 030). */
+  recipes: {
+    notFound: 'Receita de conciliação não encontrada.',
+    globalAdminOnly: 'Só o administrador cria e edita receitas globais.',
+    agentRequired: 'Escolha um agente ativo.',
+    outOfScope: 'A linha está fora do escopo desta receita.',
+    notApplicable: 'Esta receita não vale para este lote.',
+    inactive: 'A receita está desligada ou arquivada.',
+    busy: 'Já há uma conciliação com IA em andamento neste lote. Aguarde ou pare a execução.',
+    noLines: 'Nenhuma linha no escopo: selecione linhas pendentes ou deixe linhas por conciliar no lote.',
+    lineNotInImport: 'Há linhas que não são deste lote.',
+    conversation: (name: string, file: string) => `Receita: ${name} (${file})`,
+    awaitingTitle: (name: string, file: string) => `A receita ${name} em ${file} espera sua aprovação`,
+    noKit: (agent: string) => `O agente ${agent} não tem kit: ele vai lançar sem pedir aprovação`,
+    previewWarning: 'Roda como você, com as suas permissões, numa sessão nova; o kit do agente decide o que espera aprovação.',
+    promptBlock: (name: string, lineIds: string[]) =>
+      [
+        `Receita de conciliação: ${name}. Siga a instrução da mensagem do usuário.`,
+        `Escopo: só estas ${lineIds.length} linha(s) do lote podem ser tocadas (as tools recusam as demais): ${lineIds.join(', ')}.`,
+        'Ao notar um padrão repetitivo e determinístico (mesma descrição, mesma entidade e categoria), proponha uma regra de classificação com create_classification_rule, para o caso sair da IA.',
+      ].join('\n'),
+  },
   telegram: {
     notPaired: 'Este chat não está pareado com o MoneyFlow. Em Minha conta → Telegram, gere um código e envie aqui /start <código>.',
     paired: (user: string, agent: string) =>

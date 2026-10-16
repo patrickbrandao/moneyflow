@@ -89,3 +89,40 @@ O que é repetitivo e determinístico continua nas **regras de classificação**
 
 - Receitas agendadas (sem lote): ficam nas tarefas agendadas da [029](029-fluxos-autonomos.md).
 - Escolha automática da receita pela IA, filtro de linhas por padrão (descrição, valor) na própria receita e simulação sem efeito (um kit com tudo em `ask` já cumpre esse papel).
+
+## Decisões da implementação (F16)
+Entregue na tarefa [036](../tasks/036-receitas-de-conciliacao-na-aplicacao.md) (banco na tarefa 035, migration 0047).
+
+### Serviço e rotas
+- Serviço `services/reconcile-recipes.ts`; rotas em `routes/reconcile-recipes.ts`: `GET/POST /api/reconcile-recipes` (filtros `caixaId` — uma caixa ou `global` —, `accountId`, `cardCaixaId`, `archived=true`), `GET/PATCH/DELETE /api/reconcile-recipes/:id` (DELETE arquiva e desliga), `POST …/:id/restore` (desarquiva e liga), `GET …/:id/runs`; `GET /api/statement-imports/:id/recipes` (as receitas que valem para o lote — vinculadas primeiro, depois as da caixa e as globais —, as execuções do lote, as linhas pendentes, `busy` e `canRun`) e `POST /api/statement-imports/:id/recipes/:recipeId/run` (`{ lineIds? }`).
+- Vínculos no corpo como `accountIds` e `cardCaixaIds`; no PATCH, a lista dada substitui a atual (a omitida fica). Os limites (50 por dona, 10 ao importar por alvo), a dona da conta/cartão e "rodar ao importar exige vínculo" são do banco, com as mensagens em `DB_CONSTRAINT_MESSAGES`.
+- Visibilidade: as globais e as das caixas que o usuário lê; edita quem escreve na caixa dona (globais: só o admin). Alvos de caixas que o usuário não lê não aparecem no DTO.
+- Play: exige escrever na caixa do lote; o escopo são as linhas pedidas que ainda estão pendentes (`new`/`suggested`) ou, sem `lineIds`, todas as pendentes; linha de outro lote = 422, escopo vazio = 422 (`nothing_to_reconcile`), receita desligada ou que não vale para o lote = 422. `assertCanStartRun` (fluxos) antes; na transação que cria a sessão e a execução, `ai_reconcile_import_lock` + `ai_reconcile_import_busy` (409 `run_active`). A execução de receita nasce `started` com `line_ids`, `conversation_id` e `run_id`.
+- A conciliação genérica (`reconcileImportWithAi`) passou a criar a sessão, a mensagem e a execução numa transação só (`insertReconcileSession`), com o mesmo lock e o mesmo 409.
+
+### Ao importar e o worker
+- Com o interruptor ligado, `reconcileImportWithAi({ auto })` enfileira (`enqueueImportRecipes`) as receitas ativas com "rodar ao importar" vinculadas à conta/cartão do lote, de agente ativo, na `position`, como quem importou, e já começa a primeira (`startNextRecipe`); a resposta `aiReconcile` traz `recipes` (quantas) e a execução da primeira. Sem nenhuma, a conciliação genérica da 029. O play manual na tela de "Conciliar com IA" continua genérico.
+- Reserva: `ai_reconcile_recipe_claim(lote)`; a transação toma o ator do dono, relê o acesso (sem escrita na caixa do lote = `failed`), calcula as pendentes (nenhuma = `skipped no_lines`), confere o limite por minuto e o orçamento (`skipped rate_limited`/`budget_exceeded`) e cria, num savepoint, a sessão e a execução (erro = `failed` com a mensagem). Pulada ou falha: reserva a seguinte.
+- No worker (`agents/worker.ts`), `recipesTick` roda no ritmo da fila de execuções e ao fim de cada execução: fecha as execuções de receita cuja `ai_runs` terminou (`completed`; `failed` com o erro; `canceled` vira `failed` com `canceled`) e chama `startNextRecipe` para cada lote de `ai_reconcile_recipe_pending_imports(20)`. Uma execução esperando aprovação mantém o lote ocupado e segura a fila.
+
+### Runner, prompt e escopo
+- Numa conversa `reconcile_statement` com `screen_context.recipeId`, o runner põe o bloco da receita (nome, as linhas do escopo, o aviso de que só elas podem ser tocadas e o pedido de propor regra com `create_classification_rule`) na parte volátil do prompt, depois do prompt fixo da conciliação, e passa `recipeLineIds` no `ServiceContext`.
+- O escopo é garantido em `agents/tools-runtime.ts` (`assertRecipeScope`), na prévia e na execução: numa execução de receita, toda tool da categoria Conciliação que cita linhas (`lineId`, `lineIds` e os lotes `matches`/`items`/`suggestions`) recusa a que estiver fora com "A linha está fora do escopo desta receita". Um ponto só, em vez de cada handler.
+- A instrução renderizada (variáveis da 022 e as do lote: `lote.id`, `lote.arquivo`, `lote.periodo`, `conta.nome`, `caixa.nome`, `caixa.titular`, `linhas.total`) é a mensagem do usuário. As variáveis ficam em `RECIPE_PROMPT_VARIABLES` (`prompt-vars.ts`, com `scanRecipeVariables`/`renderRecipeVariables`); o schema de entrada recusa a desconhecida (400 com o nome). As do lote não valem no prompt do agente.
+- O aviso de aprovação pendente (`ai_awaiting_approval`) leva o nome da receita ("A receita <nome> em <arquivo> espera sua aprovação"); o estado do painel da IA (`GET …/reconcile-ai`) ganhou `recipeName` da execução mais recente.
+
+### Tools, textos e backup
+- Tools em `packages/shared/src/agents/recipes.ts` (`RECIPE_TOOLS`, categoria Conciliação) e `agents/tool-handlers-recipes.ts`: `list_reconcile_recipes` (allow), `create_reconcile_recipe`, `update_reconcile_recipe`, `archive_reconcile_recipe` e `run_reconcile_recipe` (ask, prévia com dona, agente, contas, linhas e instrução, e o aviso de agente sem kit). Não entram sozinhas em kit nenhum.
+- Textos do servidor em `t.agents.recipes` (`i18n/areas/agents.ts`) e os do console em `t.agentsUi.recipes` (`agents-ui.ts`, como o resto das telas dos agentes). `AgentOptionDto` ganhou `hasKit` (o aviso do formulário).
+- Backup: `ai_reconcile_recipe_runs` em `EXCLUDED_TABLES`; receitas e alvos entram no JSON completo, no `DEFERRED_CLUSTER` (o "rodar ao importar exige vínculo" é checado no COMMIT) e os alvos com dono (`OWNED_BY` pela receita).
+
+### Telas
+- Conciliação → Receitas: `/reconcile-recipes` (`pages/ReconcileRecipesPage.tsx`, item "Receitas de conciliação" na navegação): ativas e arquivadas, ativo na linha, formulário (dona só na criação, agente com o aviso de agente sem kit, instrução com a lista das variáveis e a prévia num lote de exemplo, contas e cartões, "rodar ao importar", **ordem como campo numérico** em vez de arrastar, ativa) e o histórico com link para o lote e para a sessão.
+- Tela do lote: o painel Receitas (`components/reconciliation/RecipesPanel.tsx`) com o play por receita e o escopo ("N linha(s) selecionada(s)" ou "N pendente(s)"; as linhas novas passaram a ser selecionáveis), as execuções do lote e a releitura a cada 4 s enquanto a fila anda. O andamento por SSE e o lote de aprovações são os do painel da conciliação com IA (`ReconcileAiPanel`), remontado a cada execução nova, com o nome da receita.
+- Cadastro da conta e do cartão (edição): abaixo de "Conciliar com IA ao importar", a lista das receitas que rodam ao importar, na ordem, com o link para a tela de receitas (`ImportRecipesHint`).
+
+### Simplificado ou fora agora
+- O play fica só na tela do lote (a tela de receitas não pede o lote).
+- O formulário lista todos os cartões que o usuário lê; o banco recusa o que não for da dona.
+- Execução pulada ao importar (sem linhas, orçamento, limite) não gera aviso próprio no sino; a que falha cai no aviso de conclusão comum da 011.
+- Testes de integração simples (`test/reconcile-recipes.test.ts`): cadastro e permissão, play com kit `allow` no escopo, linha fora do escopo recusada, 409 com execução ativa e a sequência de duas receitas ao importar. Sem e2e novo (pedido do usuário); os demais casos da seção Testes ficam para depois.

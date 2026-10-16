@@ -206,6 +206,8 @@ export type ReconcileAiStateDto = {
   /** Agente dos fluxos (null = nenhum agente utilizável) e se ele tem kit (sem kit: lança sem pedir aprovação). */
   agent: { id: string; name: string; hasKit: boolean } | null;
   conversationId: string | null;
+  /** Receita da execução mais recente do lote (spec 030; null = conciliação genérica). */
+  recipeName: string | null;
   run: AiRunDto | null;
   /** Confirmações pendentes da execução (as ações que o agente propõe). */
   confirmations: ToolConfirmationDto[];
@@ -219,4 +221,6 @@ export type ReconcileAiStartResult = {
   conversationId: string | null;
   lines: number;
   skippedReason?: string;
+  /** Ao importar com receitas "rodar ao importar" (spec 030): quantas entraram na fila (a primeira já começou). */
+  recipes?: number;
 };

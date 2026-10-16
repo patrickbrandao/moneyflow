@@ -1,6 +1,7 @@
 import { t } from '@moneyflow/shared';
 import {
   ArrowLeftRight,
+  BookOpenCheck,
   Bot,
   Building2,
   CalendarDays,
@@ -67,6 +68,8 @@ export const NAVIGATION: NavEntry[][] = [
     { kind: 'link', to: '/transfers', label: t.nav.transfers, icon: <ArrowLeftRight />, shortcut: 'g t' },
     { kind: 'link', to: '/calendar', label: t.nav.calendar, icon: <CalendarDays />, shortcut: 'g a' },
     { kind: 'link', to: '/contracts', label: t.nav.contracts, icon: <Handshake />, shortcut: 'g o' },
+    // Conciliação → Receitas (spec 030); a conciliação em si fica na conta da caixa.
+    { kind: 'link', to: '/reconcile-recipes', label: t.agentsUi.recipes.nav, icon: <BookOpenCheck /> },
   ],
   [
     { kind: 'link', to: '/flow', label: t.nav.flow, icon: <Waypoints />, shortcut: 'g f' },

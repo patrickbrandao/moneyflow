@@ -32,6 +32,7 @@ import * as transfers from '../services/transfers';
 import { semanticSearch } from './search';
 import { ADMIN_HANDLERS } from './tool-handlers-admin';
 import { OPERATION_HANDLERS } from './tool-handlers-operation';
+import { RECIPE_HANDLERS } from './tool-handlers-recipes';
 import { type Handlers, nameOf, withNames } from './tool-helpers';
 
 /*
@@ -168,6 +169,7 @@ const toolEntityFilter = (i: { tagIds?: string[]; tagMode: 'any' | 'all'; favori
 export const TOOL_HANDLERS: Handlers = {
   ...OPERATION_HANDLERS,
   ...ADMIN_HANDLERS,
+  ...RECIPE_HANDLERS,
   search_records: { run: (ctx, i) => search(ctx, i.query, i.limit) },
   semantic_search: { run: (ctx, i) => semanticSearch(ctx, i.query, i.types ?? null, i.limit) },
   list_caixas: { run: (ctx, i) => caixas.listCaixas(ctx, { archived: i.archived }) },

@@ -79,7 +79,8 @@ export function ReconcileAiPanel({ importId, canWrite, onChanged }: { importId: 
       <div className="flex flex-wrap items-center gap-3">
         <Bot className="size-4 flex-none" />
         <strong className="text-[13px]">{k.title}</strong>
-        {data.agent && <Badge tone="outline">{data.agent.name}</Badge>}
+        {data.agent && !data.recipeName && <Badge tone="outline">{data.agent.name}</Badge>}
+        {data.recipeName && <Badge tone="accent">{data.recipeName}</Badge>}
         <span className="flex-1" />
         {canWrite && (
           <label className="check text-[13px]">
@@ -104,14 +105,17 @@ export function ReconcileAiPanel({ importId, canWrite, onChanged }: { importId: 
       {(status === 'queued' || status === 'running') && (
         <div className="notice info flex items-center gap-2" data-testid="reconcile-running">
           <Loader2 className="spin size-4 flex-none" />
-          <span>{k.running}</span>
+          <span>{data.recipeName ? t.agentsUi.recipes.running(data.recipeName) : k.running}</span>
         </div>
       )}
       {status === 'failed' && data.run?.error && <p className="notice danger text-[12px]">{k.failed(data.run.error)}</p>}
       {status === 'awaiting_confirmation' && pending.length > 0 && (
         <div className="agent-confirm" data-testid="reconcile-batch">
           <div className="agent-confirm-head">
-            <span>{k.proposes(pending.length)}</span>
+            <span>
+              {data.recipeName ? `${data.recipeName}: ` : ''}
+              {k.proposes(pending.length)}
+            </span>
             {data.conversationId && (
               <Button size="sm" variant="quiet" onClick={() => void agents.openById(data.conversationId!)}>
                 {k.openSession}

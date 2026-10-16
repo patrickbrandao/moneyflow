@@ -17,6 +17,7 @@ import type { ServiceContext } from '../context';
 import { findPgError } from '../errors';
 import { exceededBudget } from '../services/ai-budgets';
 import { notifyAwaitingApproval } from '../services/autonomous-notify';
+import { recipeNameOf } from '../services/reconcile-recipes';
 import { deliverRunToTelegram, startTyping, telegramOrigin } from '../services/telegram-inbound';
 import { applyFlowResult, isJsonFlow, isToolFlow } from './flows';
 import { createLlmClient, type LlmClient, LlmError, type LlmResponse } from './llm';
@@ -135,7 +136,16 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
     const toolFlow = isToolFlow(conversation.purpose) ? conversation.purpose : null;
     const usagePurpose: AiUsagePurpose = purpose ?? toolFlow ?? 'chat';
     const access = await loadAccess(db, actor);
-    const ctx: ServiceContext = { db, config: deps.config, access, actorKind: 'agent', agentRunId: runId };
+    // Receita de conciliação (spec 030): o escopo das linhas vai ao contexto das tools e o bloco da receita ao prompt.
+    const recipe = toolFlow === 'reconcile_statement' ? await loadRecipeScope(db, conversation.screen_context) : null;
+    const ctx: ServiceContext = {
+      db,
+      config: deps.config,
+      access,
+      actorKind: 'agent',
+      agentRunId: runId,
+      recipeLineIds: recipe ? new Set(recipe.lineIds) : null,
+    };
 
     const creds = await db.execute<{ kind: 'anthropic' | 'openai'; base_url: string | null; api_key: string | null; model: string }>(
       sql`SELECT kind, base_url, api_key, model FROM ai_run_provider_credentials(${runId}::uuid)`,
@@ -236,7 +246,11 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
         return;
       }
 
-      const system = assemblePrompt(promptInputs, { purpose: purpose ?? toolFlow, screen: toolFlow ? null : conversation.screen_context });
+      const system = assemblePrompt(promptInputs, {
+        purpose: purpose ?? toolFlow,
+        screen: toolFlow ? null : conversation.screen_context,
+        recipe,
+      });
       const history = balanceToolUses(toNeutral(rows));
       // MCP no modo user: bloco do papel user no início do histórico enviado, nunca gravado em ai_messages.
       const messages: NeutralMessage[] = system.mcpUserBlock
@@ -332,6 +346,14 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
     clearInterval(timer);
     await tools?.close();
   }
+}
+
+/** A receita da conversa de conciliação (screen_context.recipeId) e as linhas do escopo; null = conciliação genérica. */
+async function loadRecipeScope(db: Database, screen: Record<string, unknown> | null) {
+  const name = await recipeNameOf(db, screen);
+  if (name === null) return null;
+  const lineIds = Array.isArray(screen?.lineIds) ? (screen.lineIds as unknown[]).filter((x): x is string => typeof x === 'string') : [];
+  return { name, lineIds };
 }
 
 function messageOut(m: Awaited<ReturnType<typeof insertMessage>>) {

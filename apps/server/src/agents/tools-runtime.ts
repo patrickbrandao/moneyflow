@@ -181,6 +181,31 @@ function summarize(value: unknown): string {
   return 'ok';
 }
 
+/** As linhas do extrato que a entrada de uma tool cita (lineId, lineIds e os lotes matches/items/suggestions). */
+function inputLineIds(input: unknown): string[] {
+  if (!input || typeof input !== 'object') return [];
+  const value = input as Record<string, unknown>;
+  const out: string[] = [];
+  if (typeof value.lineId === 'string') out.push(value.lineId);
+  if (Array.isArray(value.lineIds)) out.push(...value.lineIds.filter((x): x is string => typeof x === 'string'));
+  for (const key of ['matches', 'items', 'suggestions']) {
+    const list = value[key];
+    if (Array.isArray(list)) for (const item of list) out.push(...inputLineIds(item));
+  }
+  return out;
+}
+
+/**
+ * Escopo da receita de conciliação (spec 030), garantido no servidor: numa
+ * execução de receita, as tools de conciliação recusam as linhas fora dele.
+ */
+export function assertRecipeScope(ctx: ServiceContext, def: AgentToolDef, input: unknown) {
+  if (!ctx.recipeLineIds || def.category !== 'reconciliation') return;
+  if (inputLineIds(input).some((lineId) => !ctx.recipeLineIds!.has(lineId))) {
+    throw unprocessable(t.agents.recipes.outOfScope, 'line_out_of_scope');
+  }
+}
+
 type ToolSet = { list: LlmTool[]; byName: Map<string, ResolvedTool> };
 const emptySet = (): ToolSet => ({ list: [], byName: new Map() });
 
@@ -285,6 +310,7 @@ export class RunTools {
       };
     }
     const parsed = tool.def.input.parse(input);
+    assertRecipeScope(ctx, tool.def, parsed);
     const handler = handlerFor(tool.name);
     if (handler.preview) return handler.preview(ctx, parsed);
     return { title: tool.title, summary: '', action: 'other', rows: [] };
@@ -300,6 +326,7 @@ export class RunTools {
       // Tools com segredo só rodam na decisão da API (executeSecretTool), com o valor digitado no cartão.
       if (tool.def.secrets?.length) return errorOutcome(t.agents.errors.secretNeedsConsole);
       const parsed = tool.def.input.parse(input);
+      assertRecipeScope(ctx, tool.def, parsed);
       const ran = await handlerFor(tool.name).run(ctx, parsed, meta);
       const { value, files } = tool.def.producesFile ? await storeGeneratedFile(ctx, ran) : { value: ran, files: [] };
       return { content: resultText(value), isError: false, summary: summarize(value), raw: value, ...(files.length ? { files } : {}) };

@@ -62,7 +62,13 @@ const join = (parts: (string | null | undefined)[]) =>
 /** Monta as três partes do prompt e o bloco user dos MCP (puro: sem banco). */
 export function assemblePrompt(
   inputs: PromptInputs,
-  opts: { purpose: PromptPurpose | null; screen: Record<string, unknown> | null; today?: string },
+  opts: {
+    purpose: PromptPurpose | null;
+    screen: Record<string, unknown> | null;
+    today?: string;
+    /** Receita de conciliação (spec 030): o bloco com o nome e as linhas do escopo, na parte volátil. */
+    recipe?: { name: string; lineIds: string[] } | null;
+  },
 ): AssembledPrompt {
   const today = opts.today ?? todayIso();
   const stableValues: PromptVariableValues = {
@@ -104,7 +110,11 @@ export function assemblePrompt(
   if (opts.screen && Object.keys(opts.screen).length > 0 && !flow) {
     volatileLines.push(`${t.agents.systemPrompt.screen}\n${JSON.stringify(opts.screen as ScreenContext)}`);
   }
-  const volatile = join([volatileVariables ? agentPrompt : null, volatileLines.join('\n')]);
+  const volatile = join([
+    volatileVariables ? agentPrompt : null,
+    volatileLines.join('\n'),
+    opts.recipe ? t.agents.recipes.promptBlock(opts.recipe.name, opts.recipe.lineIds) : null,
+  ]);
   return { stable, user, volatile, mcpUserBlock: mcpUser.length > 0 ? mcpUser.join('\n\n') : null, volatileVariables };
 }
 

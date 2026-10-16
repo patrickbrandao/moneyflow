@@ -5,6 +5,7 @@ export * from './json-schema';
 export * from './media';
 export * from './preview';
 export * from './prompt-vars';
+export * from './recipes';
 export * from './requests';
 export * from './schemas';
 export * from './sse';

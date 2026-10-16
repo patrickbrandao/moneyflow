@@ -3,6 +3,7 @@ import { importLink, t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { Config } from '../config';
 import { emitAgentEvent } from './message-worker';
+import { recipeNameOf } from './reconcile-recipes';
 
 /*
  * Aviso "espera sua aprovação" dos fluxos autônomos (spec 029): quando a
@@ -51,7 +52,9 @@ export async function notifyAwaitingApproval(db: Database, config: Config, runId
        WHERE i.id = ${importId}`);
     const found = imp.rows[0];
     if (found) {
-      title = t.agents.tasks.reconcileAwaitingTitle(found.file_name);
+      // Receita de conciliação (spec 030): o aviso leva o nome da receita.
+      const recipe = await recipeNameOf(db, row.screen_context);
+      title = recipe ? t.agents.recipes.awaitingTitle(recipe, found.file_name) : t.agents.tasks.reconcileAwaitingTitle(found.file_name);
       caixaId = found.caixa_id;
       link = importLink({
         id: found.id,

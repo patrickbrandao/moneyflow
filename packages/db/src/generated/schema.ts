@@ -64,8 +64,8 @@ export const users = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
   },
   (table) => [
-    unique('users_email_key').on(table.email),
     unique('users_username_key').on(table.username),
+    unique('users_email_key').on(table.email),
     check(
       'users_email_format_check',
       sql`(email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'::citext) AND (length((email)::text) <= 254)`,
@@ -1015,8 +1015,8 @@ export const cardInvoiceItems = pgTable(
       foreignColumns: [caixas.id],
       name: 'card_invoice_items_payer_caixa_id_fkey',
     }),
-    unique('card_invoice_items_carryover_key').on(table.carriedFromInvoiceId, table.payerCaixaId),
     unique('card_invoice_items_purchase_installment_key').on(table.cardPurchaseId, table.installmentNumber),
+    unique('card_invoice_items_carryover_key').on(table.carriedFromInvoiceId, table.payerCaixaId),
     check('card_invoice_items_amount_cents_check', sql`amount_cents <> 0`),
     check('card_invoice_items_carried_self_check', sql`carried_from_invoice_id <> card_invoice_id`),
     check('card_invoice_items_installment_number_check', sql`(installment_number >= 1) AND (installment_number <= 99)`),
@@ -2744,7 +2744,7 @@ export const aiConversations = pgTable(
       .where(sql`((purpose = 'chat'::text) AND (archived_at IS NULL))`),
     index('ai_conversations_agent_id_idx').using('btree', table.agentId.asc().nullsLast().op('uuid_ops')),
     index('ai_conversations_chat_user_idx')
-      .using('btree', table.userId.asc().nullsLast().op('timestamptz_ops'), table.lastMessageAt.desc().nullsLast().op('timestamptz_ops'))
+      .using('btree', table.userId.asc().nullsLast().op('timestamptz_ops'), table.lastMessageAt.desc().nullsLast().op('uuid_ops'))
       .where(sql`(purpose = 'chat'::text)`),
     index('ai_conversations_forked_from_idx').using(
       'btree',
@@ -2754,11 +2754,14 @@ export const aiConversations = pgTable(
     index('ai_conversations_purpose_idx')
       .using('btree', table.purpose.asc().nullsLast().op('timestamptz_ops'), table.createdAt.asc().nullsLast().op('timestamptz_ops'))
       .where(sql`(purpose <> 'chat'::text)`),
+    index('ai_conversations_reconcile_import_idx')
+      .using('btree', sql`((screen_context ->> 'importId'::text))`)
+      .where(sql`(purpose = 'reconcile_statement'::text)`),
     index('ai_conversations_title_trgm_idx').using('gin', table.title.asc().nullsLast().op('gin_trgm_ops')),
     index('ai_conversations_user_id_idx').using(
       'btree',
       table.userId.asc().nullsLast().op('uuid_ops'),
-      table.lastMessageAt.desc().nullsLast().op('uuid_ops'),
+      table.lastMessageAt.desc().nullsLast().op('timestamptz_ops'),
     ),
     foreignKey({
       columns: [table.agentId],
@@ -3030,6 +3033,87 @@ export const telegramLinks = pgTable(
     check('telegram_links_chat_id_check', sql`chat_id > 0`),
     check('telegram_links_telegram_user_id_check', sql`telegram_user_id > 0`),
     check('telegram_links_username_check', sql`username ~ '^[A-Za-z0-9_]{1,64}$'::text`),
+  ],
+);
+
+export const aiReconcileRecipeRuns = pgTable(
+  'ai_reconcile_recipe_runs',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    recipeId: uuid('recipe_id').notNull(),
+    importId: uuid('import_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    triggerKind: text('trigger_kind').notNull(),
+    position: integer(),
+    lineIds: uuid('line_ids').array(),
+    status: text().notNull(),
+    skipReason: text('skip_reason'),
+    conversationId: uuid('conversation_id'),
+    runId: uuid('run_id'),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' }),
+    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_reconcile_recipe_runs_conversation_id_idx').using('btree', table.conversationId.asc().nullsLast().op('uuid_ops')),
+    index('ai_reconcile_recipe_runs_import_id_idx').using(
+      'btree',
+      table.importId.asc().nullsLast().op('text_ops'),
+      table.status.asc().nullsLast().op('int4_ops'),
+      table.position.asc().nullsLast().op('text_ops'),
+    ),
+    uniqueIndex('ai_reconcile_recipe_runs_import_queue_key')
+      .using('btree', table.importId.asc().nullsLast().op('uuid_ops'), table.recipeId.asc().nullsLast().op('uuid_ops'))
+      .where(sql`(trigger_kind = 'import'::text)`),
+    index('ai_reconcile_recipe_runs_queued_idx')
+      .using('btree', table.createdAt.asc().nullsLast().op('timestamptz_ops'))
+      .where(sql`(status = 'queued'::text)`),
+    index('ai_reconcile_recipe_runs_recipe_id_idx').using(
+      'btree',
+      table.recipeId.asc().nullsLast().op('uuid_ops'),
+      table.createdAt.desc().nullsFirst().op('timestamptz_ops'),
+    ),
+    index('ai_reconcile_recipe_runs_run_id_idx').using('btree', table.runId.asc().nullsLast().op('uuid_ops')),
+    index('ai_reconcile_recipe_runs_user_id_idx').using('btree', table.userId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.conversationId],
+      foreignColumns: [aiConversations.id],
+      name: 'ai_reconcile_recipe_runs_conversation_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.importId],
+      foreignColumns: [statementImports.id],
+      name: 'ai_reconcile_recipe_runs_import_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.recipeId],
+      foreignColumns: [aiReconcileRecipes.id],
+      name: 'ai_reconcile_recipe_runs_recipe_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.runId],
+      foreignColumns: [aiRuns.id],
+      name: 'ai_reconcile_recipe_runs_run_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'ai_reconcile_recipe_runs_user_id_fkey',
+    }).onDelete('cascade'),
+    check('ai_reconcile_recipe_runs_line_ids_check', sql`cardinality(line_ids) >= 1`),
+    check('ai_reconcile_recipe_runs_position_check', sql`(trigger_kind = 'import'::text) = ("position" IS NOT NULL)`),
+    check('ai_reconcile_recipe_runs_queued_check', sql`(status <> 'queued'::text) OR (trigger_kind = 'import'::text)`),
+    check(
+      'ai_reconcile_recipe_runs_reason_check',
+      sql`((status = ANY (ARRAY['skipped'::text, 'failed'::text])) = (skip_reason IS NOT NULL)) AND ((length(skip_reason) >= 1) AND (length(skip_reason) <= 500))`,
+    ),
+    check('ai_reconcile_recipe_runs_run_check', sql`(status <> ALL (ARRAY['queued'::text, 'skipped'::text])) OR (run_id IS NULL)`),
+    check(
+      'ai_reconcile_recipe_runs_status_check',
+      sql`status = ANY (ARRAY['queued'::text, 'started'::text, 'completed'::text, 'skipped'::text, 'failed'::text])`,
+    ),
+    check('ai_reconcile_recipe_runs_trigger_kind_check', sql`trigger_kind = ANY (ARRAY['manual'::text, 'import'::text])`),
   ],
 );
 
@@ -3590,6 +3674,93 @@ END)`,
     ),
     check('contract_renewal_tasks_new_cycle_self_check', sql`new_cycle_id <> contract_cycle_id`),
     check('contract_renewal_tasks_status_check', sql`status = ANY (ARRAY['open'::text, 'approved'::text, 'declined'::text])`),
+  ],
+);
+
+export const aiReconcileRecipes = pgTable(
+  'ai_reconcile_recipes',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    caixaId: uuid('caixa_id'),
+    agentId: uuid('agent_id').notNull(),
+    name: text().notNull(),
+    description: text(),
+    instruction: text().notNull(),
+    runOnImport: boolean('run_on_import').default(false).notNull(),
+    position: integer().default(0).notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdByUserId: uuid('created_by_user_id'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_reconcile_recipes_agent_id_idx').using('btree', table.agentId.asc().nullsLast().op('uuid_ops')),
+    index('ai_reconcile_recipes_caixa_id_idx').using(
+      'btree',
+      table.caixaId.asc().nullsLast().op('int4_ops'),
+      table.position.asc().nullsLast().op('int4_ops'),
+    ),
+    index('ai_reconcile_recipes_created_by_user_id_idx').using('btree', table.createdByUserId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.agentId],
+      foreignColumns: [aiAgents.id],
+      name: 'ai_reconcile_recipes_agent_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.caixaId],
+      foreignColumns: [caixas.id],
+      name: 'ai_reconcile_recipes_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.createdByUserId],
+      foreignColumns: [users.id],
+      name: 'ai_reconcile_recipes_created_by_user_id_fkey',
+    }).onDelete('set null'),
+    check('ai_reconcile_recipes_active_check', sql`NOT (is_active AND (archived_at IS NOT NULL))`),
+    check('ai_reconcile_recipes_description_check', sql`length(description) <= 2000`),
+    check('ai_reconcile_recipes_instruction_check', sql`(btrim(instruction) <> ''::text) AND (length(instruction) <= 20000)`),
+    check('ai_reconcile_recipes_name_check', sql`(btrim(name) <> ''::text) AND (length(name) <= 120)`),
+    check('ai_reconcile_recipes_position_check', sql`("position" >= 0) AND ("position" <= 100000)`),
+  ],
+);
+
+export const aiReconcileRecipeTargets = pgTable(
+  'ai_reconcile_recipe_targets',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    recipeId: uuid('recipe_id').notNull(),
+    financialAccountId: uuid('financial_account_id'),
+    cardCaixaId: uuid('card_caixa_id'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('ai_reconcile_recipe_targets_account_key')
+      .using('btree', table.recipeId.asc().nullsLast().op('uuid_ops'), table.financialAccountId.asc().nullsLast().op('uuid_ops'))
+      .where(sql`(financial_account_id IS NOT NULL)`),
+    index('ai_reconcile_recipe_targets_card_caixa_id_idx').using('btree', table.cardCaixaId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('ai_reconcile_recipe_targets_card_key')
+      .using('btree', table.recipeId.asc().nullsLast().op('uuid_ops'), table.cardCaixaId.asc().nullsLast().op('uuid_ops'))
+      .where(sql`(card_caixa_id IS NOT NULL)`),
+    index('ai_reconcile_recipe_targets_financial_account_id_idx').using('btree', table.financialAccountId.asc().nullsLast().op('uuid_ops')),
+    index('ai_reconcile_recipe_targets_recipe_id_idx').using('btree', table.recipeId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.cardCaixaId],
+      foreignColumns: [caixas.id],
+      name: 'ai_reconcile_recipe_targets_card_caixa_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.financialAccountId],
+      foreignColumns: [financialAccounts.id],
+      name: 'ai_reconcile_recipe_targets_financial_account_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.recipeId],
+      foreignColumns: [aiReconcileRecipes.id],
+      name: 'ai_reconcile_recipe_targets_recipe_id_fkey',
+    }).onDelete('cascade'),
+    check('ai_reconcile_recipe_targets_target_check', sql`num_nonnulls(financial_account_id, card_caixa_id) = 1`),
   ],
 );
 

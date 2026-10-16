@@ -141,8 +141,9 @@ export async function listAgentOptions(ctx: ServiceContext): Promise<AgentOption
     description: string | null;
     color_slot: number;
     icon: string | null;
+    has_kit: boolean;
   }>(sql`
-    SELECT a.id, a.name, a.description, a.color_slot, a.icon
+    SELECT a.id, a.name, a.description, a.color_slot, a.icon, a.tool_kit_id IS NOT NULL AS has_kit
       FROM ai_agents a JOIN ai_providers p ON p.id = a.provider_id
      WHERE a.is_active AND a.archived_at IS NULL AND p.is_active AND p.archived_at IS NULL
      ORDER BY lower(a.name)`);
@@ -153,6 +154,7 @@ export async function listAgentOptions(ctx: ServiceContext): Promise<AgentOption
     colorSlot: Number(r.color_slot),
     icon: r.icon,
     isActive: true,
+    hasKit: Boolean(r.has_kit),
   }));
 }
 

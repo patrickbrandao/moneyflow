@@ -35,6 +35,7 @@ import { CategoryLabel, LoadError, Money, SkelRows } from '../domain';
 import { useToast } from '../Toast';
 import { Badge, Button, cx, EmptyRow, Skel, Tabs, type Tone } from '../ui';
 import { CreateModal, MatchModal } from './LineModals';
+import { RecipesPanel } from './RecipesPanel';
 import { ReconcileAiPanel } from './ReconcileAiPanel';
 
 const s = t.statements;
@@ -112,6 +113,8 @@ export function ImportDetail({
   const selectedAgent = [...selected].filter((id) => agentIds.has(id));
   const toast = useToast();
   const [suggesting, setSuggesting] = useState<SuggestionRun | null>(suggestionRun);
+  const [aiPanelKey, setAiPanelKey] = useState(0);
+  const [recipesVersion, setRecipesVersion] = useState(0);
   const { reload } = detail;
 
   const changed = () => {
@@ -188,7 +191,11 @@ export function ImportDetail({
   for (const line of data?.lines ?? []) counts[line.status] = (counts[line.status] ?? 0) + 1;
   const status = filter ?? 'all';
   const lines = (data?.lines ?? []).filter((l) => status === 'all' || l.status === status);
-  const visibleSuggested = lines.filter((l) => l.status === 'suggested' || l.classificationSource === 'agent');
+  // Selecionáveis: as sugeridas e as do agente (aprovar em lote) e as novas (escopo do play das receitas, spec 030).
+  const selectable = (l: StatementLineRow) => l.status === 'suggested' || l.status === 'new' || l.classificationSource === 'agent';
+  const visibleSuggested = lines.filter(selectable);
+  const pendingIds = new Set((data?.lines ?? []).filter((l) => l.status === 'new' || l.status === 'suggested').map((l) => l.id));
+  const selectedPending = [...selected].filter((id) => pendingIds.has(id));
   const allChecked = visibleSuggested.length > 0 && visibleSuggested.every((l) => selected.has(l.id));
   const failedById = new Map(failures.map((f) => [f.lineId, f.message]));
 
@@ -275,7 +282,25 @@ export function ImportDetail({
         </div>
       )}
 
-      {data && <ReconcileAiPanel importId={importId} canWrite={canWrite} onChanged={changed} />}
+      {data && (
+        <RecipesPanel
+          importId={importId}
+          selectedLineIds={selectedPending}
+          version={recipesVersion}
+          onStarted={() => setAiPanelKey((n) => n + 1)}
+        />
+      )}
+      {data && (
+        <ReconcileAiPanel
+          key={aiPanelKey}
+          importId={importId}
+          canWrite={canWrite}
+          onChanged={() => {
+            changed();
+            setRecipesVersion((n) => n + 1);
+          }}
+        />
+      )}
 
       {suggesting && (
         <div className="notice info mb-3 flex items-center gap-2" data-testid="ai-suggesting">
@@ -341,7 +366,7 @@ export function ImportDetail({
               <tr key={line.id} className={cx(line.status === 'ignored' && 'is-off', selected.has(line.id) && 'is-selected')}>
                 {canWrite && (
                   <td>
-                    {(line.status === 'suggested' || line.classificationSource === 'agent') && (
+                    {selectable(line) && (
                       <input
                         type="checkbox"
                         aria-label={s.selectLine(line.description)}
