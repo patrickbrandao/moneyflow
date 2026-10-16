@@ -524,7 +524,7 @@ test('kit de ferramentas: marcar a Conciliação, pôr uma escrita em ask, ligar
   await expect(card).toContainText('Ignorar linhas do extrato');
   const sent = llm.calls.slice(before).find((c) => c.path === '/v1/messages' && Array.isArray(c.body.tools) && c.body.tools.length > 0);
   const offered: string[] = sent!.body.tools.map((x: { name: string }) => x.name);
-  expect(offered).toHaveLength(13);
+  expect(offered).toHaveLength(18);
   expect(offered).toContain('ignore_statement_lines');
   expect(offered).not.toContain('list_caixas');
   await card.getByTestId('agent-approve').first().click();
