@@ -15,3 +15,4 @@
 13. **F13, Controle total**: tools para tudo o que a interface faz, inclusive a configuração de IA, usuários e backup, em dois lotes F13a/F13b ([027](027-tools-de-controle-total.md)).
 14. **F14, Limites e uso**: orçamentos mensais com aviso e bloqueio, limite de execuções por minuto e painel de uso ([028](028-limites-e-uso.md)).
 15. **F15, Fluxos autônomos**: tarefas agendadas, conciliação completa ao importar e conversa pelo Telegram por webhook ([029](029-fluxos-autonomos.md)).
+16. **F16, Receitas de conciliação**: instruções reutilizáveis de conciliação, cada uma com o seu agente, rodadas pelo play na tela do lote numa sessão nova e em sequência ao importar ([030](030-receitas-de-conciliacao.md)).
