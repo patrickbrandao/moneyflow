@@ -501,7 +501,7 @@ test('kit de ferramentas: marcar a Conciliação, pôr uma escrita em ask, ligar
   await form.getByRole('button', { name: 'Salvar' }).click();
   await expect(form).toBeHidden();
   const kitRow = page.getByRole('row').filter({ hasText: kitName });
-  await expect(kitRow).toContainText('3 leitura · 10 escrita');
+  await expect(kitRow).toContainText('4 leitura · 14 escrita');
   await expect(kitRow).toContainText('1 em ask');
   await expect(kitRow).toContainText('Nenhum agente');
 
