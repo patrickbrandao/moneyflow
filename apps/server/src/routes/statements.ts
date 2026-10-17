@@ -1,4 +1,5 @@
 import {
+  applyRulesInput,
   classificationRuleInput,
   classificationRuleUpdateInput,
   csvMappingInput,
@@ -10,6 +11,7 @@ import {
   reconcileAiAutoInput,
   ruleListQuery,
   statementImportQuery,
+  statementLineSearchQuery,
   statementTargetQuery,
 } from '@moneyflow/shared';
 import type { FastifyInstance } from 'fastify';
@@ -64,6 +66,8 @@ export async function statementRoutes(app: FastifyInstance) {
   app.get('/api/statement-imports/:id', (r: Req) => statements.getImport(r.ctx, id(r)));
   app.delete('/api/statement-imports/:id', (r: Req) => statements.deleteImport(r.ctx, id(r)));
   app.post('/api/statement-imports/:id/rematch', (r: Req) => statements.rematchImport(r.ctx, id(r)));
+  app.post('/api/statement-imports/:id/apply-rules', (r: Req) => rec.applyRulesToImport(r.ctx, id(r)));
+  app.get('/api/statement-lines', (r: Req) => statements.searchLines(r.ctx, parse(statementLineSearchQuery, r.query)));
 
   app.post('/api/statement-lines/confirm', (r: Req) => rec.confirmLines(r.ctx, parse(lineIdsInput, r.body).lineIds));
   app.get('/api/statement-lines/:id/candidates', (r: Req) => rec.lineCandidates(r.ctx, id(r)));
@@ -81,6 +85,7 @@ export async function statementRoutes(app: FastifyInstance) {
 
   app.get('/api/classification-rules', (r: Req) => rec.listRules(r.ctx, parse(ruleListQuery, r.query)));
   app.post('/api/classification-rules', (r: Req) => rec.createRule(r.ctx, parse(classificationRuleInput, r.body)));
+  app.post('/api/classification-rules/apply', (r: Req) => rec.applyRulesToCaixa(r.ctx, parse(applyRulesInput, r.body).caixaId));
   app.patch('/api/classification-rules/:id', (r: Req) => rec.updateRule(r.ctx, id(r), parse(classificationRuleUpdateInput, r.body)));
   app.delete('/api/classification-rules/:id', (r: Req) => rec.archiveRule(r.ctx, id(r)));
 }

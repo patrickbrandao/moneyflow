@@ -6,6 +6,7 @@
 - Uma entidade pode ser titular de várias caixas (ex.: Patrick → Casa Praia, Casa Cidade) e marca uma como **principal**.
 - Tipos de caixa: **geral** (empresa, pessoa, casa) e **cartão de crédito** ([007](007-cartao-de-credito.md)).
 - Cada caixa tem os próprios títulos a pagar e a receber ([005](005-titulos-baixas-e-movimentos.md)).
+- Na tela da caixa, o nome no título é um link para a página inicial dela (`/caixas/:id`, a primeira aba), de qualquer aba ou sub-tela.
 
 ## Contas financeiras (dentro de uma caixa geral)
 

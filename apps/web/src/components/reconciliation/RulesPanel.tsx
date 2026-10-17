@@ -1,5 +1,5 @@
-import { type CaixaDetail, type ClassificationRuleRow, formatDate, MATCH_KINDS, t } from '@moneyflow/shared';
-import { Archive, Globe, Pencil, Plus } from 'lucide-react';
+import { type ApplyRulesResult, type CaixaDetail, type ClassificationRuleRow, formatDate, MATCH_KINDS, t } from '@moneyflow/shared';
+import { Archive, Globe, Pencil, Plus, Wand2 } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { api } from '../../lib/api';
 import { useUser } from '../../lib/auth';
@@ -19,7 +19,7 @@ export function RulesPanel({ caixa }: { caixa: CaixaDetail }) {
   const rules = useApi<ClassificationRuleRow[]>(`/api/classification-rules?caixaId=${caixa.id}${archived ? '&archived=1' : ''}`);
   const [editing, setEditing] = useState<ClassificationRuleRow | 'new' | null>(null);
   const confirm = useConfirm();
-  const { run } = useAction();
+  const { run, busy } = useAction();
 
   useRegisterCommands(
     caixa.canWrite
@@ -27,6 +27,15 @@ export function RulesPanel({ caixa }: { caixa: CaixaDetail }) {
       : [],
     [caixa.canWrite, caixa.id],
   );
+
+  // Reaplica as regras às linhas novas de todas as contas da caixa (spec 009).
+  async function applyRules() {
+    const result = await run(
+      () => api.post<ApplyRulesResult>('/api/classification-rules/apply', { caixaId: caixa.id }),
+      (r) => s.rulesApplied(r.updated),
+    );
+    if (result) void rules.reload();
+  }
 
   async function archive(rule: ClassificationRuleRow) {
     const ok = await confirm({
@@ -46,6 +55,11 @@ export function RulesPanel({ caixa }: { caixa: CaixaDetail }) {
         <label className="check">
           <input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} /> {s.showArchivedRules}
         </label>
+        {caixa.canWrite && (
+          <Button variant="ghost" onClick={() => void applyRules()} disabled={busy} title={s.applyRulesCaixaHint}>
+            <Wand2 /> {s.applyRules}
+          </Button>
+        )}
         {caixa.canWrite && (
           <Button onClick={() => setEditing('new')}>
             <Plus /> {s.newRule}

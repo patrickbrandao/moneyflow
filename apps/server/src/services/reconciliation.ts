@@ -1,5 +1,6 @@
 import { caixas, categories, classificationRules, movements, statementCsvMappings, statementLines, type Tx, titles } from '@moneyflow/db';
 import {
+  type ApplyRulesResult,
   type ClassificationRuleRow,
   type CsvMappingRow,
   type classificationRuleInput,
@@ -15,14 +16,14 @@ import {
   scoreCandidate,
   t,
 } from '@moneyflow/shared';
-import { and, eq, isNull, ne, sql } from 'drizzle-orm';
+import { and, eq, isNull, ne, type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { forbidden, notFound, translateDbError, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
 import { insertPurchase, loadCard } from './card-core';
 import { settleInTx } from './settlements';
-import { candidatesFor, listLines, resolveTarget } from './statements';
+import { candidatesFor, listLines, resolveTarget, ruleFor } from './statements';
 import { insertTitlePair } from './title-pair';
 import { resolveMirror } from './titles';
 import { withTx } from './tx';
@@ -547,6 +548,74 @@ export async function archiveRule(ctx: ServiceContext, id: string) {
       .where(and(eq(classificationRules.id, id), isNull(classificationRules.archivedAt))),
   );
   return { deleted: false, archived: true };
+}
+
+/**
+ * Reaplica as regras às linhas novas (spec 009), para regras criadas ou
+ * editadas depois do import. Só mexe nas sem classificação ou classificadas
+ * por regra: a do usuário e a sugestão do agente pendente ficam.
+ */
+async function applyRulesTo(tx: Tx, caixaId: string, where: SQL): Promise<number> {
+  const lines = await tx.execute<{
+    id: string;
+    description: string;
+    amount_cents: string | number;
+    entity_id: string | null;
+    category_id: string | null;
+    classification_rule_id: string | null;
+  }>(sql`
+    SELECT l.id, l.description, l.amount_cents, l.entity_id, l.category_id, l.classification_rule_id
+      FROM statement_lines l
+     WHERE ${where} AND l.status = 'new' AND (l.classification_source IS NULL OR l.classification_source = 'rule')
+     ORDER BY l.posted_on, l.line_number
+       FOR UPDATE`);
+  const usage = new Map<string, number>();
+  let updated = 0;
+  for (const line of lines.rows) {
+    const rule = await ruleFor(tx, caixaId, line.description, Number(line.amount_cents));
+    const next = { entityId: rule?.entityId ?? null, categoryId: rule?.categoryId ?? null, ruleId: rule?.id ?? null };
+    if (next.ruleId === line.classification_rule_id && next.entityId === line.entity_id && next.categoryId === line.category_id) continue;
+    await tx
+      .update(statementLines)
+      .set({
+        entityId: next.entityId,
+        categoryId: next.categoryId,
+        classificationRuleId: next.ruleId,
+        classificationSource: rule ? 'rule' : null,
+      })
+      .where(eq(statementLines.id, line.id));
+    updated += 1;
+    if (rule) usage.set(rule.id, (usage.get(rule.id) ?? 0) + 1);
+  }
+  for (const [ruleId, count] of usage) {
+    await tx.execute(sql`UPDATE classification_rules SET usage_count = usage_count + ${count}, last_used_at = now() WHERE id = ${ruleId}`);
+  }
+  return updated;
+}
+
+/** "Aplicar regras" no detalhe do lote (conta ou fatura do cartão). */
+export async function applyRulesToImport(ctx: ServiceContext, importId: string): Promise<ApplyRulesResult> {
+  const result = await ctx.db.execute<{ caixa_id: string }>(sql`
+    SELECT coalesce(a.caixa_id, i.card_caixa_id) AS caixa_id
+      FROM statement_imports i LEFT JOIN financial_accounts a ON a.id = i.financial_account_id WHERE i.id = ${importId}`);
+  const caixaId = result.rows[0]?.caixa_id;
+  if (!caixaId) throw notFound();
+  ctx.access.assertWrite(caixaId);
+  const updated = await withTx(ctx, (tx) => applyRulesTo(tx, caixaId, sql`l.statement_import_id = ${importId}`));
+  return { updated };
+}
+
+/** "Aplicar regras" na guia Regras: as linhas novas de todas as contas da caixa (ou do cartão, se a caixa é um). */
+export async function applyRulesToCaixa(ctx: ServiceContext, caixaId: string): Promise<ApplyRulesResult> {
+  ctx.access.assertWrite(caixaId);
+  const updated = await withTx(ctx, (tx) =>
+    applyRulesTo(
+      tx,
+      caixaId,
+      sql`(l.card_caixa_id = ${caixaId} OR l.financial_account_id IN (SELECT id FROM financial_accounts WHERE caixa_id = ${caixaId}))`,
+    ),
+  );
+  return { updated };
 }
 
 /* ---------------- sugestões do agente (spec 009/011) ---------------- */

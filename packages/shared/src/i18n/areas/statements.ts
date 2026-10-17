@@ -122,6 +122,22 @@ export const statementsStrings = {
   rematch: 'Casar de novo',
   rematched: 'Casamento refeito.',
   noLines: 'Nenhuma linha com esse filtro.',
+  applyRules: 'Aplicar regras',
+  applyRulesImportHint:
+    'Reaplica as regras de classificação às linhas novas deste lote (sem mexer nas suas classificações nem nas sugestões do agente).',
+  applyRulesCaixaHint:
+    'Reaplica as regras às linhas novas de todas as contas desta caixa (sem mexer nas suas classificações nem nas sugestões do agente).',
+  rulesApplied: (n: number) => (n === 0 ? 'Nenhuma linha nova mudou de classificação.' : `${n} linha(s) reclassificada(s) pelas regras.`),
+  search: 'Buscar nas linhas',
+  searchPlaceholder: 'Trecho da descrição (mín. 2 letras)',
+  searchScopeAll: 'em todos os lotes',
+  searchScopeSelected: (n: number) => `em ${n} lote(s) marcado(s)`,
+  searchResults: (n: number, capped: boolean) => (capped ? `As ${n} linhas mais recentes encontradas` : `${n} linha(s) encontrada(s)`),
+  searchNone: 'Nenhuma linha com essa descrição.',
+  searchClear: 'Limpar a busca',
+  selectImport: (name: string) => `Marcar o lote ${name} para a busca`,
+  selectAllImports: 'Marcar todos os lotes para a busca',
+  importColumn: 'Lote',
 
   /* casar à mão */
   matchTitle: 'Casar a linha com um lançamento',

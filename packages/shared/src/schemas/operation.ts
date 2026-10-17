@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ptBR } from '../i18n/pt-BR';
-import { cents, id, isoDate, nonNegativeCents, optionalText, positiveCents, queryBool, requiredText } from './common';
+import { cents, id, idListQuery, isoDate, nonNegativeCents, optionalText, positiveCents, queryBool, requiredText } from './common';
 
 /*
  * Entradas da fase 2 (operação): cartão (spec 007), extratos e conciliação
@@ -166,6 +166,19 @@ export const csvMappingUpdateInput = z.object({
 export const statementTargetQuery = z
   .object({ accountId: id.optional(), cardCaixaId: id.optional() })
   .refine((v) => (v.accountId ? 1 : 0) + (v.cardCaixaId ? 1 : 0) === 1, { message: E.statementTarget });
+
+/** Busca por descrição nas linhas dos lotes de uma conta ou cartão (spec 009); `importIds` vazio = todos os lotes. */
+export const statementLineSearchQuery = z
+  .object({
+    accountId: id.optional(),
+    cardCaixaId: id.optional(),
+    q: z.string().trim().min(2).max(200),
+    importIds: idListQuery(200),
+  })
+  .refine((v) => (v.accountId ? 1 : 0) + (v.cardCaixaId ? 1 : 0) === 1, { message: E.statementTarget });
+
+/** Aplicar as regras de classificação às linhas novas de todas as contas da caixa (spec 009). */
+export const applyRulesInput = z.object({ caixaId: id });
 
 /** Query do upload do extrato (o corpo é o arquivo). */
 export const statementImportQuery = z

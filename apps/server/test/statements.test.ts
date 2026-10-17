@@ -259,3 +259,85 @@ describe('extratos e conciliação (spec 009)', () => {
     expect(purchases.map((p: any) => p.amountCents).sort()).toEqual([12_000, 25_000]);
   });
 });
+
+describe('aplicar regras e buscar nas linhas (spec 009)', () => {
+  it('reaplica as regras às linhas novas sem mexer nas do usuário nem nas do agente', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const url = `/api/statement-imports?accountId=${s.accountA.id}&fileName=extrato.ofx`;
+    const imp = (await upload(adminSession.cookie, url, fixture('extrato-ofx2.ofx'), 'application/x-ofx')).json();
+    const byFitid = (lines: any[], fitid: string) => lines.find((l: any) => l.fitid === fitid);
+    // Sem regras no import: nada classificado.
+    expect(byFitid(imp.lines, 'OFX2-0004')).toMatchObject({ status: 'new', classificationSource: null, importId: imp.id });
+
+    // O usuário classifica o PIX enviado; o agente sugere o PIX recebido (ainda pendente).
+    await admin.patch(`/api/statement-lines/${byFitid(imp.lines, 'OFX2-0006').id}`, { entityId: s.holderB.id });
+    await h.db.execute(sql`UPDATE statement_lines SET classification_source = 'agent', entity_id = ${s.holderB.id}
+                            WHERE id = ${byFitid(imp.lines, 'OFX2-0002').id}`);
+
+    // Regras criadas depois do import: "internet" e "pix" (essa pegaria as duas linhas de PIX).
+    const internet = await admin.post('/api/classification-rules', {
+      caixaId: s.caixaA.id,
+      pattern: 'internet',
+      direction: 'out',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+    });
+    await admin.post('/api/classification-rules', { caixaId: s.caixaA.id, pattern: 'pix', entityId: s.supplier.id });
+
+    // Leitor não aplica.
+    const viewerUser = await userSession(h);
+    await admin.put(`/api/users/${viewerUser.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
+    const viewer = client(h, viewerUser.cookie);
+    await viewer.post(`/api/statement-imports/${imp.id}/apply-rules`, {}, 403);
+    await viewer.post('/api/classification-rules/apply', { caixaId: s.caixaA.id }, 403);
+
+    expect(await admin.post(`/api/statement-imports/${imp.id}/apply-rules`)).toEqual({ updated: 1 });
+    const after = (await admin.get(`/api/statement-imports/${imp.id}`)).lines;
+    expect(byFitid(after, 'OFX2-0004')).toMatchObject({
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      classificationSource: 'rule',
+      classificationRuleId: internet.id,
+    });
+    expect(byFitid(after, 'OFX2-0006')).toMatchObject({ classificationSource: 'user', entityId: s.holderB.id });
+    expect(byFitid(after, 'OFX2-0002')).toMatchObject({ classificationSource: 'agent', entityId: s.holderB.id });
+    const rule = (await admin.get(`/api/classification-rules?caixaId=${s.caixaA.id}`)).find((r: any) => r.id === internet.id);
+    expect(rule.usageCount).toBe(1);
+
+    // De novo, pela caixa: nada muda e o uso não conta outra vez.
+    expect(await admin.post('/api/classification-rules/apply', { caixaId: s.caixaA.id })).toEqual({ updated: 0 });
+
+    // Regra arquivada: a linha classificada por ela perde a classificação.
+    await admin.del(`/api/classification-rules/${internet.id}`);
+    expect(await admin.post('/api/classification-rules/apply', { caixaId: s.caixaA.id })).toEqual({ updated: 1 });
+    const cleared = (await admin.get(`/api/statement-imports/${imp.id}`)).lines;
+    expect(byFitid(cleared, 'OFX2-0004')).toMatchObject({ classificationSource: null, entityId: null, categoryId: null });
+  });
+
+  it('busca pela descrição em todos os lotes da conta ou nos escolhidos', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const url = `/api/statement-imports?accountId=${s.accountA.id}&fileName=extrato.ofx`;
+    const imp = (await upload(adminSession.cookie, url, fixture('extrato-ofx2.ofx'), 'application/x-ofx')).json();
+
+    const all = await admin.get(`/api/statement-lines?accountId=${s.accountA.id}&q=pix`);
+    expect(all.map((l: any) => l.fitid)).toEqual(['OFX2-0006', 'OFX2-0002']);
+    expect(all.every((l: any) => l.importId === imp.id)).toBe(true);
+
+    const chosen = await admin.get(`/api/statement-lines?accountId=${s.accountA.id}&q=PIX&importIds=${imp.id}`);
+    expect(chosen).toHaveLength(2);
+    const other = '00000000-0000-4000-8000-000000000000';
+    expect(await admin.get(`/api/statement-lines?accountId=${s.accountA.id}&q=pix&importIds=${other}`)).toEqual([]);
+    // Outra conta não vê as linhas desta; texto curto demais é recusado.
+    expect(await admin.get(`/api/statement-lines?accountId=${s.accountB.id}&q=pix`)).toEqual([]);
+    await admin.get(`/api/statement-lines?accountId=${s.accountA.id}&q=p`, 400);
+
+    // Quem não lê a caixa não busca.
+    const outsider = client(h, (await userSession(h)).cookie);
+    const res = await outsider.raw('GET', `/api/statement-lines?accountId=${s.accountA.id}&q=pix`);
+    expect([403, 404]).toContain(res.statusCode);
+  });
+});

@@ -293,6 +293,7 @@ export const ptBR = {
     accounts: 'Contas',
     statement: 'Extrato',
     reconciliation: 'Conciliação',
+    home: 'Ir para o início da caixa',
     closing: 'Fechamento',
     payables: 'A pagar',
     receivables: 'A receber',

@@ -1,6 +1,8 @@
 import { type CaixaDetail, t } from '@moneyflow/shared';
 import { FileText, ListFilter, Wand2 } from 'lucide-react';
+import { useEffect } from 'react';
 import { useParamState, useSetParams } from '../../lib/params';
+import { useStored } from '../../lib/storage';
 import { EmptyState, Tabs } from '../ui';
 import { RulesPanel } from './RulesPanel';
 import { StatementImportPanel } from './StatementImportPanel';
@@ -14,7 +16,15 @@ export function ReconciliationTab({ caixa, onChanged }: { caixa: CaixaDetail; on
   const [view] = useParamState('view');
   const [accountParam] = useParamState('account');
   const setParams = useSetParams();
-  const accountId = accounts.some((a) => a.id === accountParam) ? accountParam! : (accounts[0]?.id ?? null);
+  // Última conta escolhida, por caixa e no navegador: abre nela quando o endereço não traz `account`.
+  const [lastAccount, setLastAccount] = useStored<Record<string, string>>('reconciliation-account', {});
+  const valid = (id: string | null | undefined) => (id && accounts.some((a) => a.id === id) ? id : null);
+  const chosen = valid(accountParam);
+  const accountId = chosen ?? valid(lastAccount[caixa.id]) ?? accounts[0]?.id ?? null;
+  const caixaId = caixa.id;
+  useEffect(() => {
+    if (chosen) setLastAccount((current) => (current[caixaId] === chosen ? current : { ...current, [caixaId]: chosen }));
+  }, [chosen, caixaId, setLastAccount]);
   const current = view === 'rules' ? 'rules' : 'statements';
 
   return (

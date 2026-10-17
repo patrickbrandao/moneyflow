@@ -1,16 +1,17 @@
-import { type CardOverview, formatDate, formatDateTime, type StatementImportSummary, t } from '@moneyflow/shared';
-import { Download, FileUp, Trash2 } from 'lucide-react';
+import { type CardOverview, formatDate, formatDateTime, type StatementImportSummary, type StatementLineRow, t } from '@moneyflow/shared';
+import { Download, FileUp, Search, Trash2, X } from 'lucide-react';
 import { type DragEvent, useState } from 'react';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction, useApi } from '../../lib/hooks';
 import { useParamState, useSetParams } from '../../lib/params';
 import { attachmentUrl } from '../../lib/upload';
-import { LoadError, SkelRows } from '../domain';
+import { LoadError, Money, SkelRows } from '../domain';
 import { useToast } from '../Toast';
-import { Badge, Button, cx, EmptyRow, useConfirm } from '../ui';
-import { BalanceCompare, ImportDetail, type SuggestionRun } from './ImportDetail';
+import { Badge, Button, cx, EmptyRow, useConfirm, useDebounced } from '../ui';
+import { BalanceCompare, ImportDetail, LineStatusBadge, type SuggestionRun } from './ImportDetail';
 import { ImportModal, type StatementTarget } from './ImportModal';
+import { LineActions, LineClassification, LinePair } from './LineActions';
 import '../../styles/reconciliation.css';
 
 const s = t.statements;
@@ -44,6 +45,16 @@ export function StatementImportPanel({
   const { run } = useAction();
   const isCard = Boolean(cardCaixaId);
   const label = isCard ? s.importInvoice : s.importStatement;
+  // Busca por descrição nas linhas: em todos os lotes da conta ou nos marcados na lista (spec 009).
+  const [q, setQ] = useState('');
+  const term = useDebounced(q.trim(), 300);
+  const [scope, setScope] = useState<Set<string>>(new Set());
+  const scopeIds = [...scope].filter((id) => imports.data?.some((row) => row.id === id));
+  const found = useApi<StatementLineRow[]>(
+    target && term.length >= 2
+      ? `/api/statement-lines?${query}&q=${encodeURIComponent(term)}${scopeIds.length ? `&importIds=${scopeIds.join(',')}` : ''}`
+      : null,
+  );
 
   useRegisterCommands(
     canWrite && target
@@ -54,8 +65,19 @@ export function StatementImportPanel({
 
   const changed = () => {
     void imports.reload();
+    if (term.length >= 2) void found.reload();
     onChanged();
   };
+
+  const toggleScope = (id: string) =>
+    setScope((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const allScoped = Boolean(imports.data?.length) && imports.data!.every((row) => scope.has(row.id));
+  const fileOf = new Map((imports.data ?? []).map((row) => [row.id, row]));
 
   async function remove(row: StatementImportSummary) {
     const ok = await confirm({
@@ -103,12 +125,105 @@ export function StatementImportPanel({
       <div className="rec-bar">
         <h2 className="text-h3 !mb-0">{s.imports}</h2>
         <span className="flex-1" />
+        <label className="search-bar">
+          <Search />
+          <input
+            className="field"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder={s.searchPlaceholder}
+            aria-label={s.search}
+            data-testid="line-search"
+          />
+        </label>
+        {q && (
+          <Button variant="quiet" size="sm" onClick={() => setQ('')} title={s.searchClear} aria-label={s.searchClear}>
+            <X />
+          </Button>
+        )}
         {canWrite && (
           <Button onClick={() => setImporting({ file: null })}>
             <FileUp /> {label}
           </Button>
         )}
       </div>
+
+      {term.length >= 2 && (
+        <section className="mb-4" data-testid="line-search-results">
+          <p className="mb-2 text-[13px] text-muted">
+            {found.data
+              ? found.data.length === 0
+                ? s.searchNone
+                : s.searchResults(found.data.length, found.data.length >= 200)
+              : t.common.loading}{' '}
+            · {scopeIds.length ? s.searchScopeSelected(scopeIds.length) : s.searchScopeAll}
+          </p>
+          {found.error ? (
+            <LoadError error={found.error} onRetry={() => void found.reload()} />
+          ) : (
+            found.data?.length !== 0 && (
+              <div className="table-wrap">
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th>{t.common.date}</th>
+                      <th>{t.common.description}</th>
+                      <th className="num">{t.common.amount}</th>
+                      <th>{t.common.status}</th>
+                      <th>{s.importColumn}</th>
+                      <th>{s.pair}</th>
+                      <th>{s.classification}</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {!found.data && <SkelRows cols={8} />}
+                    {found.data?.map((line) => {
+                      const imp = fileOf.get(line.importId);
+                      return (
+                        <tr key={line.id} className={cx(line.status === 'ignored' && 'is-off')}>
+                          <td className="mono whitespace-nowrap text-xs">{formatDate(line.postedOn)}</td>
+                          <td className="rec-wide">
+                            <span className="row-title">{line.description}</span>
+                            {line.fitid && <span className="row-sub mono">{line.fitid}</span>}
+                          </td>
+                          <td className="num whitespace-nowrap">
+                            <Money cents={line.amountCents} signed />
+                          </td>
+                          <td>
+                            <LineStatusBadge status={line.status} />
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="link text-left text-[13px]"
+                              title={imp ? `${formatDate(imp.periodStart)} – ${formatDate(imp.periodEnd)}` : undefined}
+                              onClick={() => setImportId(line.importId)}
+                            >
+                              {imp?.fileName ?? s.importColumn}
+                            </button>
+                          </td>
+                          <td className="rec-wide">
+                            <LinePair line={line} />
+                          </td>
+                          <td className="rec-mid">
+                            <LineClassification line={line} />
+                          </td>
+                          <td className="text-right">
+                            {canWrite && (
+                              <LineActions line={line} isCard={isCard} caixaId={caixaId} card={card.data ?? null} onChanged={changed} />
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )
+          )}
+        </section>
+      )}
 
       {imports.error ? (
         <LoadError error={imports.error} onRetry={() => void imports.reload()} />
@@ -117,6 +232,16 @@ export function StatementImportPanel({
           <table className="data">
             <thead>
               <tr>
+                <th className="w-8">
+                  <input
+                    type="checkbox"
+                    aria-label={s.selectAllImports}
+                    title={s.selectAllImports}
+                    checked={allScoped}
+                    disabled={!imports.data?.length}
+                    onChange={() => setScope(allScoped ? new Set() : new Set(imports.data?.map((row) => row.id)))}
+                  />
+                </th>
                 <th>{s.file}</th>
                 <th>{s.period}</th>
                 <th className="num">{s.lines}</th>
@@ -128,10 +253,18 @@ export function StatementImportPanel({
               </tr>
             </thead>
             <tbody>
-              {!imports.data && <SkelRows cols={6} />}
-              {imports.data?.length === 0 && <EmptyRow colSpan={6}>{isCard ? s.noImportsCard : s.noImports}</EmptyRow>}
+              {!imports.data && <SkelRows cols={7} />}
+              {imports.data?.length === 0 && <EmptyRow colSpan={7}>{isCard ? s.noImportsCard : s.noImports}</EmptyRow>}
               {imports.data?.map((row) => (
-                <tr key={row.id} className="cursor-pointer" onClick={() => setImportId(row.id)}>
+                <tr key={row.id} className={cx('cursor-pointer', scope.has(row.id) && 'is-selected')} onClick={() => setImportId(row.id)}>
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      aria-label={s.selectImport(row.fileName)}
+                      checked={scope.has(row.id)}
+                      onChange={() => toggleScope(row.id)}
+                    />
+                  </td>
                   <td className="rec-wide">
                     <button
                       type="button"

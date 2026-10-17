@@ -518,9 +518,15 @@ export async function getImport(ctx: ServiceContext, id: string): Promise<Statem
   return { ...summary, canWrite: ctx.access.canWrite(summary.caixaId), lines: await listLines(ctx.db, sql`l.statement_import_id = ${id}`) };
 }
 
-export async function listLines(db: Executor, where: ReturnType<typeof sql>): Promise<StatementLineRow[]> {
+export async function listLines(
+  db: Executor,
+  where: ReturnType<typeof sql>,
+  opts: { newestFirst?: boolean; limit?: number } = {},
+): Promise<StatementLineRow[]> {
+  const order = opts.newestFirst ? sql`l.posted_on DESC, l.line_number DESC` : sql`l.posted_on, l.line_number`;
+  const limit = opts.limit ? sql` LIMIT ${opts.limit}` : sql``;
   const result = await db.execute(sql`
-    SELECT l.id, l.line_number, l.posted_on, l.amount_cents, l.description, l.fitid, l.status, l.movement_id, l.title_id,
+    SELECT l.id, l.statement_import_id AS import_id, l.line_number, l.posted_on, l.amount_cents, l.description, l.fitid, l.status, l.movement_id, l.title_id,
            l.card_invoice_item_id, l.entity_id, e.name AS entity_name, l.category_id, c.name AS category_name,
            coalesce(c.color_slot, pc.color_slot) AS category_color_slot, l.classification_source, l.classification_rule_id,
            CASE
@@ -546,12 +552,34 @@ export async function listLines(db: Executor, where: ReturnType<typeof sql>): Pr
       LEFT JOIN card_purchases p ON p.id = ci.card_purchase_id
       LEFT JOIN entities pe ON pe.id = p.entity_id
      WHERE ${where}
-     ORDER BY l.posted_on, l.line_number`);
+     ORDER BY ${order}${limit}`);
   return result.rows.map((row) => {
     const r = camel<StatementLineRow>(row);
     const target = r.target as (StatementLineRow['target'] & { amountCents: number | string }) | null;
     return { ...r, target: target ? { ...target, amountCents: Number(target.amountCents) } : null };
   });
+}
+
+export const LINE_SEARCH_LIMIT = 200;
+
+/** Busca por descrição nas linhas dos lotes da conta (ou do cartão), em todos ou nos escolhidos (spec 009). */
+export async function searchLines(
+  ctx: ServiceContext,
+  query: { accountId?: string; cardCaixaId?: string; q: string; importIds: string[] },
+): Promise<StatementLineRow[]> {
+  const target = await resolveTarget(ctx, query, false);
+  const where = [
+    target.kind === 'account' ? sql`l.financial_account_id = ${target.accountId}` : sql`l.card_caixa_id = ${target.cardId}`,
+    sql`l.description ILIKE ${`%${query.q}%`}`,
+  ];
+  if (query.importIds.length > 0)
+    where.push(
+      sql`l.statement_import_id IN (${sql.join(
+        query.importIds.map((importId) => sql`${importId}::uuid`),
+        sql`, `,
+      )})`,
+    );
+  return listLines(ctx.db, sql.join(where, sql` AND `), { newestFirst: true, limit: LINE_SEARCH_LIMIT });
 }
 
 export async function deleteImport(ctx: ServiceContext, id: string) {

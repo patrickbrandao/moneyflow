@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, type Page, test } from '@playwright/test';
 import { loginAsAdmin } from '../support/session';
@@ -99,6 +100,57 @@ test('importar OFX de exemplo e conciliar', async ({ page }) => {
   expect(received).toMatchObject({ direction: 'receivable', status: 'paid', amountCents: 150_000 });
   const detail = await (await page.request.get(`/api/titles/${received.id}`)).json();
   expect(detail.mirror).toMatchObject({ caixaId: customerOther.id });
+});
+
+test('conciliação: título da caixa, última conta lembrada, aplicar regras e buscar nos lotes', async ({ page }) => {
+  const tag = Date.now().toString(36);
+  await loginAsAdmin(page);
+  const { post, expense, supplier, caixa } = await base(page, tag);
+  const savings = await post(`/api/caixas/${caixa.id}/accounts`, {
+    kind: 'savings',
+    name: `Poupança F2 ${tag}`,
+    bankCode: '077',
+    openingBalanceCents: 0,
+    openingDate: '2026-01-01',
+  });
+  const upload = await page.request.post(`/api/statement-imports?accountId=${savings.id}&fileName=extrato-ofx2.ofx`, {
+    data: readFileSync(join(FIXTURES, 'extrato-ofx2.ofx')),
+    headers: { 'content-type': 'application/x-ofx' },
+  });
+  expect(upload.ok(), await upload.text()).toBeTruthy();
+
+  // Escolhe a poupança; sai pelo nome da caixa no título e volta: a conta escolhida continua.
+  await page.goto(`/caixas/${caixa.id}/reconciliation`);
+  await page.getByLabel('Conta', { exact: true }).selectOption(savings.id);
+  await expect(page.getByRole('button', { name: 'extrato-ofx2.ofx' })).toBeVisible();
+  await page.getByRole('heading', { level: 1 }).getByRole('link', { name: caixa.name }).click();
+  await expect(page).toHaveURL(new RegExp(`/caixas/${caixa.id}$`));
+  await page.getByRole('tab', { name: 'Conciliação', exact: true }).click();
+  await expect(page.getByLabel('Conta', { exact: true })).toHaveValue(savings.id);
+
+  // Regra criada depois do import: o "Aplicar regras" do lote classifica a linha nova.
+  await post('/api/classification-rules', {
+    caixaId: caixa.id,
+    pattern: 'internet',
+    direction: 'out',
+    entityId: supplier.id,
+    categoryId: expense.id,
+  });
+  await page.getByRole('button', { name: 'extrato-ofx2.ofx' }).click();
+  await page.getByRole('button', { name: 'Aplicar regras' }).click();
+  await expect(page.getByText('1 linha(s) reclassificada(s) pelas regras.')).toBeVisible();
+  await expect(page.getByRole('row', { name: /INTERNET/ })).toContainText(supplier.name);
+  await page.getByRole('button', { name: 'Voltar aos lotes' }).click();
+
+  // Busca por descrição nos lotes da conta, com as ações da linha no resultado.
+  await page.getByLabel('Buscar nas linhas').fill('pix');
+  const results = page.getByTestId('line-search-results');
+  await expect(results).toContainText('2 linha(s) encontrada(s) · em todos os lotes');
+  const sent = results.getByRole('row', { name: /PIX ENVIADO/ });
+  await sent.getByRole('button', { name: 'Ignorar' }).click();
+  await expect(sent).toContainText('Ignorada');
+  await page.getByLabel('Marcar o lote extrato-ofx2.ofx para a busca').check();
+  await expect(results).toContainText('em 1 lote(s) marcado(s)');
 });
 
 test('fechar a fatura do cartão e pagar', async ({ page }) => {

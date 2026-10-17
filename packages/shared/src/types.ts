@@ -528,6 +528,8 @@ export type StatementImportSummary = {
 
 export type StatementLineRow = {
   id: string;
+  /** Lote da linha (a busca por descrição junta linhas de vários lotes). */
+  importId: string;
   lineNumber: number;
   postedOn: string;
   amountCents: number;
@@ -553,6 +555,9 @@ export type StatementLineRow = {
   classificationSource: 'rule' | 'agent' | 'user' | null;
   classificationRuleId: string | null;
 };
+
+/** Resultado do "Aplicar regras" (spec 009): linhas novas cuja classificação mudou. */
+export type ApplyRulesResult = { updated: number };
 
 export type StatementImportDetail = StatementImportSummary & {
   canWrite: boolean;

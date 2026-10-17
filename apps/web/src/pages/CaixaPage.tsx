@@ -131,7 +131,11 @@ export function CaixaPage() {
   return (
     <div className="page wide">
       <PageHead
-        title={caixa.name}
+        title={
+          <Link to={`/caixas/${caixa.id}`} className="hover:text-[var(--accent-soft)]" title={t.caixa.home}>
+            {caixa.name}
+          </Link>
+        }
         sub={
           <>
             {t.caixa.holder}:{' '}

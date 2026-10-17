@@ -1,4 +1,5 @@
 import {
+  type ApplyRulesResult,
   type CardOverview,
   type ClassificationSuggestResult,
   formatDate,
@@ -8,33 +9,18 @@ import {
   type StatementLineRow,
   t,
 } from '@moneyflow/shared';
-import {
-  ArrowLeft,
-  Ban,
-  Check,
-  CheckCheck,
-  Download,
-  Link2,
-  Loader2,
-  Plus,
-  RefreshCw,
-  RotateCcw,
-  Sparkles,
-  Tag,
-  Undo2,
-  X,
-} from 'lucide-react';
-import { type ReactNode, useEffect, useState } from 'react';
+import { ArrowLeft, Check, CheckCheck, Download, Loader2, RefreshCw, Sparkles, Wand2, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { followRun } from '../../agents/stream';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction, useApi } from '../../lib/hooks';
 import { useParamState } from '../../lib/params';
 import { attachmentUrl } from '../../lib/upload';
-import { CategoryLabel, LoadError, Money, SkelRows } from '../domain';
+import { LoadError, Money, SkelRows } from '../domain';
 import { useToast } from '../Toast';
 import { Badge, Button, cx, EmptyRow, Skel, Tabs, type Tone } from '../ui';
-import { CreateModal, MatchModal } from './LineModals';
+import { LineActions, LineClassification, LinePair } from './LineActions';
 import { RecipesPanel } from './RecipesPanel';
 import { ReconcileAiPanel } from './ReconcileAiPanel';
 
@@ -66,16 +52,6 @@ export function BalanceCompare({ bank, app, diff }: { bank: number | null; app: 
   );
 }
 
-function RowAction({ icon, label, onClick, danger }: { icon: ReactNode; label: string; onClick: () => void; danger?: boolean }) {
-  return (
-    <button type="button" className={cx('row-action', danger && 'danger')} title={label} aria-label={label} onClick={onClick}>
-      {icon}
-    </button>
-  );
-}
-
-type Dialog = { kind: 'match' | 'create' | 'classify'; line: StatementLineRow } | null;
-
 /** Execução do agente que está sugerindo a classificação das linhas (logo após importar ou pelo "Sugerir com IA"). */
 export type SuggestionRun = { runId: string; lines: number };
 
@@ -99,7 +75,6 @@ export function ImportDetail({
   const [filter, setFilter] = useParamState('lines');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [failures, setFailures] = useState<{ lineId: string; message: string }[]>([]);
-  const [dialog, setDialog] = useState<Dialog>(null);
   const { run, busy } = useAction();
   const data = detail.data;
   const isCard = Boolean(data?.cardCaixaId);
@@ -177,12 +152,17 @@ export function ImportDetail({
     [canWrite, suggested.length, selected.size, importId],
   );
 
-  async function lineAction(line: StatementLineRow, action: 'unmatch' | 'ignore' | 'unignore', message: string) {
-    if (await run(() => api.post(`/api/statement-lines/${line.id}/${action}`), message)) changed();
-  }
-
   async function rematch() {
     if (await run(() => api.post(`/api/statement-imports/${importId}/rematch`), s.rematched)) changed();
+  }
+
+  // Reaplica as regras às linhas novas deste lote (spec 009).
+  async function applyRules() {
+    const result = await run(
+      () => api.post<ApplyRulesResult>(`/api/statement-imports/${importId}/apply-rules`),
+      (r) => s.rulesApplied(r.updated),
+    );
+    if (result) changed();
   }
 
   if (detail.error) return <LoadError error={detail.error} onRetry={() => void detail.reload()} />;
@@ -217,6 +197,11 @@ export function ImportDetail({
         {canWrite && (
           <Button variant="ghost" size="sm" onClick={() => void rematch()} disabled={busy}>
             <RefreshCw /> {s.rematch}
+          </Button>
+        )}
+        {canWrite && (
+          <Button variant="ghost" size="sm" onClick={() => void applyRules()} disabled={busy} title={s.applyRulesImportHint}>
+            <Wand2 /> {s.applyRules}
           </Button>
         )}
         {canWrite && (
@@ -389,59 +374,21 @@ export function ImportDetail({
                   <LineStatusBadge status={line.status} />
                 </td>
                 <td className="rec-wide">
-                  {line.target ? (
-                    <span className="rec-pair">
-                      <span className="row-title text-[13px]">{line.target.description}</span>
-                      <span className="row-sub">
-                        {s.targetKinds[line.target.kind]} · {formatDate(line.target.date)}
-                        {line.target.entityName ? ` · ${line.target.entityName}` : ''}
-                      </span>
-                    </span>
-                  ) : (
-                    <span className="text-faint text-xs">{s.noPair}</span>
-                  )}
+                  <LinePair line={line} />
                 </td>
                 <td className="rec-mid">
-                  {line.entityName || line.categoryName ? (
-                    <span className="rec-pair">
-                      {line.entityName && <span className="text-[13px]">{line.entityName}</span>}
-                      {line.categoryName && <CategoryLabel name={line.categoryName} slot={line.categoryColorSlot} />}
-                      {line.classificationSource === 'agent' ? (
-                        <span className="ai-tag">
-                          <Sparkles /> {s.bySource.agent}
-                        </span>
-                      ) : (
-                        line.classificationSource && <span className="row-sub">{s.bySource[line.classificationSource]}</span>
-                      )}
-                    </span>
-                  ) : (
-                    <span className="text-faint text-xs">—</span>
-                  )}
+                  <LineClassification line={line} />
                 </td>
                 <td className="text-right">
                   {canWrite && (
-                    <span className="row-actions">
-                      {line.status === 'suggested' && (
-                        <RowAction icon={<Check />} label={s.confirmLine} onClick={() => void confirmLines([line.id])} />
-                      )}
-                      {(line.status === 'new' || line.status === 'suggested') && (
-                        <>
-                          <RowAction icon={<Link2 />} label={s.matchManual} onClick={() => setDialog({ kind: 'match', line })} />
-                          <RowAction icon={<Plus />} label={s.create} onClick={() => setDialog({ kind: 'create', line })} />
-                          <RowAction icon={<Tag />} label={s.classify} onClick={() => setDialog({ kind: 'classify', line })} />
-                        </>
-                      )}
-                      {(line.status === 'matched' || line.status === 'suggested') && (
-                        <RowAction icon={<Undo2 />} label={s.unmatch} onClick={() => void lineAction(line, 'unmatch', s.unmatched)} />
-                      )}
-                      {line.status === 'ignored' ? (
-                        <RowAction icon={<RotateCcw />} label={s.unignore} onClick={() => void lineAction(line, 'unignore', s.unignored)} />
-                      ) : (
-                        line.status !== 'matched' && (
-                          <RowAction icon={<Ban />} label={s.ignore} danger onClick={() => void lineAction(line, 'ignore', s.ignored)} />
-                        )
-                      )}
-                    </span>
+                    <LineActions
+                      line={line}
+                      isCard={isCard}
+                      caixaId={caixaId}
+                      card={card}
+                      onChanged={changed}
+                      onConfirm={(lineId) => void confirmLines([lineId])}
+                    />
                   )}
                 </td>
               </tr>
@@ -449,31 +396,6 @@ export function ImportDetail({
           </tbody>
         </table>
       </div>
-
-      {dialog?.kind === 'match' && (
-        <MatchModal
-          line={dialog.line}
-          onClose={() => setDialog(null)}
-          onDone={() => {
-            setDialog(null);
-            changed();
-          }}
-        />
-      )}
-      {(dialog?.kind === 'create' || dialog?.kind === 'classify') && (
-        <CreateModal
-          line={dialog.line}
-          isCard={isCard}
-          caixaId={caixaId}
-          card={card}
-          classifyOnly={dialog.kind === 'classify'}
-          onClose={() => setDialog(null)}
-          onDone={() => {
-            setDialog(null);
-            changed();
-          }}
-        />
-      )}
     </>
   );
 }
