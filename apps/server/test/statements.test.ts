@@ -341,3 +341,39 @@ describe('aplicar regras e buscar nas linhas (spec 009)', () => {
     expect([403, 404]).toContain(res.statusCode);
   });
 });
+
+describe('saldo do banco do lote (spec 009)', () => {
+  it('edita, limpa e volta ao saldo do arquivo; divergência do intervalo contra o lote anterior', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const url = (name: string) => `/api/statement-imports?accountId=${s.accountA.id}&fileName=${name}`;
+    const first = (await upload(adminSession.cookie, url('a.ofx'), fixture('extrato-ofx2.ofx'), 'application/x-ofx')).json();
+    // O mesmo extrato com outros FITIDs: mesmo saldo do banco na mesma data, nenhuma divergência nova.
+    const copy = Buffer.from(fixture('extrato-ofx2.ofx').toString('latin1').replaceAll('OFX2-', 'OFX3-'), 'latin1');
+    const second = (await upload(adminSession.cookie, url('b.ofx'), copy, 'application/x-ofx')).json();
+    expect(first).toMatchObject({ bankBalanceCents: 278_620, bankBalanceOn: '2026-10-31', intervalDifferenceCents: null });
+    expect(first.accountOpeningDate).toBe('2026-01-01');
+    expect(second.intervalDifferenceCents).toBe(0);
+
+    // Leitor não edita.
+    const viewerUser = await userSession(h);
+    await admin.put(`/api/users/${viewerUser.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
+    await client(h, viewerUser.cookie).put(`/api/statement-imports/${second.id}/bank-balance`, { mode: 'clear' }, 403);
+
+    const edited = await admin.put(`/api/statement-imports/${second.id}/bank-balance`, {
+      mode: 'set',
+      amountCents: 288_620,
+      on: '2026-10-31',
+    });
+    expect(edited).toMatchObject({ bankBalanceCents: 288_620, differenceCents: first.differenceCents + 10_000 });
+    expect(edited.intervalDifferenceCents).toBe(10_000);
+
+    const cleared = await admin.put(`/api/statement-imports/${second.id}/bank-balance`, { mode: 'clear' });
+    expect(cleared).toMatchObject({ bankBalanceCents: null, bankBalanceOn: null, differenceCents: null, intervalDifferenceCents: null });
+
+    const restored = await admin.put(`/api/statement-imports/${second.id}/bank-balance`, { mode: 'file' });
+    expect(restored).toMatchObject({ bankBalanceCents: 278_620, bankBalanceOn: '2026-10-31', intervalDifferenceCents: 0 });
+    await admin.put(`/api/statement-imports/${second.id}/bank-balance`, { mode: 'set', amountCents: 1 }, 400);
+  });
+});

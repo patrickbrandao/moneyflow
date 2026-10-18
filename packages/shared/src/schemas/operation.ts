@@ -177,6 +177,13 @@ export const statementLineSearchQuery = z
   })
   .refine((v) => (v.accountId ? 1 : 0) + (v.cardCaixaId ? 1 : 0) === 1, { message: E.statementTarget });
 
+/** Saldo do banco do lote (spec 009): trocar, limpar ou voltar ao do arquivo. */
+export const importBankBalanceInput = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('set'), amountCents: cents, on: isoDate }),
+  z.object({ mode: z.literal('clear') }),
+  z.object({ mode: z.literal('file') }),
+]);
+
 /** Aplicar as regras de classificação às linhas novas de todas as contas da caixa (spec 009). */
 export const applyRulesInput = z.object({ caixaId: id });
 

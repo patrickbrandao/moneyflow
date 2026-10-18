@@ -517,6 +517,10 @@ export type StatementImportSummary = {
   bankBalanceCents: number | null;
   appBalanceCents: number | null;
   differenceCents: number | null;
+  /** Divergência nascida desde o lote anterior com saldo (a acumulada menos a dele); null no primeiro ou sem saldo (spec 009). */
+  intervalDifferenceCents: number | null;
+  /** Abertura da conta: depois do início do período, o saldo do app não cobre o começo do extrato. */
+  accountOpeningDate: string | null;
   lineCount: number;
   matchedLines: number;
   suggestedLines: number;

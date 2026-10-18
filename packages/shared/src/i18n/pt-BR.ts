@@ -198,6 +198,8 @@ export const ptBR = {
     statementTarget: 'Informe a conta ou o cartão do extrato.',
     statementFormat: 'Formato de arquivo não reconhecido: envie OFX ou CSV.',
     statementEmpty: 'Nenhuma transação encontrada no arquivo.',
+    statementBalanceAccountOnly: 'Só o lote de uma conta tem saldo do banco.',
+    statementNoFileBalance: 'O arquivo deste lote não traz saldo.',
     statementAllDuplicated: 'Todas as linhas do arquivo já tinham sido importadas.',
     csvMappingRequired: 'Escolha ou crie o mapeamento de colunas do CSV.',
     ruleTarget: 'A regra precisa de entidade ou categoria.',

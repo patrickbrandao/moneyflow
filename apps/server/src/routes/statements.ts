@@ -4,6 +4,7 @@ import {
   classificationRuleUpdateInput,
   csvMappingInput,
   csvMappingUpdateInput,
+  importBankBalanceInput,
   lineClassifyInput,
   lineCreateInput,
   lineIdsInput,
@@ -66,6 +67,9 @@ export async function statementRoutes(app: FastifyInstance) {
   app.get('/api/statement-imports/:id', (r: Req) => statements.getImport(r.ctx, id(r)));
   app.delete('/api/statement-imports/:id', (r: Req) => statements.deleteImport(r.ctx, id(r)));
   app.post('/api/statement-imports/:id/rematch', (r: Req) => statements.rematchImport(r.ctx, id(r)));
+  app.put('/api/statement-imports/:id/bank-balance', (r: Req) =>
+    statements.setImportBankBalance(r.ctx, id(r), parse(importBankBalanceInput, r.body)),
+  );
   app.post('/api/statement-imports/:id/apply-rules', (r: Req) => rec.applyRulesToImport(r.ctx, id(r)));
   app.get('/api/statement-lines', (r: Req) => statements.searchLines(r.ctx, parse(statementLineSearchQuery, r.query)));
 

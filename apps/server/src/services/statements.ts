@@ -6,6 +6,7 @@ import {
   type CsvMapping,
   decodeStatementFile,
   detectDelimiter,
+  type importBankBalanceInput,
   type MatchCandidate,
   normalizeDescriptionForDedup,
   parseCsv,
@@ -490,16 +491,28 @@ const importSql = sql`
   SELECT b.statement_import_id AS id, b.financial_account_id, a.name AS account_name, b.card_caixa_id, i.card_invoice_id,
          coalesce(a.caixa_id, b.card_caixa_id) AS caixa_id, i.format, f.file_name, i.attachment_id,
          b.period_start, b.period_end, b.bank_balance_on, b.bank_balance_cents, b.app_balance_cents, b.difference_cents,
+         b.difference_cents - prev.difference_cents AS interval_difference_cents, a.opening_date AS account_opening_date,
          b.lines AS line_count, b.matched_lines, b.suggested_lines, b.new_lines, b.ignored_lines, u.username AS imported_by, i.created_at
     FROM statement_import_balances b
     JOIN statement_imports i ON i.id = b.statement_import_id
     JOIN attachments f ON f.id = i.attachment_id
     LEFT JOIN financial_accounts a ON a.id = b.financial_account_id
-    LEFT JOIN users u ON u.id = i.imported_by_user_id`;
+    LEFT JOIN users u ON u.id = i.imported_by_user_id
+    -- Divergência do intervalo (spec 009): a acumulada menos a do lote anterior com saldo, na ordem da data do saldo.
+    LEFT JOIN LATERAL (
+      SELECT pb.difference_cents
+        FROM statement_import_balances pb
+        JOIN statement_imports pi ON pi.id = pb.statement_import_id
+       WHERE pb.financial_account_id = b.financial_account_id AND pb.bank_balance_on IS NOT NULL
+         AND (pb.bank_balance_on, pi.created_at) < (b.bank_balance_on, i.created_at)
+       ORDER BY pb.bank_balance_on DESC, pi.created_at DESC
+       LIMIT 1
+    ) prev ON b.bank_balance_on IS NOT NULL`;
 
 const toImport = (row: Record<string, unknown>): StatementImportSummary => {
   const r = camel<StatementImportSummary>(row);
-  return { ...r, createdAt: iso(r.createdAt)! };
+  const interval = r.intervalDifferenceCents as number | string | null;
+  return { ...r, intervalDifferenceCents: interval === null ? null : Number(interval), createdAt: iso(r.createdAt)! };
 };
 
 export async function listImports(ctx: ServiceContext, ref: { accountId?: string; cardCaixaId?: string }) {
@@ -558,6 +571,40 @@ export async function listLines(
     const target = r.target as (StatementLineRow['target'] & { amountCents: number | string }) | null;
     return { ...r, target: target ? { ...target, amountCents: Number(target.amountCents) } : null };
   });
+}
+
+/**
+ * Saldo do banco do lote (spec 009): trocar valor e data, limpar ou voltar ao
+ * saldo do arquivo (relido do OFX guardado). Só lote de conta.
+ */
+export async function setImportBankBalance(
+  ctx: ServiceContext,
+  id: string,
+  input: z.output<typeof importBankBalanceInput>,
+): Promise<StatementImportDetail> {
+  const detail = await getImport(ctx, id);
+  ctx.access.assertWrite(detail.caixaId);
+  if (!detail.financialAccountId) throw unprocessable(t.errors.statementBalanceAccountOnly, 'statement_balance_account_only');
+  let balance: { amountCents: number; date: string } | null = null;
+  if (input.mode === 'set') balance = { amountCents: input.amountCents, date: input.on };
+  if (input.mode === 'file') {
+    const [file] = await ctx.db.select({ content: attachments.content }).from(attachments).where(eq(attachments.id, detail.attachmentId));
+    const target = await resolveTarget(ctx, { accountId: detail.financialAccountId }, true);
+    const [imp] = await ctx.db
+      .select({ csvMappingId: statementImports.csvMappingId })
+      .from(statementImports)
+      .where(eq(statementImports.id, id));
+    const parsed = await parseStatementFile(ctx.db, target, Buffer.from(file!.content), imp?.csvMappingId ?? undefined);
+    if (!parsed.bankBalance) throw unprocessable(t.errors.statementNoFileBalance, 'statement_no_file_balance');
+    balance = parsed.bankBalance;
+  }
+  await withTx(ctx, (tx) =>
+    tx
+      .update(statementImports)
+      .set({ bankBalanceCents: balance?.amountCents ?? null, bankBalanceOn: balance?.date ?? null })
+      .where(eq(statementImports.id, id)),
+  );
+  return getImport(ctx, id);
 }
 
 export const LINE_SEARCH_LIMIT = 200;

@@ -153,6 +153,64 @@ test('conciliação: título da caixa, última conta lembrada, aplicar regras e 
   await expect(results).toContainText('em 1 lote(s) marcado(s)');
 });
 
+test('saldo do lote: o do OFX aplicado, editar, aviso do saldo inicial e lotes em ordem', async ({ page }) => {
+  const tag = Date.now().toString(36);
+  await loginAsAdmin(page);
+  const { post, caixa } = await base(page, tag);
+  // Conta aberta em 15/10, depois do início do extrato (01/10).
+  const late = await post(`/api/caixas/${caixa.id}/accounts`, {
+    kind: 'checking',
+    name: `Conta tardia ${tag}`,
+    bankCode: '077',
+    openingBalanceCents: 0,
+    openingDate: '2026-10-15',
+  });
+
+  await page.goto(`/caixas/${caixa.id}/reconciliation?account=${late.id}`);
+  await page.getByRole('button', { name: 'Importar extrato' }).first().click();
+  const dialog = page.getByRole('dialog', { name: 'Importar extrato' });
+  await dialog.getByLabel('escolha um arquivo').setInputFiles(join(FIXTURES, 'extrato-ofx2.ofx'));
+  // O saldo do arquivo já vale; o campo só abre em "Informar outro saldo".
+  await expect(dialog.getByTestId('file-balance')).toContainText('R$ 2.786,20 em 31/10/2026');
+  await expect(dialog.getByLabel('Saldo do banco')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Informar outro saldo' }).click();
+  await expect(dialog.getByLabel('Saldo do banco')).toBeVisible();
+  await dialog.getByRole('button', { name: 'usar o do arquivo' }).click();
+  await dialog.getByRole('button', { name: 'Importar', exact: true }).click();
+
+  // No lote: o saldo do arquivo, o aviso do saldo inicial e a edição do saldo.
+  await expect(page.getByText('R$ 2.786,20').first()).toBeVisible();
+  await expect(page.getByTestId('opening-warning')).toContainText('15/10/2026');
+  await page.getByRole('button', { name: 'Editar saldo' }).click();
+  const balance = page.getByRole('dialog', { name: 'Saldo do banco do lote' });
+  await balance.getByLabel('Saldo do banco').fill('1.000,00');
+  await balance.getByRole('button', { name: 'Salvar' }).click();
+  await expect(balance).toBeHidden();
+  await expect(page.getByText('R$ 1.000,00').first()).toBeVisible();
+  await page.getByRole('button', { name: 'Editar saldo' }).click();
+  await balance.getByRole('button', { name: 'Voltar ao saldo do arquivo' }).click();
+  await expect(balance).toBeHidden();
+  await expect(page.getByText('R$ 2.786,20').first()).toBeVisible();
+
+  // Outro lote com período anterior: a lista fica em ordem cronológica (mais antigo primeiro).
+  const older = readFileSync(join(FIXTURES, 'extrato-ofx2.ofx'), 'latin1').replaceAll('OFX2-', 'OLD-').replaceAll('202610', '202609');
+  const res = await page.request.post(`/api/statement-imports?accountId=${late.id}&fileName=zz-setembro.ofx`, {
+    data: Buffer.from(older, 'latin1'),
+    headers: { 'content-type': 'application/x-ofx' },
+  });
+  expect(res.ok(), await res.text()).toBeTruthy();
+  await page.getByRole('button', { name: 'Voltar aos lotes' }).click();
+  await page.reload();
+  const files = page.locator('table.data tbody tr .row-title');
+  await expect(files).toHaveText(['zz-setembro.ofx', 'extrato-ofx2.ofx']);
+  await page.getByRole('columnheader', { name: 'Arquivo' }).getByRole('button').click();
+  await expect(files).toHaveText(['extrato-ofx2.ofx', 'zz-setembro.ofx']);
+
+  // O atalho do aviso abre a edição da conta.
+  await page.getByRole('link', { name: 'Ajustar a conta' }).first().click();
+  await expect(page.getByRole('dialog', { name: 'Editar conta' })).toBeVisible();
+});
+
 test('fechar a fatura do cartão e pagar', async ({ page }) => {
   const tag = Date.now().toString(36);
   await loginAsAdmin(page);

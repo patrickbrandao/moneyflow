@@ -129,10 +129,16 @@ export function ImportModal({
   const input = useRef<HTMLInputElement>(null);
   const toast = useToast();
   const isCard = 'cardCaixaId' in target;
+  // Saldo do OFX (LEDGERBAL): já vale sem digitar nada; "Informar outro saldo" abre o campo (spec 009).
+  const fileBalance = inspect?.format === 'ofx' ? (inspect.ofx?.ledgerBalance ?? null) : null;
+  const [ownBalance, setOwnBalance] = useState(false);
+  const typedBalance = !fileBalance || ownBalance ? bankBalance : null;
 
   async function pick(next: File) {
     setFile(next);
     setInspect(null);
+    setOwnBalance(false);
+    setBankBalance(null);
     setError(null);
     setBusy(true);
     try {
@@ -167,8 +173,8 @@ export function ImportModal({
         ...target,
         mappingId,
         cardInvoiceId: invoiceId || undefined,
-        bankBalanceCents: bankBalance ?? undefined,
-        bankBalanceOn: bankBalance !== null ? bankBalanceOn : undefined,
+        bankBalanceCents: typedBalance ?? undefined,
+        bankBalanceOn: typedBalance !== null ? bankBalanceOn : undefined,
       });
       toast.success(s.imported(detail.lineCount, detail.skippedDuplicates ?? 0));
       onImported(detail);
@@ -198,21 +204,47 @@ export function ImportModal({
           </select>
         </Field>
       )}
-      <fieldset className="form-grid cols-2">
-        <legend className="label">{s.bankBalanceOptional}</legend>
-        <Field label={t.common.amount} hint={s.bankBalanceHint}>
-          <MoneyInput value={bankBalance} onChange={setBankBalance} allowNegative ariaLabel={s.bankBalance} />
-        </Field>
-        <Field label={s.bankBalanceOn}>
-          <input
-            type="date"
-            className="field"
-            value={bankBalanceOn}
-            onChange={(e) => setBankBalanceOn(e.target.value)}
-            disabled={bankBalance === null}
-          />
-        </Field>
-      </fieldset>
+      {!isCard && fileBalance && !ownBalance && (
+        <div className="notice info flex flex-wrap items-center gap-2" data-testid="file-balance">
+          <span className="min-w-0 flex-1">
+            {s.fileBalance}: <Money cents={fileBalance.amountCents} /> em {formatDate(fileBalance.date)}
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setOwnBalance(true);
+              setBankBalanceOn(fileBalance.date);
+            }}
+          >
+            {s.otherBalance}
+          </Button>
+        </div>
+      )}
+      {!isCard && (!fileBalance || ownBalance) && (
+        <fieldset className="form-grid cols-2">
+          <legend className="label">
+            {s.bankBalanceOptional}
+            {fileBalance && (
+              <button type="button" className="link ml-2 text-[12.5px]" onClick={() => setOwnBalance(false)}>
+                {s.useFileBalance}
+              </button>
+            )}
+          </legend>
+          <Field label={t.common.amount} hint={s.bankBalanceHint}>
+            <MoneyInput value={bankBalance} onChange={setBankBalance} allowNegative ariaLabel={s.bankBalance} />
+          </Field>
+          <Field label={s.bankBalanceOn}>
+            <input
+              type="date"
+              className="field"
+              value={bankBalanceOn}
+              onChange={(e) => setBankBalanceOn(e.target.value)}
+              disabled={bankBalance === null}
+            />
+          </Field>
+        </fieldset>
+      )}
     </>
   );
 

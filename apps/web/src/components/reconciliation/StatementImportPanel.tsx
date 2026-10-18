@@ -1,20 +1,53 @@
 import { type CardOverview, formatDate, formatDateTime, type StatementImportSummary, type StatementLineRow, t } from '@moneyflow/shared';
-import { Download, FileUp, Search, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, ArrowUpDown, Download, FileUp, Landmark, Search, Trash2, X } from 'lucide-react';
 import { type DragEvent, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction, useApi } from '../../lib/hooks';
 import { useParamState, useSetParams } from '../../lib/params';
+import { useStored } from '../../lib/storage';
 import { attachmentUrl } from '../../lib/upload';
 import { LoadError, Money, SkelRows } from '../domain';
 import { useToast } from '../Toast';
 import { Badge, Button, cx, EmptyRow, useConfirm, useDebounced } from '../ui';
-import { BalanceCompare, ImportDetail, LineStatusBadge, type SuggestionRun } from './ImportDetail';
+import { adjustAccountLink, BalanceCompare, ImportDetail, LineStatusBadge, openingAfterStart, type SuggestionRun } from './ImportDetail';
 import { ImportModal, type StatementTarget } from './ImportModal';
 import { LineActions, LineClassification, LinePair } from './LineActions';
 import '../../styles/reconciliation.css';
 
 const s = t.statements;
+
+type SortKey = 'period' | 'file' | 'imported';
+type Sort = { key: SortKey; dir: 'asc' | 'desc' };
+
+/** Ordem dos lotes (spec 009): período (início, depois fim), nome do arquivo ou data de importação. */
+function sortImports(rows: StatementImportSummary[], sort: Sort) {
+  const key = (row: StatementImportSummary) =>
+    sort.key === 'period' ? `${row.periodStart}|${row.periodEnd}|${row.createdAt}` : sort.key === 'file' ? row.fileName : row.createdAt;
+  const sorted = [...rows].sort((a, b) =>
+    sort.key === 'file'
+      ? key(a).localeCompare(key(b), 'pt-BR', { numeric: true, sensitivity: 'base' })
+      : key(a) < key(b)
+        ? -1
+        : key(a) > key(b)
+          ? 1
+          : 0,
+  );
+  return sort.dir === 'asc' ? sorted : sorted.reverse();
+}
+
+function SortHeader({ label, column, sort, onSort }: { label: string; column: SortKey; sort: Sort; onSort: (key: SortKey) => void }) {
+  const active = sort.key === column;
+  const Icon = !active ? ArrowUpDown : sort.dir === 'asc' ? ArrowUp : ArrowDown;
+  return (
+    <th aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      <button type="button" className="inline-flex items-center gap-1 uppercase" title={s.sortBy(label)} onClick={() => onSort(column)}>
+        {label} <Icon className={cx('size-3', !active && 'text-faint')} />
+      </button>
+    </th>
+  );
+}
 
 /** Import de extrato/fatura e conciliação de uma conta ou cartão (spec 009). */
 export function StatementImportPanel({
@@ -41,6 +74,10 @@ export function StatementImportPanel({
   // A sugestão do agente enfileirada pelo import que acabou de abrir (só para esse lote).
   const [suggestion, setSuggestion] = useState<(SuggestionRun & { importId: string }) | null>(null);
   const [over, setOver] = useState(false);
+  const [sort, setSort] = useStored<Sort>('statement-imports-sort', { key: 'period', dir: 'asc' });
+  const onSort = (key: SortKey) =>
+    setSort((current) => (current.key === key ? { key, dir: current.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }));
+  const rows = imports.data ? sortImports(imports.data, sort) : undefined;
   const confirm = useConfirm();
   const { run } = useAction();
   const isCard = Boolean(cardCaixaId);
@@ -242,8 +279,9 @@ export function StatementImportPanel({
                     onChange={() => setScope(allScoped ? new Set() : new Set(imports.data?.map((row) => row.id)))}
                   />
                 </th>
-                <th>{s.file}</th>
-                <th>{s.period}</th>
+                <SortHeader label={s.file} column="file" sort={sort} onSort={onSort} />
+                <SortHeader label={s.period} column="period" sort={sort} onSort={onSort} />
+                <SortHeader label={s.importedAtColumn} column="imported" sort={sort} onSort={onSort} />
                 <th className="num">{s.lines}</th>
                 <th>{t.common.status}</th>
                 <th>
@@ -253,9 +291,9 @@ export function StatementImportPanel({
               </tr>
             </thead>
             <tbody>
-              {!imports.data && <SkelRows cols={7} />}
-              {imports.data?.length === 0 && <EmptyRow colSpan={7}>{isCard ? s.noImportsCard : s.noImports}</EmptyRow>}
-              {imports.data?.map((row) => (
+              {!imports.data && <SkelRows cols={8} />}
+              {imports.data?.length === 0 && <EmptyRow colSpan={8}>{isCard ? s.noImportsCard : s.noImports}</EmptyRow>}
+              {rows?.map((row) => (
                 <tr key={row.id} className={cx('cursor-pointer', scope.has(row.id) && 'is-selected')} onClick={() => setImportId(row.id)}>
                   <td onClick={(e) => e.stopPropagation()}>
                     <input
@@ -274,12 +312,26 @@ export function StatementImportPanel({
                       {row.fileName}
                     </button>
                     <span className="row-sub">
-                      {row.format.toUpperCase()} · {s.importedAt(formatDateTime(row.createdAt), row.importedBy)}
+                      {row.format.toUpperCase()}
+                      {row.importedBy ? ` · ${row.importedBy}` : ''}
                     </span>
+                    {row.financialAccountId && openingAfterStart(row) && (
+                      <span className="row-sub inline-flex flex-wrap items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                        <Badge tone="warn" title={s.openingAfterStart(formatDate(row.accountOpeningDate!))}>
+                          <Landmark /> {s.openingAfterStartShort}
+                        </Badge>
+                        {canWrite && (
+                          <Link className="link text-xs" to={adjustAccountLink(caixaId, row.financialAccountId)}>
+                            {s.adjustAccount}
+                          </Link>
+                        )}
+                      </span>
+                    )}
                   </td>
                   <td className="mono whitespace-nowrap text-xs">
                     {formatDate(row.periodStart)} – {formatDate(row.periodEnd)}
                   </td>
+                  <td className="mono whitespace-nowrap text-xs">{formatDateTime(row.createdAt)}</td>
                   <td className="num">{row.lineCount}</td>
                   <td>
                     <span className="inline-flex flex-wrap gap-1">
@@ -292,7 +344,12 @@ export function StatementImportPanel({
                     </span>
                   </td>
                   <td>
-                    <BalanceCompare bank={row.bankBalanceCents} app={row.appBalanceCents} diff={row.differenceCents} />
+                    <BalanceCompare
+                      bank={row.bankBalanceCents}
+                      app={row.appBalanceCents}
+                      diff={row.differenceCents}
+                      interval={row.intervalDifferenceCents}
+                    />
                   </td>
                   <td className="text-right">
                     <span className="row-actions" onClick={(e) => e.stopPropagation()}>

@@ -6,6 +6,7 @@ import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction } from '../../lib/hooks';
 import { caixaTab } from '../../lib/links';
+import { useParamState } from '../../lib/params';
 import { Money } from '../domain';
 import { CategorySelect, FormError, ModalActions, MoneyInput } from '../forms';
 import { ImportRecipesHint } from '../reconciliation/RecipesPanel';
@@ -15,7 +16,15 @@ type Kind = (typeof ACCOUNT_KINDS)[number];
 
 /** Contas financeiras da caixa (spec 004): corrente, cofre e poupança/investimento, com saldo. */
 export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChanged: () => void }) {
-  const [editing, setEditing] = useState<AccountRow | 'new' | null>(null);
+  const [editing, setEditingState] = useState<AccountRow | 'new' | null>(null);
+  // ?editAccount=<id>: atalho "Ajustar a conta" da conciliação (spec 009) abre a edição direto.
+  const [editParam, setEditParam] = useParamState('editAccount');
+  const fromLink = editParam ? (caixa.accounts.find((a) => a.id === editParam) ?? null) : null;
+  const current = editing ?? (caixa.canWrite ? fromLink : null);
+  const setEditing = (value: AccountRow | 'new' | null) => {
+    setEditingState(value);
+    if (value === null && editParam) setEditParam(null);
+  };
   const [adjusting, setAdjusting] = useState<AccountRow | null>(null);
   const confirm = useConfirm();
   const { run } = useAction();
@@ -134,10 +143,10 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
           </tbody>
         </table>
       </div>
-      {editing && (
+      {current && (
         <AccountFormModal
           caixaId={caixa.id}
-          account={editing === 'new' ? null : editing}
+          account={current === 'new' ? null : current}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);

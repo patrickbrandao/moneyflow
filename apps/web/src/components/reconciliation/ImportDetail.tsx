@@ -9,17 +9,20 @@ import {
   type StatementLineRow,
   t,
 } from '@moneyflow/shared';
-import { ArrowLeft, Check, CheckCheck, Download, Loader2, RefreshCw, Sparkles, Wand2, X } from 'lucide-react';
+import { ArrowLeft, Check, CheckCheck, Download, Landmark, Loader2, Pencil, RefreshCw, RotateCcw, Sparkles, Wand2, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { followRun } from '../../agents/stream';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction, useApi } from '../../lib/hooks';
+import { caixaTab } from '../../lib/links';
 import { useParamState } from '../../lib/params';
 import { attachmentUrl } from '../../lib/upload';
 import { LoadError, Money, SkelRows } from '../domain';
+import { ModalActions, MoneyInput } from '../forms';
 import { useToast } from '../Toast';
-import { Badge, Button, cx, EmptyRow, Skel, Tabs, type Tone } from '../ui';
+import { Badge, Button, cx, EmptyRow, Field, Modal, Skel, Tabs, type Tone } from '../ui';
 import { LineActions, LineClassification, LinePair } from './LineActions';
 import { RecipesPanel } from './RecipesPanel';
 import { ReconcileAiPanel } from './ReconcileAiPanel';
@@ -34,7 +37,17 @@ export function LineStatusBadge({ status }: { status: LineStatus }) {
 }
 
 /** Saldo do banco × saldo do app, com a divergência destacada. */
-export function BalanceCompare({ bank, app, diff }: { bank: number | null; app: number | null; diff: number | null }) {
+export function BalanceCompare({
+  bank,
+  app,
+  diff,
+  interval = null,
+}: {
+  bank: number | null;
+  app: number | null;
+  diff: number | null;
+  interval?: number | null;
+}) {
   if (bank === null) return <span className="text-faint">—</span>;
   return (
     <span className="rec-pair">
@@ -48,7 +61,63 @@ export function BalanceCompare({ bank, app, diff }: { bank: number | null; app: 
       ) : (
         <span className="row-sub">{s.noDifference}</span>
       )}
+      {interval !== null && (
+        <span className={cx('text-xs', interval !== 0 ? 'rec-diff' : 'row-sub')} title={s.intervalDifferenceHint}>
+          {s.intervalDifference}: {formatSignedBRL(interval)}
+        </span>
+      )}
     </span>
+  );
+}
+
+/** A conta abriu depois do início do extrato: o saldo do app não cobre o começo (spec 009). */
+export const openingAfterStart = (imp: { accountOpeningDate: string | null; periodStart: string }) =>
+  Boolean(imp.accountOpeningDate && imp.accountOpeningDate > imp.periodStart);
+
+/** Link para a edição da conta (saldo inicial e data de abertura) na aba Contas. */
+export const adjustAccountLink = (caixaId: string, accountId: string) => `${caixaTab(caixaId, 'accounts')}?editAccount=${accountId}`;
+
+/** Saldo do banco do lote: trocar, limpar ou voltar ao do arquivo (spec 009). */
+function BalanceModal({ detail, onClose, onSaved }: { detail: StatementImportDetail; onClose: () => void; onSaved: () => void }) {
+  const [amount, setAmount] = useState<number | null>(detail.bankBalanceCents);
+  const [on, setOn] = useState(detail.bankBalanceOn ?? detail.periodEnd);
+  const { run, busy } = useAction();
+
+  async function save(body: { mode: 'set'; amountCents: number; on: string } | { mode: 'clear' } | { mode: 'file' }) {
+    if (await run(() => api.put(`/api/statement-imports/${detail.id}/bank-balance`, body), s.balanceSaved)) onSaved();
+  }
+
+  return (
+    <Modal open title={s.editBalanceTitle} onClose={onClose}>
+      <form
+        className="form-grid cols-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (amount !== null) void save({ mode: 'set', amountCents: amount, on });
+        }}
+      >
+        <p className="span-all text-[13px] text-muted">{s.editBalanceHint}</p>
+        <Field label={t.common.amount}>
+          <MoneyInput value={amount} onChange={setAmount} allowNegative ariaLabel={s.bankBalance} />
+        </Field>
+        <Field label={s.bankBalanceOn}>
+          <input type="date" className="field" value={on} onChange={(e) => setOn(e.target.value)} required />
+        </Field>
+        <div className="span-all">
+          <ModalActions>
+            <Button variant="ghost" disabled={busy} onClick={() => void save({ mode: 'file' })}>
+              <RotateCcw /> {s.restoreFileBalance}
+            </Button>
+            <Button variant="ghost" disabled={busy || detail.bankBalanceCents === null} onClick={() => void save({ mode: 'clear' })}>
+              {s.clearBalance}
+            </Button>
+            <Button type="submit" disabled={busy || amount === null}>
+              {busy ? t.common.saving : t.common.save}
+            </Button>
+          </ModalActions>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -90,6 +159,7 @@ export function ImportDetail({
   const [suggesting, setSuggesting] = useState<SuggestionRun | null>(suggestionRun);
   const [aiPanelKey, setAiPanelKey] = useState(0);
   const [recipesVersion, setRecipesVersion] = useState(0);
+  const [editingBalance, setEditingBalance] = useState(false);
   const { reload } = detail;
 
   const changed = () => {
@@ -244,11 +314,32 @@ export function ImportDetail({
               {s.bankBalance} × {s.appBalance.toLowerCase()}
               {data.bankBalanceOn ? ` · ${formatDate(data.bankBalanceOn)}` : ''}
             </span>
-            <BalanceCompare bank={data.bankBalanceCents} app={data.appBalanceCents} diff={data.differenceCents} />
+            <BalanceCompare
+              bank={data.bankBalanceCents}
+              app={data.appBalanceCents}
+              diff={data.differenceCents}
+              interval={data.intervalDifferenceCents}
+            />
+            {canWrite && data.financialAccountId && (
+              <button type="button" className="link mt-1 inline-flex items-center gap-1 text-xs" onClick={() => setEditingBalance(true)}>
+                <Pencil className="size-3" /> {s.editBalance}
+              </button>
+            )}
           </div>
         </div>
       ) : (
         <Skel h={64} className="mb-3" />
+      )}
+
+      {data?.financialAccountId && openingAfterStart(data) && (
+        <div className="notice warn mb-3 flex flex-wrap items-center gap-2" data-testid="opening-warning">
+          <span className="min-w-0 flex-1">{s.openingAfterStart(formatDate(data.accountOpeningDate!))}</span>
+          {canWrite && (
+            <Link className="btn btn-ghost btn-sm" to={adjustAccountLink(data.caixaId, data.financialAccountId)}>
+              <Landmark /> {s.adjustAccount}
+            </Link>
+          )}
+        </div>
       )}
 
       {failures.length > 0 && (
@@ -396,6 +487,16 @@ export function ImportDetail({
           </tbody>
         </table>
       </div>
+      {editingBalance && data && (
+        <BalanceModal
+          detail={data}
+          onClose={() => setEditingBalance(false)}
+          onSaved={() => {
+            setEditingBalance(false);
+            changed();
+          }}
+        />
+      )}
     </>
   );
 }
