@@ -51,6 +51,10 @@ export const statementsStrings = {
   clearBalance: 'Sem saldo',
   restoreFileBalance: 'Voltar ao saldo do arquivo',
   balanceSaved: 'Saldo do lote atualizado.',
+  renameFile: 'Renomear',
+  renameFileTitle: 'Renomear o arquivo do lote',
+  fileName: 'Nome do arquivo',
+  fileRenamed: 'Arquivo renomeado.',
   intervalDifference: 'Do intervalo',
   intervalDifferenceHint: 'Divergência nascida desde o lote anterior com saldo (0 = o erro é de antes).',
   openingAfterStart: (opening: string) =>

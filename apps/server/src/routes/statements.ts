@@ -5,6 +5,7 @@ import {
   csvMappingInput,
   csvMappingUpdateInput,
   importBankBalanceInput,
+  importRenameInput,
   lineClassifyInput,
   lineCreateInput,
   lineIdsInput,
@@ -70,6 +71,7 @@ export async function statementRoutes(app: FastifyInstance) {
   app.put('/api/statement-imports/:id/bank-balance', (r: Req) =>
     statements.setImportBankBalance(r.ctx, id(r), parse(importBankBalanceInput, r.body)),
   );
+  app.put('/api/statement-imports/:id/file-name', (r: Req) => statements.renameImport(r.ctx, id(r), parse(importRenameInput, r.body)));
   app.post('/api/statement-imports/:id/apply-rules', (r: Req) => rec.applyRulesToImport(r.ctx, id(r)));
   app.get('/api/statement-lines', (r: Req) => statements.searchLines(r.ctx, parse(statementLineSearchQuery, r.query)));
 

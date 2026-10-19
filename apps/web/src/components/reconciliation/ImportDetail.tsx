@@ -121,6 +121,52 @@ function BalanceModal({ detail, onClose, onSaved }: { detail: StatementImportDet
   );
 }
 
+/** Renomear o arquivo do lote (spec 009): troca só o nome do anexo. */
+function RenameModal({ detail, onClose, onSaved }: { detail: StatementImportDetail; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState(detail.fileName);
+  const { run, busy } = useAction();
+
+  async function save() {
+    if (await run(() => api.put(`/api/statement-imports/${detail.id}/file-name`, { fileName: name.trim() }), s.fileRenamed)) onSaved();
+  }
+
+  return (
+    <Modal open title={s.renameFileTitle} onClose={onClose}>
+      <form
+        className="form-grid"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void save();
+        }}
+      >
+        <Field label={s.fileName}>
+          <input
+            className="field"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            maxLength={255}
+            required
+            autoFocus
+            // Abre com o nome selecionado sem a extensão, para digitar por cima.
+            onFocus={(e) => {
+              const dot = e.target.value.lastIndexOf('.');
+              e.target.setSelectionRange(0, dot > 0 ? dot : e.target.value.length);
+            }}
+          />
+        </Field>
+        <ModalActions>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
+            {t.common.cancel}
+          </Button>
+          <Button type="submit" disabled={busy || !name.trim() || name.trim() === detail.fileName}>
+            {busy ? t.common.saving : t.common.save}
+          </Button>
+        </ModalActions>
+      </form>
+    </Modal>
+  );
+}
+
 /** Execução do agente que está sugerindo a classificação das linhas (logo após importar ou pelo "Sugerir com IA"). */
 export type SuggestionRun = { runId: string; lines: number };
 
@@ -160,6 +206,7 @@ export function ImportDetail({
   const [aiPanelKey, setAiPanelKey] = useState(0);
   const [recipesVersion, setRecipesVersion] = useState(0);
   const [editingBalance, setEditingBalance] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const { reload } = detail;
 
   const changed = () => {
@@ -298,6 +345,11 @@ export function ImportDetail({
               {data.format.toUpperCase()}
               {data.accountName ? ` · ${data.accountName}` : ''}
             </span>
+            {canWrite && (
+              <button type="button" className="link mt-1 inline-flex items-center gap-1 text-xs" onClick={() => setRenaming(true)}>
+                <Pencil className="size-3" /> {s.renameFile}
+              </button>
+            )}
           </div>
           <div>
             <span className="label">{s.period}</span>
@@ -487,6 +539,16 @@ export function ImportDetail({
           </tbody>
         </table>
       </div>
+      {renaming && data && (
+        <RenameModal
+          detail={data}
+          onClose={() => setRenaming(false)}
+          onSaved={() => {
+            setRenaming(false);
+            changed();
+          }}
+        />
+      )}
       {editingBalance && data && (
         <BalanceModal
           detail={data}

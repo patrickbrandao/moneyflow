@@ -184,6 +184,9 @@ export const importBankBalanceInput = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('file') }),
 ]);
 
+/** Renomear o arquivo do lote (spec 009): o nome do anexo, sem caminho. */
+export const importRenameInput = z.object({ fileName: requiredText(255) });
+
 /** Aplicar as regras de classificação às linhas novas de todas as contas da caixa (spec 009). */
 export const applyRulesInput = z.object({ caixaId: id });
 

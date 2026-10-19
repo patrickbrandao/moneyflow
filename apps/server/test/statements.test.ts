@@ -377,3 +377,30 @@ describe('saldo do banco do lote (spec 009)', () => {
     await admin.put(`/api/statement-imports/${second.id}/bank-balance`, { mode: 'set', amountCents: 1 }, 400);
   });
 });
+
+describe('renomear o arquivo do lote (spec 009)', () => {
+  it('troca o nome do anexo, sem caminho; leitor não renomeia e nome vazio é recusado', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const imp = (
+      await upload(
+        adminSession.cookie,
+        `/api/statement-imports?accountId=${s.accountA.id}&fileName=a.ofx`,
+        fixture('extrato-ofx2.ofx'),
+        'application/x-ofx',
+      )
+    ).json();
+
+    const renamed = await admin.put(`/api/statement-imports/${imp.id}/file-name`, { fileName: 'pasta/Extrato outubro.ofx' });
+    expect(renamed.fileName).toBe('Extrato outubro.ofx');
+    expect(renamed.lineCount).toBe(imp.lineCount);
+    const listed = await admin.get(`/api/statement-imports?accountId=${s.accountA.id}`);
+    expect(listed.find((i: any) => i.id === imp.id).fileName).toBe('Extrato outubro.ofx');
+
+    await admin.put(`/api/statement-imports/${imp.id}/file-name`, { fileName: '  ' }, 400);
+    const viewerUser = await userSession(h);
+    await admin.put(`/api/users/${viewerUser.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
+    await client(h, viewerUser.cookie).put(`/api/statement-imports/${imp.id}/file-name`, { fileName: 'x.ofx' }, 403);
+  });
+});

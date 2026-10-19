@@ -7,6 +7,7 @@ import {
   decodeStatementFile,
   detectDelimiter,
   type importBankBalanceInput,
+  type importRenameInput,
   type MatchCandidate,
   normalizeDescriptionForDedup,
   parseCsv,
@@ -23,7 +24,7 @@ import { eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { AppError, notFound, unprocessable } from '../errors';
-import { storeAttachment } from './attachments';
+import { cleanFileName, storeAttachment } from './attachments';
 import { getAccount } from './caixas';
 import { loadCard } from './card-core';
 import { withTx } from './tx';
@@ -603,6 +604,23 @@ export async function setImportBankBalance(
       .update(statementImports)
       .set({ bankBalanceCents: balance?.amountCents ?? null, bankBalanceOn: balance?.date ?? null })
       .where(eq(statementImports.id, id)),
+  );
+  return getImport(ctx, id);
+}
+
+/** Renomeia o arquivo do lote (spec 009): o anexo é só deste lote; o conteúdo não muda. */
+export async function renameImport(
+  ctx: ServiceContext,
+  id: string,
+  input: z.output<typeof importRenameInput>,
+): Promise<StatementImportDetail> {
+  const detail = await getImport(ctx, id);
+  ctx.access.assertWrite(detail.caixaId);
+  await withTx(ctx, (tx) =>
+    tx
+      .update(attachments)
+      .set({ fileName: cleanFileName(input.fileName) })
+      .where(eq(attachments.id, detail.attachmentId)),
   );
   return getImport(ctx, id);
 }
