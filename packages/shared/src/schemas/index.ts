@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { normalizeCep, normalizeUf } from '../address';
+import { addDays } from '../dates';
 import { isValidDocument, normalizeDocument } from '../documents';
 import { ptBR } from '../i18n/pt-BR';
 import { isValidPixKey, normalizePixKey, PIX_KEY_TYPES } from '../pix';
@@ -281,6 +282,12 @@ export const adjustmentInput = z.object({
 });
 
 export const statementQuery = z.object({ from: isoDate.optional(), to: isoDate.optional() });
+
+/** Resumo da conta (spec 004): período em meses fechados, até 36. */
+export const accountSummaryQuery = z
+  .object({ from: isoDate, to: isoDate })
+  .refine((q) => q.to >= q.from, { message: E.invalidPeriod, path: ['to'] })
+  .refine((q) => q.to <= addDays(q.from, 1100), { message: E.invalidPeriod, path: ['to'] });
 
 export const hiddenCategoriesInput = z.object({ categoryIds: z.array(id).max(1000) });
 

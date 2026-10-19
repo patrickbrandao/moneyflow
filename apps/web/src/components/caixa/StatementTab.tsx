@@ -1,22 +1,25 @@
 import { addDays, type CaixaDetail, formatDate, type Statement, t, todayIso } from '@moneyflow/shared';
-import { FileText, Paperclip, Trash2 } from 'lucide-react';
+import { ExternalLink, FileText, Paperclip, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { statementTable } from '../../lib/export-tables';
 import { useAction, useApi } from '../../lib/hooks';
-import { titleLink } from '../../lib/links';
+import { accountLink, titleLink } from '../../lib/links';
 import { useParamState } from '../../lib/params';
 import { AttachmentsModal } from '../attachments/AttachmentsPanel';
 import { LoadError, Money, SkelRows } from '../domain';
 import { ExportMenu } from '../ExportMenu';
 import { Badge, EmptyRow, EmptyState, useConfirm } from '../ui';
 
-/** Extrato por conta: movimentos do período com saldo corrente. */
-export function StatementTab({ caixa, onChanged }: { caixa: CaixaDetail; onChanged: () => void }) {
+/**
+ * Extrato por conta: movimentos do período com saldo corrente. Na caixa, escolhe a conta;
+ * na tela da conta (`fixedAccountId`), fica nela, sem o seletor.
+ */
+export function StatementTab({ caixa, fixedAccountId, onChanged }: { caixa: CaixaDetail; fixedAccountId?: string; onChanged: () => void }) {
   const active = caixa.accounts.filter((a) => !a.archivedAt);
   const [accountParam, setAccount] = useParamState('account');
-  const accountId = accountParam ?? active[0]?.id ?? caixa.accounts[0]?.id ?? null;
+  const accountId = fixedAccountId ?? accountParam ?? active[0]?.id ?? caixa.accounts[0]?.id ?? null;
   const [from, setFrom] = useState(addDays(todayIso(), -30));
   const [to, setTo] = useState('');
   const qs = new URLSearchParams();
@@ -45,19 +48,26 @@ export function StatementTab({ caixa, onChanged }: { caixa: CaixaDetail; onChang
   return (
     <>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <select
-          className="field field-auto"
-          value={accountId}
-          onChange={(e) => setAccount(e.target.value)}
-          aria-label={t.settlement.account}
-        >
-          {caixa.accounts.map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.name}
-              {a.archivedAt ? ` (${t.common.archived.toLowerCase()})` : ''}
-            </option>
-          ))}
-        </select>
+        {!fixedAccountId && (
+          <>
+            <select
+              className="field field-auto"
+              value={accountId}
+              onChange={(e) => setAccount(e.target.value)}
+              aria-label={t.settlement.account}
+            >
+              {caixa.accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                  {a.archivedAt ? ` (${t.common.archived.toLowerCase()})` : ''}
+                </option>
+              ))}
+            </select>
+            <Link className="row-action" to={accountLink(caixa.id, accountId, 'statement')} title={t.caixa.account.open}>
+              <ExternalLink />
+            </Link>
+          </>
+        )}
         <input
           type="date"
           className="field field-auto"

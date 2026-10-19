@@ -1,4 +1,14 @@
-import { addDays, type Statement, type StatementRow, type statementQuery } from '@moneyflow/shared';
+import {
+  type AccountSummary,
+  type AccountSummaryCategory,
+  type AccountSummaryMonth,
+  type accountSummaryQuery,
+  addDays,
+  type Statement,
+  type StatementRow,
+  type statementQuery,
+  todayIso,
+} from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
@@ -45,5 +55,101 @@ export async function accountStatement(ctx: ServiceContext, accountId: string, q
     openingCents,
     closingCents: rows.at(-1)?.balanceCents ?? openingCents,
     rows,
+  };
+}
+
+/**
+ * Resumo da conta (spec 004): entradas e saídas por mês (transferências à parte) com o saldo ao fim
+ * de cada mês, despesa e receita por categoria pelo regime de caixa (as mesmas regras de
+ * report_category_totals, só com os movimentos desta conta) e a situação da conciliação.
+ */
+export async function accountSummary(
+  ctx: ServiceContext,
+  accountId: string,
+  query: z.output<typeof accountSummaryQuery>,
+): Promise<AccountSummary> {
+  const account = await getAccount(ctx, accountId);
+  const summary = (await listAccounts(ctx, { caixaId: account.caixaId, archived: true })).find((a) => a.id === accountId)!;
+  const { from, to } = query;
+  const today = todayIso();
+
+  const monthly = await ctx.db.execute(sql`
+    WITH months AS (
+      SELECT g::date AS month
+        FROM generate_series(date_trunc('month', ${from}::date), date_trunc('month', ${to}::date), interval '1 month') g
+    ), totals AS (
+      SELECT date_trunc('month', m.occurred_on)::date AS month,
+             coalesce(sum(m.amount_cents) FILTER (WHERE m.kind <> 'transfer' AND m.amount_cents > 0), 0) AS inflow_cents,
+             coalesce(-sum(m.amount_cents) FILTER (WHERE m.kind <> 'transfer' AND m.amount_cents < 0), 0) AS outflow_cents,
+             coalesce(sum(m.amount_cents) FILTER (WHERE m.kind = 'transfer' AND m.amount_cents > 0), 0) AS transfer_in_cents,
+             coalesce(-sum(m.amount_cents) FILTER (WHERE m.kind = 'transfer' AND m.amount_cents < 0), 0) AS transfer_out_cents
+        FROM movements m
+       WHERE m.financial_account_id = ${accountId}
+         AND m.occurred_on BETWEEN ${from}::date AND ${to}::date
+       GROUP BY 1
+    )
+    SELECT mo.month,
+           coalesce(t.inflow_cents, 0)::bigint AS inflow_cents,
+           coalesce(t.outflow_cents, 0)::bigint AS outflow_cents,
+           coalesce(t.transfer_in_cents, 0)::bigint AS transfer_in_cents,
+           coalesce(t.transfer_out_cents, 0)::bigint AS transfer_out_cents,
+           CASE WHEN mo.month <= ${today}::date
+                THEN financial_account_balance_at(${accountId}::uuid, (mo.month + interval '1 month' - interval '1 day')::date)
+           END AS closing_cents
+      FROM months mo
+      LEFT JOIN totals t ON t.month = mo.month
+     ORDER BY mo.month`);
+
+  const categories = await ctx.db.execute(sql`
+    WITH lines AS (
+      SELECT c.kind, coalesce(c.parent_id, c.id) AS group_category_id, c.id AS category_id,
+             CASE c.kind WHEN 'expense' THEN -m.amount_cents ELSE m.amount_cents END AS amount_cents
+        FROM movements m
+        JOIN settlements s ON s.id = m.settlement_id
+        JOIN titles t ON t.id = s.title_id
+        JOIN categories c ON c.id = t.category_id
+       WHERE m.kind = 'settlement'
+         AND m.financial_account_id = ${accountId}
+         AND m.occurred_on BETWEEN ${from}::date AND ${to}::date
+      UNION ALL
+      SELECT x.kind, coalesce(c.parent_id, c.id), c.id,
+             CASE x.kind WHEN 'expense' THEN -m.amount_cents ELSE m.amount_cents END
+        FROM movements m
+        LEFT JOIN categories c ON c.id = m.category_id
+        CROSS JOIN LATERAL (SELECT coalesce(c.kind, CASE WHEN m.amount_cents > 0 THEN 'income' ELSE 'expense' END) AS kind) x
+       WHERE m.kind = 'adjustment'
+         AND m.financial_account_id = ${accountId}
+         AND m.occurred_on BETWEEN ${from}::date AND ${to}::date
+    )
+    SELECT l.kind, l.group_category_id, g.name AS group_name, g.color_slot AS group_color_slot,
+           l.category_id, c.name AS category_name, c.color_slot,
+           sum(l.amount_cents)::bigint AS amount_cents, count(*)::int AS entries
+      FROM lines l
+      LEFT JOIN categories g ON g.id = l.group_category_id
+      LEFT JOIN categories c ON c.id = l.category_id
+     GROUP BY l.kind, l.group_category_id, g.name, g.color_slot, l.category_id, c.name, c.color_slot
+     ORDER BY l.kind, amount_cents DESC`);
+
+  let reconciliation: AccountSummary['reconciliation'] = null;
+  if (account.kind === 'checking' || account.kind === 'savings') {
+    const result = await ctx.db.execute<NonNullable<AccountSummary['reconciliation']>>(sql`
+      SELECT (SELECT count(*) FROM statement_imports i WHERE i.financial_account_id = ${accountId})::int AS imports,
+             (SELECT i.id FROM statement_imports i WHERE i.financial_account_id = ${accountId}
+               ORDER BY i.period_end DESC, i.created_at DESC LIMIT 1) AS "lastImportId",
+             (SELECT max(i.period_end) FROM statement_imports i WHERE i.financial_account_id = ${accountId}) AS "lastPeriodEnd",
+             count(*) FILTER (WHERE l.status = 'new')::int AS "newLines",
+             count(*) FILTER (WHERE l.status = 'suggested')::int AS "suggestedLines"
+        FROM statement_lines l
+       WHERE l.financial_account_id = ${accountId}`);
+    reconciliation = result.rows[0]!;
+  }
+
+  return {
+    account: summary,
+    from,
+    to,
+    months: monthly.rows.map((row) => camel<AccountSummaryMonth>(row)),
+    categories: categories.rows.map((row) => camel<AccountSummaryCategory>(row)),
+    reconciliation,
   };
 }

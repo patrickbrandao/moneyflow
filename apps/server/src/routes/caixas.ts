@@ -1,5 +1,6 @@
 import {
   accountCreateInput,
+  accountSummaryQuery,
   accountUpdateInput,
   adjustmentInput,
   caixaCreateInput,
@@ -17,7 +18,7 @@ import { z } from 'zod';
 import { param, parse, type Req } from '../http';
 import * as caixas from '../services/caixas';
 import * as categories from '../services/categories';
-import { accountStatement } from '../services/statement';
+import { accountStatement, accountSummary } from '../services/statement';
 
 const archivedQuery = z.object({ archived: queryBool });
 const accountsQuery = z.object({ archived: queryBool, writable: queryBool, caixaId: z.uuid().optional() });
@@ -52,6 +53,7 @@ export async function caixaRoutes(app: FastifyInstance) {
     return { ok: true };
   });
   app.get('/api/accounts/:id/statement', (r: Req) => accountStatement(r.ctx, id(r), parse(statementQuery, r.query)));
+  app.get('/api/accounts/:id/summary', (r: Req) => accountSummary(r.ctx, id(r), parse(accountSummaryQuery, r.query)));
   app.post('/api/accounts/:id/adjustments', (r: Req) => caixas.addAdjustment(r.ctx, id(r), parse(adjustmentInput, r.body)));
   app.delete('/api/movements/:id', async (r: Req) => {
     await caixas.deleteAdjustment(r.ctx, id(r));

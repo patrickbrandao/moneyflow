@@ -33,6 +33,12 @@ export const invoiceLink = (invoiceId: string, payerCaixaId?: string | null) =>
 
 export const purchaseLink = (cardCaixaId: string, purchaseId: string) => `${caixaTab(cardCaixaId, 'purchases')}?purchase=${purchaseId}`;
 
+/** Tela da conta financeira dentro da caixa (spec 004): resumo, extrato e conciliação só dela. */
+export type AccountTab = 'overview' | 'statement' | 'reconciliation';
+
+export const accountLink = (caixaId: string, accountId: string, tab?: AccountTab) =>
+  `/caixas/${caixaId}/accounts/${accountId}${tab && tab !== 'overview' ? `/${tab}` : ''}`;
+
 export const statementLink = (caixaId: string, accountId: string) => `${caixaTab(caixaId, 'statement')}?account=${accountId}`;
 
 export const reconciliationLink = (caixaId: string, accountId: string, importId?: string) =>

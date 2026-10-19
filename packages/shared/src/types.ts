@@ -358,6 +358,50 @@ export type Statement = {
   rows: StatementRow[];
 };
 
+/** Resumo da conta (spec 004): série mensal, categorias pelo regime de caixa e situação da conciliação. */
+export type AccountSummaryMonth = {
+  /** 'YYYY-MM-01'. */
+  month: string;
+  /** Baixas e avulsos que entraram (sem transferências). */
+  inflowCents: number;
+  /** Baixas e avulsos que saíram, positivo (sem transferências). */
+  outflowCents: number;
+  transferInCents: number;
+  /** Positivo. */
+  transferOutCents: number;
+  /** Saldo ao fim do mês (ou hoje, no mês corrente); null antes da abertura da conta. */
+  closingCents: number | null;
+};
+
+export type AccountSummaryCategory = {
+  kind: 'income' | 'expense';
+  groupCategoryId: string | null;
+  groupName: string | null;
+  groupColorSlot: number | null;
+  categoryId: string | null;
+  categoryName: string | null;
+  colorSlot: number | null;
+  /** Positivo = despesa em expense, receita em income; estornos subtraem. */
+  amountCents: number;
+  entries: number;
+};
+
+export type AccountSummary = {
+  account: AccountRow;
+  from: string;
+  to: string;
+  months: AccountSummaryMonth[];
+  categories: AccountSummaryCategory[];
+  /** Só conta corrente e poupança concilia extrato; null nas demais. */
+  reconciliation: {
+    imports: number;
+    lastImportId: string | null;
+    lastPeriodEnd: string | null;
+    newLines: number;
+    suggestedLines: number;
+  } | null;
+};
+
 export type Overview = {
   totals: { balanceCents: number; payableOpenCents: number; receivableOpenCents: number; overdueCents: number };
   caixas: CaixaSummary[];

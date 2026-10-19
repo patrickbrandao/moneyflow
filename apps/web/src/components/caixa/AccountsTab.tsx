@@ -5,7 +5,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction } from '../../lib/hooks';
-import { caixaTab } from '../../lib/links';
+import { accountLink } from '../../lib/links';
 import { useParamState } from '../../lib/params';
 import { Money } from '../domain';
 import { CategorySelect, FormError, ModalActions, MoneyInput } from '../forms';
@@ -95,8 +95,9 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
               <tr key={account.id} className={account.archivedAt ? 'is-off' : ''}>
                 <td>
                   <Link
-                    to={`${caixaTab(caixa.id, 'statement')}?account=${account.id}`}
+                    to={accountLink(caixa.id, account.id)}
                     className="row-title hover:text-[var(--accent-soft)]"
+                    title={t.caixa.account.open}
                   >
                     {account.name}
                   </Link>
@@ -115,7 +116,7 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
                 </td>
                 <td className="text-right">
                   <span className="row-actions">
-                    <Link className="row-action" title={t.caixa.statement} to={`${caixaTab(caixa.id, 'statement')}?account=${account.id}`}>
+                    <Link className="row-action" title={t.caixa.statement} to={accountLink(caixa.id, account.id, 'statement')}>
                       <FileText />
                     </Link>
                     {caixa.canWrite && !account.archivedAt && (
@@ -168,7 +169,7 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
   );
 }
 
-function AccountFormModal({
+export function AccountFormModal({
   caixaId,
   account,
   onClose,
@@ -285,7 +286,7 @@ function AccountFormModal({
 }
 
 /** Lançamento avulso (ajuste de contagem, rendimento, tarifa): + entra, − sai. */
-function AdjustmentModal({ account, onClose, onSaved }: { account: AccountRow; onClose: () => void; onSaved: () => void }) {
+export function AdjustmentModal({ account, onClose, onSaved }: { account: AccountRow; onClose: () => void; onSaved: () => void }) {
   const [direction, setDirection] = useState<'in' | 'out'>('in');
   const [amount, setAmount] = useState<number | null>(null);
   const [occurredOn, setOccurredOn] = useState(todayIso());

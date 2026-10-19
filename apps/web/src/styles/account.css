@@ -1,0 +1,163 @@
+/* Caixa → conta (spec 004): a faixa de contas da caixa e a tela da conta. */
+
+.acc-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -10px 0 18px;
+}
+.acc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 6px 12px;
+  border: 1px solid var(--surface-3);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: inherit;
+  font-size: 13px;
+  text-decoration: none;
+  transition: border-color 0.12s ease;
+}
+.acc-chip:hover {
+  border-color: var(--accent-soft);
+}
+.acc-chip svg {
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  flex: none;
+}
+.acc-chip-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.acc-chip-kind {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.acc-title {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.acc-title-caixa {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.acc-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.acc-toolbar .segmented {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+.acc-toolbar .segmented button {
+  white-space: nowrap;
+}
+
+.acc-donuts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.acc-donut {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+  margin: 0;
+}
+.acc-donut svg {
+  flex: none;
+}
+.acc-donut svg circle {
+  transition: stroke-width 0.12s ease;
+}
+.acc-donut-k {
+  fill: var(--text-muted);
+  font-size: 11px;
+}
+.acc-donut-v {
+  fill: var(--text);
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 600;
+}
+.acc-donut-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.acc-donut-legend button {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "dot name share"
+    ". value value";
+  align-items: center;
+  column-gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  text-align: left;
+  color: inherit;
+}
+.acc-donut-legend button i {
+  grid-area: dot;
+}
+.acc-donut-name {
+  grid-area: name;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.acc-donut-value {
+  grid-area: value;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+.acc-donut-legend button.is-hover,
+.acc-donut-legend button:focus-visible {
+  background: var(--surface-2);
+}
+.acc-donut-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+.acc-donut-share {
+  grid-area: share;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .acc-donuts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .acc-donut {
+    justify-content: center;
+  }
+}

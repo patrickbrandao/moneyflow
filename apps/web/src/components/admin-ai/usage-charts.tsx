@@ -19,7 +19,7 @@ const GAP = 2;
 const RADIUS = 4;
 
 /** Largura do contêiner (o SVG desenha em pixels reais: texto nítido e colunas de largura fixa). */
-function useWidth() {
+export function useWidth() {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   useEffect(() => {
@@ -34,7 +34,7 @@ function useWidth() {
 }
 
 /** Marcas "redondas" do eixo: 0, 1, 2, 5 × 10ⁿ. */
-function niceTicks(max: number, count = 4): number[] {
+export function niceTicks(max: number, count = 4): number[] {
   if (!(max > 0)) return [0];
   const raw = max / count;
   const power = 10 ** Math.floor(Math.log10(raw));
@@ -49,12 +49,12 @@ function niceTicks(max: number, count = 4): number[] {
 export const dayLabel = (day: string) => `${day.slice(8, 10)}/${day.slice(5, 7)}`;
 
 /** Retângulo com só os cantos de cima arredondados (a base fica reta na linha zero). */
-function topRounded(x: number, y: number, w: number, h: number, r: number) {
+export function topRounded(x: number, y: number, w: number, h: number, r: number) {
   const radius = Math.min(r, h, w / 2);
   return `M${x},${y + h}V${y + radius}Q${x},${y} ${x + radius},${y}H${x + w - radius}Q${x + w},${y} ${x + w},${y + radius}V${y + h}Z`;
 }
 
-function Tooltip({ x, width, children }: { x: number; width: number; children: ReactNode }) {
+export function Tooltip({ x, width, children }: { x: number; width: number; children: ReactNode }) {
   // À direita do ponto; perto da borda, vira para a esquerda (não cobre a coluna em destaque).
   const left = x + 12 + 220 <= width ? x + 12 : Math.max(8, x - 12 - 220);
   return (
@@ -64,7 +64,7 @@ function Tooltip({ x, width, children }: { x: number; width: number; children: R
   );
 }
 
-function TipRow({ color, label, value, line }: { color: string; label: string; value: string; line?: boolean }) {
+export function TipRow({ color, label, value, line }: { color: string; label: string; value: string; line?: boolean }) {
   return (
     <div className="uc-tip-row">
       <i className={line ? 'line' : undefined} style={{ background: color }} />
@@ -74,7 +74,7 @@ function TipRow({ color, label, value, line }: { color: string; label: string; v
   );
 }
 
-function Legend({ series, line }: { series: Pick<ChartSeries, 'key' | 'label' | 'color'>[]; line?: boolean }) {
+export function Legend({ series, line }: { series: Pick<ChartSeries, 'key' | 'label' | 'color'>[]; line?: boolean }) {
   return (
     <figcaption className="uc-legend">
       {series.map((s) => (
@@ -88,7 +88,7 @@ function Legend({ series, line }: { series: Pick<ChartSeries, 'key' | 'label' | 
 }
 
 /** Teclado: setas movem o dia em destaque (a mesma dica do mouse). */
-function useKeyboardIndex(count: number, setIndex: (update: (i: number | null) => number | null) => void) {
+export function useKeyboardIndex(count: number, setIndex: (update: (i: number | null) => number | null) => void) {
   return (event: KeyboardEvent) => {
     if (event.key === 'ArrowRight') setIndex((i) => Math.min(count - 1, (i ?? -1) + 1));
     else if (event.key === 'ArrowLeft') setIndex((i) => Math.max(0, (i ?? count) - 1));

@@ -1,6 +1,8 @@
 import { type CaixaDetail, t } from '@moneyflow/shared';
-import { FileText, ListFilter, Wand2 } from 'lucide-react';
+import { ExternalLink, FileText, ListFilter, Wand2 } from 'lucide-react';
 import { useEffect } from 'react';
+import { Link } from 'react-router-dom';
+import { accountLink } from '../../lib/links';
 import { useParamState, useSetParams } from '../../lib/params';
 import { useStored } from '../../lib/storage';
 import { EmptyState, Tabs } from '../ui';
@@ -54,6 +56,11 @@ export function ReconciliationTab({ caixa, onChanged }: { caixa: CaixaDetail; on
                 </option>
               ))}
             </select>
+            {accountId && (
+              <Link className="row-action" to={accountLink(caixa.id, accountId, 'reconciliation')} title={t.caixa.account.open}>
+                <ExternalLink />
+              </Link>
+            )}
           </label>
         )}
       </div>
