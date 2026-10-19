@@ -34,6 +34,7 @@ export type UserRow = {
 export type { EntityKind } from './documents';
 
 import type { EntityKind } from './documents';
+import type { LINE_CREATED_ENTRIES } from './schemas/operation';
 
 /** Tag de entidade como aparece na entidade (chip): `archived` = tag arquivada (esmaecida). */
 export type EntityTagRef = { id: string; name: string; colorSlot: number; archived: boolean };
@@ -544,6 +545,7 @@ export type CardPurchaseDetail = CardPurchaseRow & {
 /* ---------------- extratos e conciliação (spec 009) ---------------- */
 
 export type LineStatus = 'matched' | 'suggested' | 'new' | 'ignored';
+export type LineCreatedEntry = (typeof LINE_CREATED_ENTRIES)[number];
 
 export type StatementImportSummary = {
   id: string;
@@ -587,6 +589,8 @@ export type StatementLineRow = {
   movementId: string | null;
   titleId: string | null;
   cardInvoiceItemId: string | null;
+  /** O lançamento conciliado nasceu desta linha (spec 009): "desfazer e excluir" o tira junto. */
+  createdEntry: LineCreatedEntry | null;
   /** Resumo do par (conciliado ou sugerido). */
   target: {
     kind: 'movement' | 'title' | 'card_item';

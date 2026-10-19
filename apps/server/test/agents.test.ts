@@ -1211,7 +1211,7 @@ describe('conciliação pelo agente', () => {
     await callTool(autonomous.id, 'match_statement_line', { lineId, titleId: wrong.id });
     expect((await admin.get(`/api/titles/${wrong.id}`)).openCents).toBe(60_000);
 
-    // Com o agente que pede confirmação: a prévia avisa que a baixa fica.
+    // Com o agente que pede confirmação: a prévia avisa que a baixa (nascida da linha) fica sem deleteEntry.
     const asked = await callTool(agent.id, 'unmatch_statement_line', { lineId });
     expect(asked.status).toBe('awaiting_confirmation');
     const card = asked.detail.confirmations[0];
@@ -1220,7 +1220,7 @@ describe('conciliação pelo agente', () => {
       preview: { title: 'Desfazer conciliação da linha', action: 'delete' },
     });
     expect(card.preview.rows[0].before).toContain('Aluguel');
-    expect(card.preview.warnings[0]).toContain('continuam lançados');
+    expect(card.preview.warnings[0]).toContain('relançar a linha duplica o valor');
     await admin.post(`/api/runs/${asked.runId}/confirmations`, { decision: 'approved' });
     await drain();
     const after = (await admin.get(`/api/statement-imports/${imp.id}`)).lines.find((l: any) => l.id === lineId);

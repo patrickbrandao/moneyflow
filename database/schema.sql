@@ -7441,6 +7441,37 @@ $$;
 
 
 --
+-- Name: statement_line_inferred_created_entry(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.statement_line_inferred_created_entry(p_line_id uuid) RETURNS text
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT CASE
+           WHEN l.status <> 'matched' THEN NULL
+           WHEN m.kind = 'adjustment' AND m.created_at = l.matched_at THEN 'adjustment'
+           WHEN m.kind = 'settlement' AND t.created_at = l.matched_at THEN 'title'
+           WHEN m.kind = 'settlement' AND s.created_at = l.matched_at THEN 'settlement'
+           WHEN p.created_at = l.matched_at THEN 'purchase'
+         END
+    FROM statement_lines l
+    LEFT JOIN movements m ON m.id = l.movement_id
+    LEFT JOIN settlements s ON s.id = m.settlement_id
+    LEFT JOIN titles t ON t.id = s.title_id
+    LEFT JOIN card_invoice_items i ON i.id = l.card_invoice_item_id
+    LEFT JOIN card_purchases p ON p.id = i.card_purchase_id
+   WHERE l.id = p_line_id
+$$;
+
+
+--
+-- Name: FUNCTION statement_line_inferred_created_entry(p_line_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.statement_line_inferred_created_entry(p_line_id uuid) IS 'Uso interno (backfill da 0048): created_entry inferido para uma linha matched pelo instante de criação do lançamento igual ao matched_at (mesma transação). Nulo se o lançamento é mais antigo que a conciliação. Não é usado pela aplicação, que grava created_entry ao conciliar.';
+
+
+--
 -- Name: statement_lines_validate(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -13256,8 +13287,18 @@ CREATE TABLE public.statement_lines (
     matched_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_entry text,
     CONSTRAINT statement_lines_amount_cents_check CHECK ((amount_cents <> 0)),
     CONSTRAINT statement_lines_classification_source_check CHECK (((classification_source = ANY (ARRAY['rule'::text, 'agent'::text, 'user'::text])) AND ((classification_rule_id IS NULL) OR (NOT (classification_source IS DISTINCT FROM 'rule'::text))))),
+    CONSTRAINT statement_lines_created_entry_check CHECK (((created_entry IS NULL) OR ((created_entry = ANY (ARRAY['adjustment'::text, 'title'::text, 'settlement'::text, 'purchase'::text])) AND (status = 'matched'::text)))),
+    CONSTRAINT statement_lines_created_entry_links_check CHECK (
+CASE created_entry
+    WHEN 'adjustment'::text THEN (movement_id IS NOT NULL)
+    WHEN 'title'::text THEN (movement_id IS NOT NULL)
+    WHEN 'settlement'::text THEN (movement_id IS NOT NULL)
+    WHEN 'purchase'::text THEN (card_invoice_item_id IS NOT NULL)
+    ELSE true
+END),
     CONSTRAINT statement_lines_dedup_hash_check CHECK (((btrim(dedup_hash) <> ''::text) AND (length(dedup_hash) <= 200))),
     CONSTRAINT statement_lines_line_number_check CHECK ((line_number >= 1)),
     CONSTRAINT statement_lines_links_check CHECK ((((movement_id IS NULL) OR (financial_account_id IS NOT NULL)) AND ((title_id IS NULL) OR (financial_account_id IS NOT NULL)) AND ((card_invoice_item_id IS NULL) OR (card_caixa_id IS NOT NULL)) AND
@@ -13375,6 +13416,13 @@ COMMENT ON COLUMN public.statement_lines.raw IS 'Campos originais da linha no ar
 --
 
 COMMENT ON COLUMN public.statement_lines.matched_at IS 'Quando a linha foi conciliada (obrigatório se e somente se matched).';
+
+
+--
+-- Name: COLUMN statement_lines.created_entry; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.statement_lines.created_entry IS 'Só em matched: o lançamento ligado foi criado a partir desta linha. adjustment = o movimento avulso de movement_id; title = o título (o par com o espelho) e a baixa cujo movimento é movement_id; settlement = só a baixa cujo movimento é movement_id, num título que já existia (casar com título em aberto); purchase = a compra no cartão do card_invoice_item_id. Nulo = a linha foi casada com um lançamento que já existia. A aplicação grava junto com a conciliação e limpa ao desfazer ou ignorar a linha (o "desfazer e excluir o lançamento" apaga o que ela indica).';
 
 
 --

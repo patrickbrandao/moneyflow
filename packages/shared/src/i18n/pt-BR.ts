@@ -208,6 +208,9 @@ export const ptBR = {
     lineNotPending: 'Esta linha já foi conciliada ou ignorada.',
     lineNotSuggested: 'Esta linha não tem sugestão a confirmar.',
     lineNotMatched: 'Esta linha não está conciliada.',
+    lineEntryNotCreated: 'O lançamento desta linha não nasceu dela: desfaça só a conciliação e corrija o lançamento à mão.',
+    lineEntryChanged:
+      'O lançamento desta linha mudou depois de lançado (outra baixa, estorno ou conciliação): desfaça só a conciliação e corrija à mão.',
     lineMatchTarget: 'Informe um (e só um) alvo: movimento, título ou item de fatura.',
     lineAmountMismatch: 'O valor não bate com o da linha do extrato.',
     lineDirectionMismatch: 'A direção do título não bate com a da linha (entrada × saída).',

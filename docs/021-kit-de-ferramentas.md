@@ -25,7 +25,7 @@ O registro (`packages/shared/src/agents/tools.ts`) ganha o campo `category` em c
 | Categoria | Tools |
 |---|---|
 | Busca e consulta | `search_records`, `semantic_search`, `calendar` |
-| Caixas e contas | `list_caixas`, `get_caixa`, `list_accounts`, `get_account_statement`, `list_transfers`, `create_transfer`, `delete_transfer`, `create_caixa`, `update_caixa`, `archive_caixa` (admin), `create_account`, `update_account`, `archive_account`, `create_adjustment` |
+| Caixas e contas | `list_caixas`, `get_caixa`, `list_accounts`, `get_account_statement`, `list_transfers`, `create_transfer`, `delete_transfer`, `create_caixa`, `update_caixa`, `archive_caixa` (admin), `create_account`, `update_account`, `archive_account`, `create_adjustment`, `delete_adjustment` |
 | Entidades | `list_entities`, `list_entity_tags`, `get_entity`, `create_entity`, `update_entity`, `set_entity_tags`, `set_entity_favorite`, `add_pix_key`, `create_entity_tag` (admin), `update_entity_tag` (admin), `archive_entity_tag` (admin) |
 | Títulos e baixas | `list_titles`, `get_title`, `create_title`, `update_title`, `end_series`, `settle_title`, `reverse_settlement`, `cancel_title`, `archive_title`, `delete_title`, `accept_mirror`, `dispute_mirror` |
 | Cartão de crédito | `get_card`, `get_invoice`, `list_card_purchases`, `create_card_purchase`, `close_invoice`, `pay_invoice`, `reopen_invoice`, `create_card_charge`, `refund_card_purchase` |

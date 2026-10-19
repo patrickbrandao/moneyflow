@@ -8,6 +8,7 @@ import {
   detectDelimiter,
   type importBankBalanceInput,
   type importRenameInput,
+  type LineStatus,
   type MatchCandidate,
   normalizeDescriptionForDedup,
   parseCsv,
@@ -523,25 +524,65 @@ export async function listImports(ctx: ServiceContext, ref: { accountId?: string
   return result.rows.map(toImport);
 }
 
-export async function getImport(ctx: ServiceContext, id: string): Promise<StatementImportDetail> {
+export async function getImport(ctx: ServiceContext, id: string, withLines = true): Promise<StatementImportDetail> {
   const result = await ctx.db.execute(sql`${importSql} WHERE i.id = ${id}`);
   const raw = result.rows[0];
   if (!raw) throw notFound();
   const summary = toImport(raw);
   ctx.access.assertRead(summary.caixaId);
-  return { ...summary, canWrite: ctx.access.canWrite(summary.caixaId), lines: await listLines(ctx.db, sql`l.statement_import_id = ${id}`) };
+  const lines = withLines ? await listLines(ctx.db, sql`l.statement_import_id = ${id}`) : [];
+  return { ...summary, canWrite: ctx.access.canWrite(summary.caixaId), lines };
+}
+
+type Page = { limit: number; offset: number };
+const nextOffset = (page: Page, shown: number, total: number) => (page.offset + shown < total ? page.offset + shown : null);
+
+/**
+ * Página dos lotes da conta ou do cartão, do mais recente ao mais antigo, com
+ * o total (spec 011: as tools leem em páginas para não passar do limite do
+ * resultado).
+ */
+export async function listImportsPage(ctx: ServiceContext, ref: { accountId?: string; cardCaixaId?: string }, page: Page) {
+  const target = await resolveTarget(ctx, ref, false);
+  const where = target.kind === 'account' ? sql`i.financial_account_id = ${target.accountId}` : sql`i.card_caixa_id = ${target.cardId}`;
+  const count = await ctx.db.execute<{ total: number }>(sql`SELECT count(*)::int AS total FROM statement_imports i WHERE ${where}`);
+  const total = Number(count.rows[0]?.total ?? 0);
+  const result = await ctx.db.execute(
+    sql`${importSql} WHERE ${where} ORDER BY i.created_at DESC, i.id DESC LIMIT ${page.limit} OFFSET ${page.offset}`,
+  );
+  const imports = result.rows.map(toImport);
+  return { total, offset: page.offset, nextOffset: nextOffset(page, imports.length, total), imports };
+}
+
+/** O lote com uma página das linhas (filtradas por situação), para as tools (spec 011). */
+export async function getImportPage(ctx: ServiceContext, id: string, query: Page & { statuses?: LineStatus[] }) {
+  const { lines: _all, ...summary } = await getImport(ctx, id, false);
+  const where = [sql`l.statement_import_id = ${id}`];
+  if (query.statuses?.length)
+    where.push(
+      sql`l.status IN (${sql.join(
+        query.statuses.map((status) => sql`${status}`),
+        sql`, `,
+      )})`,
+    );
+  const filter = sql.join(where, sql` AND `);
+  const count = await ctx.db.execute<{ total: number }>(sql`SELECT count(*)::int AS total FROM statement_lines l WHERE ${filter}`);
+  const lineTotal = Number(count.rows[0]?.total ?? 0);
+  // limit 0 = só o resumo (a próxima página começa no mesmo offset).
+  const lines = query.limit === 0 ? [] : await listLines(ctx.db, filter, { limit: query.limit, offset: query.offset });
+  return { ...summary, lineTotal, offset: query.offset, nextOffset: nextOffset(query, lines.length, lineTotal), lines };
 }
 
 export async function listLines(
   db: Executor,
   where: ReturnType<typeof sql>,
-  opts: { newestFirst?: boolean; limit?: number } = {},
+  opts: { newestFirst?: boolean; limit?: number; offset?: number } = {},
 ): Promise<StatementLineRow[]> {
   const order = opts.newestFirst ? sql`l.posted_on DESC, l.line_number DESC` : sql`l.posted_on, l.line_number`;
-  const limit = opts.limit ? sql` LIMIT ${opts.limit}` : sql``;
+  const limit = sql`${opts.limit ? sql` LIMIT ${opts.limit}` : sql``}${opts.offset ? sql` OFFSET ${opts.offset}` : sql``}`;
   const result = await db.execute(sql`
     SELECT l.id, l.statement_import_id AS import_id, l.line_number, l.posted_on, l.amount_cents, l.description, l.fitid, l.status, l.movement_id, l.title_id,
-           l.card_invoice_item_id, l.entity_id, e.name AS entity_name, l.category_id, c.name AS category_name,
+           l.card_invoice_item_id, l.created_entry, l.entity_id, e.name AS entity_name, l.category_id, c.name AS category_name,
            coalesce(c.color_slot, pc.color_slot) AS category_color_slot, l.classification_source, l.classification_rule_id,
            CASE
              WHEN l.movement_id IS NOT NULL THEN json_build_object('kind', 'movement', 'date', m.occurred_on,

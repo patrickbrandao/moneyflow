@@ -116,6 +116,7 @@ describe('registro de tools', () => {
         'reopen_invoice',
         'archive_caixa',
         'archive_account',
+        'delete_adjustment',
         'delete_title',
         'delete_transfer',
         'archive_category',

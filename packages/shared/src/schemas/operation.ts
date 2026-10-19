@@ -217,6 +217,16 @@ export const lineMatchInput = z
 
 export const LINE_CREATE_MODES = ['adjustment', 'title', 'purchase'] as const;
 
+/**
+ * O lançamento ligado à linha que nasceu dela (spec 009): adjustment = o
+ * movimento avulso; title = o título (com o espelho) e a baixa; settlement = só
+ * a baixa, num título que já existia; purchase = a compra no cartão.
+ */
+export const LINE_CREATED_ENTRIES = ['adjustment', 'title', 'settlement', 'purchase'] as const;
+
+/** Desfazer a conciliação; deleteEntry = excluir junto o lançamento que nasceu da linha. */
+export const lineUnmatchInput = z.object({ deleteEntry: z.boolean().default(false) });
+
 export const lineCreateInput = z.object({
   /** adjustment = movimento avulso; title = título já baixado; purchase = compra no cartão (import de fatura). */
   mode: z.enum(LINE_CREATE_MODES),

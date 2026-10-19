@@ -138,7 +138,7 @@ export const agentsStrings = {
     reconcileMessage: (file: string, importId: string, lines: number) =>
       [
         `Concilie o lote de extrato ${file} (statementImportId ${importId}, ${lines} linha(s) por conciliar).`,
-        'Leia as linhas com get_statement_import e, para cada linha nova ou sugerida: localize os candidatos (list_line_candidates),',
+        'Leia as linhas pendentes com get_statement_import (statuses ["new", "suggested"], página a página pelo nextOffset) e, para cada uma: localize os candidatos (list_line_candidates),',
         'case com o movimento ou o título certo, lance as linhas sem par (com o espelho e a pagadora quando couber),',
         'ignore as tarifas conforme as regras e corrija casamentos errados (desfazer e estornar). Ao final, resuma o que fez.',
       ].join(' '),

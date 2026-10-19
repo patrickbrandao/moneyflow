@@ -1,4 +1,4 @@
-import { cardInvoices, cardPurchases, categories, titles } from '@moneyflow/db';
+import { cardInvoices, cardPurchases, categories, type Tx, titles } from '@moneyflow/db';
 import {
   type CardOverview,
   type CardPurchaseDetail,
@@ -320,18 +320,26 @@ export async function updatePurchase(ctx: ServiceContext, id: string, input: z.o
   return getPurchase(ctx, id);
 }
 
-/** Exclui o lançamento (as parcelas vão junto) enquanto todas as faturas dele estão abertas. */
-export async function deletePurchase(ctx: ServiceContext, id: string) {
+/** A compra sai só com todas as faturas dela abertas e sem estornos (e quem age escreve no cartão). */
+export async function assertPurchaseDeletable(ctx: ServiceContext, id: string) {
   const current = await getPurchase(ctx, id);
   ctx.access.assertWrite(current.cardCaixaId);
   if (!current.editable) throw unprocessable(t.errors.purchaseClosedInvoice);
   if (current.refunds.length > 0) throw unprocessable(t.errors.purchaseHasRefunds);
-  await withTx(ctx, async (tx) => {
-    await tx.execute(sql`
-      UPDATE statement_lines SET status = 'new', card_invoice_item_id = NULL
-       WHERE status = 'suggested' AND card_invoice_item_id IN (SELECT id FROM card_invoice_items WHERE card_purchase_id = ${id})`);
-    await tx.delete(cardPurchases).where(eq(cardPurchases.id, id));
-  });
+}
+
+/** Exclui a compra (as parcelas vão junto) numa transação aberta; as sugestões de extrato para ela voltam a novas. */
+export async function deletePurchaseTx(tx: Tx, id: string) {
+  await tx.execute(sql`
+    UPDATE statement_lines SET status = 'new', card_invoice_item_id = NULL
+     WHERE status = 'suggested' AND card_invoice_item_id IN (SELECT id FROM card_invoice_items WHERE card_purchase_id = ${id})`);
+  await tx.delete(cardPurchases).where(eq(cardPurchases.id, id));
+}
+
+/** Exclui o lançamento (as parcelas vão junto) enquanto todas as faturas dele estão abertas. */
+export async function deletePurchase(ctx: ServiceContext, id: string) {
+  await assertPurchaseDeletable(ctx, id);
+  await withTx(ctx, (tx) => deletePurchaseTx(tx, id));
   return { deleted: true, archived: false };
 }
 

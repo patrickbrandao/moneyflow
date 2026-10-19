@@ -10,6 +10,7 @@ import {
   lineCreateInput,
   lineIdsInput,
   lineMatchInput,
+  lineUnmatchInput,
   reconcileAiAutoInput,
   ruleListQuery,
   statementImportQuery,
@@ -78,7 +79,7 @@ export async function statementRoutes(app: FastifyInstance) {
   app.post('/api/statement-lines/confirm', (r: Req) => rec.confirmLines(r.ctx, parse(lineIdsInput, r.body).lineIds));
   app.get('/api/statement-lines/:id/candidates', (r: Req) => rec.lineCandidates(r.ctx, id(r)));
   app.post('/api/statement-lines/:id/match', (r: Req) => rec.matchLine(r.ctx, id(r), parse(lineMatchInput, r.body)));
-  app.post('/api/statement-lines/:id/unmatch', (r: Req) => rec.unmatchLine(r.ctx, id(r)));
+  app.post('/api/statement-lines/:id/unmatch', (r: Req) => rec.unmatchLine(r.ctx, id(r), parse(lineUnmatchInput, r.body ?? {})));
   app.post('/api/statement-lines/:id/ignore', (r: Req) => rec.setIgnored(r.ctx, id(r), true));
   app.post('/api/statement-lines/:id/unignore', (r: Req) => rec.setIgnored(r.ctx, id(r), false));
   app.post('/api/statement-lines/:id/create', (r: Req) => rec.createFromLine(r.ctx, id(r), parse(lineCreateInput, r.body)));

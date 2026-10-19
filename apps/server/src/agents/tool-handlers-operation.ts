@@ -872,6 +872,53 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     },
     run: (ctx, i) => caixas.addAdjustment(ctx, i.accountId, i.adjustment),
   },
+  delete_adjustment: {
+    preview: async (ctx, i) => {
+      const r = await ctx.db.execute<{
+        financial_account_id: string;
+        kind: string;
+        occurred_on: string;
+        amount_cents: number;
+        description: string | null;
+        entity_id: string | null;
+        category_id: string | null;
+      }>(sql`
+        SELECT financial_account_id, kind, occurred_on, amount_cents, description, entity_id, category_id
+          FROM movements WHERE id = ${i.movementId}`);
+      const movement = r.rows[0];
+      if (movement?.kind !== 'adjustment') throw notFound();
+      await writableAccount(ctx, movement.financial_account_id);
+      const lines = await ctx.db.execute<{ status: string }>(
+        sql`SELECT status FROM statement_lines WHERE movement_id = ${i.movementId} AND status IN ('matched', 'suggested')`,
+      );
+      if (lines.rows.some((l) => l.status === 'matched')) throw unprocessable(t.errors.movementReconciled, 'movement_reconciled');
+      const amount = Number(movement.amount_cents);
+      return {
+        title: 'Excluir movimento avulso',
+        summary: `${movement.description ?? '—'} · ${formatBRL(amount)}`,
+        action: 'delete',
+        rows: [
+          { label: 'Conta', before: (await nameOf(ctx, 'account', movement.financial_account_id)) ?? '', after: '—' },
+          { label: 'Data', before: formatDate(movement.occurred_on), after: '—' },
+          { label: amount > 0 ? 'Entrada' : 'Saída', before: formatBRL(Math.abs(amount)), after: '—' },
+          ...(movement.category_id
+            ? [{ label: 'Categoria', before: (await nameOf(ctx, 'category', movement.category_id)) ?? '', after: '—' }]
+            : []),
+          ...(movement.entity_id
+            ? [{ label: 'Entidade', before: (await nameOf(ctx, 'entity', movement.entity_id)) ?? '', after: '—' }]
+            : []),
+        ],
+        warnings: [
+          'O movimento sai do extrato e do saldo da conta.',
+          ...(lines.rows.length > 0 ? ['A linha do extrato com este movimento sugerido volta a nova.'] : []),
+        ],
+      };
+    },
+    run: async (ctx, i) => {
+      await caixas.deleteAdjustment(ctx, i.movementId);
+      return { deleted: true };
+    },
+  },
 
   /* ---- títulos ---- */
   cancel_title: {

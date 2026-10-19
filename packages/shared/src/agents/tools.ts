@@ -6,7 +6,9 @@ import {
   entityCreateInput,
   entityUpdateInput,
   id,
+  LINE_STATUSES,
   lineCreateInput,
+  lineUnmatchInput,
   pixKeyInput,
   settlementCreateInput,
   settlementReverseInput,
@@ -268,17 +270,29 @@ export const AGENT_TOOLS = [
     name: 'list_statement_imports',
     category: 'reconciliation',
     title: 'Listar extratos importados',
-    description: 'Extratos (OFX/CSV) importados de uma conta ou cartão.',
+    description:
+      'Lotes de extrato (OFX/CSV) importados de uma conta ou cartão, do mais recente ao mais antigo, em páginas: devolve total, imports e nextOffset (null = acabou; passe-o em offset para a próxima página).',
     kind: 'read',
-    input: z.object({ accountId: id.optional(), cardCaixaId: id.optional() }),
+    input: z.object({
+      accountId: id.optional(),
+      cardCaixaId: id.optional(),
+      limit: limit(50, 20),
+      offset: z.number().int().min(0).default(0).describe('Quantos lotes pular (o nextOffset da página anterior).'),
+    }),
   }),
   define({
     name: 'get_statement_import',
     category: 'reconciliation',
     title: 'Ver extrato importado',
-    description: 'Linhas de um extrato importado com status de conciliação e classificação sugerida.',
+    description:
+      'Um lote de extrato: o resumo (período, saldos, divergência, contagem por situação) e uma página das linhas, com a situação da conciliação, o par, a classificação e createdEntry (o lançamento que nasceu da linha). Filtre por statuses (ex.: ["new", "suggested"] = só as pendentes); lineTotal conta as linhas do filtro e nextOffset (null = acabou) leva à próxima página. limit 0 = só o resumo.',
     kind: 'read',
-    input: z.object({ importId: id }),
+    input: z.object({
+      importId: id,
+      statuses: z.array(z.enum(LINE_STATUSES)).max(4).optional().describe('Situações das linhas; omitido = todas.'),
+      limit: z.number().int().min(0).max(100).default(50).describe('Linhas por página (até 100; 0 = só o resumo).'),
+      offset: z.number().int().min(0).default(0).describe('Quantas linhas pular (o nextOffset da página anterior).'),
+    }),
   }),
   define({
     name: 'list_line_candidates',
@@ -447,10 +461,15 @@ export const AGENT_TOOLS = [
     category: 'reconciliation',
     title: 'Desfazer conciliação da linha',
     description:
-      'Desfaz a conciliação (ou a sugestão) de uma linha do extrato, que volta a nova. O movimento ou a baixa criados ao conciliar continuam lançados (estorne a baixa errada com reverse_settlement).',
+      'Desfaz a conciliação (ou a sugestão) de uma linha do extrato, que volta a nova. Por padrão o lançamento conciliado continua lançado. Se ele nasceu da linha (createdEntry em get_statement_import: adjustment = avulso, title = título já baixado, settlement = baixa num título existente, purchase = compra no cartão), deleteEntry true o exclui junto (o título criado com o espelho e a baixa; a baixa num título existente, que volta a ter o valor em aberto) — use antes de relançar a linha, para não duplicar o valor.',
     kind: 'write',
     destructive: true,
-    input: z.object({ lineId: id }),
+    input: z.object({
+      lineId: id,
+      deleteEntry: lineUnmatchInput.shape.deleteEntry.describe(
+        'true = exclui também o lançamento que nasceu da linha (só quando createdEntry não é nulo).',
+      ),
+    }),
   }),
   define({
     name: 'ignore_statement_lines',

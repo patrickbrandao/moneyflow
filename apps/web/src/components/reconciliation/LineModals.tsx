@@ -84,6 +84,44 @@ export function MatchModal({ line, onClose, onDone }: { line: StatementLineRow; 
   );
 }
 
+/**
+ * Desfazer a conciliação de uma linha cujo lançamento nasceu dela (spec 009):
+ * excluir junto o lançamento (o padrão) ou só desfazer a conciliação.
+ */
+export function UnmatchModal({ line, onClose, onDone }: { line: StatementLineRow; onClose: () => void; onDone: () => void }) {
+  const { run, busy } = useAction();
+  const entry = line.createdEntry ?? 'adjustment';
+
+  async function submit(deleteEntry: boolean) {
+    const ok = await run(
+      () => api.post(`/api/statement-lines/${line.id}/unmatch`, { deleteEntry }),
+      deleteEntry ? s.unmatchedDeleted : s.unmatched,
+    );
+    if (ok) onDone();
+  }
+
+  return (
+    <Modal open title={s.unmatchTitle} onClose={onClose}>
+      <div className="modal-body">
+        <LineHeader line={line} />
+        <p className="notice warn">{s.unmatchCreated(s.createdEntries[entry] ?? '')}</p>
+        <p className="text-[13px] text-muted">{s.unmatchDeleteHint[entry]}</p>
+      </div>
+      <ModalActions>
+        <Button variant="ghost" onClick={onClose}>
+          {t.common.cancel}
+        </Button>
+        <Button variant="ghost" onClick={() => void submit(false)} disabled={busy}>
+          {s.unmatchKeep}
+        </Button>
+        <Button variant="danger" onClick={() => void submit(true)} disabled={busy} autoFocus>
+          {s.unmatchAndDelete}
+        </Button>
+      </ModalActions>
+    </Modal>
+  );
+}
+
 type Mode = 'adjustment' | 'title' | 'purchase';
 
 /** Lançar uma linha nova (ou só classificar, com `classifyOnly`). */

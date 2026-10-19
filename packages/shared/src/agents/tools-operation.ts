@@ -382,6 +382,16 @@ export const OPERATION_TOOLS = [
     kind: 'write',
     input: z.object({ accountId: id, adjustment: adjustmentInput }),
   }),
+  define({
+    name: 'delete_adjustment',
+    category: 'caixas',
+    title: 'Excluir movimento avulso',
+    description:
+      'Exclui um movimento avulso (kind adjustment: ajuste, tarifa, rendimento) de uma conta; o id vem de get_account_statement. Movimento de baixa sai pelo estorno (reverse_settlement) e o de transferência por delete_transfer. Movimento conciliado com uma linha do extrato precisa da conciliação desfeita antes (unmatch_statement_line, que com deleteEntry já exclui o avulso nascido da linha).',
+    kind: 'write',
+    destructive: true,
+    input: z.object({ movementId: id }),
+  }),
 
   /* ---------------- Títulos e baixas ---------------- */
   define({

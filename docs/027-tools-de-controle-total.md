@@ -51,7 +51,7 @@ Os nomes são indicativos; o executor fecha os schemas a partir das rotas existe
 **Caixas e contas**:
 - `create_caixa`, `update_caixa`, `archive_caixa` (admin, como a rota);
 - `create_account`, `update_account`, `archive_account`;
-- `create_adjustment` (movimento avulso);
+- `create_adjustment` (movimento avulso) e `delete_adjustment` (destrutiva; o `DELETE /api/movements/:id` da tela: só movimento `adjustment`, recusado se conciliado com uma linha do extrato — desfaça antes, ou use `unmatch_statement_line` com `deleteEntry` quando o avulso nasceu da linha —, e a sugestão de extrato que aponta para ele volta a nova);
 - `archive_caixa` e `archive_account` usam o "excluir" da tela: com uso, arquivam; sem nenhum uso, excluem. Por isso são destrutivas.
 
 **Títulos e baixas**:

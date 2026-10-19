@@ -6,7 +6,7 @@ import { useAction } from '../../lib/hooks';
 import { CategoryLabel } from '../domain';
 import { useToast } from '../Toast';
 import { cx } from '../ui';
-import { CreateModal, MatchModal } from './LineModals';
+import { CreateModal, MatchModal, UnmatchModal } from './LineModals';
 
 const s = t.statements;
 
@@ -50,7 +50,7 @@ export function LineClassification({ line }: { line: StatementLineRow }) {
   );
 }
 
-type Dialog = 'match' | 'create' | 'classify' | null;
+type Dialog = 'match' | 'create' | 'classify' | 'unmatch' | null;
 
 /**
  * Ações de uma linha de extrato (confirmar, casar à mão, lançar, classificar,
@@ -110,7 +110,11 @@ export function LineActions({
           </>
         )}
         {(line.status === 'matched' || line.status === 'suggested') && (
-          <RowAction icon={<Undo2 />} label={s.unmatch} onClick={() => void lineAction('unmatch', s.unmatched)} />
+          <RowAction
+            icon={<Undo2 />}
+            label={s.unmatch}
+            onClick={() => (line.createdEntry ? setDialog('unmatch') : void lineAction('unmatch', s.unmatched))}
+          />
         )}
         {line.status === 'ignored' ? (
           <RowAction icon={<RotateCcw />} label={s.unignore} onClick={() => void lineAction('unignore', s.unignored)} />
@@ -121,6 +125,7 @@ export function LineActions({
         )}
       </span>
       {dialog === 'match' && <MatchModal line={line} onClose={() => setDialog(null)} onDone={done} />}
+      {dialog === 'unmatch' && <UnmatchModal line={line} onClose={() => setDialog(null)} onDone={done} />}
       {(dialog === 'create' || dialog === 'classify') && (
         <CreateModal
           line={line}

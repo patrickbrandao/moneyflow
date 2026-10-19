@@ -767,6 +767,85 @@ describe('caixas e contas', () => {
   });
 });
 
+describe('conciliação: avulso, desfazer e excluir e lotes em páginas', () => {
+  it('delete_adjustment, unmatch_statement_line com deleteEntry e as páginas de list/get_statement_import', async () => {
+    const account = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'checking',
+      name: `Conciliação ${uid()}`,
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const movementExists = async (id: string) => (await h.db.execute(sql`SELECT 1 FROM movements WHERE id = ${id}`)).rows.length > 0;
+
+    // Excluir avulso: prévia com os dados, execução, e o viewer negado.
+    const fee = await admin.post(`/api/accounts/${account.id}/adjustments`, {
+      occurredOn: '2026-02-01',
+      amountCents: -1_500,
+      description: 'Tarifa avulsa',
+      categoryId: s.expense.id,
+    });
+    expect((await call(viewerSession, 'delete_adjustment', { movementId: fee.id })).error).toBe('Você só tem leitura nesta caixa.');
+    const deleted = await approved(adminSession, 'delete_adjustment', { movementId: fee.id });
+    expect(deleted.preview.action).toBe('delete');
+    expect(rowsOf(deleted.preview)).toMatchObject({ Saída: 'R$ 15,00 → —', Data: '01/02/2026 → —' });
+    expect(deleted.value).toEqual({ deleted: true });
+    expect(await movementExists(fee.id)).toBe(false);
+
+    // Lote importado: páginas das linhas, filtro por situação e só o resumo.
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/statement-imports?accountId=${account.id}&fileName=extrato.ofx`,
+      payload: fixture('extrato-ofx2.ofx'),
+      headers: { cookie: adminSession.cookie, 'content-type': 'application/x-ofx' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    const imp = res.json();
+    const imports = await call(adminSession, 'list_statement_imports', { accountId: account.id, limit: 1 });
+    expect(imports.value).toMatchObject({ total: 1, offset: 0, nextOffset: null });
+    expect(imports.value.imports[0].id).toBe(imp.id);
+    const page = await call(adminSession, 'get_statement_import', { importId: imp.id, statuses: ['new'], limit: 4 });
+    expect(page.value).toMatchObject({ id: imp.id, lineTotal: 6, offset: 0, nextOffset: 4 });
+    expect(page.value.lines).toHaveLength(4);
+    expect(page.value.lines[0]).not.toHaveProperty('importId');
+    expect(page.value.lines[0]).not.toHaveProperty('movementId');
+    const rest = await call(adminSession, 'get_statement_import', { importId: imp.id, statuses: ['new'], limit: 4, offset: 4 });
+    expect(rest.value).toMatchObject({ lineTotal: 6, nextOffset: null });
+    expect(rest.value.lines).toHaveLength(2);
+    expect((await call(adminSession, 'get_statement_import', { importId: imp.id, limit: 0 })).value).toMatchObject({
+      lineCount: 6,
+      lines: [],
+    });
+
+    // Linha lançada como avulso: a leitura mostra createdEntry; desfazer sem excluir avisa a duplicação.
+    const lineId = imp.lines.find((l: any) => l.fitid === 'OFX2-0005').id;
+    const created = await admin.post(`/api/statement-lines/${lineId}/create`, { mode: 'adjustment', learnRule: false });
+    const matched = await call(adminSession, 'get_statement_import', { importId: imp.id, statuses: ['matched'] });
+    expect(matched.value.lines).toEqual([expect.objectContaining({ id: lineId, createdEntry: 'adjustment' })]);
+    const kept = await call(adminSession, 'unmatch_statement_line', { lineId }, { approve: false });
+    expect(kept.preview.warnings.join(' ')).toContain('duplica o valor');
+    const removed = await approved(adminSession, 'unmatch_statement_line', { lineId, deleteEntry: true });
+    expect(rowsOf(removed.preview).Lançamento).toBe('Movimento avulso → Excluído');
+    expect(removed.value).toMatchObject({ status: 'new', createdEntry: null });
+    expect(await movementExists(created.movementId)).toBe(false);
+
+    // Linha nova não tem o que desfazer; casada com um avulso que já existia, deleteEntry é recusado já na prévia.
+    expect((await call(adminSession, 'unmatch_statement_line', { lineId, deleteEntry: true })).error).toBe(
+      'Esta linha não está conciliada.',
+    );
+    const other = await admin.post(`/api/accounts/${account.id}/adjustments`, {
+      occurredOn: '2026-10-18',
+      amountCents: 7_525,
+      description: 'Rendimento',
+    });
+    await admin.post(`/api/statement-lines/${lineId}/match`, { movementId: other.id });
+    expect((await call(adminSession, 'unmatch_statement_line', { lineId, deleteEntry: true })).error).toBe(
+      'O lançamento desta linha não nasceu dela: desfaça só a conciliação e corrija o lançamento à mão.',
+    );
+    // Avulso conciliado não sai pela tool de exclusão.
+    expect((await call(adminSession, 'delete_adjustment', { movementId: other.id })).error).toMatch(/concilia/i);
+  });
+});
+
 describe('títulos e baixas', () => {
   const newTitle = (overrides: Record<string, unknown> = {}) =>
     admin.post('/api/titles', {

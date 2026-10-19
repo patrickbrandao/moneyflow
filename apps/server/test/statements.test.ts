@@ -254,9 +254,113 @@ describe('extratos e conciliação (spec 009)', () => {
       entityId: s.supplier.id,
       categoryId: s.expense.id,
     });
-    expect(created.status).toBe('matched');
+    expect(created).toMatchObject({ status: 'matched', createdEntry: 'purchase' });
     const purchases = await admin.get(`/api/cards/${card.id}/purchases`);
     expect(purchases.map((p: any) => p.amountCents).sort()).toEqual([12_000, 25_000]);
+
+    // Desfazer e excluir: a compra lançada pela linha sai da fatura; a casada com a compra existente não tem marca.
+    expect(posto.createdEntry).toBeNull();
+    await admin.post(`/api/statement-lines/${gym.id}/unmatch`, { deleteEntry: true });
+    expect((await admin.get(`/api/cards/${card.id}/purchases`)).map((p: any) => p.amountCents)).toEqual([12_000]);
+  });
+});
+
+describe('desfazer e excluir o lançamento que nasceu da linha (spec 009)', () => {
+  const exists = async (table: 'movements' | 'titles' | 'settlements', id: string) =>
+    (await h.db.execute(sql`SELECT 1 FROM ${sql.identifier(table)} WHERE id = ${id}`)).rows.length > 0;
+
+  it('avulso, título com espelho e baixa num título existente saem junto; relançar não duplica', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const market = await admin.post('/api/titles', {
+      caixaId: s.caixaA.id,
+      direction: 'payable',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      description: 'Supermercado do mês',
+      competenceDate: '2026-10-01',
+      dueDate: '2026-10-07',
+      amountCents: 23_015,
+    });
+    const res = await upload(
+      adminSession.cookie,
+      `/api/statement-imports?accountId=${s.accountA.id}&fileName=extrato.ofx`,
+      fixture('extrato-ofx2.ofx'),
+      'application/x-ofx',
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    const imp = res.json();
+    const line = (fitid: string) => imp.lines.find((l: any) => l.fitid === fitid);
+    const unmatch = (fitid: string, body?: Record<string, unknown>, status?: number) =>
+      admin.post(`/api/statement-lines/${line(fitid).id}/unmatch`, body, status);
+
+    // Movimento avulso: a marca adjustment; desfazer e excluir tira o movimento; relançar cria um só.
+    const adjusted = await admin.post(`/api/statement-lines/${line('OFX2-0005').id}/create`, {
+      mode: 'adjustment',
+      categoryId: s.income.id,
+      learnRule: false,
+    });
+    expect(adjusted).toMatchObject({ status: 'matched', createdEntry: 'adjustment' });
+    const firstMovement = adjusted.movementId;
+    expect(await unmatch('OFX2-0005', { deleteEntry: true })).toMatchObject({ status: 'new', movementId: null, createdEntry: null });
+    expect(await exists('movements', firstMovement)).toBe(false);
+    const again = await admin.post(`/api/statement-lines/${line('OFX2-0005').id}/create`, {
+      mode: 'adjustment',
+      categoryId: s.income.id,
+      learnRule: false,
+    });
+    const count = await h.db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM movements WHERE financial_account_id = ${s.accountA.id} AND amount_cents = 7525`,
+    );
+    expect(count.rows[0]!.n).toBe(1);
+
+    // Título já baixado com espelho na caixa principal da entidade: título, espelho e baixa saem.
+    const asTitle = await admin.post(`/api/statement-lines/${line('OFX2-0002').id}/create`, {
+      mode: 'title',
+      entityId: s.holderB.id,
+      categoryId: s.income.id,
+      learnRule: false,
+    });
+    expect(asTitle.createdEntry).toBe('title');
+    const title = await admin.get(`/api/titles/${await titleOfLine(line('OFX2-0002').id)}`);
+    expect(title.mirror).toMatchObject({ caixaId: s.caixaB.id });
+    const settlementId = title.settlements[0].id;
+    await unmatch('OFX2-0002', { deleteEntry: true });
+    expect(await exists('titles', title.id)).toBe(false);
+    expect(await exists('titles', title.mirror.id)).toBe(false);
+    expect(await exists('settlements', settlementId)).toBe(false);
+    expect(await exists('movements', asTitle.movementId)).toBe(false);
+
+    // Baixa ao confirmar a sugestão de um título que já existia: a baixa sai e o título volta a aberto.
+    expect(line('OFX2-0003')).toMatchObject({ status: 'suggested', titleId: market.id, createdEntry: null });
+    await admin.post('/api/statement-lines/confirm', { lineIds: [line('OFX2-0003').id] });
+    expect((await admin.get(`/api/titles/${market.id}`)).status).toBe('paid');
+    const confirmedLine = (await admin.get(`/api/statement-imports/${imp.id}`)).lines.find((l: any) => l.fitid === 'OFX2-0003');
+    expect(confirmedLine.createdEntry).toBe('settlement');
+    await unmatch('OFX2-0003', { deleteEntry: true });
+    expect(await admin.get(`/api/titles/${market.id}`)).toMatchObject({ status: 'open', settlements: [] });
+
+    // Casada com um movimento que já existia: só desfazer; deleteEntry é recusado e nada muda.
+    await unmatch('OFX2-0005');
+    expect(await exists('movements', again.movementId)).toBe(true);
+    await admin.post(`/api/statement-lines/${line('OFX2-0005').id}/match`, { movementId: again.movementId });
+    const refused = await unmatch('OFX2-0005', { deleteEntry: true }, 422);
+    expect(refused.error.code).toBe('line_entry_not_created');
+    expect((await admin.get(`/api/statement-imports/${imp.id}`)).lines.find((l: any) => l.fitid === 'OFX2-0005').status).toBe('matched');
+
+    // O lançamento mudou depois (baixa estornada): recusado, a linha continua conciliada.
+    const changed = await admin.post(`/api/statement-lines/${line('OFX2-0006').id}/create`, {
+      mode: 'title',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      learnRule: false,
+    });
+    const changedTitle = await admin.get(`/api/titles/${await titleOfLine(line('OFX2-0006').id)}`);
+    await admin.post(`/api/settlements/${changedTitle.settlements[0].id}/reverse`, { reason: 'teste', reversedOn: '2026-10-25' });
+    expect((await unmatch('OFX2-0006', { deleteEntry: true }, 422)).error.code).toBe('line_entry_changed');
+    expect(await exists('titles', changedTitle.id)).toBe(true);
+    expect((await admin.get(`/api/statement-imports/${imp.id}`)).lines.find((l: any) => l.id === changed.id).status).toBe('matched');
   });
 });
 
