@@ -485,6 +485,11 @@ export const apiTokenCreateInput = z.object({
   expiresInDays: z.number().int().min(1).max(3650).nullish(),
 });
 
+/** Administração → Controle MCP: chave para qualquer usuário, que herda os poderes dele. */
+export const adminApiTokenCreateInput = apiTokenCreateInput.extend({ userId: id });
+
+export const adminApiTokenQuery = z.object({ userId: id.optional(), includeRevoked: queryBool.default(false) });
+
 export const suggestionDecisionInput = z.object({
   lineIds: z.array(id).min(1).max(1000),
   decision: z.enum(['approve', 'reject']),

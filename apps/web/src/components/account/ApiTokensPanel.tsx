@@ -9,7 +9,7 @@ import { Badge, Button, CopyButton, cx, EmptyRow, Field, Modal, Panel, useConfir
 
 const k = t.agentsUi.tokens;
 
-function tokenState(token: ApiTokenDto): { label: string; tone: 'ok' | 'outline' | 'danger' } {
+export function tokenState(token: ApiTokenDto): { label: string; tone: 'ok' | 'outline' | 'danger' } {
   if (token.revokedAt) return { label: k.revoked, tone: 'danger' };
   if (token.expiresAt && new Date(token.expiresAt).getTime() < Date.now()) return { label: k.expired, tone: 'outline' };
   return { label: k.active, tone: 'ok' };

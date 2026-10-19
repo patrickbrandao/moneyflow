@@ -36,6 +36,13 @@ let llm: FakeLlm;
 let mcp: FakeMcp;
 let admin: ReturnType<typeof client>;
 let adminSession: Awaited<ReturnType<typeof userSession>>;
+
+/** Endereço do app para o /mcp (escuta uma vez por arquivo). */
+async function mcpAddress() {
+  const bound = h.app.server.address();
+  if (bound && typeof bound === 'object') return `http://127.0.0.1:${bound.port}`;
+  return h.app.listen({ port: 0, host: '127.0.0.1' });
+}
 let provider: any;
 let agent: any;
 let defaultKit: any;
@@ -778,7 +785,7 @@ describe('MCP', () => {
     const list = await user.raw('GET', '/api/account/api-tokens');
     expect(list.body).not.toContain(created.token);
 
-    const address = await h.app.listen({ port: 0, host: '127.0.0.1' });
+    const address = await mcpAddress();
     const connect = async (token: string) => {
       const mcpClient = new Client({ name: 'teste', version: '1.0.0' });
       await mcpClient.connect(
@@ -826,6 +833,81 @@ describe('MCP', () => {
     expect(bad.status).toBe(401);
     // O hash nunca é legível pelo papel da aplicação.
     await expect(h.db.execute(sql`SELECT token_hash FROM user_api_tokens LIMIT 1`)).rejects.toThrow();
+  });
+
+  it('Controle MCP: o admin gera chaves para qualquer usuário, que herdam os poderes dele', async () => {
+    const s = await scenario(h, admin);
+    const viewerSess = await userSession(h);
+    const viewer = client(h, viewerSess.cookie);
+    await admin.post(`/api/caixas/${s.caixaA.id}/members`, { userId: viewerSess.id, role: 'viewer' });
+
+    // Só admin.
+    await viewer.get('/api/admin/api-tokens', 403);
+    await viewer.post('/api/admin/api-tokens', { userId: viewerSess.id, name: 'x' }, 403);
+
+    const readerKey = await admin.post('/api/admin/api-tokens', { userId: viewerSess.id, name: 'Leitor da A' });
+    expect(readerKey.token).toMatch(/^mf_/);
+    expect(readerKey).toMatchObject({
+      userId: viewerSess.id,
+      userRole: 'user',
+      userActive: true,
+      createdBy: adminSession.username,
+      memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }],
+    });
+    const adminKey = await admin.post('/api/admin/api-tokens', { userId: adminSession.id, name: `Admin ${uid()}` });
+    expect(adminKey).toMatchObject({ userRole: 'admin', memberships: [] });
+
+    // A chave aparece para o dono em Minha conta (e ele pode revogá-la); a lista do admin filtra por usuário.
+    expect((await viewer.get('/api/account/api-tokens')).map((x: { id: string }) => x.id)).toContain(readerKey.id);
+    const listed = await admin.raw('GET', `/api/admin/api-tokens?userId=${viewerSess.id}`);
+    expect(listed.body).not.toContain(readerKey.token);
+    expect(listed.json().map((x: { id: string }) => x.id)).toEqual([readerKey.id]);
+
+    const address = await mcpAddress();
+    const connect = async (token: string) => {
+      const mcpClient = new Client({ name: 'teste', version: '1.0.0' });
+      await mcpClient.connect(
+        new StreamableHTTPClientTransport(new URL(`${address}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }),
+      );
+      return mcpClient;
+    };
+    const textOf = (r: unknown) => (r as { content: { text: string }[] }).content[0]!.text;
+
+    // Leitor: só a caixa A, sem as tools de administração e sem escrever.
+    const asReader = await connect(readerKey.token);
+    const readerTools = (await asReader.listTools()).tools.map((x) => x.name);
+    expect(readerTools).not.toContain('list_users');
+    const readerCaixas = textOf(await asReader.callTool({ name: 'list_caixas', arguments: {} }));
+    expect(readerCaixas).toContain(s.caixaA.name);
+    expect(readerCaixas).not.toContain(s.caixaB.name);
+    const denied = await asReader.callTool({ name: 'create_entity', arguments: { kind: 'company', name: `Leitor ${uid()}` } });
+    expect(denied.isError).toBe(true);
+    await asReader.close();
+
+    // Admin: todas as caixas e as tools de administração.
+    const asAdmin = await connect(adminKey.token);
+    expect((await asAdmin.listTools()).tools.map((x) => x.name)).toContain('list_users');
+    expect(textOf(await asAdmin.callTool({ name: 'list_caixas', arguments: {} }))).toContain(s.caixaB.name);
+    await asAdmin.close();
+
+    // Os poderes são lidos a cada uso: virar editor libera a escrita na hora.
+    await admin.put(`/api/users/${viewerSess.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'editor' }] });
+    const asEditor = await connect(readerKey.token);
+    const allowed = await asEditor.callTool({ name: 'create_entity', arguments: { kind: 'company', name: `Editor ${uid()}` } });
+    expect(allowed.isError).toBeFalsy();
+    await asEditor.close();
+
+    // Revogação pelo admin; revogadas só com includeRevoked.
+    await admin.del(`/api/admin/api-tokens/${readerKey.id}`);
+    await expect(connect(readerKey.token)).rejects.toThrow();
+    expect(await admin.get(`/api/admin/api-tokens?userId=${viewerSess.id}`)).toEqual([]);
+    const withRevoked = await admin.get(`/api/admin/api-tokens?userId=${viewerSess.id}&includeRevoked=true`);
+    expect(withRevoked[0]).toMatchObject({ id: readerKey.id, revokedAt: expect.any(String) });
+    await admin.del(`/api/admin/api-tokens/${adminKey.id}`);
+
+    // Usuário desativado não recebe chave.
+    await admin.patch(`/api/users/${viewerSess.id}`, { isActive: false });
+    await admin.post('/api/admin/api-tokens', { userId: viewerSess.id, name: 'Inativo' }, 422);
   });
 });
 

@@ -9,6 +9,7 @@ import {
   DatabaseBackup,
   Handshake,
   History,
+  KeyRound,
   LayoutGrid,
   Send,
   ShieldCheck,
@@ -89,6 +90,7 @@ export const NAVIGATION: NavEntry[][] = [
       children: [
         { kind: 'link', to: '/admin/ai', label: t.agentsUi.admin.nav, icon: <Bot />, roles: ['admin'] },
         { kind: 'link', to: '/admin/backup', label: t.backup.nav, icon: <DatabaseBackup />, roles: ['admin'] },
+        { kind: 'link', to: '/admin/mcp', label: t.agentsUi.mcpControl.nav, icon: <KeyRound />, roles: ['admin'] },
       ],
     },
     { kind: 'link', to: '/account', label: t.nav.account, icon: <UserRound /> },

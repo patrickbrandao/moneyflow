@@ -838,6 +838,30 @@ export const agentsUiStrings = {
     done: 'Já copiei',
   },
 
+  /* ---------------- Administração → Controle MCP ---------------- */
+  mcpControl: {
+    nav: 'Controle MCP',
+    title: 'Controle MCP',
+    sub: 'Chaves do servidor MCP do MoneyFlow. Cada chave pertence a um usuário e age com os poderes dele: papel global e acesso às caixas.',
+    howTitle: 'Conectar um cliente',
+    howHint: 'Envie a chave no cabeçalho Authorization: Bearer <chave>. No Claude Code:',
+    powersHint:
+      'Os poderes são lidos a cada uso: mudar o papel ou as caixas do usuário muda o que a chave faz na hora. Para uma chave de editor ou leitor, gere-a para um usuário com esse acesso (em Usuários).',
+    new: 'Nova chave',
+    user: 'Usuário',
+    allUsers: 'Todos os usuários',
+    pickUser: 'Escolha o usuário',
+    powers: 'Poderes',
+    adminPowers: 'Todas as caixas e a administração',
+    noCaixas: 'Nenhuma caixa: a chave não vê dados',
+    inactive: 'Usuário desativado: a chave não autentica',
+    createdBy: (name: string) => `por ${name}`,
+    includeRevoked: 'Mostrar revogadas',
+    empty: 'Nenhuma chave ativa.',
+    createdTitle: (user: string) => `Chave criada para ${user}`,
+    claudeCommand: 'Comando para o Claude Code',
+  },
+
   /* ---------------- IA nos fluxos ---------------- */
   flows: {
     documentSource: 'Documento (IA)',

@@ -383,7 +383,7 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   ai_runs_transition_check: 'Esta execução já terminou.',
   ai_messages_content_check: 'Mensagem inválida.',
   ai_tool_confirmations_decider_check: 'Só quem iniciou a execução pode decidir.',
-  user_api_tokens_name_key: 'Você já tem um token ativo com esse nome.',
+  user_api_tokens_name_key: 'Já existe um token ativo com esse nome para este usuário.',
   user_api_tokens_name_check: 'Informe o nome do token (até 120 caracteres).',
   user_api_tokens_revoked_check: 'Este token já foi revogado.',
 };

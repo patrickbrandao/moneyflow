@@ -1,3 +1,4 @@
+import type { GlobalRole, Membership } from '../types';
 import type { AiBlock, AiRole } from './blocks';
 import type { ToolPreview } from './preview';
 import type { AgentToolCategory, AgentToolKind, AgentToolMode } from './tools';
@@ -490,6 +491,19 @@ export type ApiTokenDto = {
 
 /** Criação: o token completo vem só nesta resposta. */
 export type ApiTokenCreated = ApiTokenDto & { token: string };
+
+/**
+ * Administração → Controle MCP: a chave com o dono e os poderes que ela herda
+ * (papel global e caixas), lidos na hora; `createdBy` vem da auditoria.
+ */
+export type AdminApiTokenDto = ApiTokenDto & {
+  userId: string;
+  username: string;
+  userRole: GlobalRole;
+  userActive: boolean;
+  memberships: Membership[];
+  createdBy: string | null;
+};
 
 /** Leitura de documento por IA (title-entry/document). */
 export type DocumentReadingDto = {

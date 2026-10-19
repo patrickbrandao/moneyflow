@@ -200,6 +200,7 @@ export const ptBR = {
     statementEmpty: 'Nenhuma transação encontrada no arquivo.',
     statementBalanceAccountOnly: 'Só o lote de uma conta tem saldo do banco.',
     statementNoFileBalance: 'O arquivo deste lote não traz saldo.',
+    apiTokenUserInactive: 'O usuário está desativado: a chave não autenticaria. Reative-o antes.',
     statementAllDuplicated: 'Todas as linhas do arquivo já tinham sido importadas.',
     csvMappingRequired: 'Escolha ou crie o mapeamento de colunas do CSV.',
     ruleTarget: 'A regra precisa de entidade ou categoria.',

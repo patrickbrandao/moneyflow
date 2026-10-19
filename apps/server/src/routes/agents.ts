@@ -1,4 +1,6 @@
 import {
+  adminApiTokenCreateInput,
+  adminApiTokenQuery,
   agentSessionStartInput,
   agentSessionsQuery,
   agentTaskCreateInput,
@@ -234,6 +236,10 @@ export async function agentRoutes(app: FastifyInstance) {
   app.get('/api/account/api-tokens', (r: Req) => tokens.listApiTokens(r.ctx));
   app.post('/api/account/api-tokens', (r: Req) => tokens.createApiToken(r.ctx, parse(apiTokenCreateInput, r.body)));
   app.delete('/api/account/api-tokens/:id', (r: Req) => tokens.revokeApiToken(r.ctx, id(r)));
+  // Administração → Controle MCP: chaves de qualquer usuário, que herdam os poderes dele.
+  app.get('/api/admin/api-tokens', (r: Req) => tokens.listAllApiTokens(r.ctx, parse(adminApiTokenQuery, r.query)));
+  app.post('/api/admin/api-tokens', (r: Req) => tokens.createApiTokenFor(r.ctx, parse(adminApiTokenCreateInput, r.body)));
+  app.delete('/api/admin/api-tokens/:id', (r: Req) => tokens.revokeAnyApiToken(r.ctx, id(r)));
 
   /* ---------------- IA na conciliação ---------------- */
   app.post('/api/statement-imports/:id/ai-suggest', (r: Req) => suggestImportClassifications(r.ctx, id(r)));

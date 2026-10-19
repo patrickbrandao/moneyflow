@@ -35,7 +35,7 @@ export async function insertUser(
   return result.rows[0]!.id;
 }
 
-async function membershipsOf(db: Executor, userIds: string[]): Promise<Map<string, Membership[]>> {
+export async function membershipsOf(db: Executor, userIds: string[]): Promise<Map<string, Membership[]>> {
   const map = new Map<string, Membership[]>();
   if (userIds.length === 0) return map;
   const rows = await db

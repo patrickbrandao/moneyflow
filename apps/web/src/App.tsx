@@ -14,6 +14,7 @@ import { AccountPage } from './pages/AccountPage';
 import { AdminAiPage } from './pages/AdminAiPage';
 import { AdminAiProviderPage } from './pages/AdminAiProviderPage';
 import { AdminBackupPage } from './pages/AdminBackupPage';
+import { AdminMcpPage } from './pages/AdminMcpPage';
 import { AuditPage } from './pages/AuditPage';
 import { CaixaPage } from './pages/CaixaPage';
 import { CaixasPage } from './pages/CaixasPage';
@@ -89,6 +90,7 @@ function Console() {
             <Route path="admin/ai/:tab" element={<AdminAiPage />} />
             <Route path="admin/backup" element={<AdminBackupPage />} />
             <Route path="admin/backup/:tab" element={<AdminBackupPage />} />
+            <Route path="admin/mcp" element={<AdminMcpPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Route>
           <Route element={<Layout stage />}>
