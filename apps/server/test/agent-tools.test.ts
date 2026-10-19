@@ -576,6 +576,54 @@ describe('importação a partir de anexo', () => {
       const detail = JSON.parse((result.content as { text: string }[])[0]!.text);
       expect(detail).toMatchObject({ financialAccountId: account.id, format: 'ofx' });
       expect(await auditActor('statement_imports', detail.id)).toEqual({ actor_kind: 'agent', agent_run_id: null });
+
+      // upload_file (só do /mcp): o OFX com corrente e poupança vai para a poupança, que importa só o extrato dela.
+      expect(tools.find((t) => t.name === 'upload_file')).toBeTruthy();
+      const text = (r: Awaited<ReturnType<typeof mcpClient.callTool>>) => (r.content as { text: string }[])[0]!.text;
+      const bad = await mcpClient.callTool({ name: 'upload_file', arguments: { fileName: 'x.ofx', contentBase64: 'não é base64!' } });
+      expect(bad.isError).toBe(true);
+      expect(text(bad)).toBe('Conteúdo inválido: envie o arquivo em base64.');
+      const sent = await mcpClient.callTool({
+        name: 'upload_file',
+        arguments: { fileName: 'poupanca.ofx', contentBase64: fixture('extrato-duas-contas.ofx').toString('base64') },
+      });
+      expect(sent.isError, text(sent)).toBeFalsy();
+      const file = JSON.parse(text(sent));
+      expect(file).toMatchObject({ fileName: 'poupanca.ofx', mimeType: 'application/x-ofx' });
+      const savings = await admin.post(`/api/caixas/${s.caixaB.id}/accounts`, {
+        kind: 'savings',
+        name: `Poupança MCP ${uid()}`,
+        bankCode: '033',
+        accountNumber: '60000987-6',
+        openingBalanceCents: 0,
+        openingDate: '2026-01-01',
+      });
+      const imported = await mcpClient.callTool({
+        name: 'import_statement',
+        arguments: { attachmentId: file.attachmentId, accountId: savings.id },
+      });
+      expect(imported.isError, text(imported)).toBeFalsy();
+      const savingsLot = JSON.parse(text(imported));
+      expect(savingsLot).toMatchObject({ financialAccountId: savings.id, lineCount: 2, bankBalanceCents: 120_840 });
+
+      // Saldo do banco do lote pela tool: valor e data, limpar e voltar ao do arquivo.
+      const set = await mcpClient.callTool({
+        name: 'set_statement_import_balance',
+        arguments: { importId: savingsLot.id, mode: 'set', bankBalanceCents: 99_999, bankBalanceOn: '2026-10-15' },
+      });
+      expect(set.isError, text(set)).toBeFalsy();
+      expect(JSON.parse(text(set))).toMatchObject({ bankBalanceCents: 99_999, bankBalanceOn: '2026-10-15' });
+      expect(JSON.parse(text(set))).not.toHaveProperty('lines');
+      const cleared = await mcpClient.callTool({
+        name: 'set_statement_import_balance',
+        arguments: { importId: savingsLot.id, mode: 'clear' },
+      });
+      expect(JSON.parse(text(cleared))).toMatchObject({ bankBalanceCents: null, bankBalanceOn: null });
+      const fromFile = await mcpClient.callTool({
+        name: 'set_statement_import_balance',
+        arguments: { importId: savingsLot.id, mode: 'file' },
+      });
+      expect(JSON.parse(text(fromFile))).toMatchObject({ bankBalanceCents: 120_840, bankBalanceOn: '2026-10-31' });
     } finally {
       await mcpClient.close();
     }
@@ -843,6 +891,27 @@ describe('conciliação: avulso, desfazer e excluir e lotes em páginas', () => 
     );
     // Avulso conciliado não sai pela tool de exclusão.
     expect((await call(adminSession, 'delete_adjustment', { movementId: other.id })).error).toMatch(/concilia/i);
+
+    // Saldo do banco do lote pelo agente: prévia antes → depois; o viewer não escreve.
+    expect(
+      (
+        await call(viewerSession, 'set_statement_import_balance', {
+          importId: imp.id,
+          mode: 'set',
+          bankBalanceCents: 1,
+          bankBalanceOn: '2026-10-31',
+        })
+      ).error,
+    ).toBe('Você só tem leitura nesta caixa.');
+    const balance = await approved(adminSession, 'set_statement_import_balance', {
+      importId: imp.id,
+      mode: 'set',
+      bankBalanceCents: -26_772,
+      bankBalanceOn: '2026-10-31',
+    });
+    expect(balance.preview.action).toBe('update');
+    expect(rowsOf(balance.preview)['Saldo do banco']).toMatch(/→ .*267,72 em 31\/10\/2026$/);
+    expect(balance.value).toMatchObject({ id: imp.id, bankBalanceCents: -26_772, bankBalanceOn: '2026-10-31' });
   });
 });
 

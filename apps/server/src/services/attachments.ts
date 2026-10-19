@@ -149,6 +149,21 @@ export async function uploadAttachment(
 }
 
 /**
+ * Arquivo enviado pelo /mcp (tool upload_file): gravado sem vínculo, como o
+ * upload do chat antes de ir a uma mensagem. Só quem enviou (e o admin) o lê
+ * até ele ser ligado a um registro (assertReadable).
+ */
+export async function storeUnlinkedAttachment(ctx: ServiceContext, file: { name: string; mime: string; content: Buffer }) {
+  if (file.content.length === 0) throw unprocessable(t.errors.attachmentEmpty, 'attachment_empty');
+  const id = await withTx(ctx, (tx) => storeAttachment(tx, ctx, file));
+  const [row] = await ctx.db
+    .select({ id: attachments.id, fileName: attachments.fileName, mimeType: attachments.mimeType, sizeBytes: attachments.sizeBytes })
+    .from(attachments)
+    .where(eq(attachments.id, id));
+  return row!;
+}
+
+/**
  * Liga um anexo já gravado (o arquivo de uma mensagem do agente, spec 027) a
  * um registro, com a mesma checagem do upload (escrita no alvo). Quem chama
  * confere antes que o anexo pode ser usado (sessão da execução ou legível).

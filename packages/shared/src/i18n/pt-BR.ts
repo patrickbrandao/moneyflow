@@ -223,6 +223,8 @@ export const ptBR = {
     lineAccountOnly: 'Linha de fatura de cartão vira compra, não movimento.',
     attachmentEmpty: 'Arquivo vazio.',
     attachmentTooLarge: 'O arquivo passa de 20 MB.',
+    uploadInvalidBase64: 'Conteúdo inválido: envie o arquivo em base64.',
+    uploadTooLarge: 'O arquivo enviado pelo MCP passa de 5 MB.',
     closingUnreconciled: (n: number) =>
       `Há ${n} linha(s) de extrato do mês sem conciliar nas contas desta caixa. Concilie antes ou feche assim mesmo.`,
     reopenAdminOnly: 'Só um administrador reabre um mês fechado.',

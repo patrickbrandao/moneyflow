@@ -3,10 +3,21 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { userColumns, users } from '@moneyflow/db';
-import { AGENT_TOOLS, type AgentToolDef, agentTool, mcpExposed, t, toolJsonSchema } from '@moneyflow/shared';
+import {
+  AGENT_TOOLS,
+  type AgentToolDef,
+  agentTool,
+  MCP_ONLY_TOOLS,
+  MCP_UPLOAD_MAX_BYTES,
+  mcpExposed,
+  mcpOnlyTool,
+  t,
+  toolJsonSchema,
+} from '@moneyflow/shared';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { TOOL_HANDLERS } from '../agents/tool-handlers';
+import { MCP_ONLY_HANDLERS } from '../agents/tool-handlers-mcp';
 import { resultText, toolErrorMessage } from '../agents/tools-runtime';
 import { type Actor, loadAccess } from '../authz/access';
 import type { ServiceContext } from '../context';
@@ -24,14 +35,15 @@ import { authenticateApiToken } from '../services/api-tokens';
 /**
  * O kit não vale aqui (spec 021): todas as tools, menos as só de administrador
  * para quem não é admin, as de segredo e as que geram arquivo (spec 027). As de
- * importação recebem o attachmentId de qualquer anexo que o dono do token lê.
+ * importação recebem o attachmentId de qualquer anexo que o dono do token lê,
+ * inclusive o enviado pela tool upload_file, que só existe aqui (MCP_ONLY_TOOLS).
  */
 const offered = (ctx: ServiceContext, tool: AgentToolDef) => mcpExposed(tool, ctx.access.isAdmin);
 
 function mcpServerFor(ctx: ServiceContext) {
   const server = new Server({ name: 'moneyflow', version: '1.0.0' }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: AGENT_TOOLS.filter((tool) => offered(ctx, tool)).map((tool) => ({
+    tools: [...AGENT_TOOLS.filter((tool) => offered(ctx, tool)), ...MCP_ONLY_TOOLS].map((tool: AgentToolDef) => ({
       name: tool.name,
       title: tool.title,
       description: tool.description,
@@ -46,6 +58,15 @@ function mcpServerFor(ctx: ServiceContext) {
     })),
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const mcpOnly = mcpOnlyTool(request.params.name);
+    if (mcpOnly) {
+      try {
+        const value = await MCP_ONLY_HANDLERS[mcpOnly.name].run(ctx, mcpOnly.input.parse(request.params.arguments ?? {}));
+        return { content: [{ type: 'text', text: resultText(value) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: toolErrorMessage(error) }], isError: true };
+      }
+    }
     const tool = agentTool(request.params.name);
     if (!tool || !offered(ctx, tool))
       return { content: [{ type: 'text', text: t.agents.errors.toolUnknown(request.params.name) }], isError: true };
@@ -108,7 +129,8 @@ export async function mcpRoutes(app: FastifyInstance) {
     await server.connect(transport);
     await transport.handleRequest(request.raw, reply.raw, request.body);
   };
-  app.post('/mcp', handle);
+  // O upload_file leva o arquivo em base64 no corpo JSON (até 5 MB de arquivo).
+  app.post('/mcp', { bodyLimit: Math.ceil((MCP_UPLOAD_MAX_BYTES * 4) / 3) + 256 * 1024 }, handle);
   app.get('/mcp', handle);
   app.delete('/mcp', handle);
 }

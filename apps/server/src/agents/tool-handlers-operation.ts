@@ -192,6 +192,8 @@ const fileLabel = (file: { fileName: string; sizeBytes: number }) =>
   `${file.fileName} (${file.sizeBytes < 1024 ? `${file.sizeBytes} B` : `${Math.ceil(file.sizeBytes / 1024)} KB`})`;
 
 /** Pagamento de boleto ou PIX copia-e-cola: o PIX começa pelo cabeçalho do BR Code. */
+const lotBalance = (cents: number | null, on: string | null) =>
+  cents === null || on === null ? '—' : `${formatBRL(cents)} em ${formatDate(on)}`;
 const isPixPayload = (code: string) => /^000201/.test(code.trim());
 
 /* ---------------- handlers ---------------- */
@@ -517,6 +519,38 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         { mime: file.mime, content: file.content },
       );
       return detail;
+    },
+  },
+  set_statement_import_balance: {
+    preview: async (ctx, i) => {
+      const lot = await statements.getImport(ctx, i.importId, false);
+      ctx.access.assertWrite(lot.caixaId);
+      if (!lot.financialAccountId) throw unprocessable(t.errors.statementBalanceAccountOnly, 'statement_balance_account_only');
+      const after =
+        i.mode === 'set'
+          ? lotBalance(i.bankBalanceCents ?? null, i.bankBalanceOn ?? null)
+          : i.mode === 'clear'
+            ? '—'
+            : 'o saldo do arquivo';
+      return {
+        title: 'Saldo do banco do lote',
+        summary: lot.fileName,
+        action: 'update',
+        rows: [
+          { label: 'Conta', after: lot.accountName ?? '' },
+          {
+            label: 'Período',
+            after: `${lot.periodStart ? formatDate(lot.periodStart) : '—'} a ${lot.periodEnd ? formatDate(lot.periodEnd) : '—'}`,
+          },
+          { label: 'Saldo do banco', before: lotBalance(lot.bankBalanceCents, lot.bankBalanceOn), after },
+        ],
+        warnings: i.mode === 'clear' ? ['O lote fica sem comparação de saldo.'] : [],
+      };
+    },
+    run: async (ctx, i) => {
+      const input = i.mode === 'set' ? { mode: 'set' as const, amountCents: i.bankBalanceCents!, on: i.bankBalanceOn! } : { mode: i.mode };
+      const { lines: _lines, ...lot } = await statements.setImportBankBalance(ctx, i.importId, input);
+      return lot;
     },
   },
   import_nfe: {

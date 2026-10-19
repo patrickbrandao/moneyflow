@@ -13,5 +13,6 @@ export * from './tasks';
 export * from './telegram';
 export * from './tools';
 export * from './tools-admin';
+export * from './tools-mcp';
 export * from './tools-operation';
 export type * from './types';

@@ -232,6 +232,29 @@ export const OPERATION_TOOLS = [
       }),
   }),
   define({
+    name: 'set_statement_import_balance',
+    category: 'imports',
+    title: 'Saldo do banco do lote',
+    description:
+      'Troca o saldo do banco de um lote de extrato de conta (o "Editar saldo" da tela; ids em list_statement_imports): mode set com bankBalanceCents e bankBalanceOn (o saldo da conta no banco nessa data, normalmente o fim do extrato); clear deixa o lote sem comparação; file volta ao saldo do arquivo OFX. Devolve o lote com a divergência acumulada e a do intervalo recalculadas.',
+    kind: 'write',
+    input: z
+      .object({
+        importId: id,
+        mode: z.enum(['set', 'clear', 'file']),
+        bankBalanceCents: z.number().int().safe().optional().describe('Saldo do banco (centavos; negativo = devedor), só com mode set.'),
+        bankBalanceOn: isoDate.optional().describe('Data do saldo, só com mode set.'),
+      })
+      .refine((v) => (v.mode === 'set') === (v.bankBalanceCents !== undefined && v.bankBalanceOn !== undefined), {
+        path: ['bankBalanceCents'],
+        message: 'mode set exige bankBalanceCents e bankBalanceOn; clear e file não os aceitam.',
+      })
+      .refine((v) => v.mode === 'set' || (v.bankBalanceCents === undefined && v.bankBalanceOn === undefined), {
+        path: ['bankBalanceOn'],
+        message: 'Saldo e data só com mode set.',
+      }),
+  }),
+  define({
     name: 'import_nfe',
     category: 'imports',
     title: 'Importar NF-e',
