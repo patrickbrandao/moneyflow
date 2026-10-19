@@ -129,8 +129,13 @@ export function ImportModal({
   const input = useRef<HTMLInputElement>(null);
   const toast = useToast();
   const isCard = 'cardCaixaId' in target;
+  // OFX com várias contas (spec 009): só o extrato escolhido entra; começa pelo que casa com a conta ou pelo palpite.
+  const [ofxPosition, setOfxPosition] = useState<number | null>(null);
+  const ofxStatements = inspect?.format === 'ofx' ? (inspect.ofx?.statements ?? []) : [];
+  const manyAccounts = ofxStatements.length > 1;
+  const ofx = manyAccounts ? (ofxStatements.find((st) => st.position === ofxPosition) ?? inspect?.ofx) : inspect?.ofx;
   // Saldo do OFX (LEDGERBAL): já vale sem digitar nada; "Informar outro saldo" abre o campo (spec 009).
-  const fileBalance = inspect?.format === 'ofx' ? (inspect.ofx?.ledgerBalance ?? null) : null;
+  const fileBalance = inspect?.format === 'ofx' ? (ofx?.ledgerBalance ?? null) : null;
   const [ownBalance, setOwnBalance] = useState(false);
   const typedBalance = !fileBalance || ownBalance ? bankBalance : null;
 
@@ -142,8 +147,9 @@ export function ImportModal({
     setError(null);
     setBusy(true);
     try {
-      const [result, bytes] = await Promise.all([upload<StatementInspect>('/api/statements/inspect', next), next.arrayBuffer()]);
+      const [result, bytes] = await Promise.all([upload<StatementInspect>('/api/statements/inspect', next, target), next.arrayBuffer()]);
       setInspect(result);
+      setOfxPosition(result.ofx ? (result.ofx.selected ?? result.ofx.suggested) : null);
       setBuffer(bytes);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -175,6 +181,7 @@ export function ImportModal({
         cardInvoiceId: invoiceId || undefined,
         bankBalanceCents: typedBalance ?? undefined,
         bankBalanceOn: typedBalance !== null ? bankBalanceOn : undefined,
+        ofxStatement: manyAccounts ? (ofxPosition ?? undefined) : undefined,
       });
       toast.success(s.imported(detail.lineCount, detail.skippedDuplicates ?? 0));
       onImported(detail);
@@ -282,36 +289,64 @@ export function ImportModal({
           />
         </div>
 
-        {inspect?.format === 'ofx' && inspect.ofx && (
+        {inspect?.format === 'ofx' && inspect.ofx && ofx && (
           <>
+            {manyAccounts && (
+              <div className="notice warn flex flex-col gap-2" data-testid="ofx-many-accounts">
+                <span>{s.ofxManyAccounts(ofxStatements.length)}</span>
+                {inspect.ofx.selected === null && <span>{s.ofxNeedsChoice}</span>}
+                <Field label={s.ofxAccount}>
+                  <select
+                    className="field"
+                    value={ofxPosition ?? ''}
+                    onChange={(e) => setOfxPosition(e.target.value ? Number(e.target.value) : null)}
+                    aria-label={s.ofxAccount}
+                  >
+                    <option value="">{s.ofxPickAccount}</option>
+                    {ofxStatements.map((st) => (
+                      <option key={st.position} value={st.position}>
+                        {s.ofxAccountLabel(st)} · {st.count} {s.transactions.toLowerCase()}
+                        {st.position === inspect.ofx?.selected ? ` · ${s.ofxMatchesTarget}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              </div>
+            )}
             <div className="well">
               <div className="mb-2 flex items-center gap-2">
                 <strong className="text-[13px]">{s.ofxSummary}</strong>
-                <Badge tone="info">{s.ofxKind[inspect.ofx.kind] ?? inspect.ofx.kind}</Badge>
+                <Badge tone="info">{s.ofxKind[ofx.kind] ?? ofx.kind}</Badge>
               </div>
               <dl className="kv">
+                {manyAccounts && (
+                  <>
+                    <dt>{s.account}</dt>
+                    <dd>{s.ofxAccountLabel(ofx)}</dd>
+                  </>
+                )}
                 <dt>{s.period}</dt>
                 <dd>
-                  {formatDate(inspect.ofx.periodStart)} – {formatDate(inspect.ofx.periodEnd)}
+                  {formatDate(ofx.periodStart)} – {formatDate(ofx.periodEnd)}
                 </dd>
                 <dt>{s.transactions}</dt>
-                <dd>{inspect.ofx.count}</dd>
-                {inspect.ofx.ledgerBalance && (
+                <dd>{ofx.count}</dd>
+                {ofx.ledgerBalance && (
                   <>
                     <dt>{s.ledgerBalance}</dt>
                     <dd>
-                      <Money cents={inspect.ofx.ledgerBalance.amountCents} /> em {formatDate(inspect.ofx.ledgerBalance.date)}
+                      <Money cents={ofx.ledgerBalance.amountCents} /> em {formatDate(ofx.ledgerBalance.date)}
                     </dd>
                   </>
                 )}
               </dl>
             </div>
-            {inspect.ofx.sample.length > 0 && (
+            {ofx.sample.length > 0 && (
               <div className="rec-preview">
                 <table className="data">
                   <caption className="label text-left">{s.sample}</caption>
                   <tbody>
-                    {inspect.ofx.sample.map((row, i) => (
+                    {ofx.sample.map((row, i) => (
                       <tr key={row.fitid ?? i}>
                         <td className="mono text-xs">{formatDate(row.postedOn)}</td>
                         <td>{row.description}</td>
@@ -330,7 +365,7 @@ export function ImportModal({
               <Button variant="ghost" onClick={onClose}>
                 {t.common.cancel}
               </Button>
-              <Button onClick={() => void doImport()} disabled={busy}>
+              <Button onClick={() => void doImport()} disabled={busy || (manyAccounts && ofxPosition === null)}>
                 {busy ? s.importing : s.doImport}
               </Button>
             </ModalActions>

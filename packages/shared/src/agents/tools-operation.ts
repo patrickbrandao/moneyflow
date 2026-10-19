@@ -211,6 +211,15 @@ export const OPERATION_TOOLS = [
         csvMapping: csvMappingTool.optional(),
         bankBalanceCents: z.number().int().safe().optional().describe('Saldo do banco informado (centavos), com bankBalanceOn.'),
         bankBalanceOn: isoDate.optional(),
+        ofxStatement: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe(
+            'OFX com extratos de várias contas (ex.: corrente e poupança juntas): a posição (1, 2, …) do extrato a importar. Omitida = o que casa com a conta de destino; sem casamento, o erro lista as contas do arquivo.',
+          ),
       })
       .refine((v) => (v.accountId ? 1 : 0) + (v.cardCaixaId ? 1 : 0) === 1, {
         path: ['accountId'],

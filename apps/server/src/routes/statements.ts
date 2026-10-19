@@ -13,6 +13,7 @@ import {
   reconcileAiAutoInput,
   ruleListQuery,
   statementImportQuery,
+  statementInspectQuery,
   statementLineSearchQuery,
   statementTargetQuery,
 } from '@moneyflow/shared';
@@ -35,7 +36,7 @@ export async function statementRoutes(app: FastifyInstance) {
   const id = (r: Req) => param(r, 'id');
 
   app.post('/api/statements/inspect', { bodyLimit: UPLOAD_BODY_LIMIT, config: { rawUpload: true } }, (r: Req) =>
-    statements.inspectStatement(r.ctx, assertUpload(r.body)),
+    statements.inspectStatement(r.ctx, assertUpload(r.body), parse(statementInspectQuery, r.query)),
   );
   app.get('/api/statement-imports', (r: Req) => statements.listImports(r.ctx, parse(statementTargetQuery, r.query)));
   app.post('/api/statement-imports', { bodyLimit: UPLOAD_BODY_LIMIT, config: { rawUpload: true } }, async (r: Req) => {

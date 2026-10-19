@@ -342,6 +342,74 @@ describe('aplicar regras e buscar nas linhas (spec 009)', () => {
   });
 });
 
+describe('OFX com extratos de várias contas (spec 009)', () => {
+  it('importa só o extrato da conta de destino; sem casamento pede a escolha; o saldo do arquivo é o do extrato do lote', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const file = fixture('extrato-duas-contas.ofx');
+    const checking = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'checking',
+      name: 'Santander CC',
+      bankCode: '033',
+      accountNumber: '1300012-3',
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const savings = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'savings',
+      name: 'Santander Poupança',
+      bankCode: '033',
+      accountNumber: '60000987-6',
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const inspect = (accountId: string) =>
+      upload(adminSession.cookie, `/api/statements/inspect?accountId=${accountId}&fileName=x.ofx`, file).then((r) => r.json());
+    const importUrl = (accountId: string, extra = '') => `/api/statement-imports?accountId=${accountId}&fileName=duas.ofx${extra}`;
+    const fitids = (imp: any) => imp.lines.map((l: any) => l.fitid).sort();
+
+    // A leitura prévia lista as duas contas e já escolhe a que casa com o número cadastrado.
+    const seen = await inspect(checking.id);
+    expect(seen.ofx).toMatchObject({ position: 1, accountId: '013000123', count: 3, selected: 1 });
+    expect(seen.ofx.statements.map((st: any) => [st.accountId, st.accountType, st.count])).toEqual([
+      ['013000123', 'CHECKING', 3],
+      ['600009876', 'SAVINGS', 2],
+    ]);
+    expect((await inspect(savings.id)).ofx).toMatchObject({ position: 2, selected: 2, ledgerBalance: { amountCents: 120_840 } });
+
+    // Conta corrente: só as 3 linhas dela, saldo do extrato dela, e a poupança avisada como de fora.
+    const res = await upload(adminSession.cookie, importUrl(checking.id), file, 'application/x-ofx');
+    expect(res.statusCode, res.body).toBe(200);
+    const cc = res.json();
+    expect(fitids(cc)).toEqual(['DUAS-CC-001', 'DUAS-CC-002', 'DUAS-CC-003']);
+    expect(cc).toMatchObject({ bankBalanceCents: 265_010, bankBalanceOn: '2026-10-31', ofxLeftOut: ['Poupança 600009876 (banco 033)'] });
+
+    // Poupança pelo número cadastrado: só as linhas dela.
+    const pp = (await upload(adminSession.cookie, importUrl(savings.id), file, 'application/x-ofx')).json();
+    expect(fitids(pp)).toEqual(['DUAS-PP-001', 'DUAS-PP-002']);
+    expect(pp.bankBalanceCents).toBe(120_840);
+
+    // Conta sem número cadastrado: nada casa, o import pede a escolha e lista as contas do arquivo.
+    const inspected = await inspect(s.accountA.id);
+    expect(inspected.ofx).toMatchObject({ selected: null, suggested: 1 });
+    const refused = await upload(adminSession.cookie, importUrl(s.accountA.id), file, 'application/x-ofx');
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json().error.code).toBe('statement_ofx_choose_account');
+    expect(refused.json().error.message).toContain('2 = Poupança 600009876 (banco 033)');
+    const missing = await upload(adminSession.cookie, importUrl(s.accountA.id, '&ofxStatement=3'), file, 'application/x-ofx');
+    expect(missing.json().error.code).toBe('statement_ofx_statement');
+
+    // Escolhido o 2º extrato: as linhas e o saldo da poupança; "voltar ao saldo do arquivo" relê o mesmo extrato.
+    const chosen = (await upload(adminSession.cookie, importUrl(s.accountA.id, '&ofxStatement=2'), file, 'application/x-ofx')).json();
+    expect(fitids(chosen)).toEqual(['DUAS-PP-001', 'DUAS-PP-002']);
+    expect(chosen).toMatchObject({ bankBalanceCents: 120_840, ofxLeftOut: ['Conta corrente 013000123 (banco 033)'] });
+    await admin.put(`/api/statement-imports/${chosen.id}/bank-balance`, { mode: 'clear' });
+    const restored = await admin.put(`/api/statement-imports/${chosen.id}/bank-balance`, { mode: 'file' });
+    expect(restored).toMatchObject({ bankBalanceCents: 120_840, bankBalanceOn: '2026-10-31' });
+  });
+});
+
 describe('saldo do banco do lote (spec 009)', () => {
   it('edita, limpa e volta ao saldo do arquivo; divergência do intervalo contra o lote anterior', async () => {
     const adminSession = await userSession(h, 'admin');

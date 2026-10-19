@@ -167,6 +167,11 @@ export const statementTargetQuery = z
   .object({ accountId: id.optional(), cardCaixaId: id.optional() })
   .refine((v) => (v.accountId ? 1 : 0) + (v.cardCaixaId ? 1 : 0) === 1, { message: E.statementTarget });
 
+/** Leitura prévia do extrato: a conta ou o cartão de destino é opcional e escolhe o extrato de um OFX com várias contas. */
+export const statementInspectQuery = z
+  .object({ accountId: id.optional(), cardCaixaId: id.optional() })
+  .refine((v) => !(v.accountId && v.cardCaixaId), { message: E.statementTarget });
+
 /** Busca por descrição nas linhas dos lotes de uma conta ou cartão (spec 009); `importIds` vazio = todos os lotes. */
 export const statementLineSearchQuery = z
   .object({
@@ -200,6 +205,8 @@ export const statementImportQuery = z
     cardInvoiceId: id.optional(),
     bankBalanceCents: z.coerce.number().int().safe().optional(),
     bankBalanceOn: isoDate.optional(),
+    /** OFX com várias contas: a posição (1, 2, …) do extrato a importar; omitida = o que casa com a conta de destino. */
+    ofxStatement: z.coerce.number().int().min(1).max(100).optional(),
   })
   .refine((v) => (v.accountId ? 1 : 0) + (v.cardCaixaId ? 1 : 0) === 1, { message: E.statementTarget })
   .refine((v) => (v.bankBalanceCents === undefined) === (v.bankBalanceOn === undefined), {

@@ -460,7 +460,11 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
   import_statement: {
     preview: async (ctx, i) => {
       const file = await toolAttachment(ctx, i.attachmentId);
-      const info = await statements.previewStatementImport(ctx, i, file.content, { mappingId: i.mappingId, inline: i.csvMapping });
+      const info = await statements.previewStatementImport(ctx, i, file.content, {
+        mappingId: i.mappingId,
+        inline: i.csvMapping,
+        ofxStatement: i.ofxStatement,
+      });
       const where = i.accountId ? await nameOf(ctx, 'account', i.accountId) : await nameOf(ctx, 'caixa', i.cardCaixaId);
       if (info.fresh === 0) throw unprocessable(t.errors.statementAllDuplicated, 'statement_duplicated');
       const rows: PreviewRow[] = [
@@ -481,7 +485,10 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         summary: file.fileName,
         action: 'create',
         rows,
-        warnings: info.duplicated > 0 ? [`${info.duplicated} linha(s) já importada(s) ficam de fora.`] : [],
+        warnings: [
+          ...(info.duplicated > 0 ? [`${info.duplicated} linha(s) já importada(s) ficam de fora.`] : []),
+          ...(info.ofxLeftOut.length ? [t.statements.ofxLeftOut(info.ofxLeftOut.join(', '))] : []),
+        ],
       };
     },
     run: async (ctx, i) => {
@@ -505,6 +512,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
           mappingId,
           bankBalanceCents: i.bankBalanceCents,
           bankBalanceOn: i.bankBalanceOn,
+          ofxStatement: i.ofxStatement,
         },
         { mime: file.mime, content: file.content },
       );
