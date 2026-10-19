@@ -25,13 +25,13 @@ O registro (`packages/shared/src/agents/tools.ts`) ganha o campo `category` em c
 | Categoria | Tools |
 |---|---|
 | Busca e consulta | `search_records`, `semantic_search`, `calendar` |
-| Caixas e contas | `list_caixas`, `get_caixa`, `list_accounts`, `get_account_statement`, `list_transfers`, `create_transfer`, `delete_transfer`, `create_caixa`, `update_caixa`, `archive_caixa` (admin), `create_account`, `update_account`, `archive_account`, `create_adjustment` |
+| Caixas e contas | `list_caixas`, `get_caixa`, `list_accounts`, `get_account_statement`, `list_transfers`, `create_transfer`, `delete_transfer`, `create_caixa`, `update_caixa`, `archive_caixa` (admin), `create_account`, `update_account`, `archive_account`, `create_adjustment`, `delete_adjustment` |
 | Entidades | `list_entities`, `list_entity_tags`, `get_entity`, `create_entity`, `update_entity`, `set_entity_tags`, `set_entity_favorite`, `add_pix_key`, `create_entity_tag` (admin), `update_entity_tag` (admin), `archive_entity_tag` (admin) |
 | Títulos e baixas | `list_titles`, `get_title`, `create_title`, `update_title`, `end_series`, `settle_title`, `reverse_settlement`, `cancel_title`, `archive_title`, `delete_title`, `accept_mirror`, `dispute_mirror` |
 | Cartão de crédito | `get_card`, `get_invoice`, `list_card_purchases`, `create_card_purchase`, `close_invoice`, `pay_invoice`, `reopen_invoice`, `create_card_charge`, `refund_card_purchase` |
 | Contratos | `list_contracts`, `get_contract`, `create_contract`, `update_contract`, `activate_contract`, `add_contract_amendment`, `terminate_contract`, `decide_contract_renewal`, `get_contract_document`, `save_contract_markdown`, `convert_contract_pdf` |
 | Conciliação | `list_statement_imports`, `get_statement_import`, `list_line_candidates`, `match_statement_line`, `match_statement_lines`, `confirm_statement_lines`, `unmatch_statement_line`, `ignore_statement_lines`, `unignore_statement_lines`, `create_from_statement_line`, `create_from_statement_lines`, `classify_statement_lines`, `apply_classification_suggestions` |
-| Importação | `import_statement`, `import_nfe`, `read_document`, `parse_payment_code`, `attach_file` |
+| Importação | `import_statement`, `set_statement_import_balance`, `import_nfe`, `read_document`, `parse_payment_code`, `attach_file` |
 | Categorias e regras | `list_categories`, `create_category` (admin), `update_category` (admin), `archive_category` (admin), `list_classification_rules`, `create_classification_rule`, `update_classification_rule`, `archive_classification_rule` |
 | Relatórios e canvas | `report_categories`, `report_entities`, `report_projection`, `flow_graph` |
 | Mensagens e avisos | `list_message_destinations`, `send_telegram_message`, `notify_user`, `list_message_subscriptions`, `create_message_destination` (segredo), `update_message_destination` (segredo), `archive_message_destination`, `set_message_subscriptions`, `send_test_message`, `list_notifications` |

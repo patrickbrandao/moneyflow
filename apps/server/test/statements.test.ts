@@ -254,9 +254,113 @@ describe('extratos e conciliação (spec 009)', () => {
       entityId: s.supplier.id,
       categoryId: s.expense.id,
     });
-    expect(created.status).toBe('matched');
+    expect(created).toMatchObject({ status: 'matched', createdEntry: 'purchase' });
     const purchases = await admin.get(`/api/cards/${card.id}/purchases`);
     expect(purchases.map((p: any) => p.amountCents).sort()).toEqual([12_000, 25_000]);
+
+    // Desfazer e excluir: a compra lançada pela linha sai da fatura; a casada com a compra existente não tem marca.
+    expect(posto.createdEntry).toBeNull();
+    await admin.post(`/api/statement-lines/${gym.id}/unmatch`, { deleteEntry: true });
+    expect((await admin.get(`/api/cards/${card.id}/purchases`)).map((p: any) => p.amountCents)).toEqual([12_000]);
+  });
+});
+
+describe('desfazer e excluir o lançamento que nasceu da linha (spec 009)', () => {
+  const exists = async (table: 'movements' | 'titles' | 'settlements', id: string) =>
+    (await h.db.execute(sql`SELECT 1 FROM ${sql.identifier(table)} WHERE id = ${id}`)).rows.length > 0;
+
+  it('avulso, título com espelho e baixa num título existente saem junto; relançar não duplica', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const market = await admin.post('/api/titles', {
+      caixaId: s.caixaA.id,
+      direction: 'payable',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      description: 'Supermercado do mês',
+      competenceDate: '2026-10-01',
+      dueDate: '2026-10-07',
+      amountCents: 23_015,
+    });
+    const res = await upload(
+      adminSession.cookie,
+      `/api/statement-imports?accountId=${s.accountA.id}&fileName=extrato.ofx`,
+      fixture('extrato-ofx2.ofx'),
+      'application/x-ofx',
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    const imp = res.json();
+    const line = (fitid: string) => imp.lines.find((l: any) => l.fitid === fitid);
+    const unmatch = (fitid: string, body?: Record<string, unknown>, status?: number) =>
+      admin.post(`/api/statement-lines/${line(fitid).id}/unmatch`, body, status);
+
+    // Movimento avulso: a marca adjustment; desfazer e excluir tira o movimento; relançar cria um só.
+    const adjusted = await admin.post(`/api/statement-lines/${line('OFX2-0005').id}/create`, {
+      mode: 'adjustment',
+      categoryId: s.income.id,
+      learnRule: false,
+    });
+    expect(adjusted).toMatchObject({ status: 'matched', createdEntry: 'adjustment' });
+    const firstMovement = adjusted.movementId;
+    expect(await unmatch('OFX2-0005', { deleteEntry: true })).toMatchObject({ status: 'new', movementId: null, createdEntry: null });
+    expect(await exists('movements', firstMovement)).toBe(false);
+    const again = await admin.post(`/api/statement-lines/${line('OFX2-0005').id}/create`, {
+      mode: 'adjustment',
+      categoryId: s.income.id,
+      learnRule: false,
+    });
+    const count = await h.db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM movements WHERE financial_account_id = ${s.accountA.id} AND amount_cents = 7525`,
+    );
+    expect(count.rows[0]!.n).toBe(1);
+
+    // Título já baixado com espelho na caixa principal da entidade: título, espelho e baixa saem.
+    const asTitle = await admin.post(`/api/statement-lines/${line('OFX2-0002').id}/create`, {
+      mode: 'title',
+      entityId: s.holderB.id,
+      categoryId: s.income.id,
+      learnRule: false,
+    });
+    expect(asTitle.createdEntry).toBe('title');
+    const title = await admin.get(`/api/titles/${await titleOfLine(line('OFX2-0002').id)}`);
+    expect(title.mirror).toMatchObject({ caixaId: s.caixaB.id });
+    const settlementId = title.settlements[0].id;
+    await unmatch('OFX2-0002', { deleteEntry: true });
+    expect(await exists('titles', title.id)).toBe(false);
+    expect(await exists('titles', title.mirror.id)).toBe(false);
+    expect(await exists('settlements', settlementId)).toBe(false);
+    expect(await exists('movements', asTitle.movementId)).toBe(false);
+
+    // Baixa ao confirmar a sugestão de um título que já existia: a baixa sai e o título volta a aberto.
+    expect(line('OFX2-0003')).toMatchObject({ status: 'suggested', titleId: market.id, createdEntry: null });
+    await admin.post('/api/statement-lines/confirm', { lineIds: [line('OFX2-0003').id] });
+    expect((await admin.get(`/api/titles/${market.id}`)).status).toBe('paid');
+    const confirmedLine = (await admin.get(`/api/statement-imports/${imp.id}`)).lines.find((l: any) => l.fitid === 'OFX2-0003');
+    expect(confirmedLine.createdEntry).toBe('settlement');
+    await unmatch('OFX2-0003', { deleteEntry: true });
+    expect(await admin.get(`/api/titles/${market.id}`)).toMatchObject({ status: 'open', settlements: [] });
+
+    // Casada com um movimento que já existia: só desfazer; deleteEntry é recusado e nada muda.
+    await unmatch('OFX2-0005');
+    expect(await exists('movements', again.movementId)).toBe(true);
+    await admin.post(`/api/statement-lines/${line('OFX2-0005').id}/match`, { movementId: again.movementId });
+    const refused = await unmatch('OFX2-0005', { deleteEntry: true }, 422);
+    expect(refused.error.code).toBe('line_entry_not_created');
+    expect((await admin.get(`/api/statement-imports/${imp.id}`)).lines.find((l: any) => l.fitid === 'OFX2-0005').status).toBe('matched');
+
+    // O lançamento mudou depois (baixa estornada): recusado, a linha continua conciliada.
+    const changed = await admin.post(`/api/statement-lines/${line('OFX2-0006').id}/create`, {
+      mode: 'title',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      learnRule: false,
+    });
+    const changedTitle = await admin.get(`/api/titles/${await titleOfLine(line('OFX2-0006').id)}`);
+    await admin.post(`/api/settlements/${changedTitle.settlements[0].id}/reverse`, { reason: 'teste', reversedOn: '2026-10-25' });
+    expect((await unmatch('OFX2-0006', { deleteEntry: true }, 422)).error.code).toBe('line_entry_changed');
+    expect(await exists('titles', changedTitle.id)).toBe(true);
+    expect((await admin.get(`/api/statement-imports/${imp.id}`)).lines.find((l: any) => l.id === changed.id).status).toBe('matched');
   });
 });
 
@@ -339,6 +443,74 @@ describe('aplicar regras e buscar nas linhas (spec 009)', () => {
     const outsider = client(h, (await userSession(h)).cookie);
     const res = await outsider.raw('GET', `/api/statement-lines?accountId=${s.accountA.id}&q=pix`);
     expect([403, 404]).toContain(res.statusCode);
+  });
+});
+
+describe('OFX com extratos de várias contas (spec 009)', () => {
+  it('importa só o extrato da conta de destino; sem casamento pede a escolha; o saldo do arquivo é o do extrato do lote', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const file = fixture('extrato-duas-contas.ofx');
+    const checking = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'checking',
+      name: 'Santander CC',
+      bankCode: '033',
+      accountNumber: '1300012-3',
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const savings = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'savings',
+      name: 'Santander Poupança',
+      bankCode: '033',
+      accountNumber: '60000987-6',
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const inspect = (accountId: string) =>
+      upload(adminSession.cookie, `/api/statements/inspect?accountId=${accountId}&fileName=x.ofx`, file).then((r) => r.json());
+    const importUrl = (accountId: string, extra = '') => `/api/statement-imports?accountId=${accountId}&fileName=duas.ofx${extra}`;
+    const fitids = (imp: any) => imp.lines.map((l: any) => l.fitid).sort();
+
+    // A leitura prévia lista as duas contas e já escolhe a que casa com o número cadastrado.
+    const seen = await inspect(checking.id);
+    expect(seen.ofx).toMatchObject({ position: 1, accountId: '013000123', count: 3, selected: 1 });
+    expect(seen.ofx.statements.map((st: any) => [st.accountId, st.accountType, st.count])).toEqual([
+      ['013000123', 'CHECKING', 3],
+      ['600009876', 'SAVINGS', 2],
+    ]);
+    expect((await inspect(savings.id)).ofx).toMatchObject({ position: 2, selected: 2, ledgerBalance: { amountCents: 120_840 } });
+
+    // Conta corrente: só as 3 linhas dela, saldo do extrato dela, e a poupança avisada como de fora.
+    const res = await upload(adminSession.cookie, importUrl(checking.id), file, 'application/x-ofx');
+    expect(res.statusCode, res.body).toBe(200);
+    const cc = res.json();
+    expect(fitids(cc)).toEqual(['DUAS-CC-001', 'DUAS-CC-002', 'DUAS-CC-003']);
+    expect(cc).toMatchObject({ bankBalanceCents: 265_010, bankBalanceOn: '2026-10-31', ofxLeftOut: ['Poupança 600009876 (banco 033)'] });
+
+    // Poupança pelo número cadastrado: só as linhas dela.
+    const pp = (await upload(adminSession.cookie, importUrl(savings.id), file, 'application/x-ofx')).json();
+    expect(fitids(pp)).toEqual(['DUAS-PP-001', 'DUAS-PP-002']);
+    expect(pp.bankBalanceCents).toBe(120_840);
+
+    // Conta sem número cadastrado: nada casa, o import pede a escolha e lista as contas do arquivo.
+    const inspected = await inspect(s.accountA.id);
+    expect(inspected.ofx).toMatchObject({ selected: null, suggested: 1 });
+    const refused = await upload(adminSession.cookie, importUrl(s.accountA.id), file, 'application/x-ofx');
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json().error.code).toBe('statement_ofx_choose_account');
+    expect(refused.json().error.message).toContain('2 = Poupança 600009876 (banco 033)');
+    const missing = await upload(adminSession.cookie, importUrl(s.accountA.id, '&ofxStatement=3'), file, 'application/x-ofx');
+    expect(missing.json().error.code).toBe('statement_ofx_statement');
+
+    // Escolhido o 2º extrato: as linhas e o saldo da poupança; "voltar ao saldo do arquivo" relê o mesmo extrato.
+    const chosen = (await upload(adminSession.cookie, importUrl(s.accountA.id, '&ofxStatement=2'), file, 'application/x-ofx')).json();
+    expect(fitids(chosen)).toEqual(['DUAS-PP-001', 'DUAS-PP-002']);
+    expect(chosen).toMatchObject({ bankBalanceCents: 120_840, ofxLeftOut: ['Conta corrente 013000123 (banco 033)'] });
+    await admin.put(`/api/statement-imports/${chosen.id}/bank-balance`, { mode: 'clear' });
+    const restored = await admin.put(`/api/statement-imports/${chosen.id}/bank-balance`, { mode: 'file' });
+    expect(restored).toMatchObject({ bankBalanceCents: 120_840, bankBalanceOn: '2026-10-31' });
   });
 });
 

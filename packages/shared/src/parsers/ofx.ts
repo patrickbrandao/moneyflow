@@ -1,6 +1,8 @@
 /*
  * Extratos OFX (spec 009): OFX 1.x (SGML, tags sem fechamento) e 2.x (XML),
- * de conta corrente (STMTRS) e de cartão de crédito (CCSTMTRS).
+ * de conta corrente (STMTRS) e de cartão de crédito (CCSTMTRS). Um arquivo
+ * pode trazer vários extratos (o Santander manda conta corrente e poupança
+ * juntas): cada um tem conta, saldo, período e transações próprios.
  */
 import { isIsoDate } from '../dates';
 import { decodeXmlEntities, findAll, findFirst, type XmlNode } from './xml';
@@ -22,7 +24,10 @@ export type OfxTransaction = {
 export type OfxStatement = {
   kind: 'bank' | 'creditcard';
   bankId: string | null;
+  branchId: string | null;
   accountId: string | null;
+  /** ACCTTYPE do BANKACCTFROM (CHECKING, SAVINGS, MONEYMRKT, CREDITLINE); null no cartão. */
+  accountType: string | null;
   currency: string | null;
   periodStart: string | null;
   periodEnd: string | null;
@@ -132,34 +137,28 @@ const leafText = (node: XmlNode | null | undefined, name: string): string | null
   return value ? value : null;
 };
 
-export function parseOfx(text: string): OfxStatement {
-  const start = text.search(/<OFX[\s>]/i);
-  if (start < 0) throw new Error('Arquivo OFX inválido: não encontrei a tag <OFX>.');
-  const tree = parseOfxTree(text.slice(start));
+/** Os extratos do arquivo (STMTRS e CCSTMTRS) na ordem em que aparecem. */
+function statementNodes(tree: XmlNode): XmlNode[] {
+  const out: XmlNode[] = [];
+  const walk = (node: XmlNode) => {
+    for (const child of node.children) {
+      if (child.name === 'STMTRS' || child.name === 'CCSTMTRS') out.push(child);
+      else walk(child);
+    }
+  };
+  walk(tree);
+  return out;
+}
 
-  const ccStmt = findFirst(tree, 'CCSTMTRS');
-  const bankStmt = findFirst(tree, 'STMTRS');
-  const stmt = ccStmt ?? bankStmt;
-  const tranList = findFirst(tree, 'BANKTRANLIST');
-  const trnNodes = findAll(tree, 'STMTTRN');
-  if (!trnNodes.length && !tranList && !ccStmt) {
-    throw new Error('Arquivo OFX sem transações (faltam STMTTRN e BANKTRANLIST).');
-  }
-
-  const account = findFirst(stmt ?? tree, ccStmt ? 'CCACCTFROM' : 'BANKACCTFROM') ?? findFirst(tree, 'BANKACCTFROM');
-  const ledger = findFirst(stmt ?? tree, 'LEDGERBAL');
-  const ledgerAmount = parseOfxAmount(leafText(ledger, 'BALAMT'));
-  const ledgerDate = parseOfxDate(leafText(ledger, 'DTASOF'));
-
-  const transactions: OfxTransaction[] = [];
-  for (const [index, node] of trnNodes.entries()) {
+function readTransactions(trnNodes: XmlNode[]): OfxTransaction[] {
+  return trnNodes.map((node, index) => {
     const postedOn = parseOfxDate(leafText(node, 'DTPOSTED')) ?? parseOfxDate(leafText(node, 'DTUSER'));
     const amountCents = parseOfxAmount(leafText(node, 'TRNAMT'));
     if (!postedOn) throw new Error(`Transação ${index + 1} do OFX sem data válida (DTPOSTED).`);
     if (amountCents === null) throw new Error(`Transação ${index + 1} do OFX sem valor válido (TRNAMT).`);
     const name = leafText(node, 'NAME') ?? leafText(node, 'PAYEE');
     const memo = leafText(node, 'MEMO');
-    transactions.push({
+    return {
       fitid: leafText(node, 'FITID'),
       postedOn,
       amountCents,
@@ -168,17 +167,111 @@ export function parseOfx(text: string): OfxStatement {
       memo,
       checkNum: leafText(node, 'CHECKNUM'),
       description: combineDescription(name, memo),
-    });
-  }
+    };
+  });
+}
 
+/**
+ * Lê um extrato. As transações vêm só do BANKTRANLIST dele (nunca de outro
+ * extrato do mesmo arquivo); sem STMTRS/CCSTMTRS, o arquivo inteiro vale como um.
+ */
+function readStatement(stmt: XmlNode, kind: OfxStatement['kind']): OfxStatement {
+  const tranList = findFirst(stmt, 'BANKTRANLIST');
+  const account = findFirst(stmt, kind === 'creditcard' ? 'CCACCTFROM' : 'BANKACCTFROM') ?? findFirst(stmt, 'BANKACCTFROM');
+  const ledger = findFirst(stmt, 'LEDGERBAL');
+  const ledgerAmount = parseOfxAmount(leafText(ledger, 'BALAMT'));
+  const ledgerDate = parseOfxDate(leafText(ledger, 'DTASOF'));
   return {
-    kind: ccStmt ? 'creditcard' : 'bank',
+    kind,
     bankId: leafText(account, 'BANKID'),
+    branchId: leafText(account, 'BRANCHID'),
     accountId: leafText(account, 'ACCTID'),
-    currency: leafText(stmt ?? tree, 'CURDEF'),
+    accountType: kind === 'bank' ? (leafText(account, 'ACCTTYPE')?.toUpperCase() ?? null) : null,
+    currency: leafText(stmt, 'CURDEF'),
     periodStart: parseOfxDate(leafText(tranList, 'DTSTART')),
     periodEnd: parseOfxDate(leafText(tranList, 'DTEND')),
     ledgerBalance: ledgerAmount !== null && ledgerDate ? { amountCents: ledgerAmount, date: ledgerDate } : null,
-    transactions,
+    transactions: readTransactions(findAll(tranList ?? stmt, 'STMTTRN')),
   };
+}
+
+/** Todos os extratos do arquivo, cada um com as suas transações (spec 009). */
+export function parseOfxStatements(text: string): OfxStatement[] {
+  const start = text.search(/<OFX[\s>]/i);
+  if (start < 0) throw new Error('Arquivo OFX inválido: não encontrei a tag <OFX>.');
+  const tree = parseOfxTree(text.slice(start));
+
+  const nodes = statementNodes(tree);
+  const hasTransactions = (node: XmlNode) =>
+    node.name === 'CCSTMTRS' || !!findFirst(node, 'BANKTRANLIST') || findAll(node, 'STMTTRN').length > 0;
+  if (!(nodes.length ? nodes : [tree]).some(hasTransactions)) {
+    throw new Error('Arquivo OFX sem transações (faltam STMTTRN e BANKTRANLIST).');
+  }
+  if (!nodes.length) return [readStatement(tree, 'bank')];
+  return nodes.map((node) => readStatement(node, node.name === 'CCSTMTRS' ? 'creditcard' : 'bank'));
+}
+
+/** O extrato principal do arquivo: o primeiro de cartão, senão o primeiro. Arquivos com várias contas: veja `pickOfxStatement`. */
+export function parseOfx(text: string): OfxStatement {
+  const statements = parseOfxStatements(text);
+  return statements.find((st) => st.kind === 'creditcard') ?? statements[0]!;
+}
+
+/** A conta de destino da importação, para escolher o extrato num arquivo com várias contas. */
+export type OfxTargetAccount = {
+  kind: 'checking' | 'savings' | 'creditcard';
+  bankCode?: string | null;
+  branch?: string | null;
+  accountNumber?: string | null;
+};
+
+const digits = (value: string | null | undefined) => (value ?? '').replace(/\D/g, '').replace(/^0+/, '');
+
+/** Número igual, com ou sem o dígito verificador, ou um contido no fim do outro (agência na frente). */
+function sameNumber(a: string, b: string): boolean {
+  const variants = (x: string) => [x, x.slice(0, -1)].filter((v) => v.length >= 4);
+  return variants(a).some((x) =>
+    variants(b).some((y) => x === y || (Math.min(x.length, y.length) >= 5 && (x.endsWith(y) || y.endsWith(x)))),
+  );
+}
+
+/** O extrato é da conta: o número casa e banco e agência, quando os dois lados trazem, não contradizem. */
+export function ofxStatementMatches(st: OfxStatement, target: OfxTargetAccount): boolean {
+  const own = digits(target.accountNumber);
+  const file = digits(st.accountId);
+  if (!own || !file || !sameNumber(own, file)) return false;
+  if (st.bankId && target.bankCode && digits(st.bankId) !== digits(target.bankCode)) return false;
+  const ownBranch = digits(target.branch);
+  const fileBranch = digits(st.branchId);
+  if (ownBranch && fileBranch && !ownBranch.startsWith(fileBranch) && !fileBranch.startsWith(ownBranch)) return false;
+  return true;
+}
+
+const SAVINGS_TYPES = new Set(['SAVINGS']);
+
+export type OfxStatementPick = {
+  /** Índice do extrato a importar, ou null quando o usuário precisa escolher. */
+  index: number | null;
+  /** Palpite pelo tipo de conta (ACCTTYPE), para pré-selecionar na escolha. */
+  suggested: number | null;
+};
+
+/**
+ * Escolhe o extrato de um arquivo com várias contas (spec 009): só os do tipo
+ * do destino (banco ou cartão); entre eles, o único cuja conta casa com a de
+ * destino (banco/agência/conta). Sem um único casamento, devolve null e o
+ * palpite pelo tipo (corrente × poupança), e quem importa pergunta ao usuário.
+ */
+export function pickOfxStatement(statements: OfxStatement[], target: OfxTargetAccount): OfxStatementPick {
+  if (statements.length === 1) return { index: 0, suggested: 0 };
+  const wanted = target.kind === 'creditcard' ? 'creditcard' : 'bank';
+  const sameKind = statements.flatMap((st, i) => (st.kind === wanted ? [i] : []));
+  const candidates = sameKind.length ? sameKind : statements.map((_, i) => i);
+  if (candidates.length === 1) return { index: candidates[0]!, suggested: candidates[0]! };
+  const matching = candidates.filter((i) => ofxStatementMatches(statements[i]!, target));
+  if (matching.length === 1) return { index: matching[0]!, suggested: matching[0]! };
+  const byType = (matching.length ? matching : candidates).filter(
+    (i) => target.kind !== 'creditcard' && SAVINGS_TYPES.has(statements[i]!.accountType ?? '') === (target.kind === 'savings'),
+  );
+  return { index: null, suggested: byType.length === 1 ? byType[0]! : null };
 }

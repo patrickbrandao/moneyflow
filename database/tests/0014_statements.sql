@@ -17,7 +17,7 @@ SELECT columns_are('statement_lines', ARRAY['id', 'statement_import_id', 'financ
                                             'posted_on', 'amount_cents', 'description', 'fitid', 'dedup_hash', 'status',
                                             'movement_id', 'title_id', 'card_invoice_item_id', 'entity_id', 'category_id',
                                             'classification_rule_id', 'classification_source', 'raw', 'matched_at',
-                                            'created_at', 'updated_at']);
+                                            'created_at', 'updated_at', 'created_entry']);
 SELECT columns_are('classification_rules', ARRAY['id', 'caixa_id', 'match_kind', 'pattern', 'direction', 'entity_id',
                                                  'category_id', 'priority', 'origin', 'created_from_line_id', 'created_by_user_id',
                                                  'usage_count', 'last_used_at', 'archived_at', 'created_at', 'updated_at']);

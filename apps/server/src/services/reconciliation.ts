@@ -1,4 +1,15 @@
-import { caixas, categories, classificationRules, movements, statementCsvMappings, statementLines, type Tx, titles } from '@moneyflow/db';
+import {
+  caixas,
+  cardInvoiceItems,
+  categories,
+  classificationRules,
+  movements,
+  settlements,
+  statementCsvMappings,
+  statementLines,
+  type Tx,
+  titles,
+} from '@moneyflow/db';
 import {
   type ApplyRulesResult,
   type ClassificationRuleRow,
@@ -7,21 +18,25 @@ import {
   type classificationRuleUpdateInput,
   type csvMappingInput,
   type csvMappingUpdateInput,
+  type LineCreatedEntry,
   type lineClassifyInput,
   type lineCreateInput,
   type lineMatchInput,
+  type lineUnmatchInput,
   type MatchCandidateRow,
   normalizeDescription,
   type StatementLineRow,
   scoreCandidate,
   t,
 } from '@moneyflow/shared';
-import { and, eq, isNull, ne, type SQL, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne, type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { forbidden, notFound, translateDbError, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
 import { insertPurchase, loadCard } from './card-core';
+import { assertPurchaseDeletable, deletePurchaseTx } from './cards';
+import { assertNotReconciled, clearStatementSuggestions } from './reconciliation-guards';
 import { settleInTx } from './settlements';
 import { candidatesFor, listLines, resolveTarget, ruleFor } from './statements';
 import { insertTitlePair } from './title-pair';
@@ -55,7 +70,12 @@ async function lineRow(ctx: ServiceContext, id: string): Promise<StatementLineRo
   return row;
 }
 
-async function setMatched(tx: Tx, lineId: string, link: { movementId?: string | null; cardInvoiceItemId?: string | null }) {
+/** Concilia a linha; `createdEntry` = o lançamento ligado nasceu dela (o "desfazer e excluir" o tira junto). */
+async function setMatched(
+  tx: Tx,
+  lineId: string,
+  link: { movementId?: string | null; cardInvoiceItemId?: string | null; createdEntry?: LineCreatedEntry | null },
+) {
   await tx
     .update(statementLines)
     .set({
@@ -64,6 +84,7 @@ async function setMatched(tx: Tx, lineId: string, link: { movementId?: string | 
       movementId: link.movementId ?? null,
       titleId: null,
       cardInvoiceItemId: link.cardInvoiceItemId ?? null,
+      createdEntry: link.createdEntry ?? null,
     })
     .where(eq(statementLines.id, lineId));
 }
@@ -101,7 +122,7 @@ async function applyMatch(ctx: ServiceContext, tx: Tx, line: Line, ref: z.output
   } else if (ref.titleId) {
     if (!line.financialAccountId) throw unprocessable(t.errors.lineAccountOnly);
     const movementId = await settleFromLine(ctx, tx, line, ref.titleId);
-    await setMatched(tx, line.id, { movementId });
+    await setMatched(tx, line.id, { movementId, createdEntry: 'settlement' });
   } else if (ref.cardInvoiceItemId) {
     if (!line.cardCaixaId) throw unprocessable(t.errors.lineCardOnly);
     await setMatched(tx, line.id, { cardInvoiceItemId: ref.cardInvoiceItemId });
@@ -175,17 +196,82 @@ export async function matchLine(ctx: ServiceContext, id: string, input: z.output
   return lineRow(ctx, id);
 }
 
-/** Desfaz a conciliação/sugestão (o movimento ou a baixa criados ficam). */
-export async function unmatchLine(ctx: ServiceContext, id: string) {
+/**
+ * Desfaz a conciliação/sugestão. Por padrão o lançamento ligado fica; com
+ * `deleteEntry`, o que nasceu da linha (created_entry) sai junto, como se não
+ * tivesse sido lançado — relançar a linha depois não duplica o valor.
+ */
+export async function unmatchLine(ctx: ServiceContext, id: string, input: z.output<typeof lineUnmatchInput> = { deleteEntry: false }) {
   await withTx(ctx, async (tx) => {
     const line = await loadLine(ctx, tx, id);
     if (line.status !== 'matched' && line.status !== 'suggested') throw unprocessable(t.errors.lineNotMatched);
+    if (input.deleteEntry && !line.createdEntry) throw unprocessable(t.errors.lineEntryNotCreated, 'line_entry_not_created');
     await tx
       .update(statementLines)
-      .set({ status: 'new', matchedAt: null, movementId: null, titleId: null, cardInvoiceItemId: null })
+      .set({ status: 'new', matchedAt: null, movementId: null, titleId: null, cardInvoiceItemId: null, createdEntry: null })
       .where(eq(statementLines.id, id));
+    if (input.deleteEntry) await deleteCreatedEntry(ctx, tx, line);
   });
   return lineRow(ctx, id);
+}
+
+const uuids = (ids: string[]) =>
+  sql.join(
+    ids.map((v) => sql`${v}::uuid`),
+    sql`, `,
+  );
+
+/**
+ * Exclui o lançamento que nasceu da linha (a linha já voltou a nova): o
+ * movimento avulso; o título criado pela linha com o espelho e a baixa; a
+ * baixa feita num título que já existia (ele volta a ter o valor em aberto);
+ * a compra no cartão (faturas abertas, sem estorno). Se o lançamento mudou
+ * depois (outra baixa, estorno, outra conciliação), nada sai.
+ */
+async function deleteCreatedEntry(ctx: ServiceContext, tx: Tx, line: Line) {
+  if (line.createdEntry === 'purchase') {
+    const [item] = await tx
+      .select({ purchaseId: cardInvoiceItems.cardPurchaseId })
+      .from(cardInvoiceItems)
+      .where(eq(cardInvoiceItems.id, line.cardInvoiceItemId!));
+    if (!item?.purchaseId) throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
+    await assertPurchaseDeletable(ctx, item.purchaseId);
+    await deletePurchaseTx(tx, item.purchaseId);
+    return;
+  }
+  const [movement] = await tx.select().from(movements).where(eq(movements.id, line.movementId!));
+  if (!movement) throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
+  if (line.createdEntry === 'adjustment') {
+    if (movement.kind !== 'adjustment') throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
+    await assertNotReconciled(tx, [movement.id]);
+    await clearStatementSuggestions(tx, { movementIds: [movement.id] });
+    await tx.delete(movements).where(eq(movements.id, movement.id));
+    return;
+  }
+
+  // title / settlement: a baixa (e a perna do espelho) do movimento da linha.
+  if (!movement.settlementId) throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
+  const [leg] = await tx.select().from(settlements).where(eq(settlements.id, movement.settlementId));
+  const legIds = [leg!.id, ...(leg!.mirrorSettlementId ? [leg!.mirrorSettlementId] : [])];
+  const [title] = await tx.select().from(titles).where(eq(titles.id, leg!.titleId));
+  const pair = [title!.id, ...(title!.mirrorTitleId ? [title!.mirrorTitleId] : [])];
+  const legs = await tx.execute<{ id: string; reversed_at: string | null }>(
+    line.createdEntry === 'title'
+      ? sql`SELECT id, reversed_at FROM settlements WHERE title_id IN (${uuids(pair)})`
+      : sql`SELECT id, reversed_at FROM settlements WHERE id IN (${uuids(legIds)})`,
+  );
+  if (legs.rows.some((r) => r.reversed_at !== null || !legIds.includes(r.id)))
+    throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
+  const moved = await tx.execute<{ id: string }>(sql`SELECT id FROM movements WHERE settlement_id IN (${uuids(legIds)})`);
+  const movementIds = moved.rows.map((r) => r.id);
+  await assertNotReconciled(tx, movementIds);
+  await clearStatementSuggestions(tx, { movementIds });
+  if (movementIds.length > 0) await tx.delete(movements).where(inArray(movements.id, movementIds));
+  await tx.delete(settlements).where(inArray(settlements.id, legIds));
+  if (line.createdEntry === 'title') {
+    await clearStatementSuggestions(tx, { titleIds: pair });
+    await tx.delete(titles).where(inArray(titles.id, pair));
+  }
 }
 
 async function applyIgnored(tx: Tx, line: Line, ignored: boolean) {
@@ -193,7 +279,14 @@ async function applyIgnored(tx: Tx, line: Line, ignored: boolean) {
   if (!ignored && line.status !== 'ignored') return;
   await tx
     .update(statementLines)
-    .set({ status: ignored ? 'ignored' : 'new', matchedAt: null, movementId: null, titleId: null, cardInvoiceItemId: null })
+    .set({
+      status: ignored ? 'ignored' : 'new',
+      matchedAt: null,
+      movementId: null,
+      titleId: null,
+      cardInvoiceItemId: null,
+      createdEntry: null,
+    })
     .where(eq(statementLines.id, line.id));
 }
 
@@ -282,7 +375,7 @@ async function createInTx(ctx: ServiceContext, tx: Tx, line: Line, input: z.outp
       installmentsTotal: 1,
       firstInstallment: 1,
     });
-    await setMatched(tx, line.id, { cardInvoiceItemId: created.itemIds[0]! });
+    await setMatched(tx, line.id, { cardInvoiceItemId: created.itemIds[0]!, createdEntry: 'purchase' });
   } else {
     if (!line.financialAccountId) throw unprocessable(t.errors.lineAccountOnly);
     if (input.mode === 'adjustment') {
@@ -298,7 +391,7 @@ async function createInTx(ctx: ServiceContext, tx: Tx, line: Line, input: z.outp
           categoryId,
         })
         .returning({ id: movements.id });
-      await setMatched(tx, line.id, { movementId: movement!.id });
+      await setMatched(tx, line.id, { movementId: movement!.id, createdEntry: 'adjustment' });
     } else {
       if (!entityId || !categoryId) throw unprocessable(t.errors.lineNeedsClassification);
       const direction = line.amountCents < 0 ? 'payable' : 'receivable';
@@ -329,7 +422,7 @@ async function createInTx(ctx: ServiceContext, tx: Tx, line: Line, input: z.outp
         mirror,
       );
       const movementId = await settleFromLine(ctx, tx, line, pair.id);
-      await setMatched(tx, line.id, { movementId });
+      await setMatched(tx, line.id, { movementId, createdEntry: 'title' });
     }
   }
   const corrected = (entityId ?? null) !== (line.entityId ?? null) || (categoryId ?? null) !== (line.categoryId ?? null);

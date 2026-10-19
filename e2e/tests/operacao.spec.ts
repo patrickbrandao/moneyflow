@@ -118,6 +118,21 @@ test('conciliação: título da caixa, última conta lembrada, aplicar regras e 
     headers: { 'content-type': 'application/x-ofx' },
   });
   expect(upload.ok(), await upload.text()).toBeTruthy();
+  // Com um agente dos fluxos ligado por outro teste na mesma pilha, o import enfileira sugestões do agente,
+  // que o "Aplicar regras" não sobrescreve (spec 009): espera a execução e começa sem elas.
+  const imported = await upload.json();
+  const runId: string | null = imported.aiSuggestion?.runId ?? null;
+  if (runId) {
+    await expect
+      .poll(async () => (await (await page.request.get(`/api/runs/${runId}`)).json()).status, { timeout: 30_000 })
+      .toMatch(/completed|failed|canceled|awaiting_confirmation/);
+    const detail = await (await page.request.get(`/api/statement-imports/${imported.id}`)).json();
+    for (const line of detail.lines as { id: string; classificationSource: string | null }[]) {
+      if (line.classificationSource !== 'agent') continue;
+      const cleared = await page.request.patch(`/api/statement-lines/${line.id}`, { data: { entityId: null, categoryId: null } });
+      expect(cleared.ok(), await cleared.text()).toBeTruthy();
+    }
+  }
 
   // Escolhe a poupança; sai pelo nome da caixa no título e volta: a conta escolhida continua.
   await page.goto(`/caixas/${caixa.id}/reconciliation`);

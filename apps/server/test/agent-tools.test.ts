@@ -576,6 +576,54 @@ describe('importação a partir de anexo', () => {
       const detail = JSON.parse((result.content as { text: string }[])[0]!.text);
       expect(detail).toMatchObject({ financialAccountId: account.id, format: 'ofx' });
       expect(await auditActor('statement_imports', detail.id)).toEqual({ actor_kind: 'agent', agent_run_id: null });
+
+      // upload_file (só do /mcp): o OFX com corrente e poupança vai para a poupança, que importa só o extrato dela.
+      expect(tools.find((t) => t.name === 'upload_file')).toBeTruthy();
+      const text = (r: Awaited<ReturnType<typeof mcpClient.callTool>>) => (r.content as { text: string }[])[0]!.text;
+      const bad = await mcpClient.callTool({ name: 'upload_file', arguments: { fileName: 'x.ofx', contentBase64: 'não é base64!' } });
+      expect(bad.isError).toBe(true);
+      expect(text(bad)).toBe('Conteúdo inválido: envie o arquivo em base64.');
+      const sent = await mcpClient.callTool({
+        name: 'upload_file',
+        arguments: { fileName: 'poupanca.ofx', contentBase64: fixture('extrato-duas-contas.ofx').toString('base64') },
+      });
+      expect(sent.isError, text(sent)).toBeFalsy();
+      const file = JSON.parse(text(sent));
+      expect(file).toMatchObject({ fileName: 'poupanca.ofx', mimeType: 'application/x-ofx' });
+      const savings = await admin.post(`/api/caixas/${s.caixaB.id}/accounts`, {
+        kind: 'savings',
+        name: `Poupança MCP ${uid()}`,
+        bankCode: '033',
+        accountNumber: '60000987-6',
+        openingBalanceCents: 0,
+        openingDate: '2026-01-01',
+      });
+      const imported = await mcpClient.callTool({
+        name: 'import_statement',
+        arguments: { attachmentId: file.attachmentId, accountId: savings.id },
+      });
+      expect(imported.isError, text(imported)).toBeFalsy();
+      const savingsLot = JSON.parse(text(imported));
+      expect(savingsLot).toMatchObject({ financialAccountId: savings.id, lineCount: 2, bankBalanceCents: 120_840 });
+
+      // Saldo do banco do lote pela tool: valor e data, limpar e voltar ao do arquivo.
+      const set = await mcpClient.callTool({
+        name: 'set_statement_import_balance',
+        arguments: { importId: savingsLot.id, mode: 'set', bankBalanceCents: 99_999, bankBalanceOn: '2026-10-15' },
+      });
+      expect(set.isError, text(set)).toBeFalsy();
+      expect(JSON.parse(text(set))).toMatchObject({ bankBalanceCents: 99_999, bankBalanceOn: '2026-10-15' });
+      expect(JSON.parse(text(set))).not.toHaveProperty('lines');
+      const cleared = await mcpClient.callTool({
+        name: 'set_statement_import_balance',
+        arguments: { importId: savingsLot.id, mode: 'clear' },
+      });
+      expect(JSON.parse(text(cleared))).toMatchObject({ bankBalanceCents: null, bankBalanceOn: null });
+      const fromFile = await mcpClient.callTool({
+        name: 'set_statement_import_balance',
+        arguments: { importId: savingsLot.id, mode: 'file' },
+      });
+      expect(JSON.parse(text(fromFile))).toMatchObject({ bankBalanceCents: 120_840, bankBalanceOn: '2026-10-31' });
     } finally {
       await mcpClient.close();
     }
@@ -764,6 +812,106 @@ describe('caixas e contas', () => {
     expect((await call(viewerSession, 'create_caixa', { name: 'x', holderEntityId: holder.id })).error).toBe(
       'Você não tem permissão para esta ação.',
     );
+  });
+});
+
+describe('conciliação: avulso, desfazer e excluir e lotes em páginas', () => {
+  it('delete_adjustment, unmatch_statement_line com deleteEntry e as páginas de list/get_statement_import', async () => {
+    const account = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'checking',
+      name: `Conciliação ${uid()}`,
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const movementExists = async (id: string) => (await h.db.execute(sql`SELECT 1 FROM movements WHERE id = ${id}`)).rows.length > 0;
+
+    // Excluir avulso: prévia com os dados, execução, e o viewer negado.
+    const fee = await admin.post(`/api/accounts/${account.id}/adjustments`, {
+      occurredOn: '2026-02-01',
+      amountCents: -1_500,
+      description: 'Tarifa avulsa',
+      categoryId: s.expense.id,
+    });
+    expect((await call(viewerSession, 'delete_adjustment', { movementId: fee.id })).error).toBe('Você só tem leitura nesta caixa.');
+    const deleted = await approved(adminSession, 'delete_adjustment', { movementId: fee.id });
+    expect(deleted.preview.action).toBe('delete');
+    expect(rowsOf(deleted.preview)).toMatchObject({ Saída: 'R$ 15,00 → —', Data: '01/02/2026 → —' });
+    expect(deleted.value).toEqual({ deleted: true });
+    expect(await movementExists(fee.id)).toBe(false);
+
+    // Lote importado: páginas das linhas, filtro por situação e só o resumo.
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/statement-imports?accountId=${account.id}&fileName=extrato.ofx`,
+      payload: fixture('extrato-ofx2.ofx'),
+      headers: { cookie: adminSession.cookie, 'content-type': 'application/x-ofx' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    const imp = res.json();
+    const imports = await call(adminSession, 'list_statement_imports', { accountId: account.id, limit: 1 });
+    expect(imports.value).toMatchObject({ total: 1, offset: 0, nextOffset: null });
+    expect(imports.value.imports[0].id).toBe(imp.id);
+    const page = await call(adminSession, 'get_statement_import', { importId: imp.id, statuses: ['new'], limit: 4 });
+    expect(page.value).toMatchObject({ id: imp.id, lineTotal: 6, offset: 0, nextOffset: 4 });
+    expect(page.value.lines).toHaveLength(4);
+    expect(page.value.lines[0]).not.toHaveProperty('importId');
+    expect(page.value.lines[0]).not.toHaveProperty('movementId');
+    const rest = await call(adminSession, 'get_statement_import', { importId: imp.id, statuses: ['new'], limit: 4, offset: 4 });
+    expect(rest.value).toMatchObject({ lineTotal: 6, nextOffset: null });
+    expect(rest.value.lines).toHaveLength(2);
+    expect((await call(adminSession, 'get_statement_import', { importId: imp.id, limit: 0 })).value).toMatchObject({
+      lineCount: 6,
+      lines: [],
+    });
+
+    // Linha lançada como avulso: a leitura mostra createdEntry; desfazer sem excluir avisa a duplicação.
+    const lineId = imp.lines.find((l: any) => l.fitid === 'OFX2-0005').id;
+    const created = await admin.post(`/api/statement-lines/${lineId}/create`, { mode: 'adjustment', learnRule: false });
+    const matched = await call(adminSession, 'get_statement_import', { importId: imp.id, statuses: ['matched'] });
+    expect(matched.value.lines).toEqual([expect.objectContaining({ id: lineId, createdEntry: 'adjustment' })]);
+    const kept = await call(adminSession, 'unmatch_statement_line', { lineId }, { approve: false });
+    expect(kept.preview.warnings.join(' ')).toContain('duplica o valor');
+    const removed = await approved(adminSession, 'unmatch_statement_line', { lineId, deleteEntry: true });
+    expect(rowsOf(removed.preview).Lançamento).toBe('Movimento avulso → Excluído');
+    expect(removed.value).toMatchObject({ status: 'new', createdEntry: null });
+    expect(await movementExists(created.movementId)).toBe(false);
+
+    // Linha nova não tem o que desfazer; casada com um avulso que já existia, deleteEntry é recusado já na prévia.
+    expect((await call(adminSession, 'unmatch_statement_line', { lineId, deleteEntry: true })).error).toBe(
+      'Esta linha não está conciliada.',
+    );
+    const other = await admin.post(`/api/accounts/${account.id}/adjustments`, {
+      occurredOn: '2026-10-18',
+      amountCents: 7_525,
+      description: 'Rendimento',
+    });
+    await admin.post(`/api/statement-lines/${lineId}/match`, { movementId: other.id });
+    expect((await call(adminSession, 'unmatch_statement_line', { lineId, deleteEntry: true })).error).toBe(
+      'O lançamento desta linha não nasceu dela: desfaça só a conciliação e corrija o lançamento à mão.',
+    );
+    // Avulso conciliado não sai pela tool de exclusão.
+    expect((await call(adminSession, 'delete_adjustment', { movementId: other.id })).error).toMatch(/concilia/i);
+
+    // Saldo do banco do lote pelo agente: prévia antes → depois; o viewer não escreve.
+    expect(
+      (
+        await call(viewerSession, 'set_statement_import_balance', {
+          importId: imp.id,
+          mode: 'set',
+          bankBalanceCents: 1,
+          bankBalanceOn: '2026-10-31',
+        })
+      ).error,
+    ).toBe('Você só tem leitura nesta caixa.');
+    const balance = await approved(adminSession, 'set_statement_import_balance', {
+      importId: imp.id,
+      mode: 'set',
+      bankBalanceCents: -26_772,
+      bankBalanceOn: '2026-10-31',
+    });
+    expect(balance.preview.action).toBe('update');
+    expect(rowsOf(balance.preview)['Saldo do banco']).toMatch(/→ .*267,72 em 31\/10\/2026$/);
+    expect(balance.value).toMatchObject({ id: imp.id, bankBalanceCents: -26_772, bankBalanceOn: '2026-10-31' });
   });
 });
 

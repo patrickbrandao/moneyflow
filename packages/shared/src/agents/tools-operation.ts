@@ -211,6 +211,15 @@ export const OPERATION_TOOLS = [
         csvMapping: csvMappingTool.optional(),
         bankBalanceCents: z.number().int().safe().optional().describe('Saldo do banco informado (centavos), com bankBalanceOn.'),
         bankBalanceOn: isoDate.optional(),
+        ofxStatement: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe(
+            'OFX com extratos de várias contas (ex.: corrente e poupança juntas): a posição (1, 2, …) do extrato a importar. Omitida = o que casa com a conta de destino; sem casamento, o erro lista as contas do arquivo.',
+          ),
       })
       .refine((v) => (v.accountId ? 1 : 0) + (v.cardCaixaId ? 1 : 0) === 1, {
         path: ['accountId'],
@@ -220,6 +229,29 @@ export const OPERATION_TOOLS = [
       .refine((v) => (v.bankBalanceCents === undefined) === (v.bankBalanceOn === undefined), {
         path: ['bankBalanceOn'],
         message: 'Saldo e data do saldo vão juntos.',
+      }),
+  }),
+  define({
+    name: 'set_statement_import_balance',
+    category: 'imports',
+    title: 'Saldo do banco do lote',
+    description:
+      'Troca o saldo do banco de um lote de extrato de conta (o "Editar saldo" da tela; ids em list_statement_imports): mode set com bankBalanceCents e bankBalanceOn (o saldo da conta no banco nessa data, normalmente o fim do extrato); clear deixa o lote sem comparação; file volta ao saldo do arquivo OFX. Devolve o lote com a divergência acumulada e a do intervalo recalculadas.',
+    kind: 'write',
+    input: z
+      .object({
+        importId: id,
+        mode: z.enum(['set', 'clear', 'file']),
+        bankBalanceCents: z.number().int().safe().optional().describe('Saldo do banco (centavos; negativo = devedor), só com mode set.'),
+        bankBalanceOn: isoDate.optional().describe('Data do saldo, só com mode set.'),
+      })
+      .refine((v) => (v.mode === 'set') === (v.bankBalanceCents !== undefined && v.bankBalanceOn !== undefined), {
+        path: ['bankBalanceCents'],
+        message: 'mode set exige bankBalanceCents e bankBalanceOn; clear e file não os aceitam.',
+      })
+      .refine((v) => v.mode === 'set' || (v.bankBalanceCents === undefined && v.bankBalanceOn === undefined), {
+        path: ['bankBalanceOn'],
+        message: 'Saldo e data só com mode set.',
       }),
   }),
   define({
@@ -381,6 +413,16 @@ export const OPERATION_TOOLS = [
       'Lança um movimento avulso numa conta (ajuste de saldo, rendimento, tarifa): valor positivo entra, negativo sai; categoria e entidade opcionais.',
     kind: 'write',
     input: z.object({ accountId: id, adjustment: adjustmentInput }),
+  }),
+  define({
+    name: 'delete_adjustment',
+    category: 'caixas',
+    title: 'Excluir movimento avulso',
+    description:
+      'Exclui um movimento avulso (kind adjustment: ajuste, tarifa, rendimento) de uma conta; o id vem de get_account_statement. Movimento de baixa sai pelo estorno (reverse_settlement) e o de transferência por delete_transfer. Movimento conciliado com uma linha do extrato precisa da conciliação desfeita antes (unmatch_statement_line, que com deleteEntry já exclui o avulso nascido da linha).',
+    kind: 'write',
+    destructive: true,
+    input: z.object({ movementId: id }),
   }),
 
   /* ---------------- Títulos e baixas ---------------- */

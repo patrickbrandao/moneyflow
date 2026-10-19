@@ -200,6 +200,9 @@ export const ptBR = {
     statementEmpty: 'Nenhuma transação encontrada no arquivo.',
     statementBalanceAccountOnly: 'Só o lote de uma conta tem saldo do banco.',
     statementNoFileBalance: 'O arquivo deste lote não traz saldo.',
+    statementOfxChooseAccount: (list: string) =>
+      `O arquivo traz extratos de mais de uma conta e nenhum casa com o banco, a agência e a conta de destino. Escolha qual importar (ofxStatement): ${list}.`,
+    statementOfxStatement: 'Esse extrato não existe no arquivo.',
     apiTokenUserInactive: 'O usuário está desativado: a chave não autenticaria. Reative-o antes.',
     statementAllDuplicated: 'Todas as linhas do arquivo já tinham sido importadas.',
     csvMappingRequired: 'Escolha ou crie o mapeamento de colunas do CSV.',
@@ -208,6 +211,9 @@ export const ptBR = {
     lineNotPending: 'Esta linha já foi conciliada ou ignorada.',
     lineNotSuggested: 'Esta linha não tem sugestão a confirmar.',
     lineNotMatched: 'Esta linha não está conciliada.',
+    lineEntryNotCreated: 'O lançamento desta linha não nasceu dela: desfaça só a conciliação e corrija o lançamento à mão.',
+    lineEntryChanged:
+      'O lançamento desta linha mudou depois de lançado (outra baixa, estorno ou conciliação): desfaça só a conciliação e corrija à mão.',
     lineMatchTarget: 'Informe um (e só um) alvo: movimento, título ou item de fatura.',
     lineAmountMismatch: 'O valor não bate com o da linha do extrato.',
     lineDirectionMismatch: 'A direção do título não bate com a da linha (entrada × saída).',
@@ -217,6 +223,8 @@ export const ptBR = {
     lineAccountOnly: 'Linha de fatura de cartão vira compra, não movimento.',
     attachmentEmpty: 'Arquivo vazio.',
     attachmentTooLarge: 'O arquivo passa de 20 MB.',
+    uploadInvalidBase64: 'Conteúdo inválido: envie o arquivo em base64.',
+    uploadTooLarge: 'O arquivo enviado pelo MCP passa de 5 MB.',
     closingUnreconciled: (n: number) =>
       `Há ${n} linha(s) de extrato do mês sem conciliar nas contas desta caixa. Concilie antes ou feche assim mesmo.`,
     reopenAdminOnly: 'Só um administrador reabre um mês fechado.',

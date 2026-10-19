@@ -34,6 +34,7 @@ export type UserRow = {
 export type { EntityKind } from './documents';
 
 import type { EntityKind } from './documents';
+import type { LINE_CREATED_ENTRIES } from './schemas/operation';
 
 /** Tag de entidade como aparece na entidade (chip): `archived` = tag arquivada (esmaecida). */
 export type EntityTagRef = { id: string; name: string; colorSlot: number; archived: boolean };
@@ -544,6 +545,7 @@ export type CardPurchaseDetail = CardPurchaseRow & {
 /* ---------------- extratos e conciliação (spec 009) ---------------- */
 
 export type LineStatus = 'matched' | 'suggested' | 'new' | 'ignored';
+export type LineCreatedEntry = (typeof LINE_CREATED_ENTRIES)[number];
 
 export type StatementImportSummary = {
   id: string;
@@ -587,6 +589,8 @@ export type StatementLineRow = {
   movementId: string | null;
   titleId: string | null;
   cardInvoiceItemId: string | null;
+  /** O lançamento conciliado nasceu desta linha (spec 009): "desfazer e excluir" o tira junto. */
+  createdEntry: LineCreatedEntry | null;
   /** Resumo do par (conciliado ou sugerido). */
   target: {
     kind: 'movement' | 'title' | 'card_item';
@@ -612,6 +616,8 @@ export type StatementImportDetail = StatementImportSummary & {
   lines: StatementLineRow[];
   /** Quantas linhas do arquivo já existiam (dedup) no momento do import. */
   skippedDuplicates?: number;
+  /** Só na resposta do import de um OFX com várias contas: as contas do arquivo que ficaram de fora (spec 009). */
+  ofxLeftOut?: string[];
   /** Só na resposta do import: a sugestão do agente dos fluxos enfileirada para as linhas novas (a tela acompanha a execução). */
   aiSuggestion?: { queued: boolean; runId: string | null; lines: number; skippedReason?: string } | null;
   /** Só na resposta do import, com "Conciliar com IA ao importar" ligado (spec 029): a conciliação enfileirada. */
@@ -625,19 +631,30 @@ export type StatementImportDetail = StatementImportSummary & {
   } | null;
 };
 
+/** Resumo de um extrato do OFX; `position` (1, 2, …) é a ordem no arquivo, o `ofxStatement` do import. */
+export type OfxInspectStatement = {
+  position: number;
+  kind: 'bank' | 'creditcard';
+  bankId: string | null;
+  branchId: string | null;
+  accountId: string | null;
+  accountType: string | null;
+  periodStart: string | null;
+  periodEnd: string | null;
+  ledgerBalance: { amountCents: number; date: string } | null;
+  count: number;
+  sample: { postedOn: string; amountCents: number; description: string; fitid: string | null }[];
+};
+
 export type StatementInspect = {
   format: 'ofx' | 'csv';
   encoding: string;
-  ofx: {
-    kind: 'bank' | 'creditcard';
-    bankId: string | null;
-    accountId: string | null;
-    periodStart: string | null;
-    periodEnd: string | null;
-    ledgerBalance: { amountCents: number; date: string } | null;
-    count: number;
-    sample: { postedOn: string; amountCents: number; description: string; fitid: string | null }[];
-  } | null;
+  /**
+   * O extrato escolhido (ou o palpite, ou o primeiro) e, em `statements`, todos
+   * os do arquivo. Com mais de um (spec 009), `selected` é o que casa com a
+   * conta de destino (null = o usuário escolhe) e `suggested` o palpite pelo tipo.
+   */
+  ofx: (OfxInspectStatement & { statements: OfxInspectStatement[]; selected: number | null; suggested: number | null }) | null;
   csv: { delimiter: string; rows: string[][] } | null;
 };
 

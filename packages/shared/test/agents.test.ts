@@ -15,6 +15,7 @@ import {
   formatSse,
   isValidBlock,
   kitTools,
+  MCP_ONLY_TOOLS,
   mcpExposed,
   type NeutralMessage,
   OPERATION_TOOLS,
@@ -23,6 +24,7 @@ import {
   t,
   toolJsonSchema,
   toolKitCreateInput,
+  uploadMime,
 } from '../src';
 
 describe('registro de tools', () => {
@@ -93,8 +95,20 @@ describe('registro de tools', () => {
       ].sort(),
     );
     expect(names(AGENT_TOOLS.filter((tool) => tool.category === 'imports'))).toEqual(
-      ['import_statement', 'import_nfe', 'read_document', 'parse_payment_code', 'attach_file'].sort(),
+      ['import_statement', 'set_statement_import_balance', 'import_nfe', 'read_document', 'parse_payment_code', 'attach_file'].sort(),
     );
+    // Só do /mcp (spec 027): o upload de arquivo fica fora do registro, dos kits e das execuções.
+    expect(names(MCP_ONLY_TOOLS)).toEqual(['upload_file']);
+    expect(agentTool('upload_file')).toBeUndefined();
+    expect(uploadMime('extrato.OFX')).toBe('application/x-ofx');
+    expect(uploadMime('arquivo.bin')).toBe('application/octet-stream');
+    expect(uploadMime('nota.xml', 'text/xml')).toBe('text/xml');
+    const balance = agentTool('set_statement_import_balance')!.input;
+    const importId = '0192d8e4-0000-7000-8000-000000000002';
+    expect(balance.parse({ importId, mode: 'set', bankBalanceCents: -1, bankBalanceOn: '2019-07-31' })).toMatchObject({ mode: 'set' });
+    expect(() => balance.parse({ importId, mode: 'set', bankBalanceCents: 100 })).toThrow();
+    expect(() => balance.parse({ importId, mode: 'clear', bankBalanceCents: 100, bankBalanceOn: '2019-07-31' })).toThrow();
+    expect(balance.parse({ importId, mode: 'file' })).toMatchObject({ mode: 'file' });
     expect(names(AGENT_TOOLS.filter((tool) => tool.category === 'categories'))).toEqual(
       [
         'list_categories',
@@ -116,6 +130,7 @@ describe('registro de tools', () => {
         'reopen_invoice',
         'archive_caixa',
         'archive_account',
+        'delete_adjustment',
         'delete_title',
         'delete_transfer',
         'archive_category',

@@ -1293,6 +1293,7 @@ export const statementLines = pgTable(
     matchedAt: timestamp('matched_at', { withTimezone: true, mode: 'string' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    createdEntry: text('created_entry'),
   },
   (table) => [
     uniqueIndex('statement_lines_account_dedup_key')
@@ -1379,6 +1380,21 @@ export const statementLines = pgTable(
     check(
       'statement_lines_classification_source_check',
       sql`(classification_source = ANY (ARRAY['rule'::text, 'agent'::text, 'user'::text])) AND ((classification_rule_id IS NULL) OR (NOT (classification_source IS DISTINCT FROM 'rule'::text)))`,
+    ),
+    check(
+      'statement_lines_created_entry_check',
+      sql`(created_entry IS NULL) OR ((created_entry = ANY (ARRAY['adjustment'::text, 'title'::text, 'settlement'::text, 'purchase'::text])) AND (status = 'matched'::text))`,
+    ),
+    check(
+      'statement_lines_created_entry_links_check',
+      sql`CHECK (
+CASE created_entry
+    WHEN 'adjustment'::text THEN (movement_id IS NOT NULL)
+    WHEN 'title'::text THEN (movement_id IS NOT NULL)
+    WHEN 'settlement'::text THEN (movement_id IS NOT NULL)
+    WHEN 'purchase'::text THEN (card_invoice_item_id IS NOT NULL)
+    ELSE true
+END)`,
     ),
     check('statement_lines_dedup_hash_check', sql`(btrim(dedup_hash) <> ''::text) AND (length(dedup_hash) <= 200)`),
     check('statement_lines_line_number_check', sql`line_number >= 1`),

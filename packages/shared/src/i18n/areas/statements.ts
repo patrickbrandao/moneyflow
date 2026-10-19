@@ -37,6 +37,24 @@ export const statementsStrings = {
   ofxSummary: 'Resumo do OFX',
   ofxKind: { bank: 'Extrato bancário', creditcard: 'Fatura de cartão' } as Record<string, string>,
   transactions: 'Transações',
+  ofxAccountTypes: {
+    CHECKING: 'Conta corrente',
+    SAVINGS: 'Poupança',
+    MONEYMRKT: 'Aplicação',
+    CREDITLINE: 'Conta garantida',
+  } as Record<string, string>,
+  /** Rótulo de um extrato de um OFX com várias contas: tipo, número e banco. */
+  ofxAccountLabel: (st: { kind: string; accountType: string | null; accountId: string | null; bankId: string | null }) =>
+    `${st.kind === 'creditcard' ? 'Cartão' : ((st.accountType && statementsStrings.ofxAccountTypes[st.accountType]) ?? 'Conta')} ${
+      st.accountId ?? 'sem número'
+    }${st.bankId ? ` (banco ${st.bankId})` : ''}`,
+  ofxManyAccounts: (count: number) =>
+    `O arquivo traz extratos de ${count} contas. Só as transações da conta escolhida entram neste lote; as das outras ficam de fora.`,
+  ofxAccount: 'Conta do arquivo',
+  ofxPickAccount: 'Escolha a conta…',
+  ofxMatchesTarget: 'casa com esta conta',
+  ofxNeedsChoice: 'Nenhuma conta do arquivo casa com o banco, a agência e a conta cadastrados: escolha qual importar.',
+  ofxLeftOut: (labels: string) => `Ficaram de fora as transações de ${labels}, que vieram no mesmo arquivo.`,
   ledgerBalance: 'Saldo informado no arquivo',
   sample: 'Primeiras transações',
   bankBalanceOptional: 'Saldo informado pelo banco (opcional)',
@@ -133,6 +151,24 @@ export const statementsStrings = {
   confirmLine: 'Confirmar',
   unmatch: 'Desfazer',
   unmatched: 'Conciliação desfeita.',
+  unmatchTitle: 'Desfazer a conciliação',
+  unmatchCreated: (entry: string) =>
+    `${entry} desta conciliação foi lançado a partir desta linha. Se você só desfizer a conciliação, ele continua lançado, e lançar a linha de novo duplica o valor.`,
+  createdEntries: {
+    adjustment: 'O movimento avulso',
+    title: 'O título (com o espelho e a baixa)',
+    settlement: 'A baixa no título',
+    purchase: 'A compra no cartão',
+  } as Record<string, string>,
+  unmatchDeleteHint: {
+    adjustment: 'O movimento sai do extrato e do saldo da conta.',
+    title: 'O título, o espelho e a baixa são excluídos.',
+    settlement: 'A baixa é excluída e o título volta a ter o valor em aberto.',
+    purchase: 'A compra sai da fatura (só com a fatura aberta e sem estornos).',
+  } as Record<string, string>,
+  unmatchAndDelete: 'Desfazer e excluir o lançamento',
+  unmatchKeep: 'Só desfazer a conciliação',
+  unmatchedDeleted: 'Conciliação desfeita e lançamento excluído.',
   ignore: 'Ignorar',
   unignore: 'Reativar',
   ignored: 'Linha ignorada.',

@@ -167,6 +167,11 @@ export const statementTargetQuery = z
   .object({ accountId: id.optional(), cardCaixaId: id.optional() })
   .refine((v) => (v.accountId ? 1 : 0) + (v.cardCaixaId ? 1 : 0) === 1, { message: E.statementTarget });
 
+/** Leitura prévia do extrato: a conta ou o cartão de destino é opcional e escolhe o extrato de um OFX com várias contas. */
+export const statementInspectQuery = z
+  .object({ accountId: id.optional(), cardCaixaId: id.optional() })
+  .refine((v) => !(v.accountId && v.cardCaixaId), { message: E.statementTarget });
+
 /** Busca por descrição nas linhas dos lotes de uma conta ou cartão (spec 009); `importIds` vazio = todos os lotes. */
 export const statementLineSearchQuery = z
   .object({
@@ -200,6 +205,8 @@ export const statementImportQuery = z
     cardInvoiceId: id.optional(),
     bankBalanceCents: z.coerce.number().int().safe().optional(),
     bankBalanceOn: isoDate.optional(),
+    /** OFX com várias contas: a posição (1, 2, …) do extrato a importar; omitida = o que casa com a conta de destino. */
+    ofxStatement: z.coerce.number().int().min(1).max(100).optional(),
   })
   .refine((v) => (v.accountId ? 1 : 0) + (v.cardCaixaId ? 1 : 0) === 1, { message: E.statementTarget })
   .refine((v) => (v.bankBalanceCents === undefined) === (v.bankBalanceOn === undefined), {
@@ -216,6 +223,16 @@ export const lineMatchInput = z
   .refine((v) => [v.movementId, v.titleId, v.cardInvoiceItemId].filter(Boolean).length === 1, { message: E.validation });
 
 export const LINE_CREATE_MODES = ['adjustment', 'title', 'purchase'] as const;
+
+/**
+ * O lançamento ligado à linha que nasceu dela (spec 009): adjustment = o
+ * movimento avulso; title = o título (com o espelho) e a baixa; settlement = só
+ * a baixa, num título que já existia; purchase = a compra no cartão.
+ */
+export const LINE_CREATED_ENTRIES = ['adjustment', 'title', 'settlement', 'purchase'] as const;
+
+/** Desfazer a conciliação; deleteEntry = excluir junto o lançamento que nasceu da linha. */
+export const lineUnmatchInput = z.object({ deleteEntry: z.boolean().default(false) });
 
 export const lineCreateInput = z.object({
   /** adjustment = movimento avulso; title = título já baixado; purchase = compra no cartão (import de fatura). */

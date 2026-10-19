@@ -192,6 +192,8 @@ const fileLabel = (file: { fileName: string; sizeBytes: number }) =>
   `${file.fileName} (${file.sizeBytes < 1024 ? `${file.sizeBytes} B` : `${Math.ceil(file.sizeBytes / 1024)} KB`})`;
 
 /** Pagamento de boleto ou PIX copia-e-cola: o PIX começa pelo cabeçalho do BR Code. */
+const lotBalance = (cents: number | null, on: string | null) =>
+  cents === null || on === null ? '—' : `${formatBRL(cents)} em ${formatDate(on)}`;
 const isPixPayload = (code: string) => /^000201/.test(code.trim());
 
 /* ---------------- handlers ---------------- */
@@ -460,7 +462,11 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
   import_statement: {
     preview: async (ctx, i) => {
       const file = await toolAttachment(ctx, i.attachmentId);
-      const info = await statements.previewStatementImport(ctx, i, file.content, { mappingId: i.mappingId, inline: i.csvMapping });
+      const info = await statements.previewStatementImport(ctx, i, file.content, {
+        mappingId: i.mappingId,
+        inline: i.csvMapping,
+        ofxStatement: i.ofxStatement,
+      });
       const where = i.accountId ? await nameOf(ctx, 'account', i.accountId) : await nameOf(ctx, 'caixa', i.cardCaixaId);
       if (info.fresh === 0) throw unprocessable(t.errors.statementAllDuplicated, 'statement_duplicated');
       const rows: PreviewRow[] = [
@@ -481,7 +487,10 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         summary: file.fileName,
         action: 'create',
         rows,
-        warnings: info.duplicated > 0 ? [`${info.duplicated} linha(s) já importada(s) ficam de fora.`] : [],
+        warnings: [
+          ...(info.duplicated > 0 ? [`${info.duplicated} linha(s) já importada(s) ficam de fora.`] : []),
+          ...(info.ofxLeftOut.length ? [t.statements.ofxLeftOut(info.ofxLeftOut.join(', '))] : []),
+        ],
       };
     },
     run: async (ctx, i) => {
@@ -505,10 +514,43 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
           mappingId,
           bankBalanceCents: i.bankBalanceCents,
           bankBalanceOn: i.bankBalanceOn,
+          ofxStatement: i.ofxStatement,
         },
         { mime: file.mime, content: file.content },
       );
       return detail;
+    },
+  },
+  set_statement_import_balance: {
+    preview: async (ctx, i) => {
+      const lot = await statements.getImport(ctx, i.importId, false);
+      ctx.access.assertWrite(lot.caixaId);
+      if (!lot.financialAccountId) throw unprocessable(t.errors.statementBalanceAccountOnly, 'statement_balance_account_only');
+      const after =
+        i.mode === 'set'
+          ? lotBalance(i.bankBalanceCents ?? null, i.bankBalanceOn ?? null)
+          : i.mode === 'clear'
+            ? '—'
+            : 'o saldo do arquivo';
+      return {
+        title: 'Saldo do banco do lote',
+        summary: lot.fileName,
+        action: 'update',
+        rows: [
+          { label: 'Conta', after: lot.accountName ?? '' },
+          {
+            label: 'Período',
+            after: `${lot.periodStart ? formatDate(lot.periodStart) : '—'} a ${lot.periodEnd ? formatDate(lot.periodEnd) : '—'}`,
+          },
+          { label: 'Saldo do banco', before: lotBalance(lot.bankBalanceCents, lot.bankBalanceOn), after },
+        ],
+        warnings: i.mode === 'clear' ? ['O lote fica sem comparação de saldo.'] : [],
+      };
+    },
+    run: async (ctx, i) => {
+      const input = i.mode === 'set' ? { mode: 'set' as const, amountCents: i.bankBalanceCents!, on: i.bankBalanceOn! } : { mode: i.mode };
+      const { lines: _lines, ...lot } = await statements.setImportBankBalance(ctx, i.importId, input);
+      return lot;
     },
   },
   import_nfe: {
@@ -871,6 +913,53 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
       };
     },
     run: (ctx, i) => caixas.addAdjustment(ctx, i.accountId, i.adjustment),
+  },
+  delete_adjustment: {
+    preview: async (ctx, i) => {
+      const r = await ctx.db.execute<{
+        financial_account_id: string;
+        kind: string;
+        occurred_on: string;
+        amount_cents: number;
+        description: string | null;
+        entity_id: string | null;
+        category_id: string | null;
+      }>(sql`
+        SELECT financial_account_id, kind, occurred_on, amount_cents, description, entity_id, category_id
+          FROM movements WHERE id = ${i.movementId}`);
+      const movement = r.rows[0];
+      if (movement?.kind !== 'adjustment') throw notFound();
+      await writableAccount(ctx, movement.financial_account_id);
+      const lines = await ctx.db.execute<{ status: string }>(
+        sql`SELECT status FROM statement_lines WHERE movement_id = ${i.movementId} AND status IN ('matched', 'suggested')`,
+      );
+      if (lines.rows.some((l) => l.status === 'matched')) throw unprocessable(t.errors.movementReconciled, 'movement_reconciled');
+      const amount = Number(movement.amount_cents);
+      return {
+        title: 'Excluir movimento avulso',
+        summary: `${movement.description ?? '—'} · ${formatBRL(amount)}`,
+        action: 'delete',
+        rows: [
+          { label: 'Conta', before: (await nameOf(ctx, 'account', movement.financial_account_id)) ?? '', after: '—' },
+          { label: 'Data', before: formatDate(movement.occurred_on), after: '—' },
+          { label: amount > 0 ? 'Entrada' : 'Saída', before: formatBRL(Math.abs(amount)), after: '—' },
+          ...(movement.category_id
+            ? [{ label: 'Categoria', before: (await nameOf(ctx, 'category', movement.category_id)) ?? '', after: '—' }]
+            : []),
+          ...(movement.entity_id
+            ? [{ label: 'Entidade', before: (await nameOf(ctx, 'entity', movement.entity_id)) ?? '', after: '—' }]
+            : []),
+        ],
+        warnings: [
+          'O movimento sai do extrato e do saldo da conta.',
+          ...(lines.rows.length > 0 ? ['A linha do extrato com este movimento sugerido volta a nova.'] : []),
+        ],
+      };
+    },
+    run: async (ctx, i) => {
+      await caixas.deleteAdjustment(ctx, i.movementId);
+      return { deleted: true };
+    },
   },
 
   /* ---- títulos ---- */

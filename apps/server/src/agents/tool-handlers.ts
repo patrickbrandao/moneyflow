@@ -4,8 +4,10 @@ import {
   diffRows,
   formatBRL,
   formatDate,
+  type LineCreatedEntry,
   type PreviewField,
   type PreviewRow,
+  type StatementLineRow,
   t,
   todayIso,
 } from '@moneyflow/shared';
@@ -92,6 +94,11 @@ async function lineCaixa(ctx: ServiceContext, lineId: string) {
 const lineLabel = (l: { description: string; amount_cents: number; posted_on: string }) =>
   `${l.posted_on} · ${l.description} · ${(l.amount_cents / 100).toFixed(2).replace('.', ',')}`;
 
+/** Linha do extrato para o modelo: sem o lote (já é o pedido), a cor e os campos nulos, para caber mais linhas por página. */
+function compactLine({ importId: _import, categoryColorSlot: _slot, ...line }: StatementLineRow) {
+  return Object.fromEntries(Object.entries(line).filter(([, value]) => value !== null));
+}
+
 const brl = (cents: number) => (cents / 100).toFixed(2).replace('.', ',');
 
 /** Prévia de lote: até 50 linhas no cartão, o resto avisado. */
@@ -127,6 +134,20 @@ const LINE_CREATE_MODE: Record<string, string> = {
   adjustment: 'Movimento avulso',
   title: 'Título já baixado',
   purchase: 'Compra no cartão',
+};
+
+/** O lançamento que nasceu da linha (created_entry) e o que o "desfazer e excluir" faz com ele. */
+const CREATED_ENTRY_LABEL: Record<LineCreatedEntry, string> = {
+  adjustment: 'Movimento avulso',
+  title: 'Título já baixado (com o espelho)',
+  settlement: 'Baixa no título',
+  purchase: 'Compra no cartão',
+};
+const CREATED_ENTRY_OUTCOME: Record<LineCreatedEntry, string> = {
+  adjustment: 'Excluído',
+  title: 'Excluído com a baixa',
+  settlement: 'Baixa excluída (o título volta a ter o valor em aberto)',
+  purchase: 'Excluída',
 };
 
 type LineCreateItem = AgentToolInput<'create_from_statement_line'>;
@@ -227,8 +248,15 @@ export const TOOL_HANDLERS: Handlers = {
       reports.projectionReport(ctx, { caixaIds: i.caixaIds ?? [], horizons: i.horizons ?? [30, 60, 90], ...toolEntityFilter(i) }),
   },
   flow_graph: { run: (ctx, i) => flowGraph(ctx, { from: i.from, to: i.to, caixaIds: i.caixaIds ?? [] }) },
-  list_statement_imports: { run: (ctx, i) => statements.listImports(ctx, { accountId: i.accountId, cardCaixaId: i.cardCaixaId }) },
-  get_statement_import: { run: (ctx, i) => statements.getImport(ctx, i.importId) },
+  list_statement_imports: {
+    run: (ctx, i) => statements.listImportsPage(ctx, { accountId: i.accountId, cardCaixaId: i.cardCaixaId }, i),
+  },
+  get_statement_import: {
+    run: async (ctx, i) => {
+      const page = await statements.getImportPage(ctx, i.importId, i);
+      return { ...page, lines: page.lines.map(compactLine) };
+    },
+  },
   list_message_destinations: {
     run: async (ctx) =>
       (await listDestinations(ctx))
@@ -594,31 +622,39 @@ export const TOOL_HANDLERS: Handlers = {
         movement_id: string | null;
         title_id: string | null;
         card_invoice_item_id: string | null;
-      }>(sql`SELECT status, movement_id, title_id, card_invoice_item_id FROM statement_lines WHERE id = ${i.lineId}`);
+        created_entry: LineCreatedEntry | null;
+      }>(sql`SELECT status, movement_id, title_id, card_invoice_item_id, created_entry FROM statement_lines WHERE id = ${i.lineId}`);
       const state = r.rows[0]!;
       if (state.status !== 'matched' && state.status !== 'suggested') throw unprocessable(t.errors.lineNotMatched);
+      if (i.deleteEntry && !state.created_entry) throw unprocessable(t.errors.lineEntryNotCreated, 'line_entry_not_created');
       const target = await matchTargetLabel(ctx, {
         movementId: state.movement_id,
         titleId: state.title_id,
         cardInvoiceItemId: state.card_invoice_item_id,
       });
-      return {
-        title: 'Desfazer conciliação da linha',
-        summary: lineLabel(line),
-        action: 'delete',
-        rows: [
-          { label: state.status === 'matched' ? 'Conciliada com' : 'Sugestão', before: target, after: '—' },
-          { label: 'Situação', before: state.status === 'matched' ? 'Conciliada' : 'Sugerida', after: 'Nova' },
-        ],
-        warnings:
-          state.status === 'matched'
-            ? [
-                'O movimento ou a baixa criados ao conciliar continuam lançados; estorne a baixa com reverse_settlement se ela estava errada.',
-              ]
-            : [],
-      };
+      const rows: PreviewRow[] = [
+        { label: state.status === 'matched' ? 'Conciliada com' : 'Sugestão', before: target, after: '—' },
+        { label: 'Situação', before: state.status === 'matched' ? 'Conciliada' : 'Sugerida', after: 'Nova' },
+      ];
+      const warnings: string[] = [];
+      if (state.created_entry && i.deleteEntry) {
+        rows.push({
+          label: 'Lançamento',
+          before: CREATED_ENTRY_LABEL[state.created_entry],
+          after: CREATED_ENTRY_OUTCOME[state.created_entry],
+        });
+      } else if (state.created_entry) {
+        warnings.push(
+          `O lançamento (${CREATED_ENTRY_LABEL[state.created_entry].toLowerCase()}) nasceu desta linha e continua lançado: relançar a linha duplica o valor. Use deleteEntry true para excluí-lo junto.`,
+        );
+      } else if (state.status === 'matched') {
+        warnings.push(
+          'O movimento ou a baixa conciliados já existiam e continuam lançados; estorne a baixa com reverse_settlement se ela estava errada.',
+        );
+      }
+      return { title: 'Desfazer conciliação da linha', summary: lineLabel(line), action: 'delete', rows, warnings };
     },
-    run: (ctx, i) => rec.unmatchLine(ctx, i.lineId),
+    run: (ctx, i) => rec.unmatchLine(ctx, i.lineId, { deleteEntry: i.deleteEntry }),
   },
   ignore_statement_lines: {
     preview: async (ctx, i) => {

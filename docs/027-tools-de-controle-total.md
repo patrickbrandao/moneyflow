@@ -24,7 +24,7 @@ Os agentes passam a ter **controle completo** do MoneyFlow: tudo o que se faz pe
   - O modelo conhece o id pelo rótulo que vai antes de cada anexo da mensagem: `[Anexo "nome" (tipo) — attachmentId …]`. OFX, CSV e XML vão ao modelo como texto.
   - Peças: `toolAttachment` em `apps/server/src/agents/tool-helpers.ts`.
 - **Arquivos gerados** (export de backup; CSV e PDF de relatório no futuro) viram anexo de uma mensagem do agente na sessão. O registro marca essas tools com `producesFile`; o handler devolve `{ file: { fileName, mime, content }, ... }` e o runtime grava o anexo (do usuário que aciona), liga-o à mensagem `tool` com os resultados (`ai_message_attachments`, sem mudança no banco: as mensagens do agente não têm bloco de anexo) e entrega ao modelo só `{ attachmentId, fileName, mime, sizeBytes }`, nunca o conteúdo. O console mostra o link de download no bloco da tool. Por estar na sessão, o arquivo serve de entrada às tools de importação da mesma sessão. Acima de 20 MB (o limite dos anexos), a tool devolve o erro que manda usar a tela. A primeira tool com `producesFile` é `export_backup` (F13b).
-- **No `/mcp`** (sem sessão): as tools de importação aceitam o `attachmentId` de qualquer anexo que o dono do token lê (senão, "Registro não encontrado"); as que geram arquivo (`producesFile`) e as de segredo não são expostas (`mcpExposed` no shared).
+- **No `/mcp`** (sem sessão): as tools de importação aceitam o `attachmentId` de qualquer anexo que o dono do token lê (senão, "Registro não encontrado"). Para o cliente MCP mandar um arquivo, existe a tool `upload_file`, só do `/mcp` (`MCP_ONLY_TOOLS` no shared, fora de `AGENT_TOOLS`, dos kits e das execuções): nome, tipo opcional (senão, pela extensão) e o conteúdo em base64 até 5 MB (o corpo do `/mcp` aceita até ~7 MB); grava o anexo sem vínculo, que só quem enviou (e o admin) lê, e devolve o `attachmentId`; as que geram arquivo (`producesFile`) e as de segredo não são expostas (`mcpExposed` no shared).
 - **Tools que chamam a IA** (`read_document`, `convert_contract_pdf`): rodam o fluxo do agente dos fluxos como hoje (conversa arquivada e execução própria, com o uso dela) e esperam o resultado até `AI_DOCUMENT_TIMEOUT_MS`. A execução aninhada precisa de outra vaga do worker: com `AGENT_CONCURRENCY` 1, ela só roda depois do prazo e a tool devolve o erro de leitura.
 
 ## Tools novas por categoria
@@ -36,7 +36,7 @@ Os nomes são indicativos; o executor fecha os schemas a partir das rotas existe
 - `get_contract_document` (o markdown atual ou uma versão, com a lista de versões), `save_contract_markdown` (com `documentId`, uma versão nova, com o diff de linhas na prévia; com `contractId` e `title`, um documento markdown novo; autor `agent` e a execução na versão), `convert_contract_pdf` (PDF → markdown por IA).
 
 **Importação** (a partir de anexo):
-- `import_statement`: OFX/CSV para uma conta ou cartão, com o mapeamento CSV salvo (`mappingId`; omitido = o padrão) ou informado (`csvMapping`, salvo na conta antes do import); devolve o lote e as linhas. A prévia lê o arquivo sem gravar (formato, período, linhas novas e repetidas, entradas e saídas) e recusa o arquivo todo repetido. Diferente da tela, não dispara a sugestão de classificação do agente dos fluxos: o próprio agente classifica;
+- `import_statement`: OFX/CSV para uma conta ou cartão, com o mapeamento CSV salvo (`mappingId`; omitido = o padrão) ou informado (`csvMapping`, salvo na conta antes do import); devolve o lote e as linhas. `set_statement_import_balance` troca, limpa ou volta ao saldo do arquivo do banco de um lote de conta (o "Editar saldo" da tela). A prévia do import lê o arquivo sem gravar (formato, período, linhas novas e repetidas, entradas e saídas) e recusa o arquivo todo repetido. Diferente da tela, não dispara a sugestão de classificação do agente dos fluxos: o próprio agente classifica;
 - `import_nfe`: grava a NF-e como a tela (emitente vira entidade, nota, itens e XML) e devolve o título sugerido (`suggestedTitle`: entidade, valor, competência, vencimento da 1ª duplicata e `nfeDocumentId`); o título é criado depois com `create_title`, com a própria prévia. A prévia mostra a nota (emitente novo ou cadastrado, valor, itens, duplicatas);
 - `read_document`: boleto, comprovante ou nota → os dados de [010](010-entrada-de-titulos.md), sem gravar;
 - `parse_payment_code`: linha digitável ou PIX copia-e-cola → dados (o PIX acha a entidade pela chave, sem criar);
@@ -51,7 +51,7 @@ Os nomes são indicativos; o executor fecha os schemas a partir das rotas existe
 **Caixas e contas**:
 - `create_caixa`, `update_caixa`, `archive_caixa` (admin, como a rota);
 - `create_account`, `update_account`, `archive_account`;
-- `create_adjustment` (movimento avulso);
+- `create_adjustment` (movimento avulso) e `delete_adjustment` (destrutiva; o `DELETE /api/movements/:id` da tela: só movimento `adjustment`, recusado se conciliado com uma linha do extrato — desfaça antes, ou use `unmatch_statement_line` com `deleteEntry` quando o avulso nasceu da linha —, e a sugestão de extrato que aponta para ele volta a nova);
 - `archive_caixa` e `archive_account` usam o "excluir" da tela: com uso, arquivam; sem nenhum uso, excluem. Por isso são destrutivas.
 
 **Títulos e baixas**:
