@@ -99,7 +99,7 @@ describe('registro de tools', () => {
     );
     // Só do /mcp (spec 027): o upload de arquivo fica fora do registro, dos kits e das execuções.
     expect(names(MCP_ONLY_TOOLS)).toEqual(['upload_file']);
-    expect(AGENT_TOOLS.some((tool) => tool.name === 'upload_file')).toBe(false);
+    expect(agentTool('upload_file')).toBeUndefined();
     expect(uploadMime('extrato.OFX')).toBe('application/x-ofx');
     expect(uploadMime('arquivo.bin')).toBe('application/octet-stream');
     expect(uploadMime('nota.xml', 'text/xml')).toBe('text/xml');
