@@ -37,6 +37,24 @@ export const statementsStrings = {
   ofxSummary: 'Resumo do OFX',
   ofxKind: { bank: 'Extrato bancário', creditcard: 'Fatura de cartão' } as Record<string, string>,
   transactions: 'Transações',
+  ofxAccountTypes: {
+    CHECKING: 'Conta corrente',
+    SAVINGS: 'Poupança',
+    MONEYMRKT: 'Aplicação',
+    CREDITLINE: 'Conta garantida',
+  } as Record<string, string>,
+  /** Rótulo de um extrato de um OFX com várias contas: tipo, número e banco. */
+  ofxAccountLabel: (st: { kind: string; accountType: string | null; accountId: string | null; bankId: string | null }) =>
+    `${st.kind === 'creditcard' ? 'Cartão' : ((st.accountType && statementsStrings.ofxAccountTypes[st.accountType]) ?? 'Conta')} ${
+      st.accountId ?? 'sem número'
+    }${st.bankId ? ` (banco ${st.bankId})` : ''}`,
+  ofxManyAccounts: (count: number) =>
+    `O arquivo traz extratos de ${count} contas. Só as transações da conta escolhida entram neste lote; as das outras ficam de fora.`,
+  ofxAccount: 'Conta do arquivo',
+  ofxPickAccount: 'Escolha a conta…',
+  ofxMatchesTarget: 'casa com esta conta',
+  ofxNeedsChoice: 'Nenhuma conta do arquivo casa com o banco, a agência e a conta cadastrados: escolha qual importar.',
+  ofxLeftOut: (labels: string) => `Ficaram de fora as transações de ${labels}, que vieram no mesmo arquivo.`,
   ledgerBalance: 'Saldo informado no arquivo',
   sample: 'Primeiras transações',
   bankBalanceOptional: 'Saldo informado pelo banco (opcional)',

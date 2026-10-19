@@ -11,9 +11,13 @@ import {
   type LineStatus,
   type MatchCandidate,
   normalizeDescriptionForDedup,
+  type OfxInspectStatement,
+  type OfxStatement,
+  type OfxTargetAccount,
   parseCsv,
-  parseOfx,
+  parseOfxStatements,
   pickMatch,
+  pickOfxStatement,
   type StatementImportDetail,
   type StatementImportSummary,
   type StatementInspect,
@@ -39,7 +43,10 @@ import { camel, iso } from './util';
  * a fatura do cartão (linhas casam com itens da fatura ou viram compras).
  */
 
-export type StatementTarget = { kind: 'account'; accountId: string; caixaId: string } | { kind: 'card'; cardId: string; caixaId: string };
+/** `ofx`: a conta de destino como o OFX a descreve, para escolher o extrato de um arquivo com várias contas. */
+export type StatementTarget =
+  | { kind: 'account'; accountId: string; caixaId: string; ofx: OfxTargetAccount }
+  | { kind: 'card'; cardId: string; caixaId: string; ofx: OfxTargetAccount };
 
 export async function resolveTarget(
   ctx: ServiceContext,
@@ -53,13 +60,23 @@ export async function resolveTarget(
     if (write && account.kind !== 'checking' && account.kind !== 'savings') {
       throw unprocessable(t.errors.statementTarget, 'statement_imports_account_kind_check');
     }
-    return { kind: 'account', accountId: account.id, caixaId: account.caixaId };
+    return {
+      kind: 'account',
+      accountId: account.id,
+      caixaId: account.caixaId,
+      ofx: {
+        kind: account.kind === 'savings' ? 'savings' : 'checking',
+        bankCode: account.bankCode,
+        branch: account.branch,
+        accountNumber: account.accountNumber,
+      },
+    };
   }
   if (ref.cardCaixaId) {
     if (write) ctx.access.assertWrite(ref.cardCaixaId);
     else ctx.access.assertRead(ref.cardCaixaId);
     await loadCard(db, ref.cardCaixaId);
-    return { kind: 'card', cardId: ref.cardCaixaId, caixaId: ref.cardCaixaId };
+    return { kind: 'card', cardId: ref.cardCaixaId, caixaId: ref.cardCaixaId, ofx: { kind: 'creditcard' } };
   }
   throw unprocessable(t.errors.statementTarget);
 }
@@ -82,7 +99,46 @@ type ParsedFile = {
   periodEnd: string | null;
   bankBalance: { amountCents: number; date: string } | null;
   csvMappingId: string | null;
+  /** OFX com várias contas: as que ficaram de fora (rótulos). */
+  ofxLeftOut: string[];
 };
+
+const ofxLabel = (st: OfxStatement) => t.statements.ofxAccountLabel(st);
+
+function ofxLines(st: OfxStatement): ParsedLine[] {
+  return st.transactions.map((tr, i) => ({
+    lineNumber: i + 1,
+    postedOn: tr.postedOn,
+    amountCents: tr.amountCents,
+    description: tr.description || tr.name || tr.memo || '—',
+    fitid: tr.fitid,
+    raw: { fitid: tr.fitid, type: tr.type, name: tr.name, memo: tr.memo, checkNum: tr.checkNum, amountCents: tr.amountCents },
+  }));
+}
+
+function readOfxStatements(text: string): OfxStatement[] {
+  try {
+    return parseOfxStatements(text);
+  } catch (error) {
+    throw unprocessable(error instanceof Error ? error.message : t.errors.statementFormat, 'statement_format');
+  }
+}
+
+/**
+ * O extrato a importar de um OFX (spec 009): o pedido (`ofxStatement`, posição
+ * 1, 2, …) ou o único cuja conta casa com a de destino. Num arquivo com várias
+ * contas sem casamento, recusa com a lista para o usuário escolher.
+ */
+function chooseOfxStatement(statements: OfxStatement[], target: StatementTarget, position?: number): number {
+  if (position !== undefined) {
+    if (position > statements.length) throw unprocessable(t.errors.statementOfxStatement, 'statement_ofx_statement');
+    return position - 1;
+  }
+  const pick = pickOfxStatement(statements, target.ofx);
+  if (pick.index !== null) return pick.index;
+  const list = statements.map((st, i) => `${i + 1} = ${ofxLabel(st)}`).join('; ');
+  throw unprocessable(t.errors.statementOfxChooseAccount(list), 'statement_ofx_choose_account');
+}
 
 function decodeWith(bytes: Buffer, encoding: string): string {
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return bytes.subarray(3).toString('utf8');
@@ -119,36 +175,31 @@ export type InlineCsvMapping = Pick<
   'delimiter' | 'encoding' | 'hasHeader' | 'skipRows' | 'dateFormat' | 'decimalSeparator' | 'columns'
 >;
 
-/** Lê o arquivo (OFX ou CSV com o mapeamento) e devolve as linhas no ponto de vista do titular. */
+/**
+ * Lê o arquivo (OFX ou CSV com o mapeamento) e devolve as linhas no ponto de
+ * vista do titular. OFX com várias contas: só as linhas do extrato escolhido
+ * (`ofxStatement` ou o que casa com a conta), nunca as das outras contas.
+ */
 export async function parseStatementFile(
   db: Executor,
   target: StatementTarget,
   bytes: Buffer,
-  mappingId?: string,
-  inline?: InlineCsvMapping,
+  opts: { mappingId?: string; inline?: InlineCsvMapping; ofxStatement?: number } = {},
 ): Promise<ParsedFile> {
+  const { mappingId, inline } = opts;
   const text = decodeStatementFile(bytes);
   if (looksLikeOfx(text)) {
-    let ofx: ReturnType<typeof parseOfx>;
-    try {
-      ofx = parseOfx(text);
-    } catch (error) {
-      throw unprocessable(error instanceof Error ? error.message : t.errors.statementFormat, 'statement_format');
-    }
+    const statements = readOfxStatements(text);
+    const index = chooseOfxStatement(statements, target, opts.ofxStatement);
+    const ofx = statements[index]!;
     return {
       format: 'ofx',
-      lines: ofx.transactions.map((tr, i) => ({
-        lineNumber: i + 1,
-        postedOn: tr.postedOn,
-        amountCents: tr.amountCents,
-        description: tr.description || tr.name || tr.memo || '—',
-        fitid: tr.fitid,
-        raw: { fitid: tr.fitid, type: tr.type, name: tr.name, memo: tr.memo, checkNum: tr.checkNum, amountCents: tr.amountCents },
-      })),
+      lines: ofxLines(ofx),
       periodStart: ofx.periodStart,
       periodEnd: ofx.periodEnd,
       bankBalance: ofx.ledgerBalance,
       csvMappingId: null,
+      ofxLeftOut: statements.filter((_, i) => i !== index).map(ofxLabel),
     };
   }
 
@@ -182,6 +233,7 @@ export async function parseStatementFile(
     periodEnd: null,
     bankBalance: last ? { amountCents: last.balanceCents!, date: last.postedOn } : null,
     csvMappingId: mapping.id,
+    ofxLeftOut: [],
   };
 }
 
@@ -208,10 +260,10 @@ export async function previewStatementImport(
   ctx: ServiceContext,
   ref: { accountId?: string; cardCaixaId?: string },
   bytes: Buffer,
-  opts: { mappingId?: string; inline?: InlineCsvMapping },
+  opts: { mappingId?: string; inline?: InlineCsvMapping; ofxStatement?: number },
 ) {
   const target = await resolveTarget(ctx, ref, true);
-  const parsed = await parseStatementFile(ctx.db, target, bytes, opts.mappingId, opts.inline);
+  const parsed = await parseStatementFile(ctx.db, target, bytes, opts);
   if (parsed.lines.length === 0) throw unprocessable(t.errors.statementEmpty, 'statement_empty');
   const hashes = dedupHashes(parsed.lines);
   const ownerColumn = target.kind === 'account' ? sql`financial_account_id` : sql`card_caixa_id`;
@@ -235,35 +287,55 @@ export async function previewStatementImport(
     duplicated: parsed.lines.length - fresh.length,
     inCents: fresh.filter((l) => l.amountCents > 0).reduce((sum, l) => sum + l.amountCents, 0),
     outCents: fresh.filter((l) => l.amountCents < 0).reduce((sum, l) => sum + l.amountCents, 0),
+    ofxLeftOut: parsed.ofxLeftOut,
   };
 }
 
-export async function inspectStatement(ctx: ServiceContext, bytes: Buffer): Promise<StatementInspect> {
-  void ctx;
+function inspectOfx(st: OfxStatement, index: number): OfxInspectStatement {
+  return {
+    position: index + 1,
+    kind: st.kind,
+    bankId: st.bankId,
+    branchId: st.branchId,
+    accountId: st.accountId,
+    accountType: st.accountType,
+    periodStart: st.periodStart,
+    periodEnd: st.periodEnd,
+    ledgerBalance: st.ledgerBalance,
+    count: st.transactions.length,
+    sample: st.transactions
+      .slice(0, 20)
+      .map((tr) => ({ postedOn: tr.postedOn, amountCents: tr.amountCents, description: tr.description, fitid: tr.fitid })),
+  };
+}
+
+/**
+ * Leitura prévia do arquivo. Com a conta ou o cartão de destino, um OFX com
+ * várias contas já vem com o extrato que casa (`selected`) ou o palpite pelo tipo.
+ */
+export async function inspectStatement(
+  ctx: ServiceContext,
+  bytes: Buffer,
+  ref: { accountId?: string; cardCaixaId?: string } = {},
+): Promise<StatementInspect> {
   const text = decodeStatementFile(bytes);
   if (looksLikeOfx(text)) {
-    try {
-      const ofx = parseOfx(text);
-      return {
-        format: 'ofx',
-        encoding: 'auto',
-        ofx: {
-          kind: ofx.kind,
-          bankId: ofx.bankId,
-          accountId: ofx.accountId,
-          periodStart: ofx.periodStart,
-          periodEnd: ofx.periodEnd,
-          ledgerBalance: ofx.ledgerBalance,
-          count: ofx.transactions.length,
-          sample: ofx.transactions
-            .slice(0, 20)
-            .map((tr) => ({ postedOn: tr.postedOn, amountCents: tr.amountCents, description: tr.description, fitid: tr.fitid })),
-        },
-        csv: null,
-      };
-    } catch (error) {
-      throw unprocessable(error instanceof Error ? error.message : t.errors.statementFormat, 'statement_format');
-    }
+    const statements = readOfxStatements(text);
+    const target = ref.accountId || ref.cardCaixaId ? (await resolveTarget(ctx, ref, false)).ofx : null;
+    const pick = target ? pickOfxStatement(statements, target) : pickOfxStatement(statements, { kind: 'checking' });
+    const all = statements.map(inspectOfx);
+    const shown = all[pick.index ?? pick.suggested ?? 0]!;
+    return {
+      format: 'ofx',
+      encoding: 'auto',
+      ofx: {
+        ...shown,
+        statements: all,
+        selected: target && pick.index !== null ? pick.index + 1 : null,
+        suggested: pick.suggested !== null ? pick.suggested + 1 : null,
+      },
+      csv: null,
+    };
   }
   const delimiter = detectDelimiter(text);
   const rows = parseCsv(text, delimiter);
@@ -279,7 +351,7 @@ export async function importStatement(
   file: { mime: string; content: Buffer },
 ): Promise<StatementImportDetail> {
   const target = await resolveTarget(ctx, query, true);
-  const parsed = await parseStatementFile(ctx.db, target, file.content, query.mappingId);
+  const parsed = await parseStatementFile(ctx.db, target, file.content, query);
   if (parsed.lines.length === 0) throw unprocessable(t.errors.statementEmpty, 'statement_empty');
   const hashes = dedupHashes(parsed.lines);
 
@@ -356,7 +428,7 @@ export async function importStatement(
     return { id: imp!.id, skipped: parsed.lines.length - fresh.length };
   });
   const detail = await getImport(ctx, result.id);
-  return { ...detail, skippedDuplicates: result.skipped };
+  return { ...detail, skippedDuplicates: result.skipped, ...(parsed.ofxLeftOut.length ? { ofxLeftOut: parsed.ofxLeftOut } : {}) };
 }
 
 type Rule = { id: string; entityId: string | null; categoryId: string | null };
@@ -636,7 +708,11 @@ export async function setImportBankBalance(
       .select({ csvMappingId: statementImports.csvMappingId })
       .from(statementImports)
       .where(eq(statementImports.id, id));
-    const parsed = await parseStatementFile(ctx.db, target, Buffer.from(file!.content), imp?.csvMappingId ?? undefined);
+    const content = Buffer.from(file!.content);
+    const parsed = await parseStatementFile(ctx.db, target, content, {
+      mappingId: imp?.csvMappingId ?? undefined,
+      ofxStatement: await importedOfxStatement(ctx, id, content),
+    });
     if (!parsed.bankBalance) throw unprocessable(t.errors.statementNoFileBalance, 'statement_no_file_balance');
     balance = parsed.bankBalance;
   }
@@ -647,6 +723,23 @@ export async function setImportBankBalance(
       .where(eq(statementImports.id, id)),
   );
   return getImport(ctx, id);
+}
+
+/**
+ * De um OFX com várias contas, o extrato que este lote importou: o que tem
+ * mais linhas no lote (pela chave de deduplicação). Um só extrato: undefined.
+ */
+async function importedOfxStatement(ctx: ServiceContext, importId: string, content: Buffer): Promise<number | undefined> {
+  const text = decodeStatementFile(content);
+  if (!looksLikeOfx(text)) return undefined;
+  const statements = readOfxStatements(text);
+  if (statements.length < 2) return undefined;
+  const result = await ctx.db.execute<{ dedup_hash: string }>(
+    sql`SELECT dedup_hash FROM statement_lines WHERE statement_import_id = ${importId}::uuid`,
+  );
+  const mine = new Set(result.rows.map((r) => r.dedup_hash));
+  const overlap = statements.map((st) => dedupHashes(ofxLines(st)).filter((h) => mine.has(h)).length);
+  return overlap.indexOf(Math.max(...overlap)) + 1;
 }
 
 /** Renomeia o arquivo do lote (spec 009): o anexo é só deste lote; o conteúdo não muda. */

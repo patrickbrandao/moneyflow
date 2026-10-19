@@ -200,6 +200,9 @@ export const ptBR = {
     statementEmpty: 'Nenhuma transação encontrada no arquivo.',
     statementBalanceAccountOnly: 'Só o lote de uma conta tem saldo do banco.',
     statementNoFileBalance: 'O arquivo deste lote não traz saldo.',
+    statementOfxChooseAccount: (list: string) =>
+      `O arquivo traz extratos de mais de uma conta e nenhum casa com o banco, a agência e a conta de destino. Escolha qual importar (ofxStatement): ${list}.`,
+    statementOfxStatement: 'Esse extrato não existe no arquivo.',
     apiTokenUserInactive: 'O usuário está desativado: a chave não autenticaria. Reative-o antes.',
     statementAllDuplicated: 'Todas as linhas do arquivo já tinham sido importadas.',
     csvMappingRequired: 'Escolha ou crie o mapeamento de colunas do CSV.',
