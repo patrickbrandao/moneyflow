@@ -34,6 +34,7 @@ export type UserRow = {
 export type { EntityKind } from './documents';
 
 import type { EntityKind } from './documents';
+import type { ContractCandidateInfo, SettlementSplit } from './reconcile';
 import type { LINE_CREATED_ENTRIES } from './schemas/operation';
 import type { SupersedeOutcome } from './supersede';
 
@@ -299,21 +300,34 @@ export type SeriesEndPreview = {
 
 export type SeriesEndResult = SeriesEndPreview & { created: number; title: TitleDetail };
 
-export type TitleDetail = TitleRow & {
-  canWrite: boolean;
-  settlements: SettlementRow[];
-  rule: RecurrenceRuleDto | null;
-  mirror: {
-    id: string;
-    caixaId: string;
-    caixaName: string;
-    canRead: boolean;
-    canWrite: boolean;
-    mirrorStatus: MirrorStatus | null;
-    categoryName: string;
-    status: TitleStatus;
-  } | null;
+/** Conta prevista do título (spec 033): onde o pagamento deve sair (ou o recebimento entrar). */
+export type PlannedAccount = {
+  plannedAccountId: string | null;
+  plannedAccountName: string | null;
+  /** Caixa da conta prevista (outra caixa = a baixa usa a conta de passagem e a transferência). */
+  plannedAccountCaixaId: string | null;
+  plannedTransitAccountId: string | null;
+  plannedTransitAccountName: string | null;
+  /** Escolhida na própria parcela: trocar a conta do contrato não a muda. */
+  plannedAccountCustom: boolean;
 };
+
+export type TitleDetail = TitleRow &
+  PlannedAccount & {
+    canWrite: boolean;
+    settlements: SettlementRow[];
+    rule: RecurrenceRuleDto | null;
+    mirror: {
+      id: string;
+      caixaId: string;
+      caixaName: string;
+      canRead: boolean;
+      canWrite: boolean;
+      mirrorStatus: MirrorStatus | null;
+      categoryName: string;
+      status: TitleStatus;
+    } | null;
+  };
 
 export type TransferRow = {
   id: string;
@@ -600,6 +614,8 @@ export type StatementLineRow = {
   cardInvoiceItemId: string | null;
   /** O lançamento conciliado nasceu desta linha (spec 009): "desfazer e excluir" o tira junto. */
   createdEntry: LineCreatedEntry | null;
+  /** A baixa foi feita sem confirmação (contrato com "baixar sem confirmação", spec 033). */
+  autoSettled: boolean;
   /** Resumo do par (conciliado ou sugerido). */
   target: {
     kind: 'movement' | 'title' | 'card_item';
@@ -607,6 +623,8 @@ export type StatementLineRow = {
     description: string;
     amountCents: number;
     entityName: string | null;
+    /** Sugestão de parcela de contrato (spec 033): a parcela e a repartição da baixa que a linha faria. */
+    contract?: ContractCandidateInfo | null;
   } | null;
   entityId: string | null;
   entityName: string | null;
@@ -651,6 +669,23 @@ export type SupersedeResolveResult = { done: number; failed: { lineId: string; m
 
 /** Resultado do "Aplicar regras" (spec 009): linhas novas cuja classificação mudou. */
 export type ApplyRulesResult = { updated: number };
+
+/** Regra pulada na cópia (spec 032): já existe igual (tipo + padrão + direção) no destino, ou está arquivada. */
+export type CopyRulesSkipped = {
+  ruleId: string;
+  pattern: string;
+  matchKind: 'contains' | 'starts_with' | 'exact' | 'regex';
+  reason: 'exists' | 'archived';
+  /** A regra do destino que já faz o mesmo (reason = exists). */
+  existingRuleId: string | null;
+};
+
+export type CopyRulesResult = {
+  copied: ClassificationRuleRow[];
+  skipped: CopyRulesSkipped[];
+  /** Lembrete: copiar não reaplica; use "Aplicar regras". */
+  hint: string;
+};
 
 export type StatementImportDetail = StatementImportSummary & {
   canWrite: boolean;
@@ -711,6 +746,8 @@ export type MatchCandidateRow = {
   description: string;
   entityName: string | null;
   score: number | null;
+  /** Parcela de contrato (spec 033): a parcela e a repartição da baixa. */
+  contract: ContractCandidateInfo | null;
 };
 
 export type CsvMappingRow = {
@@ -728,10 +765,21 @@ export type CsvMappingRow = {
   isDefault: boolean;
 };
 
+/** Regra de classificação de uma conta corrente/poupança ou de um cartão (spec 032). */
 export type ClassificationRuleRow = {
   id: string;
-  caixaId: string | null;
-  caixaName: string | null;
+  /** Caixa do alvo: a da conta, ou o próprio cartão. */
+  caixaId: string;
+  caixaName: string;
+  caixaKind: 'general' | 'credit_card';
+  /** Conta da regra; nula na regra de cartão. */
+  financialAccountId: string | null;
+  accountName: string | null;
+  /** Cartão da regra (a caixa do cartão); nulo na regra de conta. */
+  cardCaixaId: string | null;
+  /** Nome do alvo: a conta ou o cartão. */
+  targetName: string;
+  copiedFromRuleId: string | null;
   matchKind: 'contains' | 'starts_with' | 'exact' | 'regex';
   pattern: string;
   direction: 'in' | 'out' | null;
@@ -741,7 +789,7 @@ export type ClassificationRuleRow = {
   categoryName: string | null;
   categoryColorSlot: number | null;
   priority: number;
-  origin: 'manual' | 'correction' | 'agent';
+  origin: 'manual' | 'correction' | 'agent' | 'copy';
   usageCount: number;
   lastUsedAt: string | null;
   archivedAt: string | null;
@@ -1234,7 +1282,7 @@ export type ContractInstallmentDto = {
   status: TitleStatus;
   overdue: boolean;
   archived: boolean;
-};
+} & PlannedAccount;
 
 export type ContractTotals = {
   contractedCents: number;
@@ -1320,6 +1368,21 @@ export type ContractDetail = ContractRow & {
   terminationPenaltyText: string | null;
   terminationPenaltyCents: number | null;
   terminationNotes: string | null;
+  /** Conta das parcelas e a de passagem (quando ela é de outra caixa), encargos e conciliação (spec 033). */
+  paymentAccountId: string | null;
+  paymentAccountName: string | null;
+  paymentAccountCaixaId: string | null;
+  paymentAccountCaixaName: string | null;
+  transitAccountId: string | null;
+  transitAccountName: string | null;
+  lateFeePercent: number | null;
+  interestMonthPercent: number | null;
+  earlyDiscountPercent: number | null;
+  toleranceCents: number;
+  matchWindowDays: number;
+  autoSettle: boolean;
+  /** Parcelas em aberto ou parciais que seguem a conta do contrato (trocá-la as muda junto, se pedido). */
+  followingOpenInstallments: number;
   createdAt: string;
   /** Último dia do aviso prévio do ciclo atual. */
   noticeDeadline: string | null;
@@ -1333,6 +1396,82 @@ export type ContractDetail = ContractRow & {
   amendments: ContractAmendmentDto[];
   renewalTasks: RenewalTaskDto[];
 };
+
+/** Origem da baixa de uma parcela (spec 033). */
+export type PaymentOrigin = 'manual' | 'reconciliation' | 'auto';
+
+/** Uma baixa ativa da parcela, repartida. */
+export type ContractPaymentSettlement = {
+  id: string;
+  settledOn: string;
+  amountCents: number;
+  interestCents: number;
+  fineCents: number;
+  discountCents: number;
+  cashCents: number;
+  financialAccountId: string | null;
+  transferId: string | null;
+  /** A conta de outra caixa que pagou (ou recebeu) pela transferência. */
+  fundingAccountId: string | null;
+  statementLineId: string | null;
+  reconciled: boolean;
+  origin: PaymentOrigin;
+  days: number;
+};
+
+export type ContractPaymentRow = {
+  titleId: string;
+  cycleId: string;
+  cycleSeq: number;
+  installment: number;
+  installmentsCount: number;
+  competenceDate: string;
+  dueDate: string;
+  amountCents: number;
+  status: TitleStatus;
+  settledCents: number;
+  openCents: number;
+  interestCents: number;
+  fineCents: number;
+  discountCents: number;
+  cashCents: number;
+  /** Data da última baixa ativa da parcela paga. */
+  paidOn: string | null;
+  lastSettledOn: string | null;
+  /** + atraso, − adiantamento, 0 no dia; em aberto e vencida, o atraso até hoje (overdue). Nulo = em aberto no prazo. */
+  days: number | null;
+  overdue: boolean;
+  /** Conta da última baixa (ou a de outra caixa que a pagou, pela transferência). */
+  accountId: string | null;
+  accountName: string | null;
+  lastOrigin: PaymentOrigin | null;
+  settlements: ContractPaymentSettlement[];
+} & PlannedAccount;
+
+export type ContractPaymentsSummary = {
+  installments: number;
+  paid: number;
+  /** Pagas no prazo (dias ≤ 0) sobre as pagas, em % (null sem pagas). */
+  onTimePercent: number | null;
+  avgDelayDays: number | null;
+  maxDelayDays: number | null;
+  chargesCents: number;
+  discountCents: number;
+  open: number;
+  overdue: number;
+};
+
+export type ContractPaymentsDto = {
+  contractId: string;
+  cycleId: string | null;
+  /** Por mês do vencimento (AAAA-MM-01): previsto e o pago/recebido (principal), encargos e desconto das baixas do mês. */
+  months: { month: string; plannedCents: number; paidCents: number; chargesCents: number; discountCents: number }[];
+  rows: ContractPaymentRow[];
+  summary: ContractPaymentsSummary;
+};
+
+/** Repartição da baixa feita a partir de uma linha (spec 033). */
+export type LineSettlementSplit = SettlementSplit;
 
 export type AmendmentPreview = {
   cycleId: string;

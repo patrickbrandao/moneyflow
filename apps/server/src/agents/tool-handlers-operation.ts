@@ -66,7 +66,24 @@ const CONTRACT_FIELDS: PreviewField[] = [
   { key: 'terminationPenaltyText', label: 'Multa rescisória' },
   { key: 'terminationPenaltyCents', label: 'Multa (valor)', format: 'money' },
   { key: 'notes', label: 'Observações' },
+  // Conta das parcelas e encargos (spec 033).
+  { key: 'paymentAccountId', label: t.contracts.payment.account },
+  { key: 'transitAccountId', label: t.contracts.payment.transit },
+  { key: 'lateFeePercent', label: t.contracts.payment.lateFee },
+  { key: 'interestMonthPercent', label: t.contracts.payment.interest },
+  { key: 'earlyDiscountPercent', label: t.contracts.payment.discount },
+  { key: 'toleranceCents', label: t.contracts.payment.tolerance, format: 'money' },
+  { key: 'matchWindowDays', label: t.contracts.payment.window },
+  { key: 'autoSettle', label: t.contracts.payment.autoSettle, format: 'bool' },
 ];
+
+const CONTRACT_NAMES = {
+  caixaId: 'caixa',
+  entityId: 'entity',
+  categoryId: 'category',
+  paymentAccountId: 'account',
+  transitAccountId: 'account',
+} as const;
 
 async function writableContract(ctx: ServiceContext, contractId: string) {
   const contract = await contracts.getContract(ctx, contractId);
@@ -148,7 +165,7 @@ const MATCH_KIND = (v: unknown) =>
   ({ contains: 'Contém', starts_with: 'Começa com', exact: 'Igual a', regex: 'Expressão regular' })[String(v)] ?? String(v);
 
 const RULE_FIELDS: PreviewField[] = [
-  { key: 'caixaId', label: 'Caixa' },
+  { key: 'target', label: 'Conta' },
   { key: 'matchKind', label: 'Tipo do padrão', format: MATCH_KIND },
   { key: 'pattern', label: 'Padrão' },
   { key: 'direction', label: 'Direção', format: (v) => (v === 'in' ? 'Entrada' : v === 'out' ? 'Saída' : String(v)) },
@@ -157,10 +174,11 @@ const RULE_FIELDS: PreviewField[] = [
   { key: 'priority', label: 'Prioridade' },
 ];
 
-/** Regra que o usuário pode alterar (a mesma checagem do serviço: caixa com escrita; global só o admin). */
+/** Regra que o usuário pode alterar (a mesma checagem do serviço: escrita na caixa da conta ou do cartão). */
 async function writableRule(ctx: ServiceContext, ruleId: string) {
   const result = await ctx.db.execute<{
-    caixa_id: string | null;
+    caixa_id: string;
+    target_name: string;
     match_kind: string;
     pattern: string;
     direction: string | null;
@@ -169,14 +187,16 @@ async function writableRule(ctx: ServiceContext, ruleId: string) {
     priority: number;
     archived_at: string | null;
   }>(sql`
-    SELECT caixa_id, match_kind, pattern, direction, entity_id, category_id, priority, archived_at
-      FROM classification_rules WHERE id = ${ruleId}`);
+    SELECT r.caixa_id, concat_ws(' · ', c.name, a.name) AS target_name, r.match_kind, r.pattern, r.direction, r.entity_id,
+           r.category_id, r.priority, r.archived_at
+      FROM classification_rules r JOIN caixas c ON c.id = r.caixa_id
+      LEFT JOIN financial_accounts a ON a.id = r.financial_account_id
+     WHERE r.id = ${ruleId}`);
   const row = result.rows[0];
   if (!row) throw notFound();
-  if (row.caixa_id) ctx.access.assertWrite(row.caixa_id);
-  else if (!ctx.access.isAdmin) throw forbidden();
+  ctx.access.assertWrite(row.caixa_id);
   return {
-    caixaId: row.caixa_id,
+    target: row.target_name,
     matchKind: row.match_kind,
     pattern: row.pattern,
     direction: row.direction,
@@ -186,6 +206,10 @@ async function writableRule(ctx: ServiceContext, ruleId: string) {
     archivedAt: row.archived_at,
   };
 }
+
+/** Nome do alvo da regra na prévia: "Caixa · Conta", ou o cartão. */
+const ruleTargetLabel = (target: { caixaId: string; accountId: string | null; name: string }, caixaName: string | null) =>
+  target.accountId ? `${caixaName ?? ''} · ${target.name}` : `${target.name} (cartão)`;
 
 /* ---------------- importação ---------------- */
 
@@ -206,7 +230,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
   create_contract: {
     preview: async (ctx, i) => {
       ctx.access.assertWrite(i.caixaId);
-      const values = await withNames(ctx, i, { caixaId: 'caixa', entityId: 'entity', categoryId: 'category' });
+      const values = await withNames(ctx, i, CONTRACT_NAMES);
       const rows = diffRows(CONTRACT_FIELDS, values);
       const count = installmentsCount(i.durationMonths, i.periodicity);
       if (count) rows.push({ label: 'Parcelas', after: `${count} (${PERIODICITY(i.periodicity).toLowerCase()})` });
@@ -225,9 +249,19 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
   update_contract: {
     preview: async (ctx, i) => {
       const before = await writableContract(ctx, i.contractId);
-      const old = await withNames(ctx, contractValues(before), { entityId: 'entity', categoryId: 'category' });
-      const after = await withNames(ctx, i.changes as Record<string, unknown>, { entityId: 'entity', categoryId: 'category' });
+      const old = await withNames(ctx, contractValues(before), CONTRACT_NAMES);
+      const after = await withNames(ctx, i.changes as Record<string, unknown>, CONTRACT_NAMES);
       const rows = diffRows(CONTRACT_FIELDS, after, old);
+      const accountChanged =
+        (i.changes.paymentAccountId !== undefined && i.changes.paymentAccountId !== before.paymentAccountId) ||
+        (i.changes.transitAccountId !== undefined && i.changes.transitAccountId !== before.transitAccountId);
+      const warnings = accountChanged
+        ? [
+            i.changes.applyAccountToInstallments
+              ? `A nova conta vale também para ${before.followingOpenInstallments} parcela(s) em aberto que seguem o contrato (as com conta própria ficam).`
+              : `Só o contrato muda: ${before.followingOpenInstallments} parcela(s) em aberto continuam com a conta anterior (applyAccountToInstallments true as muda junto).`,
+          ]
+        : [];
       const locked = ['startsOn', 'durationMonths', 'periodicity', 'totalCents', 'dueDay', 'dueMonthOffset', 'entityId', 'categoryId'];
       if (before.status !== 'draft' && rows.some((row) => CONTRACT_FIELDS.some((f) => f.label === row.label && locked.includes(f.key))))
         throw unprocessable(t.contracts.lockedActive, 'contract_locked');
@@ -238,7 +272,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
           after: i.changes.mirrorCaixaId ? ((await nameOf(ctx, 'caixa', i.changes.mirrorCaixaId)) ?? '') : 'Sem espelho',
         });
       }
-      return { title: 'Editar contrato', summary: before.name, action: 'update', rows };
+      return { title: 'Editar contrato', summary: before.name, action: 'update', rows, warnings };
     },
     run: (ctx, i) => contracts.updateContract(ctx, i.contractId, i.changes),
   },
@@ -1125,22 +1159,54 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     },
     run: (ctx, i) => categories.deleteCategory(ctx, i.categoryId),
   },
-  list_classification_rules: { run: (ctx, i) => rec.listRules(ctx, { caixaId: i.caixaId, archived: i.archived }) },
+  list_classification_rules: {
+    run: (ctx, i) => rec.listRules(ctx, { accountId: i.accountId, cardCaixaId: i.cardCaixaId, caixaId: i.caixaId, archived: i.archived }),
+  },
   create_classification_rule: {
     preview: async (ctx, i) => {
-      if (i.caixaId) ctx.access.assertWrite(i.caixaId);
-      else ctx.access.assertAdmin();
-      const values = await withNames(ctx, i, { caixaId: 'caixa', entityId: 'entity', categoryId: 'category' });
-      const rows = diffRows(RULE_FIELDS, values);
-      if (!i.caixaId) rows.unshift({ label: 'Alcance', after: 'Global (todas as caixas)' });
+      const target = await rec.resolveRuleTarget(ctx, i, true);
+      const values = await withNames(ctx, i, { entityId: 'entity', categoryId: 'category' });
+      const rows = diffRows(RULE_FIELDS, {
+        ...values,
+        target: ruleTargetLabel(target, await nameOf(ctx, 'caixa', target.caixaId)),
+      });
       return { title: 'Criar regra de classificação', summary: i.pattern, action: 'create', rows };
     },
     run: (ctx, i) => rec.createRule(ctx, i),
   },
+  copy_classification_rules: {
+    preview: async (ctx, i) => {
+      const plan = await rec.planRuleCopy(ctx, i);
+      const label = ruleTargetLabel(plan.target, await nameOf(ctx, 'caixa', plan.target.caixaId));
+      const describeRule = (r: { matchKind: string; pattern: string; direction: string | null }) =>
+        `${MATCH_KIND(r.matchKind)} "${r.pattern}"${r.direction ? ` (${r.direction === 'in' ? 'entrada' : 'saída'})` : ''}`;
+      const rows = plan.toCopy.map((r) => ({
+        label: `${r.caixaName}${r.accountName ? ` · ${r.accountName}` : ''}`,
+        after: [describeRule(r), r.entityName, r.categoryName].filter(Boolean).join(' → '),
+      }));
+      for (const skip of plan.skipped) {
+        const source = plan.sources.find((r) => r.id === skip.ruleId);
+        rows.push({
+          label: source ? `${source.caixaName}${source.accountName ? ` · ${source.accountName}` : ''}` : skip.ruleId,
+          after: `${describeRule({ ...skip, direction: source?.direction ?? null })}: pulada, ${t.statements.copySkippedReasons[skip.reason]}`,
+        });
+      }
+      const warnings: string[] = [t.statements.copyHint];
+      if (plan.toCopy.length === 0) warnings.unshift('Nenhuma regra nova entra: todas já existem no destino ou estão arquivadas.');
+      return {
+        title: 'Copiar regras de classificação',
+        summary: `${plan.toCopy.length} regra(s) para ${label}${plan.skipped.length ? `, ${plan.skipped.length} pulada(s)` : ''}`,
+        action: 'create',
+        rows,
+        warnings,
+      };
+    },
+    run: (ctx, i) => rec.copyRules(ctx, i),
+  },
   update_classification_rule: {
     preview: async (ctx, i) => {
       const before = await writableRule(ctx, i.ruleId);
-      const map = { caixaId: 'caixa', entityId: 'entity', categoryId: 'category' } as const;
+      const map = { entityId: 'entity', categoryId: 'category' } as const;
       const rows = diffRows(
         RULE_FIELDS,
         await withNames(ctx, i.changes as Record<string, unknown>, map),
@@ -1160,7 +1226,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         action: 'delete',
         rows: [
           { label: 'Padrão', before: `${MATCH_KIND(rule.matchKind)} "${rule.pattern}"`, after: '—' },
-          { label: 'Alcance', after: rule.caixaId ? ((await nameOf(ctx, 'caixa', rule.caixaId)) ?? '') : 'Global' },
+          { label: 'Conta', after: rule.target },
         ],
         warnings: ['As linhas já classificadas pela regra guardam o histórico.'],
       };

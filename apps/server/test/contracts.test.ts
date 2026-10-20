@@ -398,3 +398,208 @@ describe('painel e entidade', () => {
     expect(byEntity.length).toBeGreaterThan(0);
   });
 });
+
+/* ---------------- pagamentos no extrato (spec 033) ---------------- */
+
+type StmtLine = { date: string; cents: number; memo: string };
+
+/** OFX mínimo de conta corrente (FITID único por linha). */
+function ofxOf(lines: StmtLine[]) {
+  const key = Math.random().toString(36).slice(2, 10);
+  const trn = lines
+    .map(
+      (l, i) => `<STMTTRN><TRNTYPE>${l.cents < 0 ? 'DEBIT' : 'CREDIT'}</TRNTYPE><DTPOSTED>${l.date.replaceAll('-', '')}120000</DTPOSTED>
+<TRNAMT>${(l.cents / 100).toFixed(2)}</TRNAMT><FITID>${key}-${i}</FITID><NAME>${l.memo}</NAME></STMTTRN>`,
+    )
+    .join('\n');
+  const dates = lines.map((l) => l.date.replaceAll('-', '')).sort();
+  return Buffer.from(`OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+
+<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>BRL</CURDEF>
+<BANKACCTFROM><BANKID>077</BANKID><ACCTID>1</ACCTID><ACCTTYPE>CHECKING</ACCTTYPE></BANKACCTFROM>
+<BANKTRANLIST><DTSTART>${dates[0]}</DTSTART><DTEND>${dates.at(-1)}</DTEND>
+${trn}
+</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`);
+}
+
+async function importOfx(cookie: string, accountId: string, lines: StmtLine[]) {
+  const res = await h.app.inject({
+    method: 'POST',
+    url: `/api/statement-imports?accountId=${accountId}&fileName=extrato.ofx`,
+    payload: ofxOf(lines),
+    headers: { cookie, 'content-type': 'application/x-ofx' },
+  });
+  expect(res.statusCode, res.body).toBe(200);
+  return res.json();
+}
+
+/** Aluguel a pagar de R$ 2.000,00 por mês em 2027, vencimento dia 10, com multa 2%, juros 1% a.m. e desconto 5%. */
+const rent = (s: Scenario, extra: Record<string, unknown> = {}) =>
+  base(s, {
+    entityId: s.supplier.id,
+    direction: 'payable',
+    categoryId: s.expense.id,
+    name: `Aluguel ${s.tag}`,
+    contractNumber: null,
+    mirrorCaixaId: null,
+    startsOn: '2027-01-01',
+    totalCents: 2_400_000,
+    dueMonthOffset: 0,
+    paymentAccountId: s.accountA.id,
+    lateFeePercent: 2,
+    interestMonthPercent: 1,
+    earlyDiscountPercent: 5,
+    matchWindowDays: 30,
+    activate: true,
+    ...extra,
+  });
+
+describe('pagamentos no extrato (spec 033)', () => {
+  it('atraso com multa e juros, desconto antes do vencimento e o atraso pagando a mais antiga; o resumo de pagamentos', async () => {
+    const { session, admin, s } = await setup();
+    const contract = await admin.post('/api/contracts', rent(s));
+    const rows = installments(contract);
+    expect(rows[0]).toMatchObject({ plannedAccountId: s.accountA.id, plannedAccountCustom: false });
+    expect(contract).toMatchObject({ paymentAccountId: s.accountA.id, lateFeePercent: 2, matchWindowDays: 30, autoSettle: false });
+    // Abril pago à mão adiantado (março fica em aberto).
+    await admin.post(`/api/titles/${rows[3].titleId}/settlements`, {
+      settledOn: '2027-04-02',
+      amountCents: 200_000,
+      financialAccountId: s.accountA.id,
+    });
+
+    const imp = await importOfx(session.cookie, s.accountA.id, [
+      // Janeiro 10 dias atrasado: multa 2% = 40,00; juros 1% a.m. × 10/30 = 6,67.
+      { date: '2027-01-20', cents: -204_667, memo: 'PIX ALUGUEL JANEIRO' },
+      // Fevereiro 2 dias antes, com o desconto de 5%.
+      { date: '2027-02-08', cents: -190_000, memo: 'PIX ALUGUEL FEVEREIRO' },
+      // O valor do aluguel em abril (já pago): paga março, a mais antiga em aberto da janela.
+      { date: '2027-04-08', cents: -200_000, memo: 'PIX ALUGUEL' },
+    ]);
+    const [jan, feb, apr] = imp.lines;
+    expect(imp.lines.map((l: any) => l.status)).toEqual(['suggested', 'suggested', 'suggested']);
+    expect(jan.titleId).toBe(rows[0].titleId);
+    expect(jan.target.contract).toMatchObject({
+      contractId: contract.id,
+      installment: 1,
+      installmentsCount: 12,
+      split: { kind: 'charges', amountCents: 200_000, fineCents: 4_000, interestCents: 667, discountCents: 0, days: 10 },
+    });
+    expect(feb.titleId).toBe(rows[1].titleId);
+    expect(feb.target.contract.split).toMatchObject({ kind: 'discount', discountCents: 10_000, days: -2 });
+    expect(apr.titleId).toBe(rows[2].titleId);
+
+    // Os candidatos (e as tools) trazem a repartição.
+    const candidates = await admin.get(`/api/statement-lines/${jan.id}/candidates`);
+    expect(candidates[0]).toMatchObject({ kind: 'title', id: rows[0].titleId, contract: { split: { fineCents: 4_000 } } });
+
+    const confirmed = await admin.post('/api/statement-lines/confirm', { lineIds: [jan.id, feb.id, apr.id] });
+    expect(confirmed).toEqual({ confirmed: 3, failed: [] });
+    const janTitle = await admin.get(`/api/titles/${rows[0].titleId}`);
+    expect(janTitle.status).toBe('paid');
+    expect(janTitle.settlements[0]).toMatchObject({ amountCents: 200_000, fineCents: 4_000, interestCents: 667, cashCents: 204_667 });
+
+    const payments = await admin.get(`/api/contracts/${contract.id}/payments?cycleId=${contract.cycles[0].id}`);
+    const byInstallment = new Map(payments.rows.map((r: any) => [r.installment, r]));
+    expect(byInstallment.get(1)).toMatchObject({
+      paidOn: '2027-01-20',
+      days: 10,
+      fineCents: 4_000,
+      interestCents: 667,
+      lastOrigin: 'reconciliation',
+    });
+    expect(byInstallment.get(2)).toMatchObject({ paidOn: '2027-02-08', days: -2, discountCents: 10_000 });
+    expect(byInstallment.get(3)).toMatchObject({ paidOn: '2027-04-08', days: 29, accountId: s.accountA.id, accountName: 'Banco A' });
+    expect(byInstallment.get(4)).toMatchObject({ paidOn: '2027-04-02', days: -8, lastOrigin: 'manual' });
+    expect(byInstallment.get(5)).toMatchObject({ status: 'open', days: null, overdue: false, plannedAccountName: 'Banco A' });
+    expect(payments.summary).toMatchObject({
+      installments: 12,
+      paid: 4,
+      onTimePercent: 50,
+      maxDelayDays: 29,
+      chargesCents: 4_667,
+      discountCents: 10_000,
+      open: 8,
+      overdue: 0,
+    });
+    const january = payments.months.find((m: any) => m.month === '2027-01-01');
+    expect(january).toEqual({ month: '2027-01-01', plannedCents: 200_000, paidCents: 200_000, chargesCents: 4_667, discountCents: 0 });
+    // Abril: previsto o de abril; pagos o de março (08/04) e o de abril.
+    expect(payments.months.find((m: any) => m.month === '2027-04-01')).toMatchObject({ plannedCents: 200_000, paidCents: 400_000 });
+  });
+
+  it('troca da conta da parcela (fica própria) e a do contrato, aplicada às que seguem; a tolerância tem teto de 10%', async () => {
+    const { admin, s } = await setup();
+    const contract = await admin.post('/api/contracts', rent(s));
+    const rows = installments(contract);
+    const second = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'savings',
+      name: 'Poupança A',
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const third = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'checking',
+      name: 'Banco A2',
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    // A parcela 1 paga não muda; a 2 ganha conta própria.
+    await admin.post(`/api/titles/${rows[0].titleId}/settlements`, {
+      settledOn: '2027-01-10',
+      amountCents: 200_000,
+      financialAccountId: s.accountA.id,
+    });
+    const own = await admin.patch(`/api/titles/${rows[1].titleId}`, { plannedAccountId: second.id });
+    expect(own).toMatchObject({ plannedAccountId: second.id, plannedAccountName: 'Poupança A', plannedAccountCustom: true });
+    // Título pago não troca a conta prevista.
+    await admin.patch(`/api/titles/${rows[0].titleId}`, { plannedAccountId: second.id }, 422);
+    // Conta de outra caixa sem a de passagem: o banco recusa.
+    const otherCaixa = await admin.post(`/api/caixas/${s.caixaB.id}/accounts`, {
+      kind: 'checking',
+      name: 'Banco B',
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const refused = await h.app.inject({
+      method: 'PATCH',
+      url: `/api/titles/${rows[2].titleId}`,
+      payload: { plannedAccountId: otherCaixa.id },
+      headers: { cookie: (await userSession(h, 'admin')).cookie },
+    });
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json().error.code).toBe('titles_planned_transit_account_check');
+
+    expect((await admin.get(`/api/contracts/${contract.id}`)).followingOpenInstallments).toBe(10);
+    // Só no contrato: as parcelas ficam.
+    const onlyContract = await admin.patch(`/api/contracts/${contract.id}`, { paymentAccountId: third.id });
+    expect(installments(onlyContract)[2].plannedAccountId).toBe(s.accountA.id);
+    // Aplicando: as que seguem mudam; a paga e a própria não.
+    const applied = await admin.patch(`/api/contracts/${contract.id}`, { paymentAccountId: third.id, applyAccountToInstallments: true });
+    const after = installments(applied);
+    expect(after[0].plannedAccountId).toBe(s.accountA.id);
+    expect(after[1].plannedAccountId).toBe(second.id);
+    expect(after.slice(2).every((r: any) => r.plannedAccountId === third.id)).toBe(true);
+    // Conta de outra caixa no contrato pede a passagem; com ela, vale.
+    await admin.patch(`/api/contracts/${contract.id}`, { paymentAccountId: otherCaixa.id }, 422);
+    const cross = await admin.patch(`/api/contracts/${contract.id}`, { paymentAccountId: otherCaixa.id, transitAccountId: s.accountA.id });
+    expect(cross).toMatchObject({ paymentAccountId: otherCaixa.id, transitAccountId: s.accountA.id, paymentAccountCaixaId: s.caixaB.id });
+    // Voltar para uma conta da própria caixa solta a passagem.
+    expect(await admin.patch(`/api/contracts/${contract.id}`, { paymentAccountId: s.accountA.id })).toMatchObject({
+      transitAccountId: null,
+    });
+
+    // Tolerância: até 10% da parcela (R$ 200,00).
+    await admin.patch(`/api/contracts/${contract.id}`, { toleranceCents: 20_001 }, 422);
+    expect((await admin.patch(`/api/contracts/${contract.id}`, { toleranceCents: 20_000 })).toleranceCents).toBe(20_000);
+    // Excluir a conta referenciada: recusado com a mensagem do banco.
+    const removal = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/accounts/${second.id}`,
+      headers: { cookie: (await userSession(h, 'admin')).cookie },
+    });
+    expect(removal.json()).not.toMatchObject({ deleted: true });
+  });
+});

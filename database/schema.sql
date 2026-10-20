@@ -5024,16 +5024,26 @@ $$;
 
 
 --
--- Name: classification_rule_for(uuid, text, bigint); Type: FUNCTION; Schema: public; Owner: -
+-- Name: classification_rule_for(uuid, uuid, text, bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.classification_rule_for(p_caixa_id uuid, p_description text, p_amount_cents bigint) RETURNS uuid
-    LANGUAGE sql STABLE
+CREATE FUNCTION public.classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint) RETURNS uuid
+    LANGUAGE plpgsql STABLE
     AS $$
-  SELECT r.id
+DECLARE
+  rule_id uuid;
+BEGIN
+  IF num_nonnulls(p_financial_account_id, p_card_caixa_id) <> 1 THEN
+    RAISE EXCEPTION 'classification_rule_for: pass exactly one target (account or card)'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  SELECT r.id INTO rule_id
     FROM classification_rules r
    WHERE r.archived_at IS NULL
-     AND (r.caixa_id IS NULL OR r.caixa_id = p_caixa_id)
+     AND CASE WHEN p_financial_account_id IS NOT NULL
+              THEN r.financial_account_id = p_financial_account_id
+              ELSE r.caixa_id = p_card_caixa_id AND r.financial_account_id IS NULL END
      AND (r.direction IS NULL OR r.direction = CASE WHEN p_amount_cents > 0 THEN 'in' ELSE 'out' END)
      AND CASE r.match_kind
            WHEN 'exact'       THEN lower(btrim(p_description)) = lower(btrim(r.pattern))
@@ -5042,19 +5052,186 @@ CREATE FUNCTION public.classification_rule_for(p_caixa_id uuid, p_description te
            WHEN 'regex'       THEN p_description ~* r.pattern
          END
    ORDER BY r.priority,
-            (r.caixa_id IS NULL),
             array_position(ARRAY['exact', 'starts_with', 'contains', 'regex'], r.match_kind),
             length(r.pattern) DESC,
             r.id
-   LIMIT 1
+   LIMIT 1;
+  RETURN rule_id;
+END
 $$;
 
 
 --
--- Name: FUNCTION classification_rule_for(p_caixa_id uuid, p_description text, p_amount_cents bigint); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.classification_rule_for(p_caixa_id uuid, p_description text, p_amount_cents bigint) IS 'Regra ativa que classifica a descrição (sinal de p_amount_cents = direção) na caixa: menor prioridade, regra da caixa antes da global, exact > starts_with > contains > regex, padrão mais longo. NULL se nenhuma casa. Para cartão, passe a caixa do cartão e o valor da linha (compra −).';
+COMMENT ON FUNCTION public.classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint) IS 'Regra ativa do alvo da linha (a conta, ou o cartão; exatamente um) que classifica a descrição (sinal de p_amount_cents = direção): menor prioridade, exact > starts_with > contains > regex, padrão mais longo. NULL se nenhuma casa. Para o cartão, passe a caixa do cartão e o valor da linha (compra −).';
+
+
+--
+-- Name: classification_rules_split_by_target(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.classification_rules_split_by_target() RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF to_regclass('pg_temp.crs_rules') IS NOT NULL THEN DROP TABLE pg_temp.crs_rules; END IF;
+  IF to_regclass('pg_temp.crs_pairs') IS NOT NULL THEN DROP TABLE pg_temp.crs_pairs; END IF;
+
+  -- Regras a migrar: as globais e as de caixa geral ainda sem conta.
+  CREATE TEMP TABLE crs_rules ON COMMIT DROP AS
+  SELECT r.id, r.caixa_id, r.match_kind, r.pattern, r.direction, r.priority, r.archived_at, r.created_from_line_id
+    FROM classification_rules r
+   WHERE r.financial_account_id IS NULL
+     AND (r.caixa_id IS NULL OR EXISTS (SELECT 1 FROM caixas c WHERE c.id = r.caixa_id AND c.kind = 'general'));
+
+  CREATE TEMP TABLE crs_pairs (
+    rule_id     uuid    NOT NULL,
+    caixa_id    uuid    NOT NULL,
+    account_id  uuid,
+    lines       integer NOT NULL DEFAULT 0,
+    archive     boolean NOT NULL DEFAULT false,
+    is_original boolean NOT NULL DEFAULT false,
+    new_id      uuid
+  ) ON COMMIT DROP;
+
+  -- Alvos: contas checking/savings ativas (da caixa, ou de todas na global), cartões ativos
+  -- (só a global) e o alvo de cada linha classificada pela regra (mesmo conta arquivada).
+  INSERT INTO crs_pairs (rule_id, caixa_id, account_id)
+  SELECT r.id, a.caixa_id, a.id
+    FROM crs_rules r
+    JOIN financial_accounts a ON a.kind IN ('checking', 'savings') AND a.archived_at IS NULL
+                             AND (r.caixa_id IS NULL OR a.caixa_id = r.caixa_id)
+  UNION
+  SELECT r.id, c.id, NULL
+    FROM crs_rules r
+    JOIN caixas c ON r.caixa_id IS NULL AND c.kind = 'credit_card' AND c.archived_at IS NULL
+  UNION
+  SELECT l.classification_rule_id, coalesce(a.caixa_id, l.card_caixa_id), l.financial_account_id
+    FROM statement_lines l
+    JOIN crs_rules r ON r.id = l.classification_rule_id
+    LEFT JOIN financial_accounts a ON a.id = l.financial_account_id
+   WHERE l.card_caixa_id IS NOT NULL OR a.kind IN ('checking', 'savings');
+
+  -- Linhas de cada alvo classificadas pela regra.
+  UPDATE crs_pairs p
+     SET lines = x.n
+    FROM (SELECT l.classification_rule_id AS rule_id, l.financial_account_id, l.card_caixa_id, count(*)::int AS n
+            FROM statement_lines l
+            JOIN crs_rules r ON r.id = l.classification_rule_id
+           GROUP BY 1, 2, 3) x
+   WHERE x.rule_id = p.rule_id
+     AND x.financial_account_id IS NOT DISTINCT FROM p.account_id
+     AND (p.account_id IS NOT NULL OR x.card_caixa_id = p.caixa_id);
+
+  -- Unicidade das ativas no alvo: a regra que já é do alvo (a do cartão) fica; entre as
+  -- migradas, vence a que já vencia (menor prioridade, a da caixa antes da global). A
+  -- perdedora vira cópia arquivada se tem linhas no alvo; senão, não vai para ele.
+  WITH cand AS (
+    SELECT p.rule_id, p.caixa_id, p.account_id, r.match_kind, lower(r.pattern) AS pat, r.direction,
+           false AS fixed, r.priority, (r.caixa_id IS NULL) AS is_global
+      FROM crs_pairs p JOIN crs_rules r ON r.id = p.rule_id
+     WHERE r.archived_at IS NULL
+    UNION ALL
+    SELECT r.id, r.caixa_id, r.financial_account_id, r.match_kind, lower(r.pattern), r.direction,
+           true, r.priority, false
+      FROM classification_rules r
+     WHERE r.archived_at IS NULL AND r.caixa_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM crs_rules m WHERE m.id = r.id)
+  ), ranked AS (
+    SELECT c.*, row_number() OVER (PARTITION BY c.caixa_id, c.account_id, c.match_kind, c.pat, c.direction
+                                   ORDER BY c.fixed DESC, c.priority, c.is_global, c.rule_id) AS rn
+      FROM cand c
+  )
+  UPDATE crs_pairs p
+     SET archive = true
+    FROM ranked k
+   WHERE NOT k.fixed AND k.rn > 1
+     AND k.rule_id = p.rule_id AND k.caixa_id = p.caixa_id AND k.account_id IS NOT DISTINCT FROM p.account_id;
+
+  DELETE FROM crs_pairs WHERE archive AND lines = 0;
+
+  -- A original fica no alvo com mais linhas (ativo antes de arquivado); os demais são cópias.
+  UPDATE crs_pairs p
+     SET is_original = true
+    FROM (SELECT DISTINCT ON (rule_id) rule_id, caixa_id, account_id
+            FROM crs_pairs
+           ORDER BY rule_id, lines DESC, archive, account_id NULLS LAST, caixa_id) o
+   WHERE o.rule_id = p.rule_id AND o.caixa_id = p.caixa_id AND o.account_id IS NOT DISTINCT FROM p.account_id;
+  UPDATE crs_pairs SET new_id = uuidv7() WHERE NOT is_original;
+
+  -- Cópias: a mesma regra no alvo, com a origem da original, o uso do alvo e o histórico.
+  INSERT INTO classification_rules (id, caixa_id, financial_account_id, match_kind, pattern, direction, entity_id,
+                                    category_id, priority, origin, created_from_line_id, created_by_user_id,
+                                    usage_count, last_used_at, archived_at, created_at, updated_at)
+  SELECT p.new_id, p.caixa_id, p.account_id, r.match_kind, r.pattern, r.direction, r.entity_id,
+         r.category_id, r.priority, r.origin,
+         (SELECT l.id FROM statement_lines l
+           WHERE l.id = r.created_from_line_id
+             AND l.financial_account_id IS NOT DISTINCT FROM p.account_id
+             AND (p.account_id IS NOT NULL OR l.card_caixa_id = p.caixa_id)),
+         r.created_by_user_id, p.lines, CASE WHEN p.lines > 0 THEN r.last_used_at END,
+         coalesce(r.archived_at, CASE WHEN p.archive THEN now() END), r.created_at, now()
+    FROM crs_pairs p
+    JOIN classification_rules r ON r.id = p.rule_id
+   WHERE NOT p.is_original;
+
+  UPDATE classification_rules r
+     SET caixa_id = p.caixa_id,
+         financial_account_id = p.account_id,
+         usage_count = p.lines,
+         last_used_at = CASE WHEN p.lines > 0 THEN r.last_used_at END,
+         archived_at = coalesce(r.archived_at, CASE WHEN p.archive THEN now() END)
+    FROM crs_pairs p
+   WHERE p.rule_id = r.id AND p.is_original;
+
+  -- As linhas passam para a cópia do alvo delas. Só classification_rule_id muda: a
+  -- validação da linha, a imutabilidade do lote substituído (0049), o updated_at e a
+  -- auditoria das linhas ficam desligados (a auditoria das regras registra a migração).
+  ALTER TABLE statement_lines DISABLE TRIGGER statement_lines_validate;
+  ALTER TABLE statement_lines DISABLE TRIGGER statement_lines_supersede_validate;
+  ALTER TABLE statement_lines DISABLE TRIGGER statement_lines_set_updated_at;
+  ALTER TABLE statement_lines DISABLE TRIGGER statement_lines_audit;
+
+  UPDATE statement_lines l
+     SET classification_rule_id = p.new_id
+    FROM crs_pairs p
+   WHERE l.classification_rule_id = p.rule_id AND NOT p.is_original
+     AND l.financial_account_id IS NOT DISTINCT FROM p.account_id
+     AND (p.account_id IS NOT NULL OR l.card_caixa_id = p.caixa_id);
+
+  -- Linha que não tem alvo de regra (conta que deixou de ser checking/savings) solta a regra.
+  UPDATE statement_lines l
+     SET classification_rule_id = NULL
+    FROM classification_rules r
+   WHERE l.classification_rule_id = r.id
+     AND EXISTS (SELECT 1 FROM crs_rules m WHERE m.id = r.id)
+     AND NOT (l.financial_account_id IS NOT DISTINCT FROM r.financial_account_id
+              AND (r.financial_account_id IS NOT NULL OR l.card_caixa_id = r.caixa_id));
+
+  -- Sem alvo e sem linha: removida (as globais sempre saem daqui, porque a original ganhou um alvo).
+  DELETE FROM classification_rules r
+   USING crs_rules m
+   WHERE r.id = m.id
+     AND NOT EXISTS (SELECT 1 FROM crs_pairs p WHERE p.rule_id = r.id AND p.is_original);
+
+  ALTER TABLE statement_lines ENABLE TRIGGER statement_lines_audit;
+  ALTER TABLE statement_lines ENABLE TRIGGER statement_lines_set_updated_at;
+  ALTER TABLE statement_lines ENABLE TRIGGER statement_lines_supersede_validate;
+  ALTER TABLE statement_lines ENABLE TRIGGER statement_lines_validate;
+
+  DROP TABLE pg_temp.crs_pairs;
+  DROP TABLE pg_temp.crs_rules;
+END
+$$;
+
+
+--
+-- Name: FUNCTION classification_rules_split_by_target(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.classification_rules_split_by_target() IS 'Uso interno (migração 0050, spec 032): leva as regras globais e de caixa geral sem conta para os alvos (conta checking/savings ou cartão), com uma cópia por alvo, as linhas reapontadas e o uso recontado. Não é usado pela aplicação.';
 
 
 --
@@ -5081,6 +5258,54 @@ BEGIN
       RAISE EXCEPTION 'classification_rules: invalid regular expression %', NEW.pattern
         USING ERRCODE = 'check_violation', CONSTRAINT = 'classification_rules_pattern_check';
     END;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: classification_rules_validate_target(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.classification_rules_validate_target() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  caixa_kind text;
+  acc        financial_accounts;
+BEGIN
+  IF NEW.caixa_id IS NULL THEN
+    RETURN NEW;  -- o NOT NULL de caixa_id recusa
+  END IF;
+  SELECT c.kind INTO caixa_kind FROM caixas c WHERE c.id = NEW.caixa_id;
+  IF NOT FOUND THEN
+    RETURN NEW;  -- a FK recusa
+  END IF;
+
+  IF caixa_kind = 'credit_card' THEN
+    IF NEW.financial_account_id IS NOT NULL THEN
+      RAISE EXCEPTION 'classification_rules: a rule of card % has no account', NEW.caixa_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'classification_rules_account_check';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.financial_account_id IS NULL THEN
+    RAISE EXCEPTION 'classification_rules: a rule of caixa % needs an account', NEW.caixa_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'classification_rules_account_check';
+  END IF;
+  SELECT * INTO acc FROM financial_accounts a WHERE a.id = NEW.financial_account_id;
+  IF NOT FOUND THEN
+    RETURN NEW;  -- a FK recusa
+  END IF;
+  IF acc.caixa_id <> NEW.caixa_id THEN
+    RAISE EXCEPTION 'classification_rules: account % is not in caixa %', acc.id, NEW.caixa_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'classification_rules_account_check';
+  END IF;
+  IF acc.kind NOT IN ('checking', 'savings') THEN
+    RAISE EXCEPTION 'classification_rules: account % does not import statements (only checking/savings)', acc.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'classification_rules_account_check';
   END IF;
   RETURN NEW;
 END
@@ -5353,6 +5578,99 @@ $$;
 
 
 --
+-- Name: contract_payments(uuid, uuid, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_payments(p_contract_id uuid, p_cycle_id uuid DEFAULT NULL::uuid, p_today date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date) RETURNS TABLE(title_id uuid, contract_cycle_id uuid, cycle_seq integer, installment integer, installments_count integer, competence_date date, due_date date, amount_cents bigint, status text, settled_cents bigint, open_cents bigint, interest_cents bigint, fine_cents bigint, discount_cents bigint, cash_cents bigint, settlement_count integer, last_settled_on date, paid_on date, days integer, overdue boolean, account_id uuid, funding_account_id uuid, planned_account_id uuid, planned_transit_account_id uuid, planned_account_custom boolean, last_origin text, settlements jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+  WITH parcels AS (
+    SELECT t.*, y.seq AS y_seq, y.installments_count AS y_count
+      FROM titles t
+      JOIN contract_cycles y ON y.id = t.contract_cycle_id
+     WHERE t.contract_id = p_contract_id
+       AND (p_cycle_id IS NULL OR t.contract_cycle_id = p_cycle_id)
+       AND t.mirror_status IS NULL           -- o lado do contrato (o espelho repete as baixas)
+       AND t.status <> 'canceled'
+  ), legs AS (
+    SELECT s.id, s.title_id, s.settled_on, s.amount_cents, s.interest_cents, s.fine_cents, s.discount_cents,
+           s.amount_cents + s.interest_cents + s.fine_cents - s.discount_cents AS cash_cents,
+           s.financial_account_id,
+           tr.id AS transfer_id,
+           CASE p.direction WHEN 'payable' THEN tr.from_account_id ELSE tr.to_account_id END AS funding_account_id,
+           ln.id AS statement_line_id,
+           CASE WHEN ln.auto_settled THEN 'auto'
+                WHEN ln.created_entry IN ('title', 'settlement', 'transfer_settlement') THEN 'reconciliation'
+                ELSE 'manual' END AS origin,
+           ln.id IS NOT NULL AS reconciled,
+           (s.settled_on - p.due_date) AS days
+      FROM settlements s
+      JOIN parcels p ON p.id = s.title_id
+      LEFT JOIN transfers tr ON tr.settlement_id = s.id
+      -- A linha conciliada com a baixa: o movimento dela (ou da perna do espelho) ou a perna da
+      -- transferência; a que criou a baixa primeiro.
+      LEFT JOIN LATERAL (
+        SELECT l.id, l.auto_settled, l.created_entry
+          FROM statement_lines l
+          JOIN movements m ON m.id = l.movement_id
+         WHERE l.status = 'matched'
+           AND (m.settlement_id IN (s.id, s.mirror_settlement_id)
+                OR m.transfer_id IN (SELECT x.id FROM transfers x
+                                      WHERE x.settlement_id IN (s.id, s.mirror_settlement_id)))
+         ORDER BY l.auto_settled DESC, (l.created_entry IS NOT NULL) DESC, l.matched_at, l.id
+         LIMIT 1
+      ) ln ON true
+     WHERE s.reversed_at IS NULL
+  ), agg AS (
+    SELECT g.title_id,
+           sum(g.amount_cents)::bigint   AS settled_cents,
+           sum(g.interest_cents)::bigint AS interest_cents,
+           sum(g.fine_cents)::bigint     AS fine_cents,
+           sum(g.discount_cents)::bigint AS discount_cents,
+           sum(g.cash_cents)::bigint     AS cash_cents,
+           count(*)::int                 AS settlement_count,
+           jsonb_agg(jsonb_build_object(
+             'id', g.id, 'settled_on', g.settled_on, 'amount_cents', g.amount_cents,
+             'interest_cents', g.interest_cents, 'fine_cents', g.fine_cents, 'discount_cents', g.discount_cents,
+             'cash_cents', g.cash_cents, 'financial_account_id', g.financial_account_id,
+             'transfer_id', g.transfer_id, 'funding_account_id', g.funding_account_id,
+             'statement_line_id', g.statement_line_id, 'reconciled', g.reconciled, 'origin', g.origin,
+             'days', g.days) ORDER BY g.settled_on, g.id) AS settlements,
+           (array_agg(g.settled_on ORDER BY g.settled_on DESC, g.id DESC))[1]           AS last_settled_on,
+           (array_agg(g.financial_account_id ORDER BY g.settled_on DESC, g.id DESC))[1] AS account_id,
+           (array_agg(g.funding_account_id ORDER BY g.settled_on DESC, g.id DESC))[1]   AS funding_account_id,
+           (array_agg(g.origin ORDER BY g.settled_on DESC, g.id DESC))[1]               AS last_origin
+      FROM legs g
+     GROUP BY g.title_id
+  )
+  SELECT p.id, p.contract_cycle_id, p.y_seq::int, p.contract_installment::int, p.y_count::int,
+         p.competence_date, p.due_date, p.amount_cents, p.status,
+         coalesce(a.settled_cents, 0), p.amount_cents - coalesce(a.settled_cents, 0),
+         coalesce(a.interest_cents, 0), coalesce(a.fine_cents, 0), coalesce(a.discount_cents, 0),
+         coalesce(a.cash_cents, 0), coalesce(a.settlement_count, 0),
+         a.last_settled_on,
+         CASE WHEN p.status = 'paid' THEN a.last_settled_on END,
+         CASE WHEN p.status = 'paid' THEN a.last_settled_on - p.due_date
+              WHEN p.due_date < p_today THEN p_today - p.due_date END,
+         p.status <> 'paid' AND p.due_date < p_today,
+         a.account_id, a.funding_account_id,
+         p.planned_account_id, p.planned_transit_account_id, p.planned_account_custom,
+         a.last_origin,
+         coalesce(a.settlements, '[]'::jsonb)
+    FROM parcels p
+    LEFT JOIN agg a ON a.title_id = p.id
+   ORDER BY p.y_seq, p.contract_installment
+$$;
+
+
+--
+-- Name: FUNCTION contract_payments(p_contract_id uuid, p_cycle_id uuid, p_today date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.contract_payments(p_contract_id uuid, p_cycle_id uuid, p_today date) IS 'Pagamentos das parcelas de um contrato (spec 033): as parcelas não canceladas do lado do contrato, do ciclo p_cycle_id (nulo = todos), em ordem de ciclo e parcela, com as baixas ativas somadas (principal, juros, multa, desconto, dinheiro) e uma a uma em settlements (jsonb: id, settled_on, valores, financial_account_id, transfer_id, funding_account_id = a conta da outra caixa que pagou pela transferência, statement_line_id, reconciled, origin manual|reconciliation|auto, days). paid_on = data da última baixa ativa do título pago; days = paid_on − vencimento (+ atraso, − adiantamento) ou, em aberto/parcial vencido, p_today − vencimento (overdue); nulo no prazo. account_id, funding_account_id e last_origin são os da última baixa ativa. p_today padrão = hoje em America/Sao_Paulo. SECURITY INVOKER; quem pode ler o contrato é checado pela aplicação, que monta o resumo.';
+
+
+--
 -- Name: contract_refs_integrity_check(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5506,6 +5824,21 @@ $$;
 
 
 --
+-- Name: contracts_validate_accounts(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contracts_validate_accounts() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM payment_accounts_assert(NEW.caixa_id, NEW.payment_account_id, NEW.transit_account_id, 'contracts',
+                                  'contracts_payment_account_check', 'contracts_transit_account_check');
+  RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: entity_tag_links_audit_row(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5652,6 +5985,60 @@ BEGIN
                   WHERE m.financial_account_id = OLD.id AND m.occurred_on < NEW.opening_date) THEN
     RAISE EXCEPTION 'financial_accounts: account % has movements before %', OLD.id, NEW.opening_date
       USING ERRCODE = 'check_violation', CONSTRAINT = 'movements_opening_date_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: financial_accounts_validate_payment_refs(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.financial_accounts_validate_payment_refs() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.caixa_id <> OLD.caixa_id OR NEW.kind NOT IN ('checking', 'savings') THEN
+    IF EXISTS (SELECT 1 FROM contracts c WHERE c.payment_account_id = OLD.id) THEN
+      RAISE EXCEPTION 'financial_accounts: account % is the installments account of a contract and must stay a '
+                      'checking/savings account of caixa %', OLD.id, OLD.caixa_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_payment_account_check';
+    END IF;
+    IF EXISTS (SELECT 1 FROM titles t WHERE t.planned_account_id = OLD.id) THEN
+      RAISE EXCEPTION 'financial_accounts: account % is the planned account of a title and must stay a '
+                      'checking/savings account of caixa %', OLD.id, OLD.caixa_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_planned_account_check';
+    END IF;
+  END IF;
+  IF NEW.caixa_id <> OLD.caixa_id THEN
+    IF EXISTS (SELECT 1 FROM contracts c WHERE c.transit_account_id = OLD.id) THEN
+      RAISE EXCEPTION 'financial_accounts: account % is the transit account of a contract and cannot change caixa', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_transit_account_check';
+    END IF;
+    IF EXISTS (SELECT 1 FROM titles t WHERE t.planned_transit_account_id = OLD.id) THEN
+      RAISE EXCEPTION 'financial_accounts: account % is the planned transit account of a title and cannot change caixa', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_planned_transit_account_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: financial_accounts_validate_rules(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.financial_accounts_validate_rules() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF (NEW.caixa_id <> OLD.caixa_id OR NEW.kind NOT IN ('checking', 'savings'))
+     AND EXISTS (SELECT 1 FROM classification_rules r WHERE r.financial_account_id = OLD.id) THEN
+    RAISE EXCEPTION 'financial_accounts: account % has classification rules and must stay a checking/savings account of caixa %',
+      OLD.id, OLD.caixa_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'classification_rules_account_check';
   END IF;
   RETURN NEW;
 END
@@ -6705,6 +7092,63 @@ BEGIN
   RETURN NEW;
 END
 $$;
+
+
+--
+-- Name: payment_accounts_assert(uuid, uuid, uuid, text, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.payment_accounts_assert(p_caixa_id uuid, p_account_id uuid, p_transit_id uuid, p_what text, p_account_constraint text, p_transit_constraint text) RETURNS void
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+  acc financial_accounts;
+  tr  financial_accounts;
+BEGIN
+  IF p_account_id IS NULL THEN
+    IF p_transit_id IS NOT NULL THEN
+      RAISE EXCEPTION '%: a transit account needs a payment account', p_what
+        USING ERRCODE = 'check_violation', CONSTRAINT = p_transit_constraint;
+    END IF;
+    RETURN;
+  END IF;
+
+  SELECT * INTO acc FROM financial_accounts a WHERE a.id = p_account_id;
+  IF NOT FOUND THEN
+    RETURN;  -- a FK recusa
+  END IF;
+  IF acc.kind NOT IN ('checking', 'savings') THEN
+    RAISE EXCEPTION '%: payment account % must be checking or savings (got %)', p_what, acc.id, acc.kind
+      USING ERRCODE = 'check_violation', CONSTRAINT = p_account_constraint;
+  END IF;
+
+  IF acc.caixa_id = p_caixa_id THEN
+    IF p_transit_id IS NOT NULL THEN
+      RAISE EXCEPTION '%: payment account % is in caixa %, so there is no transit account', p_what, acc.id, p_caixa_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = p_transit_constraint;
+    END IF;
+    RETURN;
+  END IF;
+
+  IF p_transit_id IS NULL THEN
+    RAISE EXCEPTION '%: payment account % is in another caixa and needs a transit account of caixa %',
+      p_what, acc.id, p_caixa_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = p_transit_constraint;
+  END IF;
+  SELECT * INTO tr FROM financial_accounts a WHERE a.id = p_transit_id;
+  IF FOUND AND tr.caixa_id <> p_caixa_id THEN
+    RAISE EXCEPTION '%: transit account % must be in caixa %', p_what, tr.id, p_caixa_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = p_transit_constraint;
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION payment_accounts_assert(p_caixa_id uuid, p_account_id uuid, p_transit_id uuid, p_what text, p_account_constraint text, p_transit_constraint text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.payment_accounts_assert(p_caixa_id uuid, p_account_id uuid, p_transit_id uuid, p_what text, p_account_constraint text, p_transit_constraint text) IS 'Usada pelos triggers de contracts e titles (spec 033; roda como quem escreve, por isso sem REVOKE):conta de pagamento checking/savings de qualquer caixa; a de passagem obrigatória quando a conta é de outra caixa, nula senão, sempre da caixa dona. 23514 com o nome de constraint informado.';
 
 
 --
@@ -7832,6 +8276,26 @@ $$;
 
 
 --
+-- Name: statement_lines_validate_created_entry(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.statement_lines_validate_created_entry() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.created_entry = 'transfer_settlement'
+     AND NOT EXISTS (SELECT 1 FROM movements m JOIN transfers tr ON tr.id = m.transfer_id
+                      WHERE m.id = NEW.movement_id AND tr.settlement_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'statement_lines: transfer_settlement needs the movement of a transfer that funds a settlement (line %)',
+      NEW.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_created_entry_links_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: telegram_inbound_bot_token(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8372,6 +8836,21 @@ BEGIN
     END IF;
   END IF;
 
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: titles_validate_planned_account(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.titles_validate_planned_account() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM payment_accounts_assert(NEW.caixa_id, NEW.planned_account_id, NEW.planned_transit_account_id, 'titles',
+                                  'titles_planned_account_check', 'titles_planned_transit_account_check');
   RETURN NEW;
 END
 $$;
@@ -11554,6 +12033,9 @@ CREATE TABLE public.titles (
     contract_id uuid,
     contract_cycle_id uuid,
     contract_installment smallint,
+    planned_account_id uuid,
+    planned_transit_account_id uuid,
+    planned_account_custom boolean DEFAULT false NOT NULL,
     CONSTRAINT titles_amount_cents_check CHECK ((amount_cents > 0)),
     CONSTRAINT titles_boleto_barcode_check CHECK (public.is_valid_boleto_barcode(boleto_barcode)),
     CONSTRAINT titles_card_invoice_check CHECK ((((origin = 'card_invoice'::text) = (card_invoice_id IS NOT NULL)) AND ((card_invoice_id IS NULL) OR (counterparty_caixa_id IS NOT NULL)))),
@@ -11683,6 +12165,27 @@ COMMENT ON COLUMN public.titles.contract_cycle_id IS 'Ciclo da parcela. Nulo num
 --
 
 COMMENT ON COLUMN public.titles.contract_installment IS 'Número da parcela n no ciclo (N = contract_cycles.installments_count).';
+
+
+--
+-- Name: COLUMN titles.planned_account_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.planned_account_id IS 'Conta prevista (spec 033): checking/savings da caixa do título ou de outra caixa. O contrato preenche nas parcelas; vale em qualquer título. O espelho tem a dele.';
+
+
+--
+-- Name: COLUMN titles.planned_transit_account_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.planned_transit_account_id IS 'Conta de passagem da conta prevista: da caixa do título, obrigatória quando planned_account_id é de outra caixa e nula senão.';
+
+
+--
+-- Name: COLUMN titles.planned_account_custom; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.titles.planned_account_custom IS 'A conta prevista foi escolhida na parcela: trocar a conta do contrato não a muda. Padrão false (segue o contrato).';
 
 
 --
@@ -11888,7 +12391,7 @@ COMMENT ON COLUMN public.categories.color_slot IS 'Slot de cor do design system 
 
 CREATE TABLE public.classification_rules (
     id uuid DEFAULT uuidv7() NOT NULL,
-    caixa_id uuid,
+    caixa_id uuid NOT NULL,
     match_kind text DEFAULT 'contains'::text NOT NULL,
     pattern text NOT NULL,
     direction text,
@@ -11903,9 +12406,12 @@ CREATE TABLE public.classification_rules (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    financial_account_id uuid,
+    copied_from_rule_id uuid,
+    CONSTRAINT classification_rules_copied_from_check CHECK (((copied_from_rule_id IS NULL) OR ((origin = 'copy'::text) AND (copied_from_rule_id <> id)))),
     CONSTRAINT classification_rules_direction_check CHECK ((direction = ANY (ARRAY['in'::text, 'out'::text]))),
     CONSTRAINT classification_rules_match_kind_check CHECK ((match_kind = ANY (ARRAY['contains'::text, 'starts_with'::text, 'exact'::text, 'regex'::text]))),
-    CONSTRAINT classification_rules_origin_check CHECK ((origin = ANY (ARRAY['manual'::text, 'correction'::text, 'agent'::text]))),
+    CONSTRAINT classification_rules_origin_check CHECK ((origin = ANY (ARRAY['manual'::text, 'correction'::text, 'agent'::text, 'copy'::text]))),
     CONSTRAINT classification_rules_pattern_check CHECK (((btrim(pattern) <> ''::text) AND (length(pattern) <= 200))),
     CONSTRAINT classification_rules_priority_check CHECK (((priority >= 0) AND (priority <= 1000))),
     CONSTRAINT classification_rules_target_check CHECK (((num_nonnulls(entity_id, category_id) >= 1) AND ((category_id IS NULL) OR (direction IS NOT NULL)))),
@@ -11917,14 +12423,14 @@ CREATE TABLE public.classification_rules (
 -- Name: TABLE classification_rules; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.classification_rules IS 'Regras descrição → entidade/categoria (spec 009), criadas à mão, por correção do usuário ou sugeridas pelo agente. A melhor regra para uma linha: classification_rule_for().';
+COMMENT ON TABLE public.classification_rules IS 'Regras descrição → entidade/categoria (spec 009/032), de uma conta checking/savings ou de um cartão, criadas à mão, por correção do usuário, sugeridas pelo agente ou copiadas de outra conta. A melhor regra para uma linha: classification_rule_for().';
 
 
 --
 -- Name: COLUMN classification_rules.caixa_id; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.classification_rules.caixa_id IS 'Escopo: só nesta caixa. Nulo = todas as caixas.';
+COMMENT ON COLUMN public.classification_rules.caixa_id IS 'Caixa do alvo: a caixa da conta (financial_account_id) ou o próprio cartão (caixa credit_card, sem conta).';
 
 
 --
@@ -11952,7 +12458,7 @@ COMMENT ON COLUMN public.classification_rules.priority IS 'Menor número vence (
 -- Name: COLUMN classification_rules.origin; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.classification_rules.origin IS 'manual, correction (aprendida de uma correção do usuário) ou agent (sugestão aprovada do agente).';
+COMMENT ON COLUMN public.classification_rules.origin IS 'manual, correction (aprendida de uma correção do usuário), agent (sugestão aprovada do agente) ou copy (copiada de outra conta pelo usuário).';
 
 
 --
@@ -11967,6 +12473,20 @@ COMMENT ON COLUMN public.classification_rules.created_from_line_id IS 'Linha de 
 --
 
 COMMENT ON COLUMN public.classification_rules.usage_count IS 'Quantas vezes a regra classificou uma linha (a aplicação incrementa).';
+
+
+--
+-- Name: COLUMN classification_rules.financial_account_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.classification_rules.financial_account_id IS 'Conta checking/savings da caixa cujas linhas a regra classifica; obrigatória fora do cartão, nula no cartão.';
+
+
+--
+-- Name: COLUMN classification_rules.copied_from_rule_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.classification_rules.copied_from_rule_id IS 'Regra de origem da cópia (só em origin = copy; informativo, nulo se a origem foi excluída).';
 
 
 --
@@ -12324,9 +12844,21 @@ CREATE TABLE public.contracts (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    payment_account_id uuid,
+    transit_account_id uuid,
+    late_fee_percent numeric(6,4),
+    interest_month_percent numeric(6,4),
+    early_discount_percent numeric(6,4),
+    tolerance_cents bigint DEFAULT 0 NOT NULL,
+    match_window_days smallint DEFAULT 15 NOT NULL,
+    auto_settle boolean DEFAULT false NOT NULL,
     CONSTRAINT contracts_contract_number_check CHECK (((btrim(contract_number) <> ''::text) AND (length(contract_number) <= 60))),
     CONSTRAINT contracts_counterparty_caixa_check CHECK ((counterparty_caixa_id <> caixa_id)),
     CONSTRAINT contracts_direction_check CHECK ((direction = ANY (ARRAY['payable'::text, 'receivable'::text]))),
+    CONSTRAINT contracts_early_discount_percent_check CHECK (((early_discount_percent >= (0)::numeric) AND (early_discount_percent <= (50)::numeric))),
+    CONSTRAINT contracts_interest_month_percent_check CHECK (((interest_month_percent >= (0)::numeric) AND (interest_month_percent <= (10)::numeric))),
+    CONSTRAINT contracts_late_fee_percent_check CHECK (((late_fee_percent >= (0)::numeric) AND (late_fee_percent <= (20)::numeric))),
+    CONSTRAINT contracts_match_window_days_check CHECK (((match_window_days >= 0) AND (match_window_days <= 45))),
     CONSTRAINT contracts_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 200))),
     CONSTRAINT contracts_notice_days_check CHECK (((notice_days >= 0) AND (notice_days <= 365))),
     CONSTRAINT contracts_readjustment_index_check CHECK ((readjustment_index = ANY (ARRAY['none'::text, 'ipca'::text, 'igpm'::text, 'inpc'::text, 'other'::text]))),
@@ -12335,7 +12867,8 @@ CREATE TABLE public.contracts (
     CONSTRAINT contracts_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'active'::text, 'renewal_pending'::text, 'ended'::text, 'terminated'::text]))),
     CONSTRAINT contracts_terminated_check CHECK (((status = 'terminated'::text) = (terminated_on IS NOT NULL))),
     CONSTRAINT contracts_termination_penalty_cents_check CHECK ((termination_penalty_cents > 0)),
-    CONSTRAINT contracts_termination_penalty_text_check CHECK ((length(termination_penalty_text) <= 2000))
+    CONSTRAINT contracts_termination_penalty_text_check CHECK ((length(termination_penalty_text) <= 2000)),
+    CONSTRAINT contracts_tolerance_cents_check CHECK ((tolerance_cents >= 0))
 );
 
 
@@ -12449,6 +12982,62 @@ COMMENT ON COLUMN public.contracts.termination_penalty_cents IS 'Multa rescisór
 --
 
 COMMENT ON COLUMN public.contracts.terminated_on IS 'Data de encerramento da rescisão; preenchida se e somente se status = terminated.';
+
+
+--
+-- Name: COLUMN contracts.payment_account_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.payment_account_id IS 'Conta das parcelas (spec 033): checking/savings onde o pagamento sai ou o recebimento entra, da caixa do contrato ou de outra caixa (a pagadora; a permissão é da aplicação). Nula = sem conta. Copiada para titles.planned_account_id.';
+
+
+--
+-- Name: COLUMN contracts.transit_account_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.transit_account_id IS 'Conta de passagem (spec 033): da caixa do contrato, obrigatória quando payment_account_id é de outra caixa e nula senão. A baixa da parcela é nela, com a transferência a partir da conta das parcelas.';
+
+
+--
+-- Name: COLUMN contracts.late_fee_percent; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.late_fee_percent IS 'Multa por atraso (0–20%) sobre a parcela, uma vez. Nula = sem. Só para reconhecer o valor pago.';
+
+
+--
+-- Name: COLUMN contracts.interest_month_percent; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.interest_month_percent IS 'Juros de mora (0–10% ao mês), pró-rata por dia (mês = 30 dias). Nulo = sem.';
+
+
+--
+-- Name: COLUMN contracts.early_discount_percent; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.early_discount_percent IS 'Desconto por pontualidade (0–50%) até o vencimento. Nulo = sem.';
+
+
+--
+-- Name: COLUMN contracts.tolerance_cents; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.tolerance_cents IS 'Diferença aceita além dos encargos (≥ 0, padrão 0). O teto de 10% da parcela é da aplicação (o valor da parcela muda por ciclo e aditivo).';
+
+
+--
+-- Name: COLUMN contracts.match_window_days; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.match_window_days IS 'Janela da conciliação em dias em torno do vencimento (0–45, padrão 15), além do mês do vencimento.';
+
+
+--
+-- Name: COLUMN contracts.auto_settle; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contracts.auto_settle IS 'Baixar sem confirmação: a linha com um único candidato, parcela deste contrato na conta prevista e valor exato ou dentro dos encargos/desconto vira conciliada direto (statement_lines.auto_settled).';
 
 
 --
@@ -13613,14 +14202,17 @@ CREATE TABLE public.statement_lines (
     supersede_outcome text,
     supersede_suggested_line_id uuid,
     supersede_suggestion_reason text,
+    auto_settled boolean DEFAULT false NOT NULL,
     CONSTRAINT statement_lines_amount_cents_check CHECK ((amount_cents <> 0)),
+    CONSTRAINT statement_lines_auto_settled_check CHECK (((NOT auto_settled) OR ((status = 'matched'::text) AND COALESCE((created_entry = ANY (ARRAY['settlement'::text, 'transfer_settlement'::text])), false)))),
     CONSTRAINT statement_lines_classification_source_check CHECK (((classification_source = ANY (ARRAY['rule'::text, 'agent'::text, 'user'::text])) AND ((classification_rule_id IS NULL) OR (NOT (classification_source IS DISTINCT FROM 'rule'::text))))),
-    CONSTRAINT statement_lines_created_entry_check CHECK (((created_entry IS NULL) OR ((created_entry = ANY (ARRAY['adjustment'::text, 'title'::text, 'settlement'::text, 'purchase'::text])) AND (status = 'matched'::text)))),
+    CONSTRAINT statement_lines_created_entry_check CHECK (((created_entry IS NULL) OR ((created_entry = ANY (ARRAY['adjustment'::text, 'title'::text, 'settlement'::text, 'transfer_settlement'::text, 'purchase'::text])) AND (status = 'matched'::text)))),
     CONSTRAINT statement_lines_created_entry_links_check CHECK (
 CASE created_entry
     WHEN 'adjustment'::text THEN (movement_id IS NOT NULL)
     WHEN 'title'::text THEN (movement_id IS NOT NULL)
     WHEN 'settlement'::text THEN (movement_id IS NOT NULL)
+    WHEN 'transfer_settlement'::text THEN (movement_id IS NOT NULL)
     WHEN 'purchase'::text THEN (card_invoice_item_id IS NOT NULL)
     ELSE true
 END),
@@ -13749,7 +14341,7 @@ COMMENT ON COLUMN public.statement_lines.matched_at IS 'Quando a linha foi conci
 -- Name: COLUMN statement_lines.created_entry; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.statement_lines.created_entry IS 'Só em matched: o lançamento ligado foi criado a partir desta linha. adjustment = o movimento avulso de movement_id; title = o título (o par com o espelho) e a baixa cujo movimento é movement_id; settlement = só a baixa cujo movimento é movement_id, num título que já existia (casar com título em aberto); purchase = a compra no cartão do card_invoice_item_id. Nulo = a linha foi casada com um lançamento que já existia. A aplicação grava junto com a conciliação e limpa ao desfazer ou ignorar a linha (o "desfazer e excluir o lançamento" apaga o que ela indica).';
+COMMENT ON COLUMN public.statement_lines.created_entry IS 'Só em matched: o lançamento ligado foi criado a partir desta linha. adjustment = o movimento avulso de movement_id; title = o título (o par com o espelho) e a baixa cujo movimento é movement_id; settlement = só a baixa cujo movimento é movement_id, num título que já existia (casar com título em aberto); transfer_settlement = a baixa num título de outra caixa (na conta de passagem) e a transferência que a financia (transfers.settlement_id), sendo movement_id a perna da transferência na conta da linha; purchase = a compra no cartão do card_invoice_item_id. Nulo = a linha foi casada com um lançamento que já existia. A aplicação grava junto com a conciliação e limpa ao desfazer ou ignorar a linha (o "desfazer e excluir o lançamento" apaga o que ela indica; em transfer_settlement, a baixa e a transferência).';
 
 
 --
@@ -13785,6 +14377,13 @@ COMMENT ON COLUMN public.statement_lines.supersede_suggested_line_id IS 'Só em 
 --
 
 COMMENT ON COLUMN public.statement_lines.supersede_suggestion_reason IS 'Motivo curto da sugestão da IA (até 500 caracteres).';
+
+
+--
+-- Name: COLUMN statement_lines.auto_settled; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.statement_lines.auto_settled IS 'A baixa desta linha foi feita sem confirmação (contracts.auto_settle, spec 033). Só em matched com created_entry settlement ou transfer_settlement; a aplicação limpa junto com created_entry.';
 
 
 --
@@ -15981,6 +16580,13 @@ CREATE INDEX classification_rules_category_id_idx ON public.classification_rules
 
 
 --
+-- Name: classification_rules_copied_from_rule_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX classification_rules_copied_from_rule_id_idx ON public.classification_rules USING btree (copied_from_rule_id);
+
+
+--
 -- Name: classification_rules_created_by_user_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -16002,10 +16608,17 @@ CREATE INDEX classification_rules_entity_id_idx ON public.classification_rules U
 
 
 --
+-- Name: classification_rules_financial_account_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX classification_rules_financial_account_id_idx ON public.classification_rules USING btree (financial_account_id);
+
+
+--
 -- Name: classification_rules_pattern_key; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX classification_rules_pattern_key ON public.classification_rules USING btree (caixa_id, match_kind, lower(pattern), direction) NULLS NOT DISTINCT WHERE (archived_at IS NULL);
+CREATE UNIQUE INDEX classification_rules_pattern_key ON public.classification_rules USING btree (caixa_id, financial_account_id, match_kind, lower(pattern), direction) NULLS NOT DISTINCT WHERE (archived_at IS NULL);
 
 
 --
@@ -16170,10 +16783,24 @@ CREATE INDEX contracts_entity_id_idx ON public.contracts USING btree (entity_id)
 
 
 --
+-- Name: contracts_payment_account_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contracts_payment_account_id_idx ON public.contracts USING btree (payment_account_id);
+
+
+--
 -- Name: contracts_status_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX contracts_status_idx ON public.contracts USING btree (status);
+
+
+--
+-- Name: contracts_transit_account_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contracts_transit_account_id_idx ON public.contracts USING btree (transit_account_id);
 
 
 --
@@ -16888,6 +17515,27 @@ CREATE UNIQUE INDEX titles_mirror_title_id_key ON public.titles USING btree (mir
 --
 
 CREATE INDEX titles_nfe_document_id_idx ON public.titles USING btree (nfe_document_id);
+
+
+--
+-- Name: titles_planned_account_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_planned_account_id_idx ON public.titles USING btree (planned_account_id) WHERE (planned_account_id IS NOT NULL);
+
+
+--
+-- Name: titles_planned_account_open_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_planned_account_open_idx ON public.titles USING btree (planned_account_id, due_date) WHERE ((planned_account_id IS NOT NULL) AND (status = ANY (ARRAY['open'::text, 'partial'::text])));
+
+
+--
+-- Name: titles_planned_transit_account_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_planned_transit_account_id_idx ON public.titles USING btree (planned_transit_account_id) WHERE (planned_transit_account_id IS NOT NULL);
 
 
 --
@@ -17654,6 +18302,13 @@ CREATE TRIGGER classification_rules_validate BEFORE INSERT OR UPDATE OF match_ki
 
 
 --
+-- Name: classification_rules classification_rules_validate_target; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER classification_rules_validate_target BEFORE INSERT OR UPDATE OF caixa_id, financial_account_id ON public.classification_rules FOR EACH ROW EXECUTE FUNCTION public.classification_rules_validate_target();
+
+
+--
 -- Name: contract_amendments contract_amendments_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -17812,6 +18467,13 @@ CREATE TRIGGER contracts_set_updated_at BEFORE UPDATE ON public.contracts FOR EA
 --
 
 CREATE TRIGGER contracts_validate BEFORE INSERT OR DELETE OR UPDATE ON public.contracts FOR EACH ROW EXECUTE FUNCTION public.contracts_validate();
+
+
+--
+-- Name: contracts contracts_validate_accounts; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contracts_validate_accounts BEFORE INSERT OR UPDATE OF caixa_id, payment_account_id, transit_account_id ON public.contracts FOR EACH ROW EXECUTE FUNCTION public.contracts_validate_accounts();
 
 
 --
@@ -17980,6 +18642,20 @@ CREATE TRIGGER financial_accounts_validate BEFORE INSERT OR UPDATE OF caixa_id O
 --
 
 CREATE TRIGGER financial_accounts_validate_history BEFORE UPDATE OF caixa_id, opening_date ON public.financial_accounts FOR EACH ROW EXECUTE FUNCTION public.financial_accounts_validate_history();
+
+
+--
+-- Name: financial_accounts financial_accounts_validate_payment_refs; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER financial_accounts_validate_payment_refs BEFORE UPDATE OF caixa_id, kind ON public.financial_accounts FOR EACH ROW EXECUTE FUNCTION public.financial_accounts_validate_payment_refs();
+
+
+--
+-- Name: financial_accounts financial_accounts_validate_rules; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER financial_accounts_validate_rules BEFORE UPDATE OF caixa_id, kind ON public.financial_accounts FOR EACH ROW EXECUTE FUNCTION public.financial_accounts_validate_rules();
 
 
 --
@@ -18354,6 +19030,13 @@ CREATE TRIGGER statement_lines_validate BEFORE INSERT OR UPDATE ON public.statem
 
 
 --
+-- Name: statement_lines statement_lines_validate_created_entry; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER statement_lines_validate_created_entry BEFORE INSERT OR UPDATE OF created_entry, movement_id ON public.statement_lines FOR EACH ROW EXECUTE FUNCTION public.statement_lines_validate_created_entry();
+
+
+--
 -- Name: telegram_links telegram_links_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -18470,6 +19153,13 @@ CREATE TRIGGER titles_validate_card_invoice BEFORE INSERT OR UPDATE OF card_invo
 --
 
 CREATE TRIGGER titles_validate_contract BEFORE INSERT OR UPDATE OF contract_id, contract_cycle_id, contract_installment, caixa_id, direction, entity_id, counterparty_caixa_id, mirror_status ON public.titles FOR EACH ROW EXECUTE FUNCTION public.titles_validate_contract();
+
+
+--
+-- Name: titles titles_validate_planned_account; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER titles_validate_planned_account BEFORE INSERT OR UPDATE OF caixa_id, planned_account_id, planned_transit_account_id ON public.titles FOR EACH ROW EXECUTE FUNCTION public.titles_validate_planned_account();
 
 
 --
@@ -19316,6 +20006,14 @@ ALTER TABLE ONLY public.classification_rules
 
 
 --
+-- Name: classification_rules classification_rules_copied_from_rule_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.classification_rules
+    ADD CONSTRAINT classification_rules_copied_from_rule_id_fkey FOREIGN KEY (copied_from_rule_id) REFERENCES public.classification_rules(id) ON DELETE SET NULL;
+
+
+--
 -- Name: classification_rules classification_rules_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -19337,6 +20035,14 @@ ALTER TABLE ONLY public.classification_rules
 
 ALTER TABLE ONLY public.classification_rules
     ADD CONSTRAINT classification_rules_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(id) ON DELETE CASCADE;
+
+
+--
+-- Name: classification_rules classification_rules_financial_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.classification_rules
+    ADD CONSTRAINT classification_rules_financial_account_id_fkey FOREIGN KEY (financial_account_id) REFERENCES public.financial_accounts(id) ON DELETE CASCADE;
 
 
 --
@@ -19521,6 +20227,22 @@ ALTER TABLE ONLY public.contracts
 
 ALTER TABLE ONLY public.contracts
     ADD CONSTRAINT contracts_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(id);
+
+
+--
+-- Name: contracts contracts_payment_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contracts
+    ADD CONSTRAINT contracts_payment_account_id_fkey FOREIGN KEY (payment_account_id) REFERENCES public.financial_accounts(id);
+
+
+--
+-- Name: contracts contracts_transit_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contracts
+    ADD CONSTRAINT contracts_transit_account_id_fkey FOREIGN KEY (transit_account_id) REFERENCES public.financial_accounts(id);
 
 
 --
@@ -20169,6 +20891,22 @@ ALTER TABLE ONLY public.titles
 
 ALTER TABLE ONLY public.titles
     ADD CONSTRAINT titles_nfe_document_id_fkey FOREIGN KEY (nfe_document_id) REFERENCES public.nfe_documents(id);
+
+
+--
+-- Name: titles titles_planned_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.titles
+    ADD CONSTRAINT titles_planned_account_id_fkey FOREIGN KEY (planned_account_id) REFERENCES public.financial_accounts(id);
+
+
+--
+-- Name: titles titles_planned_transit_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.titles
+    ADD CONSTRAINT titles_planned_transit_account_id_fkey FOREIGN KEY (planned_transit_account_id) REFERENCES public.financial_accounts(id);
 
 
 --

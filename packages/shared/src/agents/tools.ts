@@ -302,7 +302,7 @@ export const AGENT_TOOLS = [
     category: 'reconciliation',
     title: 'Candidatos da linha do extrato',
     description:
-      'Candidatos para casar uma linha do extrato (movimentos, títulos em aberto e itens de fatura próximos em data e valor), do mais provável ao menos.',
+      'Candidatos para casar uma linha do extrato (movimentos, títulos em aberto e itens de fatura próximos em data e valor), do mais provável ao menos. As parcelas de contrato vêm pela regra do contrato (mesmo mês ou a janela, com multa, juros, desconto ou tolerância, ou baixa parcial; também as de outra caixa cuja conta prevista é a conta da linha), com `contract`: a parcela n/N e a repartição da baixa (principal, multa, juros, desconto, dias de atraso).',
     kind: 'read',
     input: z.object({ lineId: id }),
   }),
@@ -395,7 +395,8 @@ export const AGENT_TOOLS = [
     name: 'update_title',
     category: 'titles',
     title: 'Editar título',
-    description: 'Altera um título em aberto (entidade, categoria, descrição, datas, valor, observações).',
+    description:
+      'Altera um título em aberto (entidade, categoria, descrição, datas, valor, observações e a conta prevista — conta de outra caixa pede plannedTransitAccountId, a de passagem da caixa do título; na parcela de contrato, ela passa a ter conta própria).',
     kind: 'write',
     input: z.object({ titleId: id, changes: titleUpdateInput }),
   }),
@@ -461,7 +462,7 @@ export const AGENT_TOOLS = [
     category: 'reconciliation',
     title: 'Conciliar linha do extrato',
     description:
-      'Casa uma linha do extrato com um movimento, um título em aberto (vira baixa) ou um item de fatura. Para várias linhas, use match_statement_lines.',
+      'Casa uma linha do extrato com um movimento, um título em aberto (vira baixa) ou um item de fatura. Parcela de contrato: o valor da linha vira a baixa repartida (principal, multa, juros, desconto) e, se a parcela é de outra caixa, a baixa sai na conta de passagem com a transferência a partir da conta da linha. Para várias linhas, use match_statement_lines.',
     kind: 'write',
     input: lineMatchItem,
   }),

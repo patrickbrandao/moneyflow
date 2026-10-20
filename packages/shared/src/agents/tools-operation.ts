@@ -22,6 +22,7 @@ import {
   contractTerminationInput,
   contractUpdateInput,
   contractVersionCreateInput,
+  copyRulesInput,
   csvMappingInput,
   durationFitsPeriod,
   id,
@@ -102,7 +103,7 @@ export const OPERATION_TOOLS = [
     category: 'contracts',
     title: 'Editar contrato',
     description:
-      'Altera um contrato. No rascunho muda tudo; vigente, só a configuração livre (nome, número, observações, renovação automática, aviso prévio, reajuste, multa) — valores e datas mudam por add_contract_amendment.',
+      'Altera um contrato. No rascunho muda tudo; vigente, só a configuração livre (nome, número, observações, renovação automática, aviso prévio, reajuste, multa, a conta das parcelas com a de passagem, encargos, tolerância, janela e baixar sem confirmação) — valores e datas mudam por add_contract_amendment. Trocando a conta das parcelas, applyAccountToInstallments true leva a nova conta às parcelas em aberto que seguem o contrato.',
     kind: 'write',
     input: z.object({ contractId: id, changes: contractUpdateInput }),
   }),
@@ -526,18 +527,32 @@ export const OPERATION_TOOLS = [
     category: 'categories',
     title: 'Listar regras de classificação',
     description:
-      'Regras que classificam as linhas do extrato (padrão da descrição → entidade/categoria), globais e das caixas que o usuário vê, por prioridade.',
+      'Regras que classificam as linhas do extrato (padrão da descrição → entidade/categoria). Cada regra é de uma conta corrente/poupança ou de um cartão e só classifica os extratos dele. Sem filtro, lista as de todas as contas e cartões que o usuário vê, com a conta (ou cartão), a caixa e o uso. Use para ver se uma regra de outra conta serve na conta em que você está trabalhando e, servindo, proponha copiá-la com copy_classification_rules.',
     kind: 'read',
-    input: z.object({ caixaId: id.optional(), archived: z.boolean().default(false).describe('true = só as arquivadas.') }),
+    input: z.object({
+      accountId: id.optional().describe('Só as regras desta conta.'),
+      cardCaixaId: id.optional().describe('Só as regras deste cartão.'),
+      caixaId: id.optional().describe('Só as regras das contas (ou do cartão) desta caixa.'),
+      archived: z.boolean().default(false).describe('true = só as arquivadas.'),
+    }),
   }),
   define({
     name: 'create_classification_rule',
     category: 'categories',
     title: 'Criar regra de classificação',
     description:
-      'Cria uma regra: padrão (contains, starts_with, exact ou regex) da descrição → entidade e/ou categoria (categoria exige a direção in/out). caixaId omitido = regra global (só administrador).',
+      'Cria uma regra na conta (accountId, corrente ou poupança) ou no cartão (cardCaixaId), um só: padrão (contains, starts_with, exact ou regex) da descrição → entidade e/ou categoria (categoria exige a direção in/out). Não existe regra global nem da caixa inteira. Antes de criar, veja com list_classification_rules se outra conta já tem uma que resolve: se tiver, proponha copiá-la.',
     kind: 'write',
     input: classificationRuleInput,
+  }),
+  define({
+    name: 'copy_classification_rules',
+    category: 'categories',
+    title: 'Copiar regras de classificação',
+    description:
+      'Copia regras de outras contas ou cartões (ruleIds, de qualquer conta que o usuário vê) para a conta (accountId) ou cartão (cardCaixaId) de destino: mesma regra, origem "cópia", uso zerado. As que já existem iguais no destino (tipo + padrão + direção) são puladas. Copiar não reclassifica as linhas: depois, aplique as regras.',
+    kind: 'write',
+    input: copyRulesInput,
   }),
   define({
     name: 'update_classification_rule',

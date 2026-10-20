@@ -3,19 +3,24 @@ import {
   cardInvoiceItems,
   categories,
   classificationRules,
+  type Executor,
   movements,
   settlements,
   statementCsvMappings,
   statementLines,
   type Tx,
   titles,
+  transfers,
 } from '@moneyflow/db';
 import {
   type ApplyRulesResult,
   type ClassificationRuleRow,
+  type CopyRulesResult,
+  type CopyRulesSkipped,
   type CsvMappingRow,
   type classificationRuleInput,
   type classificationRuleUpdateInput,
+  type copyRulesInput,
   type csvMappingInput,
   type csvMappingUpdateInput,
   type LineCreatedEntry,
@@ -32,13 +37,14 @@ import {
 import { and, eq, inArray, isNull, ne, type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
-import { forbidden, notFound, translateDbError, unprocessable } from '../errors';
+import { notFound, translateDbError, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
 import { insertPurchase, loadCard } from './card-core';
 import { assertPurchaseDeletable, deletePurchaseTx } from './cards';
+import { settleFromLine } from './line-settle';
 import { assertNotReconciled, clearStatementSuggestions } from './reconciliation-guards';
-import { settleInTx } from './settlements';
-import { candidatesFor, listLines, resolveTarget, ruleFor } from './statements';
+import { uuidArray } from './reports';
+import { candidatesFor, listLines, type RuleTarget, resolveTarget, ruleFor } from './statements';
 import { insertTitlePair } from './title-pair';
 import { resolveMirror } from './titles';
 import { withTx } from './tx';
@@ -78,7 +84,7 @@ async function lineRow(ctx: ServiceContext, id: string): Promise<StatementLineRo
 async function setMatched(
   tx: Tx,
   lineId: string,
-  link: { movementId?: string | null; cardInvoiceItemId?: string | null; createdEntry?: LineCreatedEntry | null },
+  link: { movementId?: string | null; cardInvoiceItemId?: string | null; createdEntry?: LineCreatedEntry | null; autoSettled?: boolean },
 ) {
   await tx
     .update(statementLines)
@@ -89,29 +95,20 @@ async function setMatched(
       titleId: null,
       cardInvoiceItemId: link.cardInvoiceItemId ?? null,
       createdEntry: link.createdEntry ?? null,
+      autoSettled: link.autoSettled ?? false,
     })
     .where(eq(statementLines.id, lineId));
 }
 
-/** Baixa o título com o valor da linha na conta do extrato e devolve o movimento gerado. */
-async function settleFromLine(ctx: ServiceContext, tx: Tx, line: Line, titleId: string): Promise<string> {
-  const [title] = await tx.select().from(titles).where(eq(titles.id, titleId));
-  if (!title || title.caixaId !== line.caixaId) throw notFound();
-  if ((title.direction === 'payable') !== line.amountCents < 0) throw unprocessable(t.errors.lineDirectionMismatch);
-  const { movementId } = await settleInTx(ctx, tx, titleId, {
-    settledOn: line.postedOn,
-    amountCents: Math.abs(line.amountCents),
-    interestCents: 0,
-    fineCents: 0,
-    discountCents: 0,
-    financialAccountId: line.financialAccountId,
-    sourceAccountId: null,
-    mirrorAccountId: null,
-    notes: null,
-  });
-  if (!movementId) throw unprocessable(t.errors.lineAmountMismatch);
-  return movementId;
-}
+/** O vínculo da linha ao voltar a nova/ignorada: a baixa automática sai junto com o created_entry (statement_lines_auto_settled_check). */
+const UNLINKED = {
+  matchedAt: null,
+  movementId: null,
+  titleId: null,
+  cardInvoiceItemId: null,
+  createdEntry: null,
+  autoSettled: false,
+} as const;
 
 /** Aplica uma sugestão (ou um casamento escolhido) dentro da transação. */
 async function applyMatch(ctx: ServiceContext, tx: Tx, line: Line, ref: z.output<typeof lineMatchInput>) {
@@ -125,8 +122,9 @@ async function applyMatch(ctx: ServiceContext, tx: Tx, line: Line, ref: z.output
     await setMatched(tx, line.id, { movementId: movement.id });
   } else if (ref.titleId) {
     if (!line.financialAccountId) throw unprocessable(t.errors.lineAccountOnly);
-    const movementId = await settleFromLine(ctx, tx, line, ref.titleId);
-    await setMatched(tx, line.id, { movementId, createdEntry: 'settlement' });
+    // Spec 033: a baixa repartida (parcela de contrato) e, no título de outra caixa, a transferência.
+    const { movementId, createdEntry } = await settleFromLine(ctx, tx, line, ref.titleId);
+    await setMatched(tx, line.id, { movementId, createdEntry });
   } else if (ref.cardInvoiceItemId) {
     if (!line.cardCaixaId) throw unprocessable(t.errors.lineCardOnly);
     await setMatched(tx, line.id, { cardInvoiceItemId: ref.cardInvoiceItemId });
@@ -212,7 +210,7 @@ export async function unmatchLine(ctx: ServiceContext, id: string, input: z.outp
     if (input.deleteEntry && !line.createdEntry) throw unprocessable(t.errors.lineEntryNotCreated, 'line_entry_not_created');
     await tx
       .update(statementLines)
-      .set({ status: 'new', matchedAt: null, movementId: null, titleId: null, cardInvoiceItemId: null, createdEntry: null })
+      .set({ status: 'new', ...UNLINKED })
       .where(eq(statementLines.id, id));
     if (input.deleteEntry) await deleteCreatedEntry(ctx, tx, line);
   });
@@ -249,6 +247,14 @@ export async function deleteCreatedEntry(
   }
   const [movement] = await tx.select().from(movements).where(eq(movements.id, line.movementId!));
   if (!movement) throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
+  if (line.createdEntry === 'transfer_settlement') {
+    // Spec 033: a perna da transferência na conta da linha → a transferência → a baixa (e a perna do espelho) na conta de passagem.
+    if (!movement.transferId) throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
+    const [transfer] = await tx.select().from(transfers).where(eq(transfers.id, movement.transferId));
+    if (!transfer?.settlementId) throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
+    await deleteSettlementLegs(tx, transfer.settlementId, [transfer.id]);
+    return;
+  }
   if (line.createdEntry === 'adjustment') {
     if (movement.kind !== 'adjustment') throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
     await assertNotReconciled(tx, [movement.id]);
@@ -259,24 +265,39 @@ export async function deleteCreatedEntry(
 
   // title / settlement: a baixa (e a perna do espelho) do movimento da linha.
   if (!movement.settlementId) throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
-  const [leg] = await tx.select().from(settlements).where(eq(settlements.id, movement.settlementId));
-  const legIds = [leg!.id, ...(leg!.mirrorSettlementId ? [leg!.mirrorSettlementId] : [])];
-  const [title] = await tx.select().from(titles).where(eq(titles.id, leg!.titleId));
+  await deleteSettlementLegs(tx, movement.settlementId, [], line.createdEntry === 'title');
+}
+
+/**
+ * Exclui a baixa (com a perna do espelho), os movimentos dela e as
+ * transferências `transferIds` que a financiavam (com os movimentos); com
+ * `withTitle`, o par de títulos criado pela linha. Recusa se a baixa foi
+ * estornada ou se o título tem outra baixa (title), ou se algum movimento
+ * está conciliado com outra linha.
+ */
+async function deleteSettlementLegs(tx: Tx, settlementId: string, transferIds: string[], withTitle = false) {
+  const [leg] = await tx.select().from(settlements).where(eq(settlements.id, settlementId));
+  if (!leg) throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
+  const legIds = [leg.id, ...(leg.mirrorSettlementId ? [leg.mirrorSettlementId] : [])];
+  const [title] = await tx.select().from(titles).where(eq(titles.id, leg.titleId));
   const pair = [title!.id, ...(title!.mirrorTitleId ? [title!.mirrorTitleId] : [])];
   const legs = await tx.execute<{ id: string; reversed_at: string | null }>(
-    line.createdEntry === 'title'
+    withTitle
       ? sql`SELECT id, reversed_at FROM settlements WHERE title_id IN (${uuids(pair)})`
       : sql`SELECT id, reversed_at FROM settlements WHERE id IN (${uuids(legIds)})`,
   );
   if (legs.rows.some((r) => r.reversed_at !== null || !legIds.includes(r.id)))
     throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
-  const moved = await tx.execute<{ id: string }>(sql`SELECT id FROM movements WHERE settlement_id IN (${uuids(legIds)})`);
+  const moved = await tx.execute<{ id: string }>(sql`
+    SELECT id FROM movements WHERE settlement_id IN (${uuids(legIds)})
+    ${transferIds.length ? sql`OR transfer_id IN (${uuids(transferIds)})` : sql``}`);
   const movementIds = moved.rows.map((r) => r.id);
   await assertNotReconciled(tx, movementIds);
   await clearStatementSuggestions(tx, { movementIds });
   if (movementIds.length > 0) await tx.delete(movements).where(inArray(movements.id, movementIds));
+  if (transferIds.length > 0) await tx.delete(transfers).where(inArray(transfers.id, transferIds));
   await tx.delete(settlements).where(inArray(settlements.id, legIds));
-  if (line.createdEntry === 'title') {
+  if (withTitle) {
     await clearStatementSuggestions(tx, { titleIds: pair });
     await tx.delete(titles).where(inArray(titles.id, pair));
   }
@@ -287,14 +308,7 @@ async function applyIgnored(tx: Tx, line: Line, ignored: boolean) {
   if (!ignored && line.status !== 'ignored') return;
   await tx
     .update(statementLines)
-    .set({
-      status: ignored ? 'ignored' : 'new',
-      matchedAt: null,
-      movementId: null,
-      titleId: null,
-      cardInvoiceItemId: null,
-      createdEntry: null,
-    })
+    .set({ status: ignored ? 'ignored' : 'new', ...UNLINKED })
     .where(eq(statementLines.id, line.id));
 }
 
@@ -319,17 +333,18 @@ export function rulePatternOf(description: string): string {
   return (normalized || description.trim().toLowerCase()).slice(0, 120);
 }
 
-/** Cria (ou atualiza) a regra aprendida da correção do usuário. */
+/** Cria (ou atualiza) a regra aprendida da correção do usuário, na conta (ou cartão) da linha (spec 032). */
 async function learnRule(ctx: ServiceContext, tx: Tx, line: Line, entityId: string | null, categoryId: string | null) {
   if (!entityId && !categoryId) return;
   const direction = line.cardCaixaId || line.amountCents < 0 ? 'out' : 'in';
   await tx.execute(sql`
-    INSERT INTO classification_rules (caixa_id, match_kind, pattern, direction, entity_id, category_id, origin,
+    INSERT INTO classification_rules (caixa_id, financial_account_id, match_kind, pattern, direction, entity_id, category_id, origin,
                                       created_from_line_id, created_by_user_id)
-    VALUES (${line.caixaId}, 'contains', ${rulePatternOf(line.description)}, ${direction}, ${entityId}, ${categoryId},
-            'correction', ${line.id}, ${ctx.access.actor.id})
-    ON CONFLICT (caixa_id, match_kind, lower(pattern), direction) WHERE archived_at IS NULL
-    DO UPDATE SET entity_id = EXCLUDED.entity_id, category_id = EXCLUDED.category_id, origin = 'correction'`);
+    VALUES (${line.caixaId}, ${line.financialAccountId}, 'contains', ${rulePatternOf(line.description)}, ${direction}, ${entityId},
+            ${categoryId}, 'correction', ${line.id}, ${ctx.access.actor.id})
+    ON CONFLICT (caixa_id, financial_account_id, match_kind, lower(pattern), direction) WHERE archived_at IS NULL
+    DO UPDATE SET entity_id = EXCLUDED.entity_id, category_id = EXCLUDED.category_id, origin = 'correction',
+                  copied_from_rule_id = NULL`);
 }
 
 export async function classifyLine(ctx: ServiceContext, id: string, input: z.output<typeof lineClassifyInput>) {
@@ -429,7 +444,7 @@ async function createInTx(ctx: ServiceContext, tx: Tx, line: Line, input: z.outp
         },
         mirror,
       );
-      const movementId = await settleFromLine(ctx, tx, line, pair.id);
+      const { movementId } = await settleFromLine(ctx, tx, line, pair.id);
       await setMatched(tx, line.id, { movementId, createdEntry: 'title' });
     }
   }
@@ -464,8 +479,11 @@ export async function lineCandidates(ctx: ServiceContext, id: string): Promise<M
     financial_account_id: line.financialAccountId,
     card_caixa_id: line.cardCaixaId,
   };
-  const candidates = await candidatesFor(ctx.db, raw, 30);
+  const candidates = await candidatesFor(ctx.db, raw, 30, (caixaId) => ctx.access.canRead(caixaId));
+  // A parcela achada pela regra do contrato (spec 033) aparece uma vez, com a repartição.
+  const contractIds = new Set(candidates.filter((c) => c.contract).map((c) => c.id));
   return candidates
+    .filter((c) => c.contract || c.kind !== 'title' || !contractIds.has(c.id))
     .map((c) => ({
       kind: c.kind,
       id: c.id,
@@ -474,6 +492,7 @@ export async function lineCandidates(ctx: ServiceContext, id: string): Promise<M
       description: c.description,
       entityName: c.entityName ?? null,
       score: scoreCandidate({ postedOn: line.postedOn, amountCents: line.amountCents, description: line.description }, c),
+      contract: c.contract ?? null,
     }))
     .sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
 }
@@ -574,13 +593,55 @@ export async function deleteMapping(ctx: ServiceContext, id: string) {
   return { deleted: true, archived: false };
 }
 
-/* ---------------- regras de classificação ---------------- */
+/* ---------------- regras de classificação (specs 009/032) ---------------- */
+
+/*
+ * Cada regra é de uma conta corrente/poupança ou de um cartão (spec 032): só
+ * classifica as linhas dos extratos dele. Ler = ler a caixa da conta; criar,
+ * editar, arquivar, aplicar e copiar para a conta = escrever nela. Não existe
+ * regra global nem da caixa inteira.
+ */
+
+export type ResolvedRuleTarget = RuleTarget & { caixaId: string; name: string };
+
+/** Conta (corrente/poupança) ou cartão das regras, com a permissão conferida. */
+export async function resolveRuleTarget(
+  ctx: ServiceContext,
+  ref: { accountId?: string | null; cardCaixaId?: string | null },
+  write: boolean,
+  db: Executor = ctx.db,
+): Promise<ResolvedRuleTarget> {
+  if (Boolean(ref.accountId) === Boolean(ref.cardCaixaId)) throw unprocessable(t.errors.ruleAccount, 'rule_target');
+  const assert = (caixaId: string) => (write ? ctx.access.assertWrite(caixaId) : ctx.access.assertRead(caixaId));
+  if (ref.accountId) {
+    const result = await db.execute<{ caixa_id: string; kind: string; name: string }>(
+      sql`SELECT caixa_id, kind, name FROM financial_accounts WHERE id = ${ref.accountId}`,
+    );
+    const account = result.rows[0];
+    if (!account) throw notFound();
+    assert(account.caixa_id);
+    if (account.kind !== 'checking' && account.kind !== 'savings')
+      throw unprocessable(t.errors.ruleAccountKind, 'classification_rules_account_check');
+    return { accountId: ref.accountId, cardCaixaId: null, caixaId: account.caixa_id, name: account.name };
+  }
+  const cardId = ref.cardCaixaId!;
+  const result = await db.execute<{ kind: string; name: string }>(sql`SELECT kind, name FROM caixas WHERE id = ${cardId}`);
+  const caixa = result.rows[0];
+  if (!caixa) throw notFound();
+  assert(cardId);
+  if (caixa.kind !== 'credit_card') throw unprocessable(t.errors.ruleAccountKind, 'classification_rules_account_check');
+  return { accountId: null, cardCaixaId: cardId, caixaId: cardId, name: caixa.name };
+}
 
 const ruleSql = sql`
-  SELECT r.id, r.caixa_id, c.name AS caixa_name, r.match_kind, r.pattern, r.direction, r.entity_id, e.name AS entity_name,
-         r.category_id, cat.name AS category_name, coalesce(cat.color_slot, pcat.color_slot) AS category_color_slot, r.priority, r.origin, r.usage_count, r.last_used_at, r.archived_at
+  SELECT r.id, r.caixa_id, c.name AS caixa_name, c.kind AS caixa_kind, r.financial_account_id, a.name AS account_name,
+         CASE WHEN r.financial_account_id IS NULL THEN r.caixa_id END AS card_caixa_id, coalesce(a.name, c.name) AS target_name,
+         r.copied_from_rule_id, r.match_kind, r.pattern, r.direction, r.entity_id, e.name AS entity_name,
+         r.category_id, cat.name AS category_name, coalesce(cat.color_slot, pcat.color_slot) AS category_color_slot, r.priority,
+         r.origin, r.usage_count, r.last_used_at, r.archived_at
     FROM classification_rules r
-    LEFT JOIN caixas c ON c.id = r.caixa_id
+    JOIN caixas c ON c.id = r.caixa_id
+    LEFT JOIN financial_accounts a ON a.id = r.financial_account_id
     LEFT JOIN entities e ON e.id = r.entity_id
     LEFT JOIN categories cat ON cat.id = r.category_id
     LEFT JOIN categories pcat ON pcat.id = cat.parent_id`;
@@ -591,17 +652,32 @@ function toRule(ctx: ServiceContext, row: Record<string, unknown>): Classificati
     ...r,
     lastUsedAt: iso(r.lastUsedAt),
     archivedAt: iso(r.archivedAt),
-    canWrite: r.caixaId ? ctx.access.canWrite(r.caixaId) : ctx.access.isAdmin,
+    canWrite: ctx.access.canWrite(r.caixaId),
   };
 }
 
-export async function listRules(ctx: ServiceContext, query: { caixaId?: string; archived?: boolean }) {
-  if (query.caixaId) ctx.access.assertRead(query.caixaId);
-  const where = [sql`(r.caixa_id IS NULL OR ${readableFilter(ctx.access, sql`r.caixa_id`)})`];
-  if (query.caixaId) where.push(sql`(r.caixa_id IS NULL OR r.caixa_id = ${query.caixaId})`);
+/** Regras de todas as contas e cartões legíveis, ou só as da conta, do cartão ou da caixa pedida. */
+export async function listRules(
+  ctx: ServiceContext,
+  query: { accountId?: string; cardCaixaId?: string; caixaId?: string; archived?: boolean },
+) {
+  const where = [readableFilter(ctx.access, sql`r.caixa_id`)];
+  if (query.accountId) {
+    await resolveRuleTarget(ctx, { accountId: query.accountId }, false);
+    where.push(sql`r.financial_account_id = ${query.accountId}`);
+  }
+  if (query.cardCaixaId) {
+    await resolveRuleTarget(ctx, { cardCaixaId: query.cardCaixaId }, false);
+    where.push(sql`r.caixa_id = ${query.cardCaixaId} AND r.financial_account_id IS NULL`);
+  }
+  if (query.caixaId) {
+    ctx.access.assertRead(query.caixaId);
+    where.push(sql`r.caixa_id = ${query.caixaId}`);
+  }
   where.push(query.archived ? sql`r.archived_at IS NOT NULL` : sql`r.archived_at IS NULL`);
   const result = await ctx.db.execute(
-    sql`${ruleSql} WHERE ${sql.join(where, sql` AND `)} ORDER BY r.priority, r.caixa_id NULLS LAST, r.pattern LIMIT 1000`,
+    sql`${ruleSql} WHERE ${sql.join(where, sql` AND `)}
+        ORDER BY c.name, coalesce(a.name, c.name), r.financial_account_id, r.priority, r.pattern LIMIT 2000`,
   );
   return result.rows.map((row) => toRule(ctx, row));
 }
@@ -609,23 +685,36 @@ export async function listRules(ctx: ServiceContext, query: { caixaId?: string; 
 async function loadRule(ctx: ServiceContext, id: string) {
   const [rule] = await ctx.db.select().from(classificationRules).where(eq(classificationRules.id, id));
   if (!rule) throw notFound();
-  if (rule.caixaId) ctx.access.assertWrite(rule.caixaId);
-  else if (!ctx.access.isAdmin) throw forbidden();
+  ctx.access.assertWrite(rule.caixaId);
   return rule;
 }
 
+async function getRules(ctx: ServiceContext, ids: string[]) {
+  if (ids.length === 0) return [];
+  const result = await ctx.db.execute(sql`${ruleSql} WHERE r.id = ANY(${uuidArray(ids)})`);
+  const rows = result.rows.map((row) => toRule(ctx, row));
+  return ids.map((id) => rows.find((r) => r.id === id)!).filter(Boolean);
+}
+
 async function getRule(ctx: ServiceContext, id: string) {
-  const result = await ctx.db.execute(sql`${ruleSql} WHERE r.id = ${id}`);
-  return toRule(ctx, result.rows[0]!);
+  const [rule] = await getRules(ctx, [id]);
+  if (!rule) throw notFound();
+  return rule;
 }
 
 export async function createRule(ctx: ServiceContext, input: z.output<typeof classificationRuleInput>) {
-  if (input.caixaId) ctx.access.assertWrite(input.caixaId);
-  else ctx.access.assertAdmin();
+  const target = await resolveRuleTarget(ctx, input, true);
+  const { accountId: _account, cardCaixaId: _card, ...values } = input;
   const [row] = await withTx(ctx, (tx) =>
     tx
       .insert(classificationRules)
-      .values({ ...input, origin: 'manual', createdByUserId: ctx.access.actor.id })
+      .values({
+        ...values,
+        caixaId: target.caixaId,
+        financialAccountId: target.accountId,
+        origin: 'manual',
+        createdByUserId: ctx.access.actor.id,
+      })
       .returning({ id: classificationRules.id }),
   );
   return getRule(ctx, row!.id);
@@ -652,11 +741,12 @@ export async function archiveRule(ctx: ServiceContext, id: string) {
 }
 
 /**
- * Reaplica as regras às linhas novas (spec 009), para regras criadas ou
+ * Reaplica as regras do alvo às linhas novas (spec 009), para regras criadas ou
  * editadas depois do import. Só mexe nas sem classificação ou classificadas
- * por regra: a do usuário e a sugestão do agente pendente ficam.
+ * por regra: a do usuário e a sugestão do agente pendente ficam. Lotes
+ * substituídos (spec 031) são somente leitura e ficam de fora.
  */
-async function applyRulesTo(tx: Tx, caixaId: string, where: SQL): Promise<number> {
+async function applyRulesTo(tx: Tx, target: RuleTarget, where: SQL): Promise<number> {
   const lines = await tx.execute<{
     id: string;
     description: string;
@@ -667,13 +757,15 @@ async function applyRulesTo(tx: Tx, caixaId: string, where: SQL): Promise<number
   }>(sql`
     SELECT l.id, l.description, l.amount_cents, l.entity_id, l.category_id, l.classification_rule_id
       FROM statement_lines l
-     WHERE ${where} AND l.status = 'new' AND (l.classification_source IS NULL OR l.classification_source = 'rule')
+      JOIN statement_imports i ON i.id = l.statement_import_id
+     WHERE ${where} AND i.superseded_by_import_id IS NULL
+       AND l.status = 'new' AND (l.classification_source IS NULL OR l.classification_source = 'rule')
      ORDER BY l.posted_on, l.line_number
-       FOR UPDATE`);
+       FOR UPDATE OF l`);
   const usage = new Map<string, number>();
   let updated = 0;
   for (const line of lines.rows) {
-    const rule = await ruleFor(tx, caixaId, line.description, Number(line.amount_cents));
+    const rule = await ruleFor(tx, target, line.description, Number(line.amount_cents));
     const next = { entityId: rule?.entityId ?? null, categoryId: rule?.categoryId ?? null, ruleId: rule?.id ?? null };
     if (next.ruleId === line.classification_rule_id && next.entityId === line.entity_id && next.categoryId === line.category_id) continue;
     await tx
@@ -694,29 +786,115 @@ async function applyRulesTo(tx: Tx, caixaId: string, where: SQL): Promise<number
   return updated;
 }
 
-/** "Aplicar regras" no detalhe do lote (conta ou fatura do cartão). */
+/** "Aplicar regras" no detalhe do lote (conta ou fatura do cartão), com as regras da conta dele. */
 export async function applyRulesToImport(ctx: ServiceContext, importId: string): Promise<ApplyRulesResult> {
-  const result = await ctx.db.execute<{ caixa_id: string }>(sql`
-    SELECT coalesce(a.caixa_id, i.card_caixa_id) AS caixa_id
+  const result = await ctx.db.execute<{ caixa_id: string; financial_account_id: string | null; card_caixa_id: string | null }>(sql`
+    SELECT coalesce(a.caixa_id, i.card_caixa_id) AS caixa_id, i.financial_account_id, i.card_caixa_id
       FROM statement_imports i LEFT JOIN financial_accounts a ON a.id = i.financial_account_id WHERE i.id = ${importId}`);
-  const caixaId = result.rows[0]?.caixa_id;
-  if (!caixaId) throw notFound();
-  ctx.access.assertWrite(caixaId);
-  const updated = await withTx(ctx, (tx) => applyRulesTo(tx, caixaId, sql`l.statement_import_id = ${importId}`));
+  const row = result.rows[0];
+  if (!row) throw notFound();
+  ctx.access.assertWrite(row.caixa_id);
+  const target = { accountId: row.financial_account_id, cardCaixaId: row.financial_account_id ? null : row.card_caixa_id };
+  const updated = await withTx(ctx, (tx) => applyRulesTo(tx, target, sql`l.statement_import_id = ${importId}`));
   return { updated };
 }
 
-/** "Aplicar regras" na guia Regras: as linhas novas de todas as contas da caixa (ou do cartão, se a caixa é um). */
-export async function applyRulesToCaixa(ctx: ServiceContext, caixaId: string): Promise<ApplyRulesResult> {
-  ctx.access.assertWrite(caixaId);
-  const updated = await withTx(ctx, (tx) =>
-    applyRulesTo(
-      tx,
-      caixaId,
-      sql`(l.card_caixa_id = ${caixaId} OR l.financial_account_id IN (SELECT id FROM financial_accounts WHERE caixa_id = ${caixaId}))`,
-    ),
-  );
+/** "Aplicar regras" na guia Regras: as linhas novas de todos os lotes da conta (ou do cartão) escolhida. */
+export async function applyRulesToAccount(
+  ctx: ServiceContext,
+  ref: { accountId?: string | null; cardCaixaId?: string | null },
+): Promise<ApplyRulesResult> {
+  const target = await resolveRuleTarget(ctx, ref, true);
+  const where = target.accountId ? sql`l.financial_account_id = ${target.accountId}` : sql`l.card_caixa_id = ${target.cardCaixaId}`;
+  const updated = await withTx(ctx, (tx) => applyRulesTo(tx, target, where));
   return { updated };
+}
+
+/* ---------------- copiar regras entre contas (spec 032) ---------------- */
+
+const ruleKey = (r: { matchKind: string; pattern: string; direction: string | null }) =>
+  `${r.matchKind}|${r.pattern.toLowerCase()}|${r.direction ?? ''}`;
+
+export type RuleCopyPlan = {
+  target: ResolvedRuleTarget;
+  /** As regras de origem pedidas, na ordem do pedido. */
+  sources: ClassificationRuleRow[];
+  toCopy: ClassificationRuleRow[];
+  skipped: CopyRulesSkipped[];
+};
+
+/**
+ * O que a cópia faria: as regras de origem (de contas legíveis), as puladas
+ * (arquivadas ou já existentes no destino por tipo + padrão + direção, inclusive
+ * repetidas na própria seleção) e as que entram. Usado pela prévia da tool.
+ */
+export async function planRuleCopy(
+  ctx: ServiceContext,
+  input: z.output<typeof copyRulesInput>,
+  db: Executor = ctx.db,
+): Promise<RuleCopyPlan> {
+  const target = await resolveRuleTarget(ctx, input, true, db);
+  const ids = [...new Set(input.ruleIds.map((id) => id.toLowerCase()))];
+  const found = await db.execute(sql`${ruleSql} WHERE r.id = ANY(${uuidArray(ids)})`);
+  const sources = found.rows.map((row) => toRule(ctx, row));
+  for (const id of ids) {
+    const source = sources.find((r) => r.id === id);
+    if (!source || !ctx.access.canRead(source.caixaId)) throw notFound();
+  }
+  const existing = await db.execute<{ id: string; match_kind: string; pattern: string; direction: string | null }>(sql`
+    SELECT id, match_kind, pattern, direction FROM classification_rules
+     WHERE archived_at IS NULL AND caixa_id = ${target.caixaId}
+       AND financial_account_id IS NOT DISTINCT FROM ${target.accountId}::uuid`);
+  const taken = new Map<string, string | null>(
+    existing.rows.map((r) => [ruleKey({ matchKind: r.match_kind, pattern: r.pattern, direction: r.direction }), r.id]),
+  );
+  const toCopy: ClassificationRuleRow[] = [];
+  const skipped: CopyRulesSkipped[] = [];
+  for (const id of ids) {
+    const source = sources.find((r) => r.id === id)!;
+    const base = { ruleId: source.id, pattern: source.pattern, matchKind: source.matchKind };
+    if (source.archivedAt) {
+      skipped.push({ ...base, reason: 'archived', existingRuleId: null });
+      continue;
+    }
+    const key = ruleKey(source);
+    if (taken.has(key)) {
+      skipped.push({ ...base, reason: 'exists', existingRuleId: taken.get(key) ?? null });
+      continue;
+    }
+    taken.set(key, null);
+    toCopy.push(source);
+  }
+  return { target, sources: ids.map((id) => sources.find((r) => r.id === id)!), toCopy, skipped };
+}
+
+/** Copia as regras escolhidas para a conta (ou cartão) de destino numa transação só; as puladas voltam com o motivo. */
+export async function copyRules(ctx: ServiceContext, input: z.output<typeof copyRulesInput>): Promise<CopyRulesResult> {
+  const { ids, skipped } = await withTx(ctx, async (tx) => {
+    const plan = await planRuleCopy(ctx, input, tx);
+    const created: string[] = [];
+    for (const rule of plan.toCopy) {
+      const [row] = await tx
+        .insert(classificationRules)
+        .values({
+          caixaId: plan.target.caixaId,
+          financialAccountId: plan.target.accountId,
+          matchKind: rule.matchKind,
+          pattern: rule.pattern,
+          direction: rule.direction,
+          entityId: rule.entityId,
+          categoryId: rule.categoryId,
+          priority: rule.priority,
+          origin: 'copy',
+          copiedFromRuleId: rule.id,
+          createdByUserId: ctx.access.actor.id,
+        })
+        .returning({ id: classificationRules.id });
+      created.push(row!.id);
+    }
+    return { ids: created, skipped: plan.skipped };
+  });
+  return { copied: await getRules(ctx, ids), skipped, hint: t.statements.copyHint };
 }
 
 /* ---------------- sugestões do agente (spec 009/011) ---------------- */

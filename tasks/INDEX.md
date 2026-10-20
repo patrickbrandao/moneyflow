@@ -4,6 +4,10 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 
 | Nº | Tarefa | Status | Tipo | Responsável | Origem |
 |---|---|---|---|---|---|
+| 041 | [Pagamentos de contrato no extrato no banco (F19)](041-pagamentos-de-contrato-no-banco.md) (depois da 039) | concluida | banco | dba | usuario |
+| 042 | [Pagamentos de contrato no extrato na aplicação (F19)](042-pagamentos-de-contrato-na-aplicacao.md) (depois da 040 e da 041) | concluida | melhoria | app | usuario |
+| 040 | [Regras de classificação por conta na aplicação (F18)](040-regras-por-conta-na-aplicacao.md) (depois da 039) | concluida | melhoria | app | usuario |
+| 039 | [Regras de classificação por conta no banco (F18)](039-regras-por-conta-no-banco.md) | concluida | banco | dba | usuario |
 | 038 | [Lote provisório e a troca pelo consolidado na aplicação (F17)](038-lote-provisorio-na-aplicacao.md) (depois da 037) | concluida | melhoria | app | usuario |
 | 037 | [Lote provisório e a troca pelo consolidado no banco (F17)](037-lote-provisorio-no-banco.md) | concluida | banco | dba | usuario |
 | 035 | [Receitas de conciliação no banco (F16)](035-receitas-de-conciliacao-no-banco.md) | concluida | banco | dba | usuario |

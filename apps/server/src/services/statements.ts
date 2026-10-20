@@ -3,7 +3,9 @@ import { attachments, type Executor, statementCsvMappings, statementImports, sta
 import {
   addDays,
   applyCsvMapping,
+  type ContractCandidateInfo,
   type CsvMapping,
+  contractMatch,
   decodeStatementFile,
   detectDelimiter,
   type importBankBalanceInput,
@@ -18,11 +20,13 @@ import {
   parseOfxStatements,
   pickMatch,
   pickOfxStatement,
+  reconciliationLink,
   type StatementImportDetail,
   type StatementImportSummary,
   type StatementInspect,
   type StatementLineRow,
   type SupersedeResult,
+  splitSettlement,
   type statementImportQuery,
   t,
 } from '@moneyflow/shared';
@@ -33,6 +37,8 @@ import { AppError, notFound, unprocessable } from '../errors';
 import { cleanFileName, storeAttachment } from './attachments';
 import { getAccount } from './caixas';
 import { loadCard } from './card-core';
+import { settleFromLine, termsOfRow } from './line-settle';
+import { createNotifications } from './notifications';
 import { activeProvisionals, lockImports, previewSupersedeForFile, supersedeInTx } from './statement-supersede';
 import { withTx } from './tx';
 import { camel, iso } from './util';
@@ -424,7 +430,7 @@ export async function importStatement(
     const usage = new Map<string, number>();
     const values = [];
     for (const { line, hash } of fresh) {
-      const rule = await ruleFor(tx, target.caixaId, line.description, line.amountCents);
+      const rule = await ruleFor(tx, ruleTargetOf(target), line.description, line.amountCents);
       if (rule) usage.set(rule.id, (usage.get(rule.id) ?? 0) + 1);
       values.push({
         statementImportId: imp!.id,
@@ -463,7 +469,7 @@ export async function importStatement(
       const left = active.filter((p) => !ids.includes(p.id));
       if (!query.provisional && left.length > 0) provisionalOverlap = left;
     }
-    await autoMatch(tx, imp!.id);
+    await autoMatch(ctx, tx, imp!.id);
     return { id: imp!.id, skipped: parsed.lines.length - fresh.length, superseded, provisionalOverlap };
   });
   const detail = await getImport(ctx, result.id);
@@ -478,11 +484,17 @@ export async function importStatement(
 
 type Rule = { id: string; entityId: string | null; categoryId: string | null };
 
-/** Regra aplicável (classification_rule_for) com a entidade/categoria dela. */
-export async function ruleFor(tx: Executor, caixaId: string, description: string, amountCents: number): Promise<Rule | null> {
+/** Alvo das regras de uma linha (spec 032): a conta corrente/poupança ou o cartão, exatamente um. */
+export type RuleTarget = { accountId: string | null; cardCaixaId: string | null };
+
+export const ruleTargetOf = (target: StatementTarget): RuleTarget =>
+  target.kind === 'account' ? { accountId: target.accountId, cardCaixaId: null } : { accountId: null, cardCaixaId: target.cardId };
+
+/** Regra aplicável (classification_rule_for, só as do alvo da linha) com a entidade/categoria dela. */
+export async function ruleFor(tx: Executor, target: RuleTarget, description: string, amountCents: number): Promise<Rule | null> {
   const result = await tx.execute<{ id: string; entity_id: string | null; category_id: string | null }>(sql`
     SELECT r.id, r.entity_id, r.category_id FROM classification_rules r
-     WHERE r.id = classification_rule_for(${caixaId}::uuid, ${description}, ${amountCents}::bigint)`);
+     WHERE r.id = classification_rule_for(${target.accountId}::uuid, ${target.cardCaixaId}::uuid, ${description}, ${amountCents}::bigint)`);
   const row = result.rows[0];
   return row ? { id: row.id, entityId: row.entity_id, categoryId: row.category_id } : null;
 }
@@ -498,8 +510,18 @@ type LineRow = {
   card_caixa_id: string | null;
 };
 
-/** Candidatos de uma linha: movimentos da conta, títulos em aberto da caixa, itens da fatura do cartão. */
-export async function candidatesFor(tx: Executor, line: LineRow, windowDays = 3): Promise<MatchCandidate[]> {
+/**
+ * Candidatos de uma linha: movimentos da conta, títulos em aberto da caixa,
+ * itens da fatura do cartão e, numa conta, as parcelas de contrato pela regra
+ * do contrato (spec 033). `canRead` filtra as parcelas de outras caixas
+ * achadas pela conta prevista (sem ele, só as da caixa da conta).
+ */
+export async function candidatesFor(
+  tx: Executor,
+  line: LineRow,
+  windowDays = 3,
+  canRead?: (caixaId: string) => boolean,
+): Promise<MatchCandidate[]> {
   const from = addDays(line.posted_on, -windowDays);
   const to = addDays(line.posted_on, windowDays);
   if (line.card_caixa_id) {
@@ -545,7 +567,9 @@ export async function candidatesFor(tx: Executor, line: LineRow, windowDays = 3)
          AND t.direction = ${line.amount_cents < 0 ? 'payable' : 'receivable'}
          AND t.due_date BETWEEN ${from}::date AND ${to}::date`),
   ]);
+  const installments = await contractCandidates(tx, line, canRead);
   return [
+    ...installments,
     ...moves.rows.map((r) => ({
       kind: 'movement' as const,
       id: r.id,
@@ -565,8 +589,87 @@ export async function candidatesFor(tx: Executor, line: LineRow, windowDays = 3)
   ];
 }
 
-/** Casa as linhas novas do lote: conciliada (um movimento/item claro) ou sugerida (confirmação em lote). */
-export async function autoMatch(tx: Tx, importId: string) {
+/**
+ * Parcelas de contrato em aberto (ou parciais) na direção da linha, da caixa
+ * da conta ou com a conta prevista = a conta da linha, que batem pela regra do
+ * contrato (contractMatch: o mesmo mês ou a janela; exato, encargos, desconto,
+ * tolerância ou parcial).
+ */
+async function contractCandidates(tx: Executor, line: LineRow, canRead?: (caixaId: string) => boolean): Promise<MatchCandidate[]> {
+  if (!line.financial_account_id) return [];
+  // Pré-filtro largo: a janela vai a 45 dias e o mesmo mês soma até 31.
+  const from = addDays(line.posted_on, -76);
+  const to = addDays(line.posted_on, 76);
+  const result = await tx.execute<{
+    id: string;
+    caixa_id: string;
+    account_caixa_id: string;
+    due_date: string;
+    amount_cents: string | number;
+    open_cents: string | number;
+    description: string;
+    entity_name: string;
+    contract_id: string;
+    contract_name: string;
+    contract_installment: number | null;
+    installments_count: number | null;
+    planned_account_id: string | null;
+    auto_settle: boolean;
+    late_fee_percent: string | null;
+    interest_month_percent: string | null;
+    early_discount_percent: string | null;
+    tolerance_cents: string | number;
+    match_window_days: number;
+  }>(sql`
+    SELECT t.id, t.caixa_id, a.caixa_id AS account_caixa_id, t.due_date, t.amount_cents, b.open_cents, t.description,
+           e.name AS entity_name, t.contract_id, c.name AS contract_name, t.contract_installment, y.installments_count,
+           t.planned_account_id, c.auto_settle, c.late_fee_percent, c.interest_month_percent, c.early_discount_percent,
+           c.tolerance_cents, c.match_window_days
+      FROM titles t
+      JOIN contracts c ON c.id = t.contract_id
+      JOIN title_balances b ON b.title_id = t.id
+      JOIN entities e ON e.id = t.entity_id
+      LEFT JOIN contract_cycles y ON y.id = t.contract_cycle_id
+      JOIN financial_accounts a ON a.id = ${line.financial_account_id}::uuid
+     WHERE (t.caixa_id = a.caixa_id OR (t.planned_account_id = a.id AND t.planned_transit_account_id IS NOT NULL))
+       AND t.status IN ('open', 'partial') AND t.archived_at IS NULL AND b.open_cents > 0
+       AND t.direction = ${line.amount_cents < 0 ? 'payable' : 'receivable'}
+       AND t.due_date BETWEEN ${from}::date AND ${to}::date`);
+  const matchLine = {
+    postedOn: line.posted_on,
+    amountCents: Number(line.amount_cents),
+    description: line.description,
+    accountId: line.financial_account_id,
+  };
+  return result.rows
+    .filter((r) => r.caixa_id === r.account_caixa_id || (canRead?.(r.caixa_id) ?? false))
+    .map((r) =>
+      contractMatch(matchLine, {
+        titleId: r.id,
+        contractId: r.contract_id,
+        contractName: r.contract_name,
+        installment: r.contract_installment,
+        installmentsCount: r.installments_count,
+        description: r.description,
+        entityName: r.entity_name,
+        dueDate: r.due_date,
+        amountCents: Number(r.amount_cents),
+        openCents: Number(r.open_cents),
+        plannedAccountId: r.planned_account_id,
+        autoSettle: r.auto_settle,
+        terms: termsOfRow(r),
+      }),
+    )
+    .filter((c): c is MatchCandidate => c !== null);
+}
+
+/**
+ * Casa as linhas novas do lote: conciliada (um movimento/item claro) ou
+ * sugerida (confirmação em lote). Parcela de contrato com "baixar sem
+ * confirmação" (spec 033) vira conciliada com a baixa já feita (auto_settled),
+ * e o sino avisa uma vez por lote quantas foram baixadas.
+ */
+export async function autoMatch(ctx: ServiceContext, tx: Tx, importId: string) {
   const lines = await tx.execute<LineRow>(sql`
     SELECT id, posted_on, amount_cents, description, financial_account_id, card_caixa_id
       FROM statement_lines WHERE statement_import_id = ${importId} AND status = 'new'
@@ -578,8 +681,10 @@ export async function autoMatch(tx: Tx, importId: string) {
   const used = new Set(pending.rows.map((r) => r.ref));
   let matched = 0;
   let suggested = 0;
+  let autoSettled = 0;
+  const canRead = (caixaId: string) => ctx.access.canRead(caixaId);
   for (const line of lines.rows) {
-    const candidates = await candidatesFor(tx, line);
+    const candidates = await candidatesFor(tx, line, 3, canRead);
     const pick = pickMatch(
       { postedOn: line.posted_on, amountCents: Number(line.amount_cents), description: line.description },
       candidates,
@@ -587,6 +692,11 @@ export async function autoMatch(tx: Tx, importId: string) {
     );
     if (!pick) continue;
     used.add(pick.candidate.id);
+    if (pick.autoSettle && (await autoSettleLine(ctx, tx, line, pick.candidate.id))) {
+      autoSettled += 1;
+      matched += 1;
+      continue;
+    }
     const link =
       pick.candidate.kind === 'movement'
         ? sql`movement_id = ${pick.candidate.id}::uuid`
@@ -601,7 +711,66 @@ export async function autoMatch(tx: Tx, importId: string) {
       suggested += 1;
     }
   }
-  return { matched, suggested };
+  if (autoSettled > 0) await notifyAutoSettled(ctx, tx, importId, autoSettled);
+  return { matched, suggested, autoSettled };
+}
+
+/**
+ * A baixa sem confirmação de uma linha (spec 033), num savepoint: se o
+ * usuário não escreve na caixa da parcela (ou a baixa falha), a linha fica
+ * como sugestão.
+ */
+async function autoSettleLine(ctx: ServiceContext, tx: Tx, line: LineRow, titleId: string): Promise<boolean> {
+  const caixa = await tx.execute<{ caixa_id: string }>(
+    sql`SELECT caixa_id FROM financial_accounts WHERE id = ${line.financial_account_id}::uuid`,
+  );
+  const caixaId = caixa.rows[0]?.caixa_id;
+  if (!caixaId) return false;
+  try {
+    await tx.transaction(async (sp) => {
+      const settled = await settleFromLine(
+        ctx,
+        sp,
+        {
+          id: line.id,
+          caixaId,
+          financialAccountId: line.financial_account_id,
+          postedOn: line.posted_on,
+          amountCents: Number(line.amount_cents),
+        },
+        titleId,
+      );
+      await sp.execute(sql`
+        UPDATE statement_lines SET status = 'matched', matched_at = now(), movement_id = ${settled.movementId}::uuid,
+               created_entry = ${settled.createdEntry}, auto_settled = true
+         WHERE id = ${line.id}`);
+      await sp.execute(sql`SET CONSTRAINTS ALL IMMEDIATE`);
+      await sp.execute(sql`SET CONSTRAINTS ALL DEFERRED`);
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function notifyAutoSettled(ctx: ServiceContext, tx: Tx, importId: string, count: number) {
+  const result = await tx.execute<{ caixa_id: string; financial_account_id: string; name: string }>(sql`
+    SELECT a.caixa_id, i.financial_account_id, a.name FROM statement_imports i
+      JOIN financial_accounts a ON a.id = i.financial_account_id WHERE i.id = ${importId}`);
+  const imp = result.rows[0];
+  if (!imp) return;
+  await createNotifications(tx, [
+    {
+      userId: ctx.access.actor.id,
+      kind: 'system',
+      title: t.statements.autoSettledTitle(count),
+      body: t.statements.autoSettledBody(imp.name),
+      link: reconciliationLink(imp.caixa_id, imp.financial_account_id, importId),
+      caixaId: imp.caixa_id,
+      data: { importId, count },
+      dedupKey: `auto_settled:${importId}`,
+    },
+  ]);
 }
 
 /* ---------------- leitura ---------------- */
@@ -725,8 +894,8 @@ export async function listLines(
   const order = opts.newestFirst ? sql`l.posted_on DESC, l.line_number DESC` : sql`l.posted_on, l.line_number`;
   const limit = sql`${opts.limit ? sql` LIMIT ${opts.limit}` : sql``}${opts.offset ? sql` OFFSET ${opts.offset}` : sql``}`;
   const result = await db.execute(sql`
-    SELECT l.id, l.statement_import_id AS import_id, l.line_number, l.posted_on, l.amount_cents, l.description, l.fitid, l.status, l.movement_id, l.title_id,
-           l.card_invoice_item_id, l.created_entry, l.entity_id, e.name AS entity_name, l.category_id, c.name AS category_name,
+    SELECT l.id, l.statement_import_id AS import_id, l.financial_account_id AS line_account_id, l.line_number, l.posted_on, l.amount_cents, l.description, l.fitid, l.status, l.movement_id, l.title_id,
+           l.card_invoice_item_id, l.created_entry, l.auto_settled, l.entity_id, e.name AS entity_name, l.category_id, c.name AS category_name,
            coalesce(c.color_slot, pc.color_slot) AS category_color_slot, l.classification_source, l.classification_rule_id,
            l.supersede_outcome, l.superseded_by_line_id,
            CASE WHEN sg.id IS NOT NULL THEN json_build_object('lineId', sg.id, 'reason', l.supersede_suggestion_reason,
@@ -735,7 +904,14 @@ export async function listLines(
              WHEN l.movement_id IS NOT NULL THEN json_build_object('kind', 'movement', 'date', m.occurred_on,
                'description', coalesce(m.description, mt.description, ''), 'amountCents', m.amount_cents, 'entityName', me.name)
              WHEN l.title_id IS NOT NULL THEN json_build_object('kind', 'title', 'date', t.due_date, 'description', t.description,
-               'amountCents', CASE t.direction WHEN 'payable' THEN -tb.open_cents ELSE tb.open_cents END, 'entityName', te.name)
+               'amountCents', CASE t.direction WHEN 'payable' THEN -tb.open_cents ELSE tb.open_cents END, 'entityName', te.name,
+               -- Parcela de contrato (spec 033): o que a repartição precisa.
+               'contractRef', CASE WHEN ct.id IS NOT NULL THEN json_build_object('contractId', ct.id, 'contractName', ct.name,
+                 'installment', t.contract_installment, 'installmentsCount', ty.installments_count, 'dueDate', t.due_date,
+                 'amountCents', t.amount_cents, 'openCents', tb.open_cents, 'plannedAccountId', t.planned_account_id,
+                 'autoSettle', ct.auto_settle, 'late_fee_percent', ct.late_fee_percent,
+                 'interest_month_percent', ct.interest_month_percent, 'early_discount_percent', ct.early_discount_percent,
+                 'tolerance_cents', ct.tolerance_cents, 'match_window_days', ct.match_window_days) END)
              WHEN l.card_invoice_item_id IS NOT NULL THEN json_build_object('kind', 'card_item', 'date', p.purchased_on,
                'description', p.description, 'amountCents', -ci.amount_cents, 'entityName', pe.name)
            END AS target
@@ -750,6 +926,8 @@ export async function listLines(
       LEFT JOIN titles t ON t.id = l.title_id
       LEFT JOIN title_balances tb ON tb.title_id = t.id
       LEFT JOIN entities te ON te.id = t.entity_id
+      LEFT JOIN contracts ct ON ct.id = t.contract_id
+      LEFT JOIN contract_cycles ty ON ty.id = t.contract_cycle_id
       LEFT JOIN card_invoice_items ci ON ci.id = l.card_invoice_item_id
       LEFT JOIN card_purchases p ON p.id = ci.card_purchase_id
       LEFT JOIN entities pe ON pe.id = p.entity_id
@@ -757,10 +935,51 @@ export async function listLines(
      WHERE ${where}
      ORDER BY ${order}${limit}`);
   return result.rows.map((row) => {
-    const r = camel<StatementLineRow>(row);
-    const target = r.target as (StatementLineRow['target'] & { amountCents: number | string }) | null;
-    return { ...r, target: target ? { ...target, amountCents: Number(target.amountCents) } : null };
+    const { lineAccountId, ...r } = camel<StatementLineRow & { lineAccountId: string | null }>(row);
+    const target = r.target as (StatementLineRow['target'] & { amountCents: number | string; contractRef?: ContractRef | null }) | null;
+    if (!target) return { ...r, target: null };
+    const { contractRef, ...rest } = target;
+    const contract = contractRef && r.status === 'suggested' ? suggestionOf({ ...r, lineAccountId }, contractRef) : null;
+    return { ...r, target: { ...rest, amountCents: Number(target.amountCents), ...(contract ? { contract } : {}) } };
   });
+}
+
+type ContractRef = {
+  contractId: string;
+  contractName: string;
+  installment: number | null;
+  installmentsCount: number | null;
+  dueDate: string;
+  amountCents: number | string;
+  openCents: number | string;
+  plannedAccountId: string | null;
+  autoSettle: boolean;
+  late_fee_percent: string | number | null;
+  interest_month_percent: string | number | null;
+  early_discount_percent: string | number | null;
+  tolerance_cents: string | number;
+  match_window_days: string | number;
+};
+
+/** A repartição que a linha sugerida faria na parcela de contrato (spec 033). */
+function suggestionOf(line: StatementLineRow & { lineAccountId?: string | null }, ref: ContractRef): ContractCandidateInfo | null {
+  const split = splitSettlement(
+    Math.abs(line.amountCents),
+    { dueDate: ref.dueDate, amountCents: Number(ref.amountCents), openCents: Number(ref.openCents) },
+    termsOfRow(ref),
+    line.postedOn,
+  );
+  if (!split) return null;
+  return {
+    contractId: ref.contractId,
+    contractName: ref.contractName,
+    installment: ref.installment,
+    installmentsCount: ref.installmentsCount,
+    dueDate: ref.dueDate,
+    sameAccount: !!line.lineAccountId && ref.plannedAccountId === line.lineAccountId,
+    autoSettle: ref.autoSettle,
+    split,
+  };
 }
 
 /**
@@ -877,6 +1096,6 @@ export async function rematchImport(ctx: ServiceContext, id: string) {
   const detail = await getImport(ctx, id);
   ctx.access.assertWrite(detail.caixaId);
   assertNotSuperseded(detail);
-  await withTx(ctx, (tx) => autoMatch(tx, id));
+  await withTx(ctx, (tx) => autoMatch(ctx, tx, id));
   return getImport(ctx, id);
 }

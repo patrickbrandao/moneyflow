@@ -21,6 +21,7 @@ import { categoryTree } from '../services/categories';
 import * as entities from '../services/entities';
 import * as entityTags from '../services/entity-tags';
 import { flowGraph } from '../services/flow';
+import { lineSplit } from '../services/line-settle';
 import { emitAgentEvent } from '../services/message-worker';
 import { listDestinations, sendAgentMessage } from '../services/messages';
 import { search } from '../services/overview';
@@ -63,7 +64,16 @@ const TITLE_FIELDS: PreviewField[] = [
   { key: 'dueDate', label: 'Vencimento', format: 'date' },
   { key: 'amountCents', label: 'Valor', format: 'money' },
   { key: 'notes', label: 'Observações' },
+  { key: 'plannedAccountId', label: 'Conta prevista' },
+  { key: 'plannedTransitAccountId', label: 'Conta de passagem' },
 ];
+
+const TITLE_NAMES = {
+  entityId: 'entity',
+  categoryId: 'category',
+  plannedAccountId: 'account',
+  plannedTransitAccountId: 'account',
+} as const;
 
 const ENTITY_FIELDS: PreviewField[] = [
   { key: 'kind', label: 'Tipo', format: (v) => (v === 'company' ? 'Empresa' : 'Pessoa') },
@@ -106,6 +116,64 @@ const brl = (cents: number) => (cents / 100).toFixed(2).replace('.', ',');
 const PREVIEW_LINES = 50;
 const moreLines = (total: number) => (total > PREVIEW_LINES ? [`E mais ${total - PREVIEW_LINES} linha(s) não mostradas.`] : []);
 
+/**
+ * A baixa que casar a linha com o título faria (spec 033): a repartição
+ * (principal, multa, juros, desconto), os dias em relação ao vencimento e, no
+ * título de outra caixa, a conta de passagem com a transferência.
+ */
+async function settlementPreview(ctx: ServiceContext, lineId: string, titleId: string) {
+  const r = await ctx.db.execute<{
+    posted_on: string;
+    amount_cents: string | number;
+    line_account_id: string | null;
+    line_caixa_id: string | null;
+    caixa_id: string;
+    contract_id: string | null;
+    due_date: string;
+    title_amount: string | number;
+    open_cents: string | number;
+    planned_account_id: string | null;
+  }>(sql`
+    SELECT l.posted_on, l.amount_cents, l.financial_account_id AS line_account_id, a.caixa_id AS line_caixa_id,
+           t.caixa_id, t.contract_id, t.due_date, t.amount_cents AS title_amount, b.open_cents, t.planned_account_id
+      FROM statement_lines l
+      LEFT JOIN financial_accounts a ON a.id = l.financial_account_id
+      JOIN titles t ON t.id = ${titleId}
+      JOIN title_balances b ON b.title_id = t.id
+     WHERE l.id = ${lineId}`);
+  const row = r.rows[0];
+  if (!row) throw notFound();
+  if (row.caixa_id !== row.line_caixa_id && row.planned_account_id !== row.line_account_id) throw notFound();
+  ctx.access.assertWrite(row.caixa_id);
+  const split = await lineSplit(
+    ctx.db,
+    { id: titleId, contractId: row.contract_id, dueDate: row.due_date, amountCents: Number(row.title_amount) },
+    Number(row.open_cents),
+    { postedOn: row.posted_on, amountCents: Number(row.amount_cents) },
+  );
+  if (!split) throw unprocessable(t.errors.lineAmountMismatch);
+  const S = t.statements.contractSplit;
+  const rows: PreviewRow[] = [
+    { label: S.principal, after: brl(split.amountCents) },
+    ...(split.fineCents ? [{ label: S.fine, after: brl(split.fineCents) }] : []),
+    ...(split.interestCents ? [{ label: S.interest, after: brl(split.interestCents) }] : []),
+    ...(split.discountCents ? [{ label: S.discount, after: brl(split.discountCents) }] : []),
+  ];
+  const parts = [
+    S.kinds[split.kind],
+    ...(row.contract_id ? [S.days(split.days)] : []),
+    ...(split.fineCents ? [`${S.fine.toLowerCase()} ${brl(split.fineCents)}`] : []),
+    ...(split.interestCents ? [`${S.interest.toLowerCase()} ${brl(split.interestCents)}`] : []),
+    ...(split.discountCents ? [`${S.discount.toLowerCase()} ${brl(split.discountCents)}`] : []),
+  ];
+  const otherCaixa = row.caixa_id !== row.line_caixa_id;
+  const warnings = [
+    otherCaixa ? S.otherCaixa : 'O título recebe uma baixa com a data da linha, na conta do extrato.',
+    ...(row.contract_id ? [`Parcela de contrato: ${parts.join(', ')}.`] : []),
+  ];
+  return { rows, warnings, summary: parts.join(', ') };
+}
+
 /** Texto do alvo de um casamento (título, movimento ou item de fatura), para a prévia. */
 async function matchTargetLabel(
   ctx: ServiceContext,
@@ -142,12 +210,14 @@ const CREATED_ENTRY_LABEL: Record<LineCreatedEntry, string> = {
   adjustment: 'Movimento avulso',
   title: 'Título já baixado (com o espelho)',
   settlement: 'Baixa no título',
+  transfer_settlement: 'Baixa no título de outra caixa (com a transferência)',
   purchase: 'Compra no cartão',
 };
 const CREATED_ENTRY_OUTCOME: Record<LineCreatedEntry, string> = {
   adjustment: 'Excluído',
   title: 'Excluído com a baixa',
   settlement: 'Baixa excluída (o título volta a ter o valor em aberto)',
+  transfer_settlement: 'Baixa e transferência excluídas (o título volta a ter o valor em aberto)',
   purchase: 'Excluída',
 };
 
@@ -419,9 +489,13 @@ export const TOOL_HANDLERS: Handlers = {
     preview: async (ctx, i) => {
       const before = await titles.getTitle(ctx, i.titleId);
       if (!before.canWrite) throw forbidden(t.errors.readOnly);
-      const after = await withNames(ctx, i.changes as Record<string, unknown>, { entityId: 'entity', categoryId: 'category' });
-      const old = await withNames(ctx, before as unknown as Record<string, unknown>, { entityId: 'entity', categoryId: 'category' });
-      return { title: 'Editar título', summary: before.description, action: 'update', rows: diffRows(TITLE_FIELDS, after, old) };
+      const after = await withNames(ctx, i.changes as Record<string, unknown>, TITLE_NAMES);
+      const old = await withNames(ctx, before as unknown as Record<string, unknown>, TITLE_NAMES);
+      const warnings =
+        i.changes.plannedAccountId !== undefined && before.contractId
+          ? ['A parcela passa a ter conta própria: trocar a conta do contrato não a muda mais.']
+          : [];
+      return { title: 'Editar título', summary: before.description, action: 'update', rows: diffRows(TITLE_FIELDS, after, old), warnings };
     },
     run: (ctx, i) => titles.updateTitle(ctx, i.titleId, i.changes),
   },
@@ -613,12 +687,13 @@ export const TOOL_HANDLERS: Handlers = {
   match_statement_line: {
     preview: async (ctx, i) => {
       const line = await lineCaixa(ctx, i.lineId);
+      const settle = i.titleId ? await settlementPreview(ctx, i.lineId, i.titleId) : null;
       return {
         title: 'Conciliar linha do extrato',
         summary: lineLabel(line),
         action: 'update',
-        rows: [{ label: 'Casar com', after: await matchTargetLabel(ctx, i) }],
-        warnings: i.titleId ? ['O título recebe uma baixa com a data e o valor da linha, na conta do extrato.'] : [],
+        rows: [{ label: 'Casar com', after: await matchTargetLabel(ctx, i) }, ...(settle?.rows ?? [])],
+        warnings: settle?.warnings ?? [],
       };
     },
     run: (ctx, i) => rec.matchLine(ctx, i.lineId, { movementId: i.movementId, titleId: i.titleId, cardInvoiceItemId: i.cardInvoiceItemId }),
@@ -628,7 +703,9 @@ export const TOOL_HANDLERS: Handlers = {
       const rows = [];
       for (const [index, m] of i.matches.entries()) {
         const line = await lineCaixa(ctx, m.lineId);
-        if (index < PREVIEW_LINES) rows.push({ label: lineLabel(line), after: await matchTargetLabel(ctx, m) });
+        if (index >= PREVIEW_LINES) continue;
+        const split = m.titleId ? (await settlementPreview(ctx, m.lineId, m.titleId)).summary : '';
+        rows.push({ label: lineLabel(line), after: `${await matchTargetLabel(ctx, m)}${split ? ` · ${split}` : ''}` });
       }
       const settles = i.matches.filter((m) => m.titleId).length;
       return {

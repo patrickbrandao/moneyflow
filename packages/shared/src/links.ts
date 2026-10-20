@@ -15,7 +15,9 @@ export type CaixaTab =
   | 'invoices'
   | 'purchases'
   | 'limit'
-  | 'import';
+  | 'import'
+  // regras de classificação da fatura do cartão (spec 032)
+  | 'rules';
 
 export const caixaTab = (caixaId: string, tab: CaixaTab) => `/caixas/${caixaId}/${tab}`;
 
@@ -34,7 +36,7 @@ export const invoiceLink = (invoiceId: string, payerCaixaId?: string | null) =>
 export const purchaseLink = (cardCaixaId: string, purchaseId: string) => `${caixaTab(cardCaixaId, 'purchases')}?purchase=${purchaseId}`;
 
 /** Tela da conta financeira dentro da caixa (spec 004): resumo, extrato e conciliação só dela. */
-export type AccountTab = 'overview' | 'statement' | 'reconciliation';
+export type AccountTab = 'overview' | 'statement' | 'reconciliation' | 'rules';
 
 export const accountLink = (caixaId: string, accountId: string, tab?: AccountTab) =>
   `/caixas/${caixaId}/accounts/${accountId}${tab && tab !== 'overview' ? `/${tab}` : ''}`;

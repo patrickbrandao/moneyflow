@@ -11,6 +11,7 @@ export const cardStrings = {
     purchases: 'Compras',
     limit: 'Limite',
     import: 'Importar fatura',
+    rules: 'Regras de classificação',
     members: 'Membros',
   },
 

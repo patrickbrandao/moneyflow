@@ -1,4 +1,4 @@
-import { DB_CODE_MESSAGES, DB_CONSTRAINT_MESSAGES, t } from '@moneyflow/shared';
+import { DB_CODE_MESSAGES, DB_CONSTRAINT_MESSAGES, DB_NOT_NULL_MESSAGES, t } from '@moneyflow/shared';
 import type { ZodError } from 'zod';
 
 /** Erro de negócio com status HTTP e mensagem pt-BR pronta para a interface. */
@@ -31,7 +31,7 @@ export function fromZod(error: ZodError): AppError {
   );
 }
 
-type PgLike = { code: string; constraint?: string; message: string; detail?: string };
+type PgLike = { code: string; constraint?: string; message: string; detail?: string; table?: string; column?: string };
 
 /** Acha o erro do Postgres na cadeia de causas (o Drizzle embrulha em DrizzleQueryError). */
 export function findPgError(error: unknown): PgLike | null {
@@ -53,7 +53,8 @@ export function translateDbError(error: unknown): AppError | null {
     return new AppError(422, pg.constraint, t.agents.errors.capabilityInUse(pg.detail));
   }
   const byConstraint = pg.constraint ? DB_CONSTRAINT_MESSAGES[pg.constraint] : undefined;
-  const message = byConstraint ?? DB_CODE_MESSAGES[pg.code];
+  const byColumn = pg.code === '23502' && pg.table && pg.column ? DB_NOT_NULL_MESSAGES[`${pg.table}.${pg.column}`] : undefined;
+  const message = byConstraint ?? byColumn ?? DB_CODE_MESSAGES[pg.code];
   if (!message) return null;
   const status = pg.code === '42501' ? 403 : pg.code === '23505' ? 409 : 422;
   return new AppError(status, pg.constraint ?? `pg_${pg.code}`, message);

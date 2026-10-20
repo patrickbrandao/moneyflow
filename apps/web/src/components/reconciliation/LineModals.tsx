@@ -14,6 +14,7 @@ import { LoadError, Money } from '../domain';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions } from '../forms';
 import { MirrorFields, mirrorPayload, useMirrorChoice } from '../titles/MirrorFields';
 import { Badge, Button, Field, Modal } from '../ui';
+import { ContractSplit } from './ContractSplit';
 
 const s = t.statements;
 
@@ -61,6 +62,7 @@ export function MatchModal({ line, onClose, onDone }: { line: StatementLineRow; 
                   {s.targetKinds[c.kind]}
                   {c.entityName ? ` · ${c.entityName}` : ''}
                 </span>
+                {c.contract && <ContractSplit info={c.contract} />}
               </span>
               {c.score !== null && (
                 <Badge mono title={s.score}>

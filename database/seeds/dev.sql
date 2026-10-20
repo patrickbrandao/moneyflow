@@ -198,8 +198,8 @@ ON CONFLICT (kind, parent_id, lower(name)) DO NOTHING;
 -- Sem provedor nem chave (segredos não entram em seed): nasce INATIVO. O admin escolhe o
 -- provedor e o modelo na tela de agentes e o ativa.
 -- Kit de ferramentas (spec 021) com todas as tools do registro (packages/shared/src/agents/tools.ts,
--- tools-operation.ts e tools-admin.ts: 154 tools, inclusive as das F13a/F13b, os orçamentos da F14 e as tarefas
--- agendadas da F15) no modo sugerido de cada
+-- tools-operation.ts e tools-admin.ts: 155 tools, inclusive as das F13a/F13b, os orçamentos da F14, as tarefas
+-- agendadas da F15 e a cópia de regras de classificação da F18) no modo sugerido de cada
 -- uma (suggestedMode): leituras, notify_user e refresh_mcp_tools em allow, as demais escritas em ask; as tools
 -- com segredos (digitados no cartão de aprovação) sempre em ask. Tool nova no registro entra aqui também. Kit já existente
 -- ganha as que faltam; as que já estão nele ficam no modo que o admin escolheu.
@@ -237,7 +237,8 @@ SELECT k.id, t.tool_name, t.mode
   ('delete_title', 'ask'), ('accept_mirror', 'ask'), ('dispute_mirror', 'ask'), ('delete_transfer', 'ask'),
   ('create_category', 'ask'), ('update_category', 'ask'), ('archive_category', 'ask'),
   ('list_classification_rules', 'allow'), ('create_classification_rule', 'ask'),
-  ('update_classification_rule', 'ask'), ('archive_classification_rule', 'ask'), ('create_entity_tag', 'ask'),
+  ('update_classification_rule', 'ask'), ('archive_classification_rule', 'ask'),
+  ('copy_classification_rules', 'ask'), ('create_entity_tag', 'ask'),
   ('update_entity_tag', 'ask'), ('archive_entity_tag', 'ask'), ('list_message_subscriptions', 'allow'),
   ('create_message_destination', 'ask'), ('update_message_destination', 'ask'),
   ('archive_message_destination', 'ask'), ('set_message_subscriptions', 'ask'), ('send_test_message', 'ask'),

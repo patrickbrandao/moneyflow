@@ -8,6 +8,9 @@ import {
   type ContractCycleDto,
   type ContractDetail,
   type ContractInstallmentDto,
+  type ContractPaymentRow,
+  type ContractPaymentsDto,
+  type ContractPaymentsSummary,
   type ContractPeriodicity,
   type ContractRow,
   type ContractStatus,
@@ -22,9 +25,12 @@ import {
   cycleEnd,
   cycleSchedule,
   type DeleteResult,
+  formatBRL,
   formatMonth,
   installmentDescription,
+  installmentsCount,
   noticeDeadline,
+  type PaymentOrigin,
   proratedAmount,
   type ReadjustmentIndex,
   type RecurringPanelDto,
@@ -35,6 +41,7 @@ import {
   type TitleStatus,
   t,
   todayIso,
+  toleranceCap,
 } from '@moneyflow/shared';
 import { type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
@@ -42,6 +49,7 @@ import type { ServiceContext } from '../context';
 import { notFound, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
 import { listContractDocuments } from './contract-documents';
+import { PLANNED_JOINS, PLANNED_SELECT, plannedOf } from './planned-account';
 import { uuidArray } from './reports';
 import { insertTitlePair, type MirrorPlan, opposite } from './title-pair';
 import { defaultMirrorCategory } from './titles';
@@ -84,20 +92,42 @@ export type ContractRecord = {
   notes: string | null;
   archivedAt: string | null;
   createdAt: string;
+  /** Spec 033: conta das parcelas, passagem, encargos e conciliação. */
+  paymentAccountId: string | null;
+  transitAccountId: string | null;
+  lateFeePercent: number | null;
+  interestMonthPercent: number | null;
+  earlyDiscountPercent: number | null;
+  toleranceCents: number;
+  matchWindowDays: number;
+  autoSettle: boolean;
 };
 
 export type CycleRecord = ContractCycleBrief & { contractId: string };
 
 const CONTRACT_COLUMNS = sql`c.id, c.caixa_id, c.entity_id, c.direction, c.name, c.contract_number, c.category_id, c.counterparty_caixa_id,
   c.status, c.auto_renew, c.notice_days, c.renewal_lead_days, c.reminder_every_days, c.readjustment_index, c.readjustment_base_date,
-  c.termination_penalty_text, c.termination_penalty_cents, c.terminated_on, c.termination_notes, c.notes, c.archived_at, c.created_at`;
+  c.termination_penalty_text, c.termination_penalty_cents, c.terminated_on, c.termination_notes, c.notes, c.archived_at, c.created_at,
+  c.payment_account_id, c.transit_account_id, c.late_fee_percent, c.interest_month_percent, c.early_discount_percent, c.tolerance_cents,
+  c.match_window_days, c.auto_settle`;
+
+const numOrNull = (v: unknown) => (v === null || v === undefined ? null : Number(v));
 
 const CYCLE_COLUMNS = sql`y.id, y.contract_id, y.seq, y.starts_on, y.ends_on, y.duration_months, y.periodicity, y.installments_count,
   y.total_cents, y.due_day, y.due_month_offset, y.readjustment_percent`;
 
 function toContract(row: Record<string, unknown>): ContractRecord {
   const r = camel<ContractRecord>(row);
-  return { ...r, archivedAt: iso(r.archivedAt), createdAt: iso(r.createdAt)! };
+  return {
+    ...r,
+    archivedAt: iso(r.archivedAt),
+    createdAt: iso(r.createdAt)!,
+    lateFeePercent: numOrNull(r.lateFeePercent),
+    interestMonthPercent: numOrNull(r.interestMonthPercent),
+    earlyDiscountPercent: numOrNull(r.earlyDiscountPercent),
+    toleranceCents: Number(r.toleranceCents),
+    matchWindowDays: Number(r.matchWindowDays),
+  };
 }
 
 function toCycle(row: Record<string, unknown>): CycleRecord {
@@ -267,7 +297,8 @@ async function contractRow(ctx: ServiceContext, id: string): Promise<ContractRow
 const INSTALLMENT_SELECT = (today: string) => sql`
   x.id AS title_id, x.caixa_id, x.direction, x.contract_cycle_id, x.contract_installment AS installment, x.description,
   x.competence_date, x.due_date, x.amount_cents, b.settled_cents, b.open_cents, x.status,
-  (b.open_cents > 0 AND x.due_date < ${today}::date) AS overdue, (x.archived_at IS NOT NULL) AS archived`;
+  (b.open_cents > 0 AND x.due_date < ${today}::date) AS overdue, (x.archived_at IS NOT NULL) AS archived,
+  ${PLANNED_SELECT}`;
 
 function toInstallment(row: Record<string, unknown>): ContractInstallmentDto & { contractCycleId: string | null } {
   const r = camel<Record<string, unknown>>(row);
@@ -286,6 +317,7 @@ function toInstallment(row: Record<string, unknown>): ContractInstallmentDto & {
     status: r.status as TitleStatus,
     overdue: Boolean(r.overdue),
     archived: Boolean(r.archived),
+    ...plannedOf(r),
   };
 }
 
@@ -314,12 +346,12 @@ export async function getContract(ctx: ServiceContext, id: string): Promise<Cont
   const sideCaixaId = mode === 'owner' ? contract.caixaId : contract.counterpartyCaixaId!;
   const installments = (
     await ctx.db.execute(sql`
-      SELECT ${INSTALLMENT_SELECT(today)} FROM titles x JOIN title_balances b ON b.title_id = x.id
+      SELECT ${INSTALLMENT_SELECT(today)} FROM titles x JOIN title_balances b ON b.title_id = x.id ${PLANNED_JOINS}
        WHERE x.contract_id = ${id} AND x.caixa_id = ${sideCaixaId}
        ORDER BY x.competence_date, x.contract_installment NULLS LAST, x.created_at`)
   ).rows.map(toInstallment);
 
-  const [counterparty, amendments, tasks, documents] = await Promise.all([
+  const [counterparty, amendments, tasks, documents, accounts] = await Promise.all([
     contract.counterpartyCaixaId
       ? ctx.db.execute<{ name: string }>(sql`SELECT name FROM caixas WHERE id = ${contract.counterpartyCaixaId}`)
       : Promise.resolve(null),
@@ -343,7 +375,24 @@ export async function getContract(ctx: ServiceContext, id: string): Promise<Cont
        WHERE k.contract_id = ${id}
        ORDER BY y.seq DESC`),
     listContractDocuments(ctx.db, id),
+    ctx.db.execute<{
+      payment_name: string | null;
+      payment_caixa_id: string | null;
+      payment_caixa_name: string | null;
+      transit_name: string | null;
+      following: number;
+    }>(sql`
+      SELECT pa.name AS payment_name, pa.caixa_id AS payment_caixa_id, pk.name AS payment_caixa_name, ta.name AS transit_name,
+             (SELECT count(*)::int FROM titles x
+               WHERE x.contract_id = c.id AND x.caixa_id = c.caixa_id AND x.contract_cycle_id IS NOT NULL
+                 AND x.status IN ('open', 'partial') AND NOT x.planned_account_custom) AS following
+        FROM contracts c
+        LEFT JOIN financial_accounts pa ON pa.id = c.payment_account_id
+        LEFT JOIN caixas pk ON pk.id = pa.caixa_id
+        LEFT JOIN financial_accounts ta ON ta.id = c.transit_account_id
+       WHERE c.id = ${id}`),
   ]);
+  const acc = accounts.rows[0];
 
   // Aditivos que trocaram a categoria: o nome entra junto do id, para a tela.
   const categoryIds = amendments.rows.flatMap((raw) => {
@@ -390,6 +439,19 @@ export async function getContract(ctx: ServiceContext, id: string): Promise<Cont
     terminationPenaltyText: contract.terminationPenaltyText,
     terminationPenaltyCents: contract.terminationPenaltyCents,
     terminationNotes: contract.terminationNotes,
+    paymentAccountId: contract.paymentAccountId,
+    paymentAccountName: acc?.payment_name ?? null,
+    paymentAccountCaixaId: acc?.payment_caixa_id ?? null,
+    paymentAccountCaixaName: acc?.payment_caixa_name ?? null,
+    transitAccountId: contract.transitAccountId,
+    transitAccountName: acc?.transit_name ?? null,
+    lateFeePercent: contract.lateFeePercent,
+    interestMonthPercent: contract.interestMonthPercent,
+    earlyDiscountPercent: contract.earlyDiscountPercent,
+    toleranceCents: contract.toleranceCents,
+    matchWindowDays: contract.matchWindowDays,
+    autoSettle: contract.autoSettle,
+    followingOpenInstallments: Number(acc?.following ?? 0),
     createdAt: contract.createdAt,
     noticeDeadline:
       latest && ['active', 'renewal_pending'].includes(contract.status) ? noticeDeadline(latest.endsOn, contract.noticeDays) : null,
@@ -453,6 +515,36 @@ async function assertCategory(tx: Executor, categoryId: string, direction: Direc
   const kind = result.rows[0]?.kind;
   if (!kind) throw notFound();
   if (kind !== (direction === 'payable' ? 'expense' : 'income')) throw unprocessable(E.categoryKind, 'contract_category_kind');
+}
+
+/**
+ * Conta das parcelas e a de passagem (spec 033). A conta pode ser de outra
+ * caixa em que o usuário escreve; aí a de passagem (da caixa do contrato) é
+ * obrigatória; na mesma caixa, a passagem sai. Tipo e caixa da passagem o
+ * banco confere (contracts_payment_account_check/contracts_transit_account_check).
+ */
+export async function resolvePaymentAccounts(
+  ctx: ServiceContext,
+  tx: Executor,
+  caixaId: string,
+  paymentAccountId: string | null,
+  transitAccountId: string | null,
+): Promise<{ paymentAccountId: string | null; transitAccountId: string | null }> {
+  if (!paymentAccountId) return { paymentAccountId: null, transitAccountId: null };
+  const found = await tx.execute<{ caixa_id: string }>(sql`SELECT caixa_id FROM financial_accounts WHERE id = ${paymentAccountId}`);
+  const account = found.rows[0];
+  if (!account) throw notFound();
+  if (account.caixa_id === caixaId) return { paymentAccountId, transitAccountId: null };
+  ctx.access.assertWrite(account.caixa_id);
+  if (!transitAccountId) throw unprocessable(E.transitAccount, 'contracts_transit_account_check');
+  return { paymentAccountId, transitAccountId };
+}
+
+/** Teto da tolerância (spec 033): 10% da menor parcela do ciclo. */
+function assertTolerance(toleranceCents: number | undefined, totalCents: number, count: number | null) {
+  if (!toleranceCents || !count) return;
+  const cap = toleranceCap(Math.floor(totalCents / count));
+  if (toleranceCents > cap) throw unprocessable(E.toleranceCap(formatBRL(cap)), 'contracts_tolerance_cents_check');
 }
 
 /** Caixa do espelho: omitida = a principal da entidade (se houver); null = sem espelho. */
@@ -535,6 +627,8 @@ async function generateInstallments(ctx: ServiceContext, tx: Tx, contract: Contr
         contractId: contract.id,
         contractCycleId: cycle.id,
         contractInstallment: row.installment,
+        plannedAccountId: contract.paymentAccountId,
+        plannedTransitAccountId: contract.transitAccountId,
       },
       mirror,
     );
@@ -579,14 +673,20 @@ export async function createContract(ctx: ServiceContext, input: z.output<typeof
     await assertCaixaAndEntity(tx, input.caixaId, input.entityId);
     await assertCategory(tx, input.categoryId, input.direction);
     const counterparty = await resolveCounterparty(tx, input.caixaId, input.entityId, input.mirrorCaixaId);
+    const accounts = await resolvePaymentAccounts(ctx, tx, input.caixaId, input.paymentAccountId, input.transitAccountId);
+    assertTolerance(input.toleranceCents, input.totalCents, installmentsCount(input.durationMonths, input.periodicity));
     const inserted = await tx.execute<{ id: string }>(sql`
       INSERT INTO contracts (caixa_id, entity_id, direction, name, contract_number, category_id, counterparty_caixa_id, auto_renew,
                              notice_days, renewal_lead_days, reminder_every_days, readjustment_index, readjustment_base_date,
-                             termination_penalty_text, termination_penalty_cents, notes, created_by)
+                             termination_penalty_text, termination_penalty_cents, notes, created_by,
+                             payment_account_id, transit_account_id, late_fee_percent, interest_month_percent, early_discount_percent,
+                             tolerance_cents, match_window_days, auto_settle)
       VALUES (${input.caixaId}, ${input.entityId}, ${input.direction}, ${input.name}, ${input.contractNumber}, ${input.categoryId},
               ${counterparty}, ${input.autoRenew}, ${input.noticeDays}, ${input.renewalLeadDays}, ${input.reminderEveryDays},
               ${input.readjustmentIndex}, ${input.readjustmentBaseDate}, ${input.terminationPenaltyText}, ${input.terminationPenaltyCents},
-              ${input.notes}, ${ctx.access.actor.id})
+              ${input.notes}, ${ctx.access.actor.id},
+              ${accounts.paymentAccountId}, ${accounts.transitAccountId}, ${input.lateFeePercent}, ${input.interestMonthPercent},
+              ${input.earlyDiscountPercent}, ${input.toleranceCents}, ${input.matchWindowDays}, ${input.autoSettle})
       RETURNING id`);
     const contractId = inserted.rows[0]!.id;
     await tx.execute(sql`
@@ -611,6 +711,12 @@ const FREE_FIELDS = [
   'readjustmentBaseDate',
   'terminationPenaltyText',
   'terminationPenaltyCents',
+  'lateFeePercent',
+  'interestMonthPercent',
+  'earlyDiscountPercent',
+  'toleranceCents',
+  'matchWindowDays',
+  'autoSettle',
 ] as const;
 
 const COLUMN: Record<(typeof FREE_FIELDS)[number] | 'entityId' | 'categoryId', string> = {
@@ -625,6 +731,12 @@ const COLUMN: Record<(typeof FREE_FIELDS)[number] | 'entityId' | 'categoryId', s
   readjustmentBaseDate: 'readjustment_base_date',
   terminationPenaltyText: 'termination_penalty_text',
   terminationPenaltyCents: 'termination_penalty_cents',
+  lateFeePercent: 'late_fee_percent',
+  interestMonthPercent: 'interest_month_percent',
+  earlyDiscountPercent: 'early_discount_percent',
+  toleranceCents: 'tolerance_cents',
+  matchWindowDays: 'match_window_days',
+  autoSettle: 'auto_settle',
   entityId: 'entity_id',
   categoryId: 'category_id',
 };
@@ -652,6 +764,28 @@ export async function updateContract(
     for (const key of FREE_FIELDS) {
       if (input[key] !== undefined) sets.push(sql`${sql.identifier(COLUMN[key])} = ${input[key]}`);
     }
+    // Conta das parcelas (spec 033): a troca vale para as parcelas em aberto que seguem o contrato, se pedido.
+    let accounts: { paymentAccountId: string | null; transitAccountId: string | null } | null = null;
+    if (input.paymentAccountId !== undefined || input.transitAccountId !== undefined) {
+      accounts = await resolvePaymentAccounts(
+        ctx,
+        tx,
+        contract.caixaId,
+        input.paymentAccountId !== undefined ? input.paymentAccountId : contract.paymentAccountId,
+        input.transitAccountId !== undefined ? input.transitAccountId : contract.transitAccountId,
+      );
+      sets.push(sql`payment_account_id = ${accounts.paymentAccountId}, transit_account_id = ${accounts.transitAccountId}`);
+    }
+    if (input.toleranceCents !== undefined) {
+      const latest = (await loadCycles(tx, id)).at(-1);
+      if (latest) {
+        const total = draft ? (input.totalCents ?? latest.totalCents) : latest.totalCents;
+        const count = draft
+          ? installmentsCount(input.durationMonths ?? latest.durationMonths, input.periodicity ?? latest.periodicity)
+          : latest.installmentsCount;
+        assertTolerance(input.toleranceCents, total, count);
+      }
+    }
     if (draft) {
       const entityId = input.entityId ?? contract.entityId;
       if (input.entityId !== undefined) {
@@ -668,6 +802,7 @@ export async function updateContract(
       }
     }
     if (sets.length > 0) await tx.execute(sql`UPDATE contracts SET ${sql.join(sets, sql`, `)} WHERE id = ${id}`);
+    if (accounts && input.applyAccountToInstallments) await applyPlannedAccount(tx, { ...contract, ...accounts });
     if (draft && cycle && changedTerms.length > 0) {
       const next = { ...termsOf(cycle), ...Object.fromEntries(changedTerms.map((key) => [key, input[key]])) };
       await tx.execute(sql`
@@ -679,6 +814,27 @@ export async function updateContract(
     if (!draft) await syncLifecycle(tx, id);
   });
   return getContract(ctx, id);
+}
+
+/**
+ * A conta do contrato nas parcelas que o seguem (spec 033): em aberto ou
+ * parciais, do lado do contrato, sem conta própria. `ids` restringe às parcelas
+ * recalculadas (aditivo). Devolve quantas mudaram.
+ */
+async function applyPlannedAccount(
+  tx: Executor,
+  contract: Pick<ContractRecord, 'id' | 'caixaId' | 'paymentAccountId' | 'transitAccountId'>,
+  ids?: string[],
+): Promise<number> {
+  if (ids && ids.length === 0) return 0;
+  const result = await tx.execute(sql`
+    UPDATE titles SET planned_account_id = ${contract.paymentAccountId}, planned_transit_account_id = ${contract.transitAccountId}
+     WHERE contract_id = ${contract.id} AND caixa_id = ${contract.caixaId} AND contract_cycle_id IS NOT NULL
+       AND status IN ('open', 'partial') AND NOT planned_account_custom
+       AND (planned_account_id IS DISTINCT FROM ${contract.paymentAccountId}::uuid
+            OR planned_transit_account_id IS DISTINCT FROM ${contract.transitAccountId}::uuid)
+       ${ids ? sql`AND id = ANY (${uuidArray(ids)})` : sql``}`);
+  return result.rowCount ?? 0;
 }
 
 async function activateInTx(ctx: ServiceContext, tx: Tx, id: string): Promise<number> {
@@ -896,6 +1052,12 @@ export async function amendContract(
       });
     }
     if (input.categoryId) await tx.execute(sql`UPDATE contracts SET category_id = ${input.categoryId} WHERE id = ${id}`);
+    // Spec 033: as parcelas recalculadas levam a conta do contrato (as com conta própria ficam).
+    await applyPlannedAccount(
+      tx,
+      locked,
+      plan.updates.map((u) => u.row.id),
+    );
     // Ciclos atingidos: dia/deslocamento novos e o total = soma das parcelas não canceladas.
     for (const cycle of plan.cycles) {
       await tx.execute(sql`
@@ -1165,5 +1327,123 @@ export async function recurringPanel(ctx: ServiceContext, caixaIds: string[]): P
     pendingRenewals: (await listContracts(ctx, { status: 'renewal_pending', archived: false, limit: 500 })).filter(
       (c) => caixaIds.length === 0 || caixaIds.includes(c.caixaId),
     ),
+  };
+}
+
+/* ---------------- pagamentos (spec 033) ---------------- */
+
+/**
+ * Pagamentos das parcelas do contrato (contract_payments no banco), de um
+ * ciclo ou de todos: as baixas repartidas, a data da que quitou e os dias de
+ * atraso ou adiantamento; aqui entram os nomes das contas legíveis, a visão
+ * por mês e o resumo.
+ */
+export async function contractPayments(ctx: ServiceContext, id: string, cycleId?: string): Promise<ContractPaymentsDto> {
+  const contract = await loadContract(ctx.db, id);
+  await contractReadMode(ctx, contract);
+  if (cycleId) {
+    const cycle = await ctx.db.execute(sql`SELECT 1 FROM contract_cycles WHERE id = ${cycleId} AND contract_id = ${id}`);
+    if (cycle.rows.length === 0) throw notFound();
+  }
+  const result = await ctx.db.execute(sql`
+    SELECT p.*, coalesce(p.funding_account_id, p.account_id) AS shown_account_id,
+           a.name AS account_name, a.caixa_id AS account_caixa_id,
+           pa.name AS planned_account_name, pa.caixa_id AS planned_account_caixa_id, pt.name AS planned_transit_account_name
+      FROM contract_payments(${id}::uuid, ${cycleId ?? null}::uuid, ${todayIso()}::date) p
+      LEFT JOIN financial_accounts a ON a.id = coalesce(p.funding_account_id, p.account_id)
+      LEFT JOIN financial_accounts pa ON pa.id = p.planned_account_id
+      LEFT JOIN financial_accounts pt ON pt.id = p.planned_transit_account_id
+     ORDER BY p.cycle_seq, p.installment`);
+  const readable = (caixaId: unknown, name: unknown) =>
+    typeof caixaId === 'string' && ctx.access.canRead(caixaId) ? ((name as string | null) ?? null) : null;
+  const rows: ContractPaymentRow[] = result.rows.map((raw) => {
+    const r = camel<Record<string, unknown>>(raw);
+    const settlements = (r.settlements as Record<string, unknown>[]).map((s) => {
+      const x = camel<Record<string, unknown>>(s);
+      return {
+        id: String(x.id),
+        settledOn: String(x.settledOn),
+        amountCents: Number(x.amountCents),
+        interestCents: Number(x.interestCents),
+        fineCents: Number(x.fineCents),
+        discountCents: Number(x.discountCents),
+        cashCents: Number(x.cashCents),
+        financialAccountId: (x.financialAccountId as string | null) ?? null,
+        transferId: (x.transferId as string | null) ?? null,
+        fundingAccountId: (x.fundingAccountId as string | null) ?? null,
+        statementLineId: (x.statementLineId as string | null) ?? null,
+        reconciled: Boolean(x.reconciled),
+        origin: x.origin as PaymentOrigin,
+        days: Number(x.days),
+      };
+    });
+    return {
+      titleId: String(r.titleId),
+      cycleId: String(r.contractCycleId),
+      cycleSeq: Number(r.cycleSeq),
+      installment: Number(r.installment),
+      installmentsCount: Number(r.installmentsCount),
+      competenceDate: String(r.competenceDate),
+      dueDate: String(r.dueDate),
+      amountCents: Number(r.amountCents),
+      status: r.status as TitleStatus,
+      settledCents: Number(r.settledCents),
+      openCents: Number(r.openCents),
+      interestCents: Number(r.interestCents),
+      fineCents: Number(r.fineCents),
+      discountCents: Number(r.discountCents),
+      cashCents: Number(r.cashCents),
+      paidOn: (r.paidOn as string | null) ?? null,
+      lastSettledOn: (r.lastSettledOn as string | null) ?? null,
+      days: r.days === null ? null : Number(r.days),
+      overdue: Boolean(r.overdue),
+      accountId: (r.shownAccountId as string | null) ?? null,
+      accountName: readable(r.accountCaixaId, r.accountName),
+      lastOrigin: (r.lastOrigin as PaymentOrigin | null) ?? null,
+      settlements,
+      ...plannedOf(r),
+      plannedAccountName: readable(r.plannedAccountCaixaId, r.plannedAccountName),
+    };
+  });
+  return { contractId: id, cycleId: cycleId ?? null, months: paymentMonths(rows), rows, summary: paymentSummary(rows) };
+}
+
+function paymentMonths(rows: ContractPaymentRow[]): ContractPaymentsDto['months'] {
+  const months = new Map<string, ContractPaymentsDto['months'][number]>();
+  const at = (date: string) => {
+    const month = monthStart(date);
+    let entry = months.get(month);
+    if (!entry) {
+      entry = { month, plannedCents: 0, paidCents: 0, chargesCents: 0, discountCents: 0 };
+      months.set(month, entry);
+    }
+    return entry;
+  };
+  for (const row of rows) {
+    at(row.dueDate).plannedCents += row.amountCents;
+    for (const s of row.settlements) {
+      const entry = at(s.settledOn);
+      entry.paidCents += s.amountCents;
+      entry.chargesCents += s.fineCents + s.interestCents;
+      entry.discountCents += s.discountCents;
+    }
+  }
+  return [...months.values()].sort((a, b) => a.month.localeCompare(b.month));
+}
+
+function paymentSummary(rows: ContractPaymentRow[]): ContractPaymentsSummary {
+  const paid = rows.filter((r) => r.status === 'paid');
+  const delays = paid.map((r) => Math.max(0, r.days ?? 0));
+  const late = rows.filter((r) => (r.days ?? 0) > 0).map((r) => r.days!);
+  return {
+    installments: rows.length,
+    paid: paid.length,
+    onTimePercent: paid.length ? Math.round((paid.filter((r) => (r.days ?? 0) <= 0).length / paid.length) * 100) : null,
+    avgDelayDays: paid.length ? Math.round((delays.reduce((a, b) => a + b, 0) / paid.length) * 10) / 10 : null,
+    maxDelayDays: late.length ? Math.max(...late) : null,
+    chargesCents: rows.reduce((acc, r) => acc + r.fineCents + r.interestCents, 0),
+    discountCents: rows.reduce((acc, r) => acc + r.discountCents, 0),
+    open: rows.filter((r) => r.openCents > 0).length,
+    overdue: rows.filter((r) => r.overdue).length,
   };
 }

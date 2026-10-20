@@ -193,8 +193,15 @@ export const importBankBalanceInput = z.discriminatedUnion('mode', [
 /** Renomear o arquivo do lote (spec 009): o nome do anexo, sem caminho. */
 export const importRenameInput = z.object({ fileName: requiredText(255) });
 
-/** Aplicar as regras de classificação às linhas novas de todas as contas da caixa (spec 009). */
-export const applyRulesInput = z.object({ caixaId: id });
+/** Alvo das regras de classificação (spec 032): a conta corrente/poupança ou o cartão, exatamente um. */
+const ruleTargetShape = {
+  accountId: id.nullish().transform((v) => v ?? null),
+  cardCaixaId: id.nullish().transform((v) => v ?? null),
+};
+const oneRuleTarget = (v: { accountId: string | null; cardCaixaId: string | null }) => Boolean(v.accountId) !== Boolean(v.cardCaixaId);
+
+/** Aplicar as regras de classificação às linhas novas de todos os lotes da conta (ou do cartão; specs 009/032). */
+export const applyRulesInput = z.object(ruleTargetShape).refine(oneRuleTarget, { path: ['accountId'], message: E.ruleAccount });
 
 /** Query do upload do extrato (o corpo é o arquivo). */
 export const statementImportQuery = z
@@ -232,9 +239,11 @@ export const LINE_CREATE_MODES = ['adjustment', 'title', 'purchase'] as const;
 /**
  * O lançamento ligado à linha que nasceu dela (spec 009): adjustment = o
  * movimento avulso; title = o título (com o espelho) e a baixa; settlement = só
- * a baixa, num título que já existia; purchase = a compra no cartão.
+ * a baixa, num título que já existia; transfer_settlement = a baixa num título
+ * de outra caixa, na conta de passagem, com a transferência a partir da conta
+ * da linha (spec 033); purchase = a compra no cartão.
  */
-export const LINE_CREATED_ENTRIES = ['adjustment', 'title', 'settlement', 'purchase'] as const;
+export const LINE_CREATED_ENTRIES = ['adjustment', 'title', 'settlement', 'transfer_settlement', 'purchase'] as const;
 
 /** Desfazer a conciliação; deleteEntry = excluir junto o lançamento que nasceu da linha. */
 /** Marcar ou desmarcar o lote como provisório (spec 031). */
@@ -295,7 +304,8 @@ export const MATCH_KINDS = ['contains', 'starts_with', 'exact', 'regex'] as cons
 
 export const classificationRuleInput = z
   .object({
-    caixaId: id.nullish().transform((v) => v ?? null),
+    accountId: ruleTargetShape.accountId.describe('Conta corrente ou poupança da regra (ou cardCaixaId; exatamente um).'),
+    cardCaixaId: ruleTargetShape.cardCaixaId.describe('Cartão (caixa do cartão) da regra (ou accountId; exatamente um).'),
     matchKind: z.enum(MATCH_KINDS).default('contains'),
     pattern: requiredText(200),
     direction: z
@@ -306,6 +316,7 @@ export const classificationRuleInput = z
     categoryId: id.nullish().transform((v) => v ?? null),
     priority: z.number().int().min(0).max(1000).default(100),
   })
+  .refine(oneRuleTarget, { path: ['accountId'], message: E.ruleAccount })
   .refine((v) => v.entityId || v.categoryId, { path: ['entityId'], message: E.ruleTarget })
   .refine((v) => !v.categoryId || v.direction, { path: ['direction'], message: E.ruleDirection });
 
@@ -318,7 +329,22 @@ export const classificationRuleUpdateInput = z.object({
   priority: z.number().int().min(0).max(1000).optional(),
 });
 
-export const ruleListQuery = z.object({ caixaId: id.optional(), archived: queryBool });
+/** Lista das regras (spec 032): todas as contas e cartões legíveis, ou só os do filtro. */
+export const ruleListQuery = z.object({
+  accountId: id.optional(),
+  cardCaixaId: id.optional(),
+  caixaId: id.optional(),
+  archived: queryBool,
+});
+
+/** Copiar regras de outras contas para a conta (ou cartão) de destino (spec 032). */
+export const copyRulesInput = z
+  .object({
+    ruleIds: z.array(id).min(1).max(500).describe('Regras de origem (de uma ou mais contas ou cartões).'),
+    accountId: ruleTargetShape.accountId.describe('Conta de destino (ou cardCaixaId; exatamente um).'),
+    cardCaixaId: ruleTargetShape.cardCaixaId.describe('Cartão de destino (ou accountId; exatamente um).'),
+  })
+  .refine(oneRuleTarget, { path: ['accountId'], message: E.ruleAccount });
 
 /* ---------------- anexos ---------------- */
 

@@ -24,30 +24,37 @@ export function ReconciliationTab({ caixa, onChanged }: { caixa: CaixaDetail; on
   const chosen = valid(accountParam);
   const accountId = chosen ?? valid(lastAccount[caixa.id]) ?? accounts[0]?.id ?? null;
   const caixaId = caixa.id;
-  useEffect(() => {
-    if (chosen) setLastAccount((current) => (current[caixaId] === chosen ? current : { ...current, [caixaId]: chosen }));
-  }, [chosen, caixaId, setLastAccount]);
   const current = view === 'rules' ? 'rules' : 'statements';
+  // As regras são da conta (spec 032): a guia Regras lembra a última conta dela à parte (`rules-account`).
+  const [lastRulesAccount, setLastRulesAccount] = useStored<Record<string, string>>('rules-account', {});
+  const rulesAccountId = chosen ?? valid(lastRulesAccount[caixa.id]) ?? accounts[0]?.id ?? null;
+  const shownAccountId = current === 'rules' ? rulesAccountId : accountId;
+  useEffect(() => {
+    if (!chosen) return;
+    const remember = current === 'rules' ? setLastRulesAccount : setLastAccount;
+    remember((stored) => (stored[caixaId] === chosen ? stored : { ...stored, [caixaId]: chosen }));
+  }, [chosen, caixaId, current, setLastAccount, setLastRulesAccount]);
+  const rulesAccount = accounts.find((a) => a.id === rulesAccountId) ?? null;
 
   return (
     <>
       <div className="rec-bar">
         <Tabs
           value={current}
-          onChange={(key) => setParams({ view: key === 'rules' ? 'rules' : null, import: null, lines: null })}
+          onChange={(key) => setParams({ view: key === 'rules' ? 'rules' : null, account: null, import: null, lines: null })}
           items={[
             { key: 'statements', label: s.tabStatements, icon: <FileText /> },
             { key: 'rules', label: s.tabRules, icon: <Wand2 /> },
           ]}
         />
         <span className="flex-1" />
-        {current === 'statements' && accounts.length > 0 && (
+        {accounts.length > 0 && (
           <label className="inline-flex items-center gap-2 text-[13px] text-muted">
             <ListFilter className="size-4" />
             <select
               className="field field-auto"
-              value={accountId ?? ''}
-              aria-label={s.account}
+              value={shownAccountId ?? ''}
+              aria-label={current === 'rules' ? s.ruleAccount : s.account}
               onChange={(e) => setParams({ account: e.target.value, import: null, lines: null })}
             >
               {accounts.map((a) => (
@@ -56,8 +63,12 @@ export function ReconciliationTab({ caixa, onChanged }: { caixa: CaixaDetail; on
                 </option>
               ))}
             </select>
-            {accountId && (
-              <Link className="row-action" to={accountLink(caixa.id, accountId, 'reconciliation')} title={t.caixa.account.open}>
+            {shownAccountId && (
+              <Link
+                className="row-action"
+                to={accountLink(caixa.id, shownAccountId, current === 'rules' ? 'rules' : 'reconciliation')}
+                title={t.caixa.account.open}
+              >
                 <ExternalLink />
               </Link>
             )}
@@ -66,7 +77,17 @@ export function ReconciliationTab({ caixa, onChanged }: { caixa: CaixaDetail; on
       </div>
 
       {current === 'rules' ? (
-        <RulesPanel caixa={caixa} />
+        rulesAccount ? (
+          <RulesPanel
+            key={rulesAccount.id}
+            caixaId={caixa.id}
+            target={{ accountId: rulesAccount.id }}
+            targetName={rulesAccount.name}
+            canWrite={caixa.canWrite && !rulesAccount.archivedAt}
+          />
+        ) : (
+          <EmptyState icon={<Wand2 />} title={s.rulesNoAccount} description={s.rulesNoAccountHint} />
+        )
       ) : accountId ? (
         <StatementImportPanel key={accountId} caixaId={caixa.id} accountId={accountId} canWrite={caixa.canWrite} onChanged={onChanged} />
       ) : (

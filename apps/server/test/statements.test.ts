@@ -1,7 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { AGENT_TOOLS } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { TOOL_HANDLERS } from '../src/agents/tool-handlers';
+import { loadAccess } from '../src/authz/access';
+import type { ServiceContext } from '../src/context';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
 let h: Harness;
@@ -61,7 +65,7 @@ describe('extratos e conciliação (spec 009)', () => {
     });
     // Regra: "internet" → fornecedor + despesa.
     await admin.post('/api/classification-rules', {
-      caixaId: s.caixaA.id,
+      accountId: s.accountA.id,
       pattern: 'internet',
       direction: 'out',
       entityId: s.supplier.id,
@@ -255,6 +259,17 @@ describe('extratos e conciliação (spec 009)', () => {
       categoryId: s.expense.id,
     });
     expect(created).toMatchObject({ status: 'matched', createdEntry: 'purchase' });
+    // A correção aprende na regra do cartão (sem conta; spec 032), e só nele.
+    const cardRules = await admin.get(`/api/classification-rules?cardCaixaId=${card.id}`);
+    expect(cardRules).toEqual([
+      expect.objectContaining({
+        origin: 'correction',
+        caixaId: card.id,
+        cardCaixaId: card.id,
+        financialAccountId: null,
+        caixaKind: 'credit_card',
+      }),
+    ]);
     const purchases = await admin.get(`/api/cards/${card.id}/purchases`);
     expect(purchases.map((p: any) => p.amountCents).sort()).toEqual([12_000, 25_000]);
 
@@ -262,6 +277,121 @@ describe('extratos e conciliação (spec 009)', () => {
     expect(posto.createdEntry).toBeNull();
     await admin.post(`/api/statement-lines/${gym.id}/unmatch`, { deleteEntry: true });
     expect((await admin.get(`/api/cards/${card.id}/purchases`)).map((p: any) => p.amountCents)).toEqual([12_000]);
+
+    // De novo na mesma descrição: atualiza a mesma regra do cartão (ON CONFLICT do índice com a conta nula).
+    await admin.patch(`/api/statement-lines/${gym.id}`, { entityId: s.holderB.id, categoryId: s.expense.id, learnRule: true });
+    const relearned = await admin.get(`/api/classification-rules?cardCaixaId=${card.id}`);
+    expect(relearned).toEqual([expect.objectContaining({ id: cardRules[0].id, entityId: s.holderB.id })]);
+  });
+
+  it('regras por conta (spec 032): cada conta classifica com as suas, aprende, aplica e copia só na conta', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const savings = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'savings',
+      name: 'Poupança A',
+      bankCode: '077',
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const rule = (body: Record<string, unknown>, status?: number) => admin.post('/api/classification-rules', body, status);
+    // A mesma descrição, regras diferentes na corrente e na poupança da mesma caixa.
+    const internetA = await rule({ accountId: s.accountA.id, pattern: 'internet', direction: 'out', entityId: s.supplier.id });
+    const internetS = await rule({ accountId: savings.id, pattern: 'internet', direction: 'out', entityId: s.holderB.id });
+    expect(internetA).toMatchObject({
+      financialAccountId: s.accountA.id,
+      accountName: 'Banco A',
+      targetName: 'Banco A',
+      caixaKind: 'general',
+    });
+    // Unicidade por conta; cofre, as duas contas ou nenhuma: recusados.
+    const dup = await rule({ accountId: s.accountA.id, pattern: 'INTERNET', direction: 'out', entityId: s.holderB.id }, 409);
+    expect(dup.error.message).toBe('Já existe uma regra igual nesta conta (mesmo tipo, padrão e direção).');
+    await rule({ accountId: s.accountB.id, pattern: 'x', entityId: s.supplier.id }, 422);
+    await rule({ accountId: s.accountA.id, cardCaixaId: s.caixaA.id, pattern: 'x', entityId: s.supplier.id }, 400);
+    await rule({ caixaId: s.caixaA.id, pattern: 'x', entityId: s.supplier.id }, 400);
+
+    const importInto = async (accountId: string) => {
+      const res = await upload(
+        adminSession.cookie,
+        `/api/statement-imports?accountId=${accountId}&fileName=extrato.ofx`,
+        fixture('extrato-ofx2.ofx'),
+        'application/x-ofx',
+      );
+      expect(res.statusCode, res.body).toBe(200);
+      return res.json();
+    };
+    const impA = await importInto(s.accountA.id);
+    const impS = await importInto(savings.id);
+    const byFitid = (imp: any, fitid: string) => imp.lines.find((l: any) => l.fitid === fitid);
+    expect(byFitid(impA, 'OFX2-0004')).toMatchObject({ entityId: s.supplier.id, classificationRuleId: internetA.id });
+    expect(byFitid(impS, 'OFX2-0004')).toMatchObject({ entityId: s.holderB.id, classificationRuleId: internetS.id });
+
+    // A correção aprende na conta da linha (a poupança), não na corrente.
+    await admin.patch(`/api/statement-lines/${byFitid(impS, 'OFX2-0005').id}`, {
+      entityId: s.holderA.id,
+      categoryId: s.income.id,
+      learnRule: true,
+    });
+    const savingsRules = await admin.get(`/api/classification-rules?accountId=${savings.id}`);
+    expect(savingsRules.find((r: any) => r.origin === 'correction')).toMatchObject({ financialAccountId: savings.id, direction: 'in' });
+    expect((await admin.get(`/api/classification-rules?accountId=${s.accountA.id}`)).map((r: any) => r.id)).toEqual([internetA.id]);
+    expect((await admin.get(`/api/classification-rules?caixaId=${s.caixaA.id}`)).length).toBe(3);
+
+    // Aplicar regras na corrente não toca a poupança.
+    await admin.del(`/api/classification-rules/${internetS.id}`);
+    expect(await admin.post('/api/classification-rules/apply', { accountId: s.accountA.id })).toEqual({ updated: 0 });
+    expect(byFitid(await admin.get(`/api/statement-imports/${impS.id}`), 'OFX2-0004')).toMatchObject({
+      classificationRuleId: internetS.id,
+    });
+    expect(await admin.post('/api/classification-rules/apply', { accountId: savings.id })).toEqual({ updated: 1 });
+
+    // Copiar da corrente para a poupança: a "supermercado" já existe lá e é pulada; a internet entra como cópia.
+    const marketA = await rule({ accountId: s.accountA.id, pattern: 'supermercado', direction: 'out', entityId: s.supplier.id });
+    const marketS = await rule({ accountId: savings.id, pattern: 'Supermercado', direction: 'out', entityId: s.holderB.id });
+    const copied = await admin.post('/api/classification-rules/copy', { ruleIds: [internetA.id, marketA.id], accountId: savings.id });
+    expect(copied.copied).toEqual([
+      expect.objectContaining({ financialAccountId: savings.id, pattern: 'internet', origin: 'copy', copiedFromRuleId: internetA.id }),
+    ]);
+    expect(copied.skipped).toEqual([
+      { ruleId: marketA.id, pattern: 'supermercado', matchKind: 'contains', reason: 'exists', existingRuleId: marketS.id },
+    ]);
+    expect(copied.hint).toContain('Aplicar regras');
+    // Copiar não reaplica; o "Aplicar regras" da poupança usa a cópia.
+    expect(byFitid(await admin.get(`/api/statement-imports/${impS.id}`), 'OFX2-0004').classificationRuleId).toBeNull();
+    expect(await admin.post('/api/classification-rules/apply', { accountId: savings.id })).toEqual({ updated: 2 });
+    expect(byFitid(await admin.get(`/api/statement-imports/${impS.id}`), 'OFX2-0004')).toMatchObject({
+      classificationRuleId: copied.copied[0].id,
+      entityId: s.supplier.id,
+    });
+
+    // Leitor da caixa A: lê as regras dela, não as de outra caixa; não copia nem aplica.
+    const checkingB = await admin.post(`/api/caixas/${s.caixaB.id}/accounts`, {
+      kind: 'checking',
+      name: 'Corrente B',
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const ruleB = await rule({ accountId: checkingB.id, pattern: 'aluguel', direction: 'out', entityId: s.supplier.id });
+    const viewerUser = await userSession(h);
+    await admin.put(`/api/users/${viewerUser.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
+    const viewer = client(h, viewerUser.cookie);
+    const seen = (await viewer.get('/api/classification-rules')).map((r: any) => r.id);
+    expect(seen).toEqual(expect.arrayContaining([internetA.id, marketA.id]));
+    expect(seen).not.toContain(ruleB.id);
+    expect((await viewer.get(`/api/classification-rules?accountId=${s.accountA.id}`))[0].canWrite).toBe(false);
+    await viewer.get(`/api/classification-rules?accountId=${checkingB.id}`, 404);
+    await viewer.post('/api/classification-rules/copy', { ruleIds: [internetA.id], accountId: savings.id }, 403);
+    await viewer.post('/api/classification-rules/apply', { accountId: savings.id }, 403);
+    // Origem de outra caixa que não lê: não encontrada (mesmo para o admin, a regra existe; o leitor não).
+    await admin.put(`/api/users/${viewerUser.id}/memberships`, {
+      memberships: [{ caixaId: s.caixaA.id, role: 'editor' }],
+    });
+    await viewer.post('/api/classification-rules/copy', { ruleIds: [ruleB.id], accountId: savings.id }, 404);
+    expect((await viewer.post('/api/classification-rules/copy', { ruleIds: [internetA.id], accountId: savings.id })).skipped).toHaveLength(
+      1,
+    );
   });
 });
 
@@ -382,20 +512,20 @@ describe('aplicar regras e buscar nas linhas (spec 009)', () => {
 
     // Regras criadas depois do import: "internet" e "pix" (essa pegaria as duas linhas de PIX).
     const internet = await admin.post('/api/classification-rules', {
-      caixaId: s.caixaA.id,
+      accountId: s.accountA.id,
       pattern: 'internet',
       direction: 'out',
       entityId: s.supplier.id,
       categoryId: s.expense.id,
     });
-    await admin.post('/api/classification-rules', { caixaId: s.caixaA.id, pattern: 'pix', entityId: s.supplier.id });
+    await admin.post('/api/classification-rules', { accountId: s.accountA.id, pattern: 'pix', entityId: s.supplier.id });
 
     // Leitor não aplica.
     const viewerUser = await userSession(h);
     await admin.put(`/api/users/${viewerUser.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
     const viewer = client(h, viewerUser.cookie);
     await viewer.post(`/api/statement-imports/${imp.id}/apply-rules`, {}, 403);
-    await viewer.post('/api/classification-rules/apply', { caixaId: s.caixaA.id }, 403);
+    await viewer.post('/api/classification-rules/apply', { accountId: s.accountA.id }, 403);
 
     expect(await admin.post(`/api/statement-imports/${imp.id}/apply-rules`)).toEqual({ updated: 1 });
     const after = (await admin.get(`/api/statement-imports/${imp.id}`)).lines;
@@ -411,11 +541,11 @@ describe('aplicar regras e buscar nas linhas (spec 009)', () => {
     expect(rule.usageCount).toBe(1);
 
     // De novo, pela caixa: nada muda e o uso não conta outra vez.
-    expect(await admin.post('/api/classification-rules/apply', { caixaId: s.caixaA.id })).toEqual({ updated: 0 });
+    expect(await admin.post('/api/classification-rules/apply', { accountId: s.accountA.id })).toEqual({ updated: 0 });
 
     // Regra arquivada: a linha classificada por ela perde a classificação.
     await admin.del(`/api/classification-rules/${internet.id}`);
-    expect(await admin.post('/api/classification-rules/apply', { caixaId: s.caixaA.id })).toEqual({ updated: 1 });
+    expect(await admin.post('/api/classification-rules/apply', { accountId: s.accountA.id })).toEqual({ updated: 1 });
     const cleared = (await admin.get(`/api/statement-imports/${imp.id}`)).lines;
     expect(byFitid(cleared, 'OFX2-0004')).toMatchObject({ classificationSource: null, entityId: null, categoryId: null });
   });
@@ -575,4 +705,214 @@ describe('renomear o arquivo do lote (spec 009)', () => {
     await admin.put(`/api/users/${viewerUser.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
     await client(h, viewerUser.cookie).put(`/api/statement-imports/${imp.id}/file-name`, { fileName: 'x.ofx' }, 403);
   });
+});
+
+/* ---------------- parcelas de contrato no extrato (spec 033) ---------------- */
+
+function ofxOf(lines: { date: string; cents: number; memo: string }[]) {
+  const key = Math.random().toString(36).slice(2, 10);
+  const trn = lines
+    .map(
+      (l, i) =>
+        `<STMTTRN><TRNTYPE>${l.cents < 0 ? 'DEBIT' : 'CREDIT'}</TRNTYPE><DTPOSTED>${l.date.replaceAll('-', '')}120000</DTPOSTED>` +
+        `<TRNAMT>${(l.cents / 100).toFixed(2)}</TRNAMT><FITID>${key}-${i}</FITID><NAME>${l.memo}</NAME></STMTTRN>`,
+    )
+    .join('\n');
+  const dates = lines.map((l) => l.date.replaceAll('-', '')).sort();
+  return Buffer.from(`OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+
+<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>BRL</CURDEF>
+<BANKACCTFROM><BANKID>341</BANKID><ACCTID>9</ACCTID><ACCTTYPE>CHECKING</ACCTTYPE></BANKACCTFROM>
+<BANKTRANLIST><DTSTART>${dates[0]}</DTSTART><DTEND>${dates.at(-1)}</DTEND>
+${trn}
+</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`);
+}
+
+describe('parcelas de contrato no extrato (spec 033)', () => {
+  it('pago pela conta de outra caixa: a baixa na conta de passagem com a transferência; desfazer estorna as duas', async () => {
+    // A conta pagadora é da caixa B (do titular B), criada antes do contrato; a de passagem, da caixa A.
+    let payer: any;
+    const { admin, s, rows, importLines } = await rentSetupWith(async (s, admin) => {
+      payer = await admin.post(`/api/caixas/${s.caixaB.id}/accounts`, {
+        kind: 'checking',
+        name: 'Banco B',
+        openingBalanceCents: 0,
+        openingDate: '2026-01-01',
+      });
+      return { paymentAccountId: payer.id, transitAccountId: s.accountA.id };
+    });
+    expect(rows[0]).toMatchObject({ plannedAccountId: payer.id, plannedTransitAccountId: s.accountA.id });
+
+    const imp = await importLines(payer.id, [{ date: '2027-01-10', cents: -200_000, memo: 'PIX ALUGUEL' }]);
+    const [line] = imp.lines;
+    expect(line).toMatchObject({ status: 'suggested', titleId: rows[0].titleId });
+    expect(line.target.contract).toMatchObject({ sameAccount: true, split: { kind: 'exact', days: 0 } });
+
+    await admin.post('/api/statement-lines/confirm', { lineIds: [line.id] });
+    const matched = (await admin.get(`/api/statement-imports/${imp.id}`)).lines[0];
+    expect(matched).toMatchObject({ status: 'matched', createdEntry: 'transfer_settlement', autoSettled: false });
+    const title = await admin.get(`/api/titles/${rows[0].titleId}`);
+    expect(title.status).toBe('paid');
+    expect(title.settlements[0]).toMatchObject({ financialAccountId: s.accountA.id, transferOtherAccountName: 'Banco B' });
+    const legs = await h.db.execute<{ account: string; amount: string }>(sql`
+      SELECT m.financial_account_id AS account, m.amount_cents AS amount FROM movements m
+        JOIN transfers tr ON tr.id = m.transfer_id WHERE tr.settlement_id = ${title.settlements[0].id}`);
+    expect(legs.rows.map((r) => [r.account, Number(r.amount)]).sort()).toEqual(
+      [
+        [payer.id, -200_000],
+        [s.accountA.id, 200_000],
+      ].sort(),
+    );
+    const movement = await h.db.execute<{ account: string }>(
+      sql`SELECT financial_account_id AS account FROM movements WHERE id = ${matched.movementId}`,
+    );
+    expect(movement.rows[0]!.account).toBe(payer.id);
+
+    // Desfazer e excluir: a baixa e a transferência saem juntas; a parcela volta em aberto.
+    const undone = await admin.post(`/api/statement-lines/${line.id}/unmatch`, { deleteEntry: true });
+    expect(undone).toMatchObject({ status: 'new', createdEntry: null, autoSettled: false });
+    expect((await admin.get(`/api/titles/${rows[0].titleId}`)).status).toBe('open');
+    const left = await h.db.execute(sql`SELECT 1 FROM transfers WHERE settlement_id = ${title.settlements[0].id}`);
+    expect(left.rows).toHaveLength(0);
+    // Casar à mão de novo (a tool match_statement_line usa o mesmo caminho) volta a fazer a transferência.
+    const again = await admin.post(`/api/statement-lines/${line.id}/match`, { titleId: rows[0].titleId });
+    expect(again).toMatchObject({ status: 'matched', createdEntry: 'transfer_settlement' });
+  });
+
+  it('baixar sem confirmação: só o candidato único na conta prevista, com o aviso do sino; desfazer limpa a marca', async () => {
+    const { admin, s, contract, rows, importLines } = await rentSetupWith(async (s) => ({
+      paymentAccountId: s.accountA.id,
+      autoSettle: true,
+    }));
+    // Um movimento igual na mesma data concorre com a parcela de março: não baixa sozinho.
+    await admin.post(`/api/accounts/${s.accountA.id}/adjustments`, {
+      occurredOn: '2027-03-10',
+      amountCents: -200_000,
+      description: 'Outro pagamento',
+      categoryId: s.expense.id,
+    });
+    const imp = await importLines(s.accountA.id, [
+      { date: '2027-01-10', cents: -200_000, memo: 'PIX ALUGUEL' },
+      { date: '2027-02-10', cents: -100_000, memo: 'PIX ALUGUEL METADE' },
+      { date: '2027-03-10', cents: -200_000, memo: 'PIX' },
+    ]);
+    const [jan, feb, mar] = imp.lines;
+    expect(jan).toMatchObject({ status: 'matched', createdEntry: 'settlement', autoSettled: true });
+    expect((await admin.get(`/api/titles/${rows[0].titleId}`)).status).toBe('paid');
+    // Parcial: só sugestão.
+    expect(feb).toMatchObject({ status: 'suggested', titleId: rows[1].titleId, autoSettled: false });
+    expect(feb.target.contract.split).toMatchObject({ kind: 'partial', amountCents: 100_000 });
+    // Dois candidatos: o movimento (conciliado) ou a parcela, nunca a baixa sozinha.
+    expect(mar.autoSettled).toBe(false);
+    expect((await admin.get(`/api/titles/${rows[2].titleId}`)).status).toBe('open');
+
+    const bell = await admin.get('/api/notifications?limit=50');
+    const notice = bell.items.find((n: any) => n.link?.includes(imp.id));
+    expect(notice).toMatchObject({ kind: 'system', title: '1 parcela(s) de contrato baixada(s) sem confirmação' });
+
+    const payments = await admin.get(`/api/contracts/${contract.id}/payments`);
+    expect(payments.rows[0]).toMatchObject({ lastOrigin: 'auto', days: 0 });
+
+    const undone = await admin.post(`/api/statement-lines/${jan.id}/unmatch`, { deleteEntry: true });
+    expect(undone).toMatchObject({ status: 'new', autoSettled: false, createdEntry: null });
+    expect((await admin.get(`/api/titles/${rows[0].titleId}`)).status).toBe('open');
+  });
+
+  it('tools: candidatos e prévia de match_statement_line com a repartição; update_contract e update_title com a conta prevista', async () => {
+    const { s, contract, rows, importLines } = await rentSetupWith(async (s) => ({
+      paymentAccountId: s.accountA.id,
+      lateFeePercent: 2,
+      interestMonthPercent: 1,
+    }));
+    const imp = await importLines(s.accountA.id, [{ date: '2027-01-20', cents: -204_667, memo: 'PIX ALUGUEL' }]);
+    const [line] = imp.lines;
+    const session = await userSession(h, 'admin');
+    const actor = {
+      id: session.id,
+      username: session.username,
+      email: `${session.username}@teste.local`,
+      role: 'admin' as const,
+      isActive: true,
+    };
+    const ctx: ServiceContext = { db: h.db, access: await loadAccess(h.db, actor), config: h.config };
+    const tool = (name: string, raw: Record<string, unknown>) => {
+      const input = AGENT_TOOLS.find((d) => d.name === name)!.input.parse(raw);
+      const handler = TOOL_HANDLERS[name as keyof typeof TOOL_HANDLERS]!;
+      return {
+        preview: () => handler.preview!(ctx, input as never),
+        run: () => handler.run(ctx, input as never, {} as never) as Promise<any>,
+      };
+    };
+    const candidates = await tool('list_line_candidates', { lineId: line.id }).run();
+    expect(candidates[0]).toMatchObject({
+      id: rows[0].titleId,
+      contract: { installment: 1, split: { kind: 'charges', fineCents: 4_000, interestCents: 667, days: 10 } },
+    });
+    const preview = await tool('match_statement_line', { lineId: line.id, titleId: rows[0].titleId }).preview();
+    expect(preview.rows).toEqual(
+      expect.arrayContaining([
+        { label: 'Principal', after: '2000,00' },
+        { label: 'Multa', after: '40,00' },
+        { label: 'Juros', after: '6,67' },
+      ]),
+    );
+    expect((preview.warnings ?? []).join(' ')).toContain('10 dia(s) de atraso');
+
+    const other = await client(h, session.cookie).post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'checking',
+      name: 'Banco A2',
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const update = await tool('update_contract', {
+      contractId: contract.id,
+      changes: { paymentAccountId: other.id, applyAccountToInstallments: true },
+    }).preview();
+    expect(update.rows).toEqual(
+      expect.arrayContaining([expect.objectContaining({ label: 'Conta das parcelas', after: expect.stringContaining('Banco A2') })]),
+    );
+    expect(update.warnings?.[0]).toContain('12 parcela(s)');
+    const titlePreview = await tool('update_title', { titleId: rows[1].titleId, changes: { plannedAccountId: other.id } }).preview();
+    expect(titlePreview.rows).toEqual(expect.arrayContaining([expect.objectContaining({ label: 'Conta prevista' })]));
+    expect(titlePreview.warnings?.[0]).toContain('conta própria');
+    const edited = await tool('update_title', { titleId: rows[1].titleId, changes: { plannedAccountId: other.id } }).run();
+    expect(edited).toMatchObject({ plannedAccountId: other.id, plannedAccountCustom: true });
+  });
+
+  async function rentSetupWith(
+    extra: (s: Awaited<ReturnType<typeof scenario>>, admin: ReturnType<typeof client>) => Promise<Record<string, unknown>>,
+  ) {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const contract = await admin.post('/api/contracts', {
+      caixaId: s.caixaA.id,
+      entityId: s.supplier.id,
+      direction: 'payable',
+      categoryId: s.expense.id,
+      name: `Aluguel ${s.tag}`,
+      mirrorCaixaId: null,
+      startsOn: '2027-01-01',
+      durationMonths: 12,
+      periodicity: 'monthly',
+      totalCents: 2_400_000,
+      dueDay: 10,
+      dueMonthOffset: 0,
+      activate: true,
+      ...(await extra(s, admin)),
+    });
+    const importLines = async (accountId: string, lines: { date: string; cents: number; memo: string }[]) => {
+      const res = await upload(
+        adminSession.cookie,
+        `/api/statement-imports?accountId=${accountId}&fileName=extrato.ofx`,
+        ofxOf(lines),
+        'application/x-ofx',
+      );
+      expect(res.statusCode, res.body).toBe(200);
+      return res.json();
+    };
+    return { admin, s, contract, rows: contract.cycles[0].installments as any[], importLines };
+  }
 });

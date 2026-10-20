@@ -26,6 +26,7 @@ import { useAction, useApi } from '../../lib/hooks';
 import { invoiceLink, titleLink } from '../../lib/links';
 import { AttachmentsPanel } from '../attachments/AttachmentsPanel';
 import { AuditHistory } from '../audit/AuditHistory';
+import { PlannedAccountButton, PlannedAccountLabel } from '../contracts/PlannedAccount';
 import { CategoryLabel, LoadError, MirrorBadge, Money, TitleStatusBadge } from '../domain';
 import { TitleEntryInfo } from '../entry/TitleEntryInfo';
 import { CategorySelect, ModalActions } from '../forms';
@@ -324,6 +325,23 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                 <dd className="mono">{formatDate(title.competenceDate)}</dd>
                 <dt>Origem</dt>
                 <dd>{t.title.origins[title.origin]}</dd>
+                {/* Conta prevista (spec 033): onde o pagamento sai ou o recebimento entra; trocável em aberto. */}
+                <dt>{t.contracts.payment.plannedAccount}</dt>
+                <dd data-testid="title-planned-account">
+                  <span className="inline-flex items-center gap-1">
+                    <PlannedAccountLabel planned={title} showCustom={Boolean(title.contractId)} />
+                    {title.plannedTransitAccountName && <span className="text-faint">→ {title.plannedTransitAccountName}</span>}
+                    {title.canWrite && (title.status === 'open' || title.status === 'partial') && (
+                      <PlannedAccountButton
+                        title={{ ...title, titleId: title.id }}
+                        onSaved={(detail) => {
+                          setData(detail);
+                          onChanged();
+                        }}
+                      />
+                    )}
+                  </span>
+                </dd>
                 {title.rule && (
                   <>
                     <dt>{t.title.series}</dt>

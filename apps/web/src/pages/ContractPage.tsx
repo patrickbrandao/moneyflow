@@ -39,6 +39,8 @@ import { AmendmentModal, RenewalModal, TerminationModal } from '../components/co
 import { ContractFormModal } from '../components/contracts/ContractFormModal';
 import { ContractStatusBadge } from '../components/contracts/ContractsTable';
 import { DocumentView } from '../components/contracts/DocumentView';
+import { PaymentsSection } from '../components/contracts/PaymentsSection';
+import { PlannedAccountButton, PlannedAccountLabel } from '../components/contracts/PlannedAccount';
 import { CategoryLabel, LoadError, Money, PageHead, TitleStatusBadge } from '../components/domain';
 import { FormError, ModalActions } from '../components/forms';
 import { useCrumbs } from '../components/shell/Layout';
@@ -210,12 +212,14 @@ export function ContractPage() {
                 onChange={(key) => setTab(key === 'installments' ? null : key)}
                 items={[
                   { key: 'installments', label: C.tabs.installments },
+                  ...(contract.status === 'draft' ? [] : [{ key: 'payments', label: C.payments.tab }]),
                   { key: 'documents', label: C.tabs.documents, count: contract.documents.length },
                   { key: 'amendments', label: C.tabs.amendments, count: contract.amendments.length },
                   { key: 'renewal', label: C.tabs.renewal, count: contract.renewalTasks.length },
                 ]}
               />
-              {(tab ?? 'installments') === 'installments' && <Installments contract={contract} />}
+              {(tab ?? 'installments') === 'installments' && <Installments contract={contract} onChanged={() => void reload()} />}
+              {tab === 'payments' && <PaymentsSection contract={contract} onChanged={() => void reload()} />}
               {tab === 'documents' && (
                 <Documents
                   contract={contract}
@@ -303,6 +307,30 @@ function Summary({ contract }: { contract: ContractDetail }) {
       `${C.indexes[contract.readjustmentIndex]}${contract.nextReadjustment ? ` · ${formatDate(contract.nextReadjustment)}` : ''}`,
     ],
     ...(contract.counterpartyCaixaName ? ([[F.mirrorCaixa, contract.counterpartyCaixaName]] as [string, React.ReactNode][]) : []),
+    ...(contract.paymentAccountId
+      ? ([
+          [
+            C.payment.account,
+            `${contract.paymentAccountName ?? '—'}${contract.paymentAccountCaixaId !== contract.caixaId && contract.paymentAccountCaixaName ? ` (${contract.paymentAccountCaixaName})` : ''}`,
+          ],
+          ...(contract.transitAccountId ? [[C.payment.transit, contract.transitAccountName ?? '—']] : []),
+        ] as [string, React.ReactNode][])
+      : []),
+    ...(contract.lateFeePercent || contract.interestMonthPercent || contract.earlyDiscountPercent
+      ? ([
+          [
+            C.payments.charges,
+            [
+              contract.lateFeePercent ? `${C.payment.lateFee}: ${contract.lateFeePercent}` : null,
+              contract.interestMonthPercent ? `${C.payment.interest}: ${contract.interestMonthPercent}` : null,
+              contract.earlyDiscountPercent ? `${C.payment.discount}: ${contract.earlyDiscountPercent}` : null,
+            ]
+              .filter(Boolean)
+              .join(' · '),
+          ],
+        ] as [string, React.ReactNode][])
+      : []),
+    ...(contract.autoSettle ? ([[C.payment.autoSettle, t.common.yes]] as [string, React.ReactNode][]) : []),
     ...(contract.terminationPenaltyText || contract.terminationPenaltyCents
       ? ([
           [
@@ -336,7 +364,7 @@ function Summary({ contract }: { contract: ContractDetail }) {
   );
 }
 
-function InstallmentRows({ rows }: { rows: ContractInstallmentDto[] }) {
+function InstallmentRows({ rows, canWrite, onChanged }: { rows: ContractInstallmentDto[]; canWrite: boolean; onChanged: () => void }) {
   const navigate = useNavigate();
   const H = C.columns;
   return (
@@ -350,11 +378,12 @@ function InstallmentRows({ rows }: { rows: ContractInstallmentDto[] }) {
             <th className="num">{H.amount}</th>
             <th className="num">{H.settled}</th>
             <th className="num">{H.open}</th>
+            <th>{C.payment.plannedAccount}</th>
             <th>{H.status}</th>
           </tr>
         </thead>
         <tbody>
-          {rows.length === 0 && <EmptyRow colSpan={7}>{C.noInstallments}</EmptyRow>}
+          {rows.length === 0 && <EmptyRow colSpan={8}>{C.noInstallments}</EmptyRow>}
           {rows.map((row) => (
             <tr
               key={row.titleId}
@@ -374,6 +403,14 @@ function InstallmentRows({ rows }: { rows: ContractInstallmentDto[] }) {
                 <Money cents={row.openCents} muted={row.openCents === 0} />
               </td>
               <td>
+                <span className="inline-flex items-center gap-1">
+                  <PlannedAccountLabel planned={row} />
+                  {canWrite && !row.archived && (row.status === 'open' || row.status === 'partial') && (
+                    <PlannedAccountButton title={row} onSaved={onChanged} />
+                  )}
+                </span>
+              </td>
+              <td>
                 <TitleStatusBadge title={row} />
               </td>
             </tr>
@@ -384,7 +421,7 @@ function InstallmentRows({ rows }: { rows: ContractInstallmentDto[] }) {
   );
 }
 
-function Installments({ contract }: { contract: ContractDetail }) {
+function Installments({ contract, onChanged }: { contract: ContractDetail; onChanged: () => void }) {
   if (contract.status === 'draft') {
     const cycle = contract.cycles[0];
     const preview = cycle ? cycleSchedule(cycle) : [];
@@ -429,13 +466,13 @@ function Installments({ contract }: { contract: ContractDetail }) {
           <h3 className="mb-2 text-sm font-semibold">
             {C.cycleLabel(latest.seq)} · {C.cycleRange(formatDate(latest.startsOn), formatDate(latest.endsOn))}
           </h3>
-          <InstallmentRows rows={latest.installments} />
+          <InstallmentRows rows={latest.installments} canWrite={contract.canWrite} onChanged={onChanged} />
         </section>
       )}
       {contract.extraTitles.length > 0 && (
         <section>
           <h3 className="mb-2 text-sm font-semibold">{C.extraTitles}</h3>
-          <InstallmentRows rows={contract.extraTitles} />
+          <InstallmentRows rows={contract.extraTitles} canWrite={contract.canWrite} onChanged={onChanged} />
         </section>
       )}
       {previous.length > 0 && <h3 className="text-sm font-semibold">{C.previousCycles}</h3>}
@@ -446,7 +483,7 @@ function Installments({ contract }: { contract: ContractDetail }) {
             <Money cents={cycle.totals.contractedCents} />
           </summary>
           <div className="mt-2">
-            <InstallmentRows rows={cycle.installments} />
+            <InstallmentRows rows={cycle.installments} canWrite={contract.canWrite} onChanged={onChanged} />
           </div>
         </details>
       ))}

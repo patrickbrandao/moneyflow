@@ -5,6 +5,10 @@
   gap: 8px;
   font-size: 12.5px;
 }
+.kv:has(> div) {
+  /* As linhas em <div> (resumo do contrato): uma coluna; o dt/dd vai dentro de cada linha. */
+  grid-template-columns: minmax(0, 1fr);
+}
 .kv > div {
   display: grid;
   grid-template-columns: minmax(0, 140px) minmax(0, 1fr);

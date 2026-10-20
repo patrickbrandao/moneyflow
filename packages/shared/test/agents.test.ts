@@ -117,6 +117,7 @@ describe('registro de tools', () => {
         'archive_category',
         'list_classification_rules',
         'create_classification_rule',
+        'copy_classification_rules',
         'update_classification_rule',
         'archive_classification_rule',
       ].sort(),

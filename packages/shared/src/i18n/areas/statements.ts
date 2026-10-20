@@ -185,8 +185,8 @@ export const statementsStrings = {
   applyRules: 'Aplicar regras',
   applyRulesImportHint:
     'Reaplica as regras de classificação às linhas novas deste lote (sem mexer nas suas classificações nem nas sugestões do agente).',
-  applyRulesCaixaHint:
-    'Reaplica as regras às linhas novas de todas as contas desta caixa (sem mexer nas suas classificações nem nas sugestões do agente).',
+  applyRulesAccountHint:
+    'Reaplica as regras desta conta às linhas novas de todos os lotes dela (sem mexer nas suas classificações nem nas sugestões do agente).',
   rulesApplied: (n: number) => (n === 0 ? 'Nenhuma linha nova mudou de classificação.' : `${n} linha(s) reclassificada(s) pelas regras.`),
   search: 'Buscar nas linhas',
   searchPlaceholder: 'Trecho da descrição (mín. 2 letras)',
@@ -233,7 +233,25 @@ export const statementsStrings = {
 
   /* regras */
   rules: 'Regras de classificação',
-  rulesHint: 'Descrição da linha do extrato → entidade e categoria. Aprendidas das suas correções ou criadas à mão.',
+  rulesHint:
+    'Descrição da linha do extrato → entidade e categoria, só nos extratos desta conta. Aprendidas das suas correções ou criadas à mão.',
+  ruleAccount: 'Conta das regras',
+  rulesNoAccount: 'Esta caixa não tem conta que importe extrato',
+  rulesNoAccountHint: 'As regras são de cada conta corrente ou poupança. Crie uma na aba Contas.',
+  targetAccount: 'Conta',
+  copyRules: 'Copiar regras de outra conta',
+  copyRulesTo: (name: string) => `Copiar regras para ${name}`,
+  copyFrom: 'Conta de origem',
+  copyFromPlaceholder: 'Escolha a conta ou o cartão',
+  copyNoRules: 'Esta conta não tem regras ativas.',
+  copyExists: 'já existe no destino',
+  copySelectAll: 'Marcar todas',
+  copySubmit: (n: number) => (n === 1 ? 'Copiar 1 regra' : `Copiar ${n} regras`),
+  copyDone: (copied: number, skipped: number) =>
+    `${copied} regra(s) copiada(s)${skipped ? `, ${skipped} pulada(s) (já existiam)` : ''}. Use “Aplicar regras” para reclassificar as linhas novas.`,
+  copyHint: 'As cópias não reclassificam nada sozinhas: use “Aplicar regras” na conta de destino.',
+  copySkippedReasons: { exists: 'já existe uma regra igual no destino', archived: 'regra arquivada' } as Record<string, string>,
+  cardGroup: 'Cartões',
   newRule: 'Nova regra',
   editRule: 'Editar regra',
   noRules: 'Nenhuma regra ainda. Ao lançar ou classificar uma linha, a regra é aprendida.',
@@ -243,14 +261,10 @@ export const statementsStrings = {
   direction: 'Direção',
   directions: { in: 'Entrada (+)', out: 'Saída (−)', any: 'Qualquer' } as Record<string, string>,
   directionHint: 'Obrigatória quando a regra define categoria (receita ou despesa).',
-  scope: 'Escopo',
-  scopeCaixa: 'Esta caixa',
-  scopeGlobal: 'Global',
-  scopeGlobalHint: 'Vale para todas as caixas; só administradores.',
   priority: 'Prioridade',
   priorityHint: 'Menor número vence quando mais de uma regra casa.',
   origin: 'Origem',
-  origins: { manual: 'Manual', correction: 'Correção', agent: 'Agente' } as Record<string, string>,
+  origins: { manual: 'Manual', correction: 'Correção', agent: 'Agente', copy: 'Cópia' } as Record<string, string>,
   usage: 'Usos',
   lastUsed: (date: string) => `último em ${date}`,
   ruleSaved: 'Regra salva.',
@@ -333,4 +347,25 @@ export const statementsStrings = {
     supersedesNote: (files: string) => `Substituiu o provisório ${files}.`,
     viewLine: 'Ver a linha no consolidado',
   },
+  /* Parcela de contrato na conciliação (spec 033). */
+  contractSplit: {
+    installment: (contract: string, n: number | null, total: number | null, month: string) =>
+      `${contract}${n && total ? ` · ${n}/${total}` : ''} · ${month}`,
+    principal: 'Principal',
+    fine: 'Multa',
+    interest: 'Juros',
+    discount: 'Desconto',
+    kinds: {
+      exact: 'valor exato',
+      charges: 'com encargos',
+      discount: 'com desconto',
+      tolerance: 'na tolerância',
+      partial: 'baixa parcial',
+    } as Record<string, string>,
+    days: (n: number) => (n === 0 ? 'no vencimento' : n > 0 ? `${n} dia(s) de atraso` : `${-n} dia(s) adiantado`),
+    otherCaixa: 'Conta de outra caixa: baixa na conta de passagem, com a transferência.',
+    autoSettled: 'Baixada sem confirmação',
+  },
+  autoSettledTitle: (n: number) => `${n} parcela(s) de contrato baixada(s) sem confirmação`,
+  autoSettledBody: (account: string) => `Na importação do extrato de ${account}. Confira na conciliação; desfazer estorna a baixa.`,
 } as const;

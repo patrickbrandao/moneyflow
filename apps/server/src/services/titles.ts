@@ -28,6 +28,7 @@ import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { notFound, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
+import { PLANNED_JOINS, PLANNED_SELECT, plannedOf, resolvePlannedAccount } from './planned-account';
 import { clearStatementSuggestions } from './reconciliation-guards';
 import { MATERIALIZE_LOCK, materializeRule } from './recurrence';
 import { insertTitlePair, type MirrorPlan, opposite } from './title-pair';
@@ -205,7 +206,15 @@ export async function getTitle(ctx: ServiceContext, id: string): Promise<TitleDe
       };
     }
   }
-  return { ...row, canWrite: ctx.access.canWrite(row.caixaId), settlements: await listSettlements(ctx.db, id), rule, mirror };
+  const planned = await ctx.db.execute(sql`SELECT ${PLANNED_SELECT} FROM titles x ${PLANNED_JOINS} WHERE x.id = ${id}`);
+  return {
+    ...row,
+    ...plannedOf(camel<Record<string, unknown>>(planned.rows[0]!)),
+    canWrite: ctx.access.canWrite(row.caixaId),
+    settlements: await listSettlements(ctx.db, id),
+    rule,
+    mirror,
+  };
 }
 
 /* ---------------- espelho ---------------- */
@@ -356,6 +365,23 @@ export async function updateTitle(ctx: ServiceContext, id: string, input: z.outp
     if (input.notes !== undefined) patch.notes = input.notes;
     if (input.boletoBarcode !== undefined) patch.boletoBarcode = normalizeBoleto(input.boletoBarcode);
     if (input.pixPayload !== undefined) patch.pixPayload = input.pixPayload;
+    // Conta prevista (spec 033): só deste título, que passa a ter conta própria (o contrato não a muda mais).
+    if (input.plannedAccountId !== undefined || input.plannedTransitAccountId !== undefined) {
+      const planned = await resolvePlannedAccount(
+        ctx,
+        tx,
+        title.caixaId,
+        input.plannedAccountId !== undefined ? input.plannedAccountId : title.plannedAccountId,
+        input.plannedTransitAccountId !== undefined ? input.plannedTransitAccountId : title.plannedTransitAccountId,
+      );
+      const changed =
+        planned.plannedAccountId !== title.plannedAccountId || planned.plannedTransitAccountId !== title.plannedTransitAccountId;
+      if (changed) {
+        if (title.status !== 'open' && title.status !== 'partial')
+          throw unprocessable(strings.contracts.errors.plannedAccountClosed, 'title_planned_account_closed');
+        Object.assign(patch, planned, { plannedAccountCustom: true });
+      }
+    }
     if (Object.keys(patch).length > 0) await tx.update(titles).set(patch).where(eq(titles.id, id));
 
     // "Esta e as próximas": reescreve as ocorrências futuras ainda em aberto (datas seguem a regra).

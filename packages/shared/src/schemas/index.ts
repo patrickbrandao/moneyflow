@@ -397,6 +397,13 @@ export const titleUpdateInput = z.object({
     .nullish()
     .transform((v) => (v ? v : null))
     .optional(),
+  /**
+   * Conta prevista (spec 033): checking/savings da caixa do título ou de outra
+   * caixa (com a de passagem, da caixa do título). Vale só para este título e
+   * o deixa com conta própria (trocar a do contrato não o muda).
+   */
+  plannedAccountId: id.nullable().optional(),
+  plannedTransitAccountId: id.nullable().optional(),
   scope: z.enum(SCOPES).default('this'),
 });
 

@@ -9,7 +9,7 @@ LANGUAGE plpgsql AS $$ BEGIN SET CONSTRAINTS ALL IMMEDIATE; SET CONSTRAINTS ALL 
 -- Estrutura
 SELECT has_table(t) FROM unnest(ARRAY['statement_csv_mappings', 'statement_imports', 'statement_lines', 'classification_rules']) t;
 SELECT has_view('statement_import_balances');
-SELECT has_function('classification_rule_for', ARRAY['uuid', 'text', 'bigint']);
+SELECT has_function('classification_rule_for', ARRAY['uuid', 'uuid', 'text', 'bigint']);
 SELECT columns_are('statement_imports', ARRAY['id', 'financial_account_id', 'card_caixa_id', 'card_invoice_id', 'format',
                                               'attachment_id', 'csv_mapping_id', 'period_start', 'period_end', 'bank_balance_cents',
                                               'bank_balance_on', 'imported_by_user_id', 'notes', 'created_at', 'updated_at',
@@ -19,10 +19,12 @@ SELECT columns_are('statement_lines', ARRAY['id', 'statement_import_id', 'financ
                                             'movement_id', 'title_id', 'card_invoice_item_id', 'entity_id', 'category_id',
                                             'classification_rule_id', 'classification_source', 'raw', 'matched_at',
                                             'created_at', 'updated_at', 'created_entry', 'provisional', 'superseded_by_line_id',
-                                            'supersede_outcome', 'supersede_suggested_line_id', 'supersede_suggestion_reason']);
+                                            'supersede_outcome', 'supersede_suggested_line_id', 'supersede_suggestion_reason',
+                                            'auto_settled']);
 SELECT columns_are('classification_rules', ARRAY['id', 'caixa_id', 'match_kind', 'pattern', 'direction', 'entity_id',
                                                  'category_id', 'priority', 'origin', 'created_from_line_id', 'created_by_user_id',
-                                                 'usage_count', 'last_used_at', 'archived_at', 'created_at', 'updated_at']);
+                                                 'usage_count', 'last_used_at', 'archived_at', 'created_at', 'updated_at',
+                                                 'financial_account_id', 'copied_from_rule_id']);
 SELECT columns_are('statement_csv_mappings', ARRAY['id', 'financial_account_id', 'card_caixa_id', 'name', 'delimiter', 'encoding',
                                                    'has_header', 'skip_rows', 'date_format', 'decimal_separator', 'columns',
                                                    'is_default', 'created_at', 'updated_at']);
@@ -245,45 +247,49 @@ SELECT throws_ok($$INSERT INTO statement_lines (statement_import_id, card_caixa_
                  '23505', NULL, 'dedup por cartão');
 
 -- Regras de classificação ------------------------------------------------------------------------------
-SELECT lives_ok($$INSERT INTO classification_rules (id, match_kind, pattern, direction, entity_id, category_id, origin, created_from_line_id)
-                  VALUES ('00000000-0000-7000-8000-0000000ae001', 'contains', 'uber', 'out', '00000000-0000-7000-8000-00000000e006',
+SELECT lives_ok($$INSERT INTO classification_rules (id, caixa_id, financial_account_id, match_kind, pattern, direction, entity_id,
+                                                    category_id, origin, created_from_line_id)
+                  VALUES ('00000000-0000-7000-8000-0000000ae001', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000a0001', 'contains', 'uber', 'out', '00000000-0000-7000-8000-00000000e006',
                           '00000000-0000-7000-8000-00000000ca02', 'correction', '00000000-0000-7000-8000-0000000ad002')$$,
-                'regra global aprendida de uma correção');
-SELECT lives_ok($$INSERT INTO classification_rules (id, caixa_id, match_kind, pattern, direction, entity_id, category_id, priority)
-                  VALUES ('00000000-0000-7000-8000-0000000ae002', '00000000-0000-7000-8000-0000000c0001', 'starts_with', 'UBER *',
+                'regra da conta aprendida de uma correção');
+SELECT lives_ok($$INSERT INTO classification_rules (id, caixa_id, financial_account_id, match_kind, pattern, direction, entity_id,
+                                                    category_id, priority)
+                  VALUES ('00000000-0000-7000-8000-0000000ae002', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000a0001', 'starts_with', 'UBER *',
                           'out', NULL, '00000000-0000-7000-8000-00000000ca03', 100),
-                         ('00000000-0000-7000-8000-0000000ae003', NULL, 'regex', '^PAG ENERGIA', 'out', NULL,
+                         ('00000000-0000-7000-8000-0000000ae003', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000a0001', 'regex', '^PAG ENERGIA', 'out', NULL,
                           '00000000-0000-7000-8000-00000000ca01', 50),
-                         ('00000000-0000-7000-8000-0000000ae004', NULL, 'exact', 'salario', NULL,
+                         ('00000000-0000-7000-8000-0000000ae004', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000a0001', 'exact', 'salario', NULL,
                           '00000000-0000-7000-8000-00000000e001', NULL, 100)$$,
-                'regras por caixa, regex e exata (só entidade, qualquer direção)');
-SELECT throws_ok($$INSERT INTO classification_rules (pattern, direction) VALUES ('sem alvo', 'out')$$,
+                'regras de prefixo, regex e exata (só entidade, qualquer direção)');
+SELECT throws_ok($$INSERT INTO classification_rules (caixa_id, financial_account_id, pattern, direction) VALUES ('00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000a0001', 'sem alvo', 'out')$$,
                  '23514', NULL, 'regra sem entidade nem categoria');
-SELECT throws_ok($$INSERT INTO classification_rules (pattern, entity_id) VALUES ('  ', '00000000-0000-7000-8000-00000000e006')$$,
+SELECT throws_ok($$INSERT INTO classification_rules (caixa_id, financial_account_id, pattern, entity_id) VALUES ('00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000a0001', '  ', '00000000-0000-7000-8000-00000000e006')$$,
                  '23514', NULL, 'padrão vazio');
-SELECT throws_ok($$INSERT INTO classification_rules (pattern, category_id) VALUES ('x', '00000000-0000-7000-8000-00000000ca01')$$,
+SELECT throws_ok($$INSERT INTO classification_rules (caixa_id, financial_account_id, pattern, category_id) VALUES ('00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000a0001', 'x', '00000000-0000-7000-8000-00000000ca01')$$,
                  '23514', NULL, 'categoria exige direção');
-SELECT throws_ok($$INSERT INTO classification_rules (pattern, direction, category_id) VALUES ('x', 'in', '00000000-0000-7000-8000-00000000ca01')$$,
+SELECT throws_ok($$INSERT INTO classification_rules (caixa_id, financial_account_id, pattern, direction, category_id)
+                   VALUES ('00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000a0001', 'x', 'in', '00000000-0000-7000-8000-00000000ca01')$$,
                  '23514', 'classification_rules: in rule requires income category', 'entrada com categoria de receita');
-SELECT throws_ok($$INSERT INTO classification_rules (match_kind, pattern, entity_id) VALUES ('regex', '([a-', '00000000-0000-7000-8000-00000000e006')$$,
+SELECT throws_ok($$INSERT INTO classification_rules (caixa_id, financial_account_id, match_kind, pattern, entity_id)
+                   VALUES ('00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000a0001', 'regex', '([a-', '00000000-0000-7000-8000-00000000e006')$$,
                  '23514', 'classification_rules: invalid regular expression ([a-', 'regex inválida');
-SELECT throws_ok($$INSERT INTO classification_rules (match_kind, pattern, direction, entity_id)
-                   VALUES ('contains', 'UBER', 'out', '00000000-0000-7000-8000-00000000e001')$$,
-                 '23505', NULL, 'padrão repetido no mesmo escopo');
-SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000c0001', 'UBER *TRIP SAO PAULO', -2500),
-          '00000000-0000-7000-8000-0000000ae002'::uuid, 'mesma prioridade: regra da caixa vence a global');
-SELECT is(classification_rule_for(NULL, 'UBER *TRIP SAO PAULO', -2500),
-          '00000000-0000-7000-8000-0000000ae001'::uuid, 'sem caixa: só regras globais');
-SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000c0001', 'uber reembolso', 2500), NULL,
+SELECT throws_ok($$INSERT INTO classification_rules (caixa_id, financial_account_id, match_kind, pattern, direction, entity_id)
+                   VALUES ('00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000a0001', 'contains', 'UBER', 'out', '00000000-0000-7000-8000-00000000e001')$$,
+                 '23505', NULL, 'padrão repetido na mesma conta');
+SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000a0001', NULL, 'UBER *TRIP SAO PAULO', -2500),
+          '00000000-0000-7000-8000-0000000ae002'::uuid, 'mesma prioridade: starts_with vence contains');
+SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000a0002', NULL, 'UBER *TRIP SAO PAULO', -2500), NULL,
+          'outra conta da caixa não usa as regras da corrente');
+SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000a0001', NULL, 'uber reembolso', 2500), NULL,
           'direção da regra filtra (saída ≠ entrada)');
-SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000c0001', 'PAG ENERGIA SA', -15000),
+SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000a0001', NULL, 'PAG ENERGIA SA', -15000),
           '00000000-0000-7000-8000-0000000ae003'::uuid, 'regex com prioridade menor vence');
-SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000c0001', '  Salario ', 500000),
+SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000a0001', NULL, '  Salario ', 500000),
           '00000000-0000-7000-8000-0000000ae004'::uuid, 'exata ignora maiúsculas e espaços nas pontas');
-SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000c0001', 'Salario maio', 500000), NULL,
+SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000a0001', NULL, 'Salario maio', 500000), NULL,
           'exata não casa com texto maior');
 SELECT lives_ok($$UPDATE classification_rules SET archived_at = now() WHERE id = '00000000-0000-7000-8000-0000000ae002'$$, 'arquiva regra');
-SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000c0001', 'UBER *TRIP', -2500),
+SELECT is(classification_rule_for('00000000-0000-7000-8000-0000000a0001', NULL, 'UBER *TRIP', -2500),
           '00000000-0000-7000-8000-0000000ae001'::uuid, 'regra arquivada não classifica');
 SELECT lives_ok($$UPDATE statement_lines SET classification_rule_id = '00000000-0000-7000-8000-0000000ae001', classification_source = 'rule',
                                              entity_id = '00000000-0000-7000-8000-00000000e006', category_id = '00000000-0000-7000-8000-00000000ca02'
@@ -313,7 +319,7 @@ SELECT is((SELECT count(*)::int FROM statement_lines WHERE statement_import_id =
 SELECT table_privs_are(t, 'moneyflow_app', ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE'])
   FROM unnest(ARRAY['statement_csv_mappings', 'statement_imports', 'statement_lines', 'classification_rules']) t;
 SELECT ok(has_table_privilege('moneyflow_app', 'statement_import_balances', 'SELECT'), 'app lê statement_import_balances');
-SELECT function_privs_are('classification_rule_for', ARRAY['uuid', 'text', 'bigint'], 'moneyflow_app', ARRAY['EXECUTE']);
+SELECT function_privs_are('classification_rule_for', ARRAY['uuid', 'uuid', 'text', 'bigint'], 'moneyflow_app', ARRAY['EXECUTE']);
 
 SELECT * FROM finish();
 ROLLBACK;

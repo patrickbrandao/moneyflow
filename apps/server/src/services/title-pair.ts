@@ -31,6 +31,9 @@ export type TitleFields = {
   contractId?: string | null;
   contractCycleId?: string | null;
   contractInstallment?: number | null;
+  /** Conta prevista (spec 033), só no lado original (o espelho tem a dele). */
+  plannedAccountId?: string | null;
+  plannedTransitAccountId?: string | null;
 };
 
 export type MirrorPlan = {

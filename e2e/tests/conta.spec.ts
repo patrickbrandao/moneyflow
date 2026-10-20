@@ -104,14 +104,15 @@ test('tela da conta: abrir pela faixa da caixa, Resumo, Extrato e Conciliação 
   await expect(page.getByText(new RegExp(`→ ${caixa.name} › ${savings.name}`))).toBeVisible();
   await expect(page.getByLabel('Conta', { exact: true })).toHaveCount(0);
 
-  // Conciliação: os lotes desta conta e o caminho para as regras da caixa.
+  // Regras (spec 032): a aba da conta, presa nela.
+  await page.getByRole('tab', { name: 'Regras' }).click();
+  await expect(page).toHaveURL(new RegExp(`/accounts/${checking.id}/rules$`));
+  await expect(page.getByTestId('rules-table')).toContainText('Nenhuma regra ainda');
+
+  // Conciliação: os lotes desta conta.
   await page.getByRole('tab', { name: 'Conciliação' }).click();
   await expect(page).toHaveURL(new RegExp(`/accounts/${checking.id}/reconciliation$`));
   await expect(page.getByRole('button', { name: 'extrato-ofx2.ofx' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'regras da caixa' })).toHaveAttribute(
-    'href',
-    `/caixas/${caixa.id}/reconciliation?view=rules`,
-  );
 
   // Trocar de conta mantém a aba: a poupança não tem lote.
   await page.getByLabel('Trocar de conta').selectOption(savings.id);

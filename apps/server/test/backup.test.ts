@@ -667,6 +667,76 @@ describe('backup: recursos num sistema novo', () => {
     expect(sum(again, 'user_ai_settings').imported).toBe(0);
   });
 
+  it('regras de classificação de arquivo antigo (de caixa ou global) viram regras por conta e por cartão (spec 032)', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const bApi = client(b, adminB.cookie);
+    const tag = uid();
+    const holder = await bApi.post('/api/entities', { kind: 'company', name: `Titular regras ${tag}` });
+    const caixa = await bApi.post('/api/caixas', { name: `Caixa regras ${tag}`, holderEntityId: holder.id });
+    const account = (kind: string, name: string) =>
+      bApi.post(`/api/caixas/${caixa.id}/accounts`, { kind, name, openingBalanceCents: 0, openingDate: '2026-01-01' });
+    const checking = await account('checking', 'Corrente');
+    const savings = await account('savings', 'Poupança');
+    await account('cash', 'Cofre');
+    const issuer = await bApi.post('/api/entities', { kind: 'company', name: `Emissor regras ${tag}` });
+    const card = await bApi.post('/api/caixas', {
+      name: `Cartão regras ${tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: caixa.id,
+      creditLimitCents: 100_000,
+      closingDay: 25,
+      dueDay: 5,
+      cardLast4: '4242',
+    });
+    const cofreOnly = await bApi.post('/api/caixas', { name: `Só cofre ${tag}`, holderEntityId: holder.id });
+
+    const base = await exportJson(h, adminA.cookie, 'categories');
+    const legacyRule = (caixaId: string | null, pattern: string) => ({
+      id: randomUUID(),
+      caixa_id: caixaId,
+      match_kind: 'contains',
+      pattern,
+      direction: 'out',
+      entity_id: holder.id,
+      category_id: null,
+      priority: 100,
+      origin: 'manual',
+      created_from_line_id: null,
+      created_by_user_id: null,
+      usage_count: 7,
+      last_used_at: '2026-01-10T12:00:00.000Z',
+      archived_at: null,
+    });
+    const ofCaixa = legacyRule(caixa.id, `mercado ${tag}`);
+    const global = legacyRule(null, `tarifa ${tag}`);
+    const ofCard = legacyRule(card.id, `posto ${tag}`);
+    const orphan = legacyRule(cofreOnly.id, `nada ${tag}`);
+    const file = { ...base, kind: 'full', tables: { classification_rules: [ofCaixa, global, ofCard, orphan] }, references: {} };
+    const report = await importFile(b, adminB.cookie, 'full', file);
+    expect(failures(report)).toEqual([]);
+
+    const byPattern = async (pattern: string) =>
+      (await bApi.get(`/api/classification-rules?caixaId=${caixa.id}`))
+        .concat(await bApi.get(`/api/classification-rules?cardCaixaId=${card.id}`))
+        .filter((r: any) => r.pattern === pattern);
+    // Da caixa: uma por conta corrente/poupança (o cofre fica de fora), a original numa delas, uso recontado (sem linhas).
+    const caixaRules = await byPattern(ofCaixa.pattern);
+    expect(caixaRules.map((r: any) => r.financialAccountId).sort()).toEqual([checking.id, savings.id].sort());
+    expect(caixaRules.map((r: any) => r.id)).toContain(ofCaixa.id);
+    expect(caixaRules.every((r: any) => r.usageCount === 0 && r.lastUsedAt === null && r.origin === 'manual')).toBe(true);
+    // Global: as contas da caixa e o cartão (entre todas as do sistema).
+    const globalRules = await byPattern(global.pattern);
+    expect(globalRules.map((r: any) => r.financialAccountId ?? r.cardCaixaId).sort()).toEqual([checking.id, savings.id, card.id].sort());
+    // Do cartão: fica no cartão, sem conta.
+    expect(await byPattern(ofCard.pattern)).toEqual([
+      expect.objectContaining({ id: ofCard.id, cardCaixaId: card.id, financialAccountId: null }),
+    ]);
+    // Caixa sem conta de extrato e sem linhas: a regra não entra.
+    expect((await bApi.get('/api/classification-rules')).some((r: any) => r.pattern === orphan.pattern)).toBe(false);
+  });
+
   it('caixas exigem o titular; entidades casam pelo documento e conflitos de chave PIX voltam com o motivo', async () => {
     if (skip) return;
     const adminA = await userSession(h, 'admin');
@@ -891,7 +961,15 @@ describe('backup: JSON completo num sistema novo', () => {
       dueMonthOffset: 1,
       activate: true,
     };
-    const pending = await admin.post('/api/contracts', { ...contractBase, name: 'Suporte', startsOn: '2025-11-01', autoRenew: true });
+    // Spec 033: a conta das parcelas (FK de contracts e titles para financial_accounts) entra depois das contas.
+    const pending = await admin.post('/api/contracts', {
+      ...contractBase,
+      name: 'Suporte',
+      startsOn: '2025-11-01',
+      autoRenew: true,
+      paymentAccountId: s.accountA.id,
+      lateFeePercent: 2,
+    });
     expect(pending.status).toBe('renewal_pending');
     await admin.post(`/api/contracts/${pending.id}/amendments`, { effectiveOn: '2026-08-01', installmentCents: 11_000 });
     const upload = (name: string, body: Buffer, mime: string) =>
@@ -968,6 +1046,9 @@ describe('backup: JSON completo num sistema novo', () => {
         const [ca, cb] = await Promise.all([admin.get(`/api/contracts/${id}`), client(b, adminB.cookie).get(`/api/contracts/${id}`)]);
         const shape = (c: any) => ({
           status: c.status,
+          paymentAccountId: c.paymentAccountId,
+          lateFeePercent: c.lateFeePercent,
+          planned: c.cycles.flatMap((y: any) => y.installments.map((i: any) => i.plannedAccountId)),
           cycles: c.cycles.map((y: any) => ({
             seq: y.seq,
             total: y.totalCents,

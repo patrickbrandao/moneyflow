@@ -1,7 +1,7 @@
 # 020 — Contratos
 
 - Um **contrato** registra um acordo com uma entidade ([003](003-entidades.md)) dentro de uma caixa: eu **recebo** (presto o serviço; parcelas a receber) ou eu **pago** (contrato o serviço; parcelas a pagar). A permissão é a da caixa ([002](002-usuarios-e-permissoes.md)).
-- O contrato **gera os títulos** das parcelas ([005](005-titulos-baixas-e-movimentos.md)), todos ligados a ele. Os títulos são títulos normais: baixas, conciliação, calendário, relatórios, canvas e avisos funcionam sem nada especial.
+- O contrato **gera os títulos** das parcelas ([005](005-titulos-baixas-e-movimentos.md)), todos ligados a ele. Os títulos são títulos normais: baixas, conciliação, calendário, relatórios, canvas e avisos funcionam sem nada especial; a conta das parcelas (com troca por parcela), os encargos usados para reconhecer o pagamento no extrato, a baixa sem confirmação e a seção Pagamentos do detalhe estão na [033](033-pagamentos-de-contrato-no-extrato.md).
 - Cada contrato guarda vários **documentos** (contrato original, aditivos, renovação, distrato…), em PDF (somente leitura) ou markdown (leitura e edição, com versões).
 - A **renovação** nunca lança nada sozinha: vira uma **tarefa de renovação** que o usuário aprova informando o que muda (valor, vencimento, periodicidade) ou recusa (encerra).
 

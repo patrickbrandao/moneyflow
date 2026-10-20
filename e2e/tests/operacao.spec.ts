@@ -102,6 +102,58 @@ test('importar OFX de exemplo e conciliar', async ({ page }) => {
   expect(detail.mirror).toMatchObject({ caixaId: customerOther.id });
 });
 
+test('regras por conta (spec 032): a regra da corrente não aparece na poupança e é copiada pelo modal', async ({ page }) => {
+  const tag = Date.now().toString(36);
+  await loginAsAdmin(page);
+  const { post, supplier, caixa, account } = await base(page, tag);
+  const savings = await post(`/api/caixas/${caixa.id}/accounts`, {
+    kind: 'savings',
+    name: `Poupança regras ${tag}`,
+    openingBalanceCents: 0,
+    openingDate: '2026-01-01',
+  });
+  const pattern = `academia ${tag}`;
+
+  // Cria a regra na corrente pela guia Regras.
+  await page.goto(`/caixas/${caixa.id}/reconciliation?view=rules&account=${account.id}`);
+  await expect(page.getByLabel('Conta das regras')).toHaveValue(account.id);
+  await page.getByRole('button', { name: 'Nova regra' }).click();
+  const form = page.getByRole('dialog', { name: 'Nova regra' });
+  await expect(form.getByLabel('Conta', { exact: true })).toHaveValue(account.name);
+  await form.getByLabel('Padrão', { exact: true }).fill(pattern);
+  await form.getByLabel('Entidade', { exact: true }).fill(supplier.name);
+  await form.getByRole('option', { name: new RegExp(supplier.name) }).click();
+  await form.getByRole('button', { name: 'Salvar' }).click();
+  await expect(form).toBeHidden();
+  const rules = page.getByTestId('rules-table');
+  await expect(rules).toContainText(pattern);
+
+  // A poupança da mesma caixa não tem a regra.
+  await page.getByLabel('Conta das regras').selectOption(savings.id);
+  await expect(rules).toContainText('Nenhuma regra ainda');
+  await expect(rules).not.toContainText(pattern);
+
+  // Copiar da corrente para a poupança pelo modal.
+  await page.getByRole('button', { name: 'Copiar regras de outra conta' }).click();
+  const copy = page.getByRole('dialog', { name: `Copiar regras para ${savings.name}` });
+  await copy.getByLabel('Conta de origem').selectOption(`accountId=${account.id}`);
+  await copy.getByRole('checkbox', { name: pattern }).check();
+  await copy.getByRole('button', { name: 'Copiar 1 regra' }).click();
+  await expect(page.getByText('1 regra(s) copiada(s). Use “Aplicar regras” para reclassificar as linhas novas.')).toBeVisible();
+  await expect(copy).toBeHidden();
+  await expect(rules.getByRole('row', { name: new RegExp(pattern) })).toContainText('Cópia');
+
+  // De novo: a regra já existe no destino e fica desabilitada.
+  await page.getByRole('button', { name: 'Copiar regras de outra conta' }).click();
+  await copy.getByLabel('Conta de origem').selectOption(`accountId=${account.id}`);
+  await expect(copy.getByRole('checkbox', { name: pattern })).toBeDisabled();
+  await expect(copy).toContainText('já existe no destino');
+
+  // A aba Regras da tela da poupança mostra a mesma lista, presa na conta.
+  await page.goto(`/caixas/${caixa.id}/accounts/${savings.id}/rules`);
+  await expect(page.getByTestId('rules-table')).toContainText(pattern);
+});
+
 test('conciliação: título da caixa, última conta lembrada, aplicar regras e buscar nos lotes', async ({ page }) => {
   const tag = Date.now().toString(36);
   await loginAsAdmin(page);
@@ -145,7 +197,7 @@ test('conciliação: título da caixa, última conta lembrada, aplicar regras e 
 
   // Regra criada depois do import: o "Aplicar regras" do lote classifica a linha nova.
   await post('/api/classification-rules', {
-    caixaId: caixa.id,
+    accountId: savings.id,
     pattern: 'internet',
     direction: 'out',
     entityId: supplier.id,

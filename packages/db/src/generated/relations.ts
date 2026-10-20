@@ -51,10 +51,10 @@ import {
   userApiTokens,
   aiEmbeddings,
   aiEmbeddingIndexes,
-  aiBudgets,
   contractCycles,
   contracts,
   recurrenceRules,
+  aiBudgets,
   aiUsage,
   aiModelPrices,
   aiRequests,
@@ -128,13 +128,13 @@ export const usersRelations = relations(users, ({ many }) => ({
   aiReconcileRecipeRuns: many(aiReconcileRecipeRuns),
   userAiSettings: many(userAiSettings),
   aiAgentPromptVersions: many(aiAgentPromptVersions),
-  contracts: many(contracts),
   contractDocuments: many(contractDocuments),
   contractDocumentVersions: many(contractDocumentVersions),
   contractAmendments: many(contractAmendments),
   contractRenewalTasks: many(contractRenewalTasks),
   aiReconcileRecipes: many(aiReconcileRecipes),
   aiRequests: many(aiRequests),
+  contracts: many(contracts),
 }));
 
 export const entityContactsRelations = relations(entityContacts, ({ one }) => ({
@@ -258,14 +258,14 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
   statementImports: many(statementImports),
   statementLines: many(statementLines),
   userAiSettings: many(userAiSettings),
+  aiReconcileRecipes: many(aiReconcileRecipes),
+  aiReconcileRecipeTargets: many(aiReconcileRecipeTargets),
   contracts_caixaId: many(contracts, {
     relationName: 'contracts_caixaId_caixas_id',
   }),
   contracts_counterpartyCaixaId: many(contracts, {
     relationName: 'contracts_counterpartyCaixaId_caixas_id',
   }),
-  aiReconcileRecipes: many(aiReconcileRecipes),
-  aiReconcileRecipeTargets: many(aiReconcileRecipeTargets),
 }));
 
 export const aiAgentsRelations = relations(aiAgents, ({ one, many }) => ({
@@ -379,6 +379,13 @@ export const financialAccountsRelations = relations(financialAccounts, ({ one, m
   }),
   movements: many(movements),
   statementCsvMappings: many(statementCsvMappings),
+  classificationRules: many(classificationRules),
+  titles_plannedAccountId: many(titles, {
+    relationName: 'titles_plannedAccountId_financialAccounts_id',
+  }),
+  titles_plannedTransitAccountId: many(titles, {
+    relationName: 'titles_plannedTransitAccountId_financialAccounts_id',
+  }),
   caixa: one(caixas, {
     fields: [financialAccounts.caixaId],
     references: [caixas.id],
@@ -386,6 +393,12 @@ export const financialAccountsRelations = relations(financialAccounts, ({ one, m
   statementImports: many(statementImports),
   statementLines: many(statementLines),
   aiReconcileRecipeTargets: many(aiReconcileRecipeTargets),
+  contracts_paymentAccountId: many(contracts, {
+    relationName: 'contracts_paymentAccountId_financialAccounts_id',
+  }),
+  contracts_transitAccountId: many(contracts, {
+    relationName: 'contracts_transitAccountId_financialAccounts_id',
+  }),
 }));
 
 export const titlesRelations = relations(titles, ({ one, many }) => ({
@@ -432,6 +445,16 @@ export const titlesRelations = relations(titles, ({ one, many }) => ({
   nfeDocument: one(nfeDocuments, {
     fields: [titles.nfeDocumentId],
     references: [nfeDocuments.id],
+  }),
+  financialAccount_plannedAccountId: one(financialAccounts, {
+    fields: [titles.plannedAccountId],
+    references: [financialAccounts.id],
+    relationName: 'titles_plannedAccountId_financialAccounts_id',
+  }),
+  financialAccount_plannedTransitAccountId: one(financialAccounts, {
+    fields: [titles.plannedTransitAccountId],
+    references: [financialAccounts.id],
+    relationName: 'titles_plannedTransitAccountId_financialAccounts_id',
   }),
   recurrenceRule: one(recurrenceRules, {
     fields: [titles.recurrenceRuleId],
@@ -694,6 +717,14 @@ export const classificationRulesRelations = relations(classificationRules, ({ on
     fields: [classificationRules.categoryId],
     references: [categories.id],
   }),
+  classificationRule: one(classificationRules, {
+    fields: [classificationRules.copiedFromRuleId],
+    references: [classificationRules.id],
+    relationName: 'classificationRules_copiedFromRuleId_classificationRules_id',
+  }),
+  classificationRules: many(classificationRules, {
+    relationName: 'classificationRules_copiedFromRuleId_classificationRules_id',
+  }),
   user: one(users, {
     fields: [classificationRules.createdByUserId],
     references: [users.id],
@@ -706,6 +737,10 @@ export const classificationRulesRelations = relations(classificationRules, ({ on
   entity: one(entities, {
     fields: [classificationRules.entityId],
     references: [entities.id],
+  }),
+  financialAccount: one(financialAccounts, {
+    fields: [classificationRules.financialAccountId],
+    references: [financialAccounts.id],
   }),
   statementLines: many(statementLines, {
     relationName: 'statementLines_classificationRuleId_classificationRules_id',
@@ -978,17 +1013,6 @@ export const aiEmbeddingIndexesRelations = relations(aiEmbeddingIndexes, ({ one,
   }),
 }));
 
-export const aiBudgetsRelations = relations(aiBudgets, ({ one }) => ({
-  aiAgent: one(aiAgents, {
-    fields: [aiBudgets.agentId],
-    references: [aiAgents.id],
-  }),
-  user: one(users, {
-    fields: [aiBudgets.userId],
-    references: [users.id],
-  }),
-}));
-
 export const contractCyclesRelations = relations(contractCycles, ({ one, many }) => ({
   titles: many(titles),
   contract: one(contracts, {
@@ -1003,6 +1027,10 @@ export const contractCyclesRelations = relations(contractCycles, ({ one, many })
 
 export const contractsRelations = relations(contracts, ({ one, many }) => ({
   titles: many(titles),
+  contractCycles: many(contractCycles),
+  contractDocuments: many(contractDocuments),
+  contractAmendments: many(contractAmendments),
+  contractRenewalTasks: many(contractRenewalTasks),
   caixa_caixaId: one(caixas, {
     fields: [contracts.caixaId],
     references: [caixas.id],
@@ -1025,14 +1053,31 @@ export const contractsRelations = relations(contracts, ({ one, many }) => ({
     fields: [contracts.entityId],
     references: [entities.id],
   }),
-  contractCycles: many(contractCycles),
-  contractDocuments: many(contractDocuments),
-  contractAmendments: many(contractAmendments),
-  contractRenewalTasks: many(contractRenewalTasks),
+  financialAccount_paymentAccountId: one(financialAccounts, {
+    fields: [contracts.paymentAccountId],
+    references: [financialAccounts.id],
+    relationName: 'contracts_paymentAccountId_financialAccounts_id',
+  }),
+  financialAccount_transitAccountId: one(financialAccounts, {
+    fields: [contracts.transitAccountId],
+    references: [financialAccounts.id],
+    relationName: 'contracts_transitAccountId_financialAccounts_id',
+  }),
 }));
 
 export const recurrenceRulesRelations = relations(recurrenceRules, ({ many }) => ({
   titles: many(titles),
+}));
+
+export const aiBudgetsRelations = relations(aiBudgets, ({ one }) => ({
+  aiAgent: one(aiAgents, {
+    fields: [aiBudgets.agentId],
+    references: [aiAgents.id],
+  }),
+  user: one(users, {
+    fields: [aiBudgets.userId],
+    references: [users.id],
+  }),
 }));
 
 export const aiUsageRelations = relations(aiUsage, ({ one }) => ({

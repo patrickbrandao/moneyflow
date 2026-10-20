@@ -7,6 +7,7 @@ import {
   contractListQuery,
   contractMarkdownCreateInput,
   contractPanelQuery,
+  contractPaymentsQuery,
   contractReadingQuery,
   contractRenewalInput,
   contractTerminationInput,
@@ -34,6 +35,10 @@ export async function contractRoutes(app: FastifyInstance) {
     documents.readContractWithAi(r.ctx, parse(contractReadingQuery, r.query), { content: r.body as Buffer }),
   );
   app.get('/api/contracts/:id', (r: Req) => contracts.getContract(r.ctx, id(r)));
+  // Pagamentos das parcelas (spec 033): baixas repartidas, dias de atraso/adiantamento e o resumo.
+  app.get('/api/contracts/:id/payments', (r: Req) =>
+    contracts.contractPayments(r.ctx, id(r), parse(contractPaymentsQuery, r.query).cycleId),
+  );
   app.patch('/api/contracts/:id', (r: Req) => contracts.updateContract(r.ctx, id(r), parse(contractUpdateInput, r.body)));
   app.delete('/api/contracts/:id', (r: Req) => contracts.deleteContract(r.ctx, id(r)));
   app.post('/api/contracts/:id/restore', (r: Req) => contracts.restoreContract(r.ctx, id(r)));

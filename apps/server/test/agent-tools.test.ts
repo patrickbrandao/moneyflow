@@ -152,6 +152,13 @@ const rowsOf = (preview: any): Record<string, string> =>
     ]),
   );
 
+let listening: string | null = null;
+/** Endereço do app para o cliente MCP (escuta uma vez só no arquivo). */
+async function listenOnce() {
+  listening ??= await h.app.listen({ port: 0, host: '127.0.0.1' });
+  return listening;
+}
+
 /** Ator agent + execução na auditoria do registro. */
 async function auditActor(table: string, recordId: string) {
   const r = await h.db.execute<{ actor_kind: string; agent_run_id: string | null }>(
@@ -557,7 +564,7 @@ describe('importação a partir de anexo', () => {
     const alien = await upload(adminSession, adminConversation.id, 'extrato.ofx', 'application/x-ofx', fixture('extrato-ofx1.ofx'));
 
     const token = (await ownerApi.post('/api/account/api-tokens', { name: 'MCP F13a', expiresInDays: 1 })).token;
-    const address = await h.app.listen({ port: 0, host: '127.0.0.1' });
+    const address = await listenOnce();
     const mcpClient = new Client({ name: 'teste-f13a', version: '1.0.0' });
     await mcpClient.connect(
       new StreamableHTTPClientTransport(new URL(`${address}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }),
@@ -1007,17 +1014,87 @@ describe('categorias e regras', () => {
     const archived = await approved(adminSession, 'archive_category', { categoryId });
     expect(archived.value).toEqual({ deleted: true, archived: false });
 
+    // Regras por conta (spec 032): a corrente e a poupança da mesma caixa não compartilham regra.
+    const savingsA = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'savings',
+      name: `Poupança regras ${uid()}`,
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const checkingB = await admin.post(`/api/caixas/${s.caixaB.id}/accounts`, {
+      kind: 'checking',
+      name: `Corrente B ${uid()}`,
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const pattern = `PADARIA ${uid()}`;
     const rule = await approved(adminSession, 'create_classification_rule', {
-      caixaId: s.caixaA.id,
-      pattern: `PADARIA ${uid()}`,
+      accountId: s.accountA.id,
+      pattern,
       direction: 'out',
       categoryId: s.expense.id,
     });
-    expect(rowsOf(rule.preview)).toMatchObject({ 'Tipo do padrão': 'Contém', Direção: 'Saída', Categoria: s.expense.name });
+    expect(rowsOf(rule.preview)).toMatchObject({
+      Conta: `${s.caixaA.name} · ${s.accountA.name}`,
+      'Tipo do padrão': 'Contém',
+      Direção: 'Saída',
+      Categoria: s.expense.name,
+    });
+    expect(rule.value).toMatchObject({ financialAccountId: s.accountA.id, caixaId: s.caixaA.id, cardCaixaId: null, origin: 'manual' });
     const ruleId = rule.value.id;
-    expect((await call(viewerSession, 'list_classification_rules', { caixaId: s.caixaA.id })).value.map((r: any) => r.id)).toContain(
-      ruleId,
+    const listed = (input: Record<string, unknown>) =>
+      call(viewerSession, 'list_classification_rules', input).then((r) => (r.value as any[]).map((x) => x.id));
+    expect(await listed({ accountId: s.accountA.id })).toContain(ruleId);
+    expect(await listed({ accountId: savingsA.id })).not.toContain(ruleId);
+    expect(await listed({ caixaId: s.caixaA.id })).toContain(ruleId);
+
+    // Regra de outra caixa: o admin vê; o leitor da caixa A, não.
+    const ruleB = await approved(adminSession, 'create_classification_rule', {
+      accountId: checkingB.id,
+      pattern: `MERCADO ${uid()}`,
+      direction: 'out',
+      categoryId: s.expense.id,
+    });
+    expect(await listed({})).not.toContain(ruleB.value.id);
+    expect((await call(adminSession, 'list_classification_rules', {})).value.map((r: any) => r.id)).toEqual(
+      expect.arrayContaining([ruleId, ruleB.value.id]),
     );
+    expect((await call(viewerSession, 'list_classification_rules', { accountId: checkingB.id })).error).toBe('Registro não encontrado.');
+
+    // Copiar para a poupança: a da corrente e a da caixa B entram; a repetida no destino é pulada.
+    const already = await admin.post('/api/classification-rules', {
+      accountId: savingsA.id,
+      pattern: ruleB.value.pattern.toLowerCase(),
+      direction: 'out',
+      entityId: s.supplier.id,
+    });
+    const copy = await approved(adminSession, 'copy_classification_rules', {
+      ruleIds: [ruleId, ruleB.value.id],
+      accountId: savingsA.id,
+    });
+    expect(copy.preview.summary).toBe(`1 regra(s) para ${s.caixaA.name} · ${savingsA.name}, 1 pulada(s)`);
+    expect(rowsOf(copy.preview)).toMatchObject({
+      [`${s.caixaA.name} · ${s.accountA.name}`]: `Contém "${pattern}" (saída) → ${s.expense.name}`,
+      [`${s.caixaB.name} · ${checkingB.name}`]: `Contém "${ruleB.value.pattern}" (saída): pulada, já existe uma regra igual no destino`,
+    });
+    expect(copy.value.copied).toHaveLength(1);
+    expect(copy.value.copied[0]).toMatchObject({
+      financialAccountId: savingsA.id,
+      pattern,
+      origin: 'copy',
+      copiedFromRuleId: ruleId,
+      usageCount: 0,
+      categoryId: s.expense.id,
+    });
+    expect(copy.value.skipped).toEqual([
+      { ruleId: ruleB.value.id, pattern: ruleB.value.pattern, matchKind: 'contains', reason: 'exists', existingRuleId: already.id },
+    ]);
+    expect(await auditActor('classification_rules', copy.value.copied[0].id)).toMatchObject({ actor_kind: 'agent' });
+    // Leitor: copiar para a conta que só lê é negado.
+    expect((await call(viewerSession, 'copy_classification_rules', { ruleIds: [ruleId], accountId: savingsA.id })).error).toBe(
+      'Você só tem leitura nesta caixa.',
+    );
+
     const changed = await approved(adminSession, 'update_classification_rule', { ruleId, changes: { priority: 10 } });
     expect(rowsOf(changed.preview).Prioridade).toBe('100 → 10');
     expect((await call(viewerSession, 'update_classification_rule', { ruleId, changes: { priority: 1 } })).error).toBe(
@@ -1025,14 +1102,47 @@ describe('categorias e regras', () => {
     );
     expect((await call(viewerSession, 'archive_classification_rule', { ruleId })).error).toBe('Você só tem leitura nesta caixa.');
     const ruleArchived = await approved(adminSession, 'archive_classification_rule', { ruleId });
+    expect(rowsOf(ruleArchived.preview)).toMatchObject({ Conta: `${s.caixaA.name} · ${s.accountA.name}` });
     expect(ruleArchived.value).toEqual({ deleted: false, archived: true });
 
-    // Viewer: regra na caixa que só lê e regra global (só admin) negadas.
+    // Viewer: regra na conta que só lê negada; sem conta (o antigo "global") recusada pelo schema; cofre não tem regra.
     expect(
-      (await call(viewerSession, 'create_classification_rule', { caixaId: s.caixaA.id, pattern: 'X', entityId: s.supplier.id })).error,
+      (await call(viewerSession, 'create_classification_rule', { accountId: s.accountA.id, pattern: 'X', entityId: s.supplier.id })).error,
     ).toBe('Você só tem leitura nesta caixa.');
-    expect((await call(viewerSession, 'create_classification_rule', { pattern: 'X', entityId: s.supplier.id })).error).toBe(
-      'Você não tem permissão para esta ação.',
+    expect((await call(adminSession, 'create_classification_rule', { pattern: 'X', entityId: s.supplier.id })).error).toContain(
+      'Informe a conta (corrente ou poupança) ou o cartão da regra',
     );
+    expect(
+      (await call(adminSession, 'create_classification_rule', { accountId: s.accountB.id, pattern: 'X', entityId: s.supplier.id })).error,
+    ).toBe('Regras de classificação são de conta corrente, poupança ou cartão.');
+
+    // /mcp: listar e copiar pelo token do admin (a cópia arquivada fica de fora: pulada com o motivo).
+    const token = (await admin.post('/api/account/api-tokens', { name: `MCP regras ${uid()}`, expiresInDays: 1 })).token;
+    const mcpClient = new Client({ name: 'teste-f18', version: '1.0.0' });
+    await mcpClient.connect(
+      new StreamableHTTPClientTransport(new URL(`${await listenOnce()}/mcp`), {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      }),
+    );
+    try {
+      const text = (r: Awaited<ReturnType<typeof mcpClient.callTool>>) => (r.content as { text: string }[])[0]!.text;
+      const list = await mcpClient.callTool({ name: 'list_classification_rules', arguments: { accountId: savingsA.id } });
+      expect(list.isError, text(list)).toBeFalsy();
+      expect(JSON.parse(text(list)).map((r: any) => r.pattern)).toEqual(expect.arrayContaining([pattern]));
+      const viaMcp = await mcpClient.callTool({
+        name: 'copy_classification_rules',
+        arguments: { ruleIds: [ruleId, ruleB.value.id], accountId: checkingB.id },
+      });
+      expect(viaMcp.isError, text(viaMcp)).toBeFalsy();
+      expect(JSON.parse(text(viaMcp))).toMatchObject({
+        copied: [],
+        skipped: [
+          { ruleId, reason: 'archived' },
+          { ruleId: ruleB.value.id, reason: 'exists', existingRuleId: ruleB.value.id },
+        ],
+      });
+    } finally {
+      await mcpClient.close();
+    }
   });
 });

@@ -1,3 +1,4 @@
+import { t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
 import { suggestClassifications } from '../services/reconciliation';
@@ -46,7 +47,10 @@ export function flowSystemPrompt(purpose: PromptPurpose): string {
       'Para cada linha nova ou sugerida do lote: localize os candidatos (list_line_candidates) e case com o movimento ou o título certo;',
       'lance as linhas sem par (com o espelho e a pagadora quando couber); ignore as tarifas conforme as regras de classificação;',
       'corrija casamentos errados (desfazer e estornar). Não invente ids: use os das tools.',
+      'Parcela de contrato (candidato com `contract`): o valor da linha vira a baixa repartida (principal, multa, juros, desconto) ao casar com o titleId;',
+      'com várias parcelas iguais, prefira a sugerida (a do mês da linha ou a mais antiga em aberto). Baixa parcial só quando nenhuma outra parcela bate.',
       'As ações que precisam de aprovação ficam esperando o usuário (aprovação em lote na tela do lote): chame a tool normalmente e siga.',
+      t.agents.reconcile.rulesAdvice,
       'Termine com um resumo curto: quantas linhas casou, lançou, ignorou e o que ficou para o usuário.',
     ].join('\n');
   }

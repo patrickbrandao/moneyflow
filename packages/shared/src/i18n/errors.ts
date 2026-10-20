@@ -83,6 +83,23 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   contracts_notice_days_check: 'Aviso prévio entre 0 e 365 dias.',
   contracts_renewal_lead_days_check: 'Antecedência da renovação entre 1 e 365 dias.',
   contracts_reminder_every_days_check: 'Lembrete da renovação entre 1 e 30 dias.',
+  // conta das parcelas e encargos (spec 033)
+  contracts_late_fee_percent_check: 'Multa por atraso entre 0 e 20%.',
+  contracts_interest_month_percent_check: 'Juros de mora entre 0 e 10% ao mês.',
+  contracts_early_discount_percent_check: 'Desconto por pontualidade entre 0 e 50%.',
+  contracts_tolerance_cents_check: 'A tolerância não pode ser negativa.',
+  contracts_match_window_days_check: 'Janela da conciliação entre 0 e 45 dias.',
+  contracts_payment_account_check:
+    'A conta das parcelas precisa ser conta corrente ou poupança (e continuar assim enquanto o contrato a usa).',
+  contracts_transit_account_check:
+    'Conta das parcelas de outra caixa pede a conta de passagem, da caixa do contrato; da mesma caixa, não tem passagem.',
+  contracts_payment_account_id_fkey: 'A conta é a conta das parcelas de um contrato: troque-a no contrato antes de excluir.',
+  contracts_transit_account_id_fkey: 'A conta é a conta de passagem de um contrato: troque-a no contrato antes de excluir.',
+  titles_planned_account_check: 'A conta prevista precisa ser conta corrente ou poupança (e continuar assim enquanto um título a usa).',
+  titles_planned_transit_account_check:
+    'Conta prevista de outra caixa pede a conta de passagem, da caixa do título; da mesma caixa, não tem passagem.',
+  titles_planned_account_id_fkey: 'A conta é a conta prevista de títulos: troque-a neles antes de excluir.',
+  titles_planned_transit_account_id_fkey: 'A conta é a conta de passagem prevista de títulos: troque-a neles antes de excluir.',
   contract_cycles_duration_months_check: 'A duração do ciclo vai de 1 a 120 meses.',
   contract_cycles_duration_periodicity_check: 'A duração precisa ser múltipla do período.',
   contract_cycles_total_cents_check: 'O valor do ciclo precisa cobrir pelo menos 1 centavo por parcela.',
@@ -227,6 +244,8 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   statement_lines_classification_source_check: 'Origem da classificação inválida.',
   statement_lines_raw_check: 'Dados originais da linha inválidos.',
   statement_lines_immutable_check: 'Os dados importados do extrato não mudam.',
+  statement_lines_auto_settled_check: 'Só uma linha conciliada com a baixa feita a partir dela fica marcada como baixa automática.',
+  statement_lines_created_entry_links_check: 'O lançamento criado a partir da linha está incoerente com o vínculo dela.',
   statement_imports_provisional_check: 'Só o lote de uma conta corrente ou poupança pode ser provisório.',
   statement_imports_superseded_check: 'Só um lote provisório é substituído, e por outro lote.',
   statement_imports_superseded_by_check: 'O lote que substitui precisa ser da mesma conta e não pode estar substituído.',
@@ -273,7 +292,10 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   classification_rules_origin_check: 'Origem da regra inválida.',
   classification_rules_usage_count_check: 'Contador de uso inválido.',
   classification_rules_category_kind_check: 'Regra de entrada usa categoria de receita; de saída, de despesa.',
-  classification_rules_pattern_key: 'Já existe uma regra igual.',
+  classification_rules_pattern_key: 'Já existe uma regra igual nesta conta (mesmo tipo, padrão e direção).',
+  classification_rules_account_check:
+    'A regra precisa ser de uma conta corrente ou poupança da caixa, ou de um cartão (e a conta com regras não muda de caixa nem vira cofre).',
+  classification_rules_copied_from_check: 'Só a regra copiada de outra conta guarda a regra de origem (e nunca ela mesma).',
   classification_rules_created_from_line_id_fkey: 'A linha de origem da regra não existe.',
   // auditoria e fechamento
   audit_log_actor_check: 'Não foi possível identificar quem fez a alteração.',
@@ -404,6 +426,11 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   user_api_tokens_name_key: 'Já existe um token ativo com esse nome para este usuário.',
   user_api_tokens_name_check: 'Informe o nome do token (até 120 caracteres).',
   user_api_tokens_revoked_check: 'Este token já foi revogado.',
+};
+
+/** NOT NULL (23502) por tabela.coluna, quando o genérico não basta. */
+export const DB_NOT_NULL_MESSAGES: Record<string, string> = {
+  'classification_rules.caixa_id': 'A regra precisa de uma conta ou de um cartão (não existe mais regra global).',
 };
 
 export const DB_CODE_MESSAGES: Record<string, string> = {

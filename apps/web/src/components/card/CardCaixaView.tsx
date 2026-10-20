@@ -1,5 +1,5 @@
 import { type CaixaDetail, type CardOverview, formatDate, t } from '@moneyflow/shared';
-import { CreditCard, Gauge, List, Lock, Plus, Receipt, ShoppingBag, Upload, Users, Wallet } from 'lucide-react';
+import { CreditCard, Gauge, List, Lock, Plus, Receipt, ShoppingBag, Upload, Users, Wallet, Wand2 } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useUser } from '../../lib/auth';
@@ -8,6 +8,7 @@ import { useApi } from '../../lib/hooks';
 import { type CaixaTab, caixaTab } from '../../lib/links';
 import { MembersTab } from '../caixa/MembersTab';
 import { LoadError, Money } from '../domain';
+import { RulesPanel } from '../reconciliation/RulesPanel';
 import { StatementImportPanel } from '../reconciliation/StatementImportPanel';
 import { Button, Skel, Tabs } from '../ui';
 import { type CardAction, InvoicesTab, LimitTab, OpenInvoiceTab } from './CardTabs';
@@ -17,7 +18,7 @@ import { PurchasesTab } from './PurchasesTab';
 import { monthLabel } from './shared';
 import '../../styles/card.css';
 
-const TABS = ['invoice', 'invoices', 'purchases', 'limit', 'import', 'members'] as const;
+const TABS = ['invoice', 'invoices', 'purchases', 'limit', 'import', 'rules', 'members'] as const;
 type Tab = (typeof TABS)[number];
 
 /** Caixa de cartão: resumo do limite e da fatura aberta, e as abas da spec 007. */
@@ -89,6 +90,7 @@ export function CardCaixaView({ caixa, tab: rawTab, onChanged }: { caixa: CaixaD
     { key: 'purchases', icon: <ShoppingBag /> },
     { key: 'limit', icon: <Gauge /> },
     { key: 'import', icon: <Upload /> },
+    { key: 'rules', icon: <Wand2 /> },
     { key: 'members', icon: <Users /> },
   ];
 
@@ -191,6 +193,7 @@ export function CardCaixaView({ caixa, tab: rawTab, onChanged }: { caixa: CaixaD
       )}
       {overview && tab === 'limit' && <LimitTab overview={overview} />}
       {tab === 'import' && <StatementImportPanel caixaId={caixa.id} cardCaixaId={caixa.id} canWrite={canWrite} onChanged={refresh} />}
+      {tab === 'rules' && <RulesPanel caixaId={caixa.id} target={{ cardCaixaId: caixa.id }} targetName={caixa.name} canWrite={canWrite} />}
       {tab === 'members' && <MembersTab caixa={caixa} />}
 
       {action === 'purchase' && (

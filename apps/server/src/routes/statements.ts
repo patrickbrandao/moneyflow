@@ -2,6 +2,7 @@ import {
   applyRulesInput,
   classificationRuleInput,
   classificationRuleUpdateInput,
+  copyRulesInput,
   csvMappingInput,
   csvMappingUpdateInput,
   importBankBalanceInput,
@@ -126,7 +127,8 @@ export async function statementRoutes(app: FastifyInstance) {
 
   app.get('/api/classification-rules', (r: Req) => rec.listRules(r.ctx, parse(ruleListQuery, r.query)));
   app.post('/api/classification-rules', (r: Req) => rec.createRule(r.ctx, parse(classificationRuleInput, r.body)));
-  app.post('/api/classification-rules/apply', (r: Req) => rec.applyRulesToCaixa(r.ctx, parse(applyRulesInput, r.body).caixaId));
+  app.post('/api/classification-rules/apply', (r: Req) => rec.applyRulesToAccount(r.ctx, parse(applyRulesInput, r.body)));
+  app.post('/api/classification-rules/copy', (r: Req) => rec.copyRules(r.ctx, parse(copyRulesInput, r.body)));
   app.patch('/api/classification-rules/:id', (r: Req) => rec.updateRule(r.ctx, id(r), parse(classificationRuleUpdateInput, r.body)));
   app.delete('/api/classification-rules/:id', (r: Req) => rec.archiveRule(r.ctx, id(r)));
 }

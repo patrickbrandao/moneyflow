@@ -92,8 +92,13 @@ SELECT results_eq($$SELECT old_data ->> 'file_name', new_data IS NULL FROM audit
                   $$VALUES ('b.pdf', true)$$, 'delete guarda o antes');
 
 -- Regras: contador de uso não gera linha
-INSERT INTO classification_rules (id, pattern, entity_id) VALUES
-  ('00000000-0000-7000-8000-0000000ae001', 'patrick', '00000000-0000-7000-8000-00000000e001');
+INSERT INTO caixas (id, name, kind, holder_entity_id) VALUES
+  ('00000000-0000-7000-8000-0000000c0001', 'Casa', 'general', '00000000-0000-7000-8000-00000000e001');
+INSERT INTO financial_accounts (id, caixa_id, kind, name, opening_date) VALUES
+  ('00000000-0000-7000-8000-0000000a0001', '00000000-0000-7000-8000-0000000c0001', 'checking', 'Itaú', '2026-01-01');
+INSERT INTO classification_rules (id, caixa_id, financial_account_id, pattern, entity_id) VALUES
+  ('00000000-0000-7000-8000-0000000ae001', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-0000000a0001',
+   'patrick', '00000000-0000-7000-8000-00000000e001');
 UPDATE classification_rules SET usage_count = usage_count + 1, last_used_at = now()
  WHERE id = '00000000-0000-7000-8000-0000000ae001';
 SELECT is((SELECT count(*)::int FROM audit_log WHERE table_name = 'classification_rules'), 1, 'uso da regra não é auditado');

@@ -99,6 +99,8 @@ type ProvLine = {
   status: string;
   movement_id: string | null;
   created_entry: string | null;
+  /** Baixa sem confirmação (spec 033): passa ao consolidado só junto com o created_entry. */
+  auto_settled: boolean;
   entity_id: string | null;
   category_id: string | null;
   classification_source: string | null;
@@ -163,7 +165,7 @@ function planResult(plan: Plan, consolidatedImportId: string, provisionalImportI
 
 async function provisionalLines(db: Executor, importIds: string[]): Promise<ProvLine[]> {
   const result = await db.execute<ProvLine>(sql`
-    SELECT id, posted_on::text, amount_cents, description, status, movement_id, created_entry, entity_id, category_id,
+    SELECT id, posted_on::text, amount_cents, description, status, movement_id, created_entry, auto_settled, entity_id, category_id,
            classification_source
       FROM statement_lines WHERE statement_import_id = ANY (${uuidArray(importIds)})
      ORDER BY posted_on, line_number`);
@@ -228,7 +230,7 @@ export async function supersedeInTx(
       await tx.execute(sql`
         UPDATE statement_lines
            SET status = 'superseded', matched_at = NULL, movement_id = NULL, title_id = NULL, card_invoice_item_id = NULL,
-               created_entry = NULL, supersede_outcome = ${outcome}, superseded_by_line_id = ${item.c?.id ?? null}
+               created_entry = NULL, auto_settled = false, supersede_outcome = ${outcome}, superseded_by_line_id = ${item.c?.id ?? null}
          WHERE id = ${item.p.id}`);
     }
   }
@@ -255,11 +257,11 @@ export async function supersedeInTx(
 }
 
 /** A linha do consolidado passa a conciliada com o movimento da provisória, com a mesma marca created_entry. */
-async function transferTo(tx: Executor, consolidatedLineId: string, p: Pick<ProvLine, 'movement_id' | 'created_entry'>) {
+async function transferTo(tx: Executor, consolidatedLineId: string, p: Pick<ProvLine, 'movement_id' | 'created_entry' | 'auto_settled'>) {
   await tx.execute(sql`
     UPDATE statement_lines
        SET status = 'matched', matched_at = now(), movement_id = ${p.movement_id}, title_id = NULL, card_invoice_item_id = NULL,
-           created_entry = ${p.created_entry}
+           created_entry = ${p.created_entry}, auto_settled = ${Boolean(p.auto_settled && p.created_entry)}
      WHERE id = ${consolidatedLineId}`);
 }
 
@@ -325,7 +327,7 @@ type PendingLine = ProvLine & { import_id: string; caixa_id: string; card_invoic
 async function loadPending(tx: Tx, importId: string, lineId: string): Promise<PendingLine> {
   const result = await tx.execute<PendingLine>(sql`
     SELECT l.id, l.statement_import_id AS import_id, l.posted_on::text, l.amount_cents, l.description, l.status, l.movement_id,
-           l.card_invoice_item_id, l.created_entry, l.entity_id, l.category_id, l.classification_source, a.caixa_id
+           l.card_invoice_item_id, l.created_entry, l.auto_settled, l.entity_id, l.category_id, l.classification_source, a.caixa_id
       FROM statement_lines l
       JOIN statement_imports i ON i.id = l.statement_import_id
       JOIN financial_accounts a ON a.id = l.financial_account_id
@@ -341,7 +343,7 @@ async function closePending(tx: Executor, lineId: string, outcome: 'transferred'
   await tx.execute(sql`
     UPDATE statement_lines
        SET status = 'superseded', matched_at = NULL, movement_id = NULL, title_id = NULL, card_invoice_item_id = NULL,
-           created_entry = NULL, supersede_outcome = ${outcome}, superseded_by_line_id = ${pairId},
+           created_entry = NULL, auto_settled = false, supersede_outcome = ${outcome}, superseded_by_line_id = ${pairId},
            supersede_suggested_line_id = NULL, supersede_suggestion_reason = NULL
      WHERE id = ${lineId}`);
 }

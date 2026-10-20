@@ -10,7 +10,7 @@ import {
   READJUSTMENT_INDEXES,
 } from '../contracts';
 import { ptBR } from '../i18n/pt-BR';
-import { id, isoDate, optionalText, positiveCents, queryBool, requiredText } from './common';
+import { id, isoDate, nonNegativeCents, optionalText, positiveCents, queryBool, requiredText } from './common';
 
 /* Entradas dos contratos (spec 020). */
 
@@ -31,6 +31,15 @@ export const durationFitsPeriod = (
     ctx.addIssue({ code: 'custom', path: ['durationMonths'], message: E.durationNotMultiple });
 };
 
+function percent(max: number) {
+  return z
+    .number()
+    .min(0)
+    .max(max)
+    .nullish()
+    .transform((v) => (v === undefined || v === null || v === 0 ? null : Math.round(v * 10000) / 10000));
+}
+
 /** Configuração livre (muda a qualquer momento, inclusive vigente). */
 const settings = {
   name: requiredText(200),
@@ -44,6 +53,21 @@ const settings = {
   readjustmentBaseDate: isoDate.nullish().transform((v) => v ?? null),
   terminationPenaltyText: optionalText(2000),
   terminationPenaltyCents: positiveCents.nullish().transform((v) => v ?? null),
+  /*
+   * Conta das parcelas e encargos (spec 033). A conta pode ser de outra caixa
+   * (a pagadora), e aí a de passagem é obrigatória (da caixa do contrato). Os
+   * encargos só servem para reconhecer o valor pago no extrato.
+   */
+  paymentAccountId: id.nullish().transform((v) => v ?? null),
+  transitAccountId: id.nullish().transform((v) => v ?? null),
+  lateFeePercent: percent(20),
+  interestMonthPercent: percent(10),
+  earlyDiscountPercent: percent(50),
+  /** Diferença aceita além dos encargos; até 10% da parcela (conferido no servidor). */
+  toleranceCents: nonNegativeCents,
+  matchWindowDays: z.number().int().min(0).max(45),
+  /** Baixar sem confirmação (a linha única, na conta prevista, com valor exato ou dentro dos encargos/desconto). */
+  autoSettle: z.boolean(),
 };
 
 /** Condições do ciclo (rascunho; vigente só por aditivo ou renovação). */
@@ -68,6 +92,9 @@ export const contractCreateFields = z.object({
   renewalLeadDays: settings.renewalLeadDays.default(60),
   reminderEveryDays: settings.reminderEveryDays.default(7),
   readjustmentIndex: settings.readjustmentIndex.default('none'),
+  toleranceCents: settings.toleranceCents.default(0),
+  matchWindowDays: settings.matchWindowDays.default(15),
+  autoSettle: settings.autoSettle.default(false),
   ...terms,
   /** Caixa do espelho: omitido = caixa principal da entidade (se houver); null = sem espelho. */
   mirrorCaixaId: id.nullish(),
@@ -84,9 +111,17 @@ export const contractUpdateInput = z
     mirrorCaixaId: id.nullable(),
     ...settings,
     ...terms,
+    /**
+     * Trocando a conta das parcelas (spec 033): true = as parcelas em aberto
+     * que seguem o contrato mudam junto (as com conta própria ficam).
+     */
+    applyAccountToInstallments: z.boolean(),
   })
   .partial()
   .superRefine(durationFitsPeriod);
+
+/** Pagamentos do contrato (spec 033): um ciclo ou todos. */
+export const contractPaymentsQuery = z.object({ cycleId: id.optional() });
 
 export const CONTRACT_LIST_STATUSES = [...CONTRACT_STATUSES, 'current'] as const;
 

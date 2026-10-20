@@ -1,4 +1,13 @@
 /* Agentes de IA (spec 011): textos usados pela API, pelo worker e pelas tools. */
+/**
+ * Regras de classificação na conciliação com IA e nas receitas (specs 030/032): a regra é
+ * da conta do lote, e antes de criar o agente confere se outra conta já tem uma que sirva.
+ */
+const RULES_ADVICE = [
+  'Ao notar um padrão repetitivo e determinístico (mesma descrição, mesma entidade e categoria), proponha uma regra de classificação na conta do lote (accountId, ou cardCaixaId na fatura do cartão), para o caso sair da IA.',
+  'Antes de criar, consulte as regras das outras contas com list_classification_rules: se uma já resolve, proponha copiá-la com copy_classification_rules em vez de criar com create_classification_rule.',
+].join(' ');
+
 export const agentsStrings = {
   errors: {
     agentNotFound: 'Agente não encontrado.',
@@ -153,6 +162,7 @@ export const agentsStrings = {
     foreignAgentTask: 'Só o administrador cria ou altera tarefas de outro usuário.',
   },
   reconcile: {
+    rulesAdvice: RULES_ADVICE,
     noLines: 'Nenhuma linha por conciliar neste lote.',
     noAgent: 'Nenhum agente dos fluxos ativo: configure um agente em Administração → IA.',
     accountKind: 'Só conta corrente, poupança e cartão concilia com IA.',
@@ -176,7 +186,7 @@ export const agentsStrings = {
       [
         `Receita de conciliação: ${name}. Siga a instrução da mensagem do usuário.`,
         `Escopo: só estas ${lineIds.length} linha(s) do lote podem ser tocadas (as tools recusam as demais): ${lineIds.join(', ')}.`,
-        'Ao notar um padrão repetitivo e determinístico (mesma descrição, mesma entidade e categoria), proponha uma regra de classificação com create_classification_rule, para o caso sair da IA.',
+        RULES_ADVICE,
       ].join('\n'),
   },
   telegram: {

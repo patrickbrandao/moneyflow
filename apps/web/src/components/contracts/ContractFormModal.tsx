@@ -25,11 +25,16 @@ import { useUser } from '../../lib/auth';
 import { useAction, useApi } from '../../lib/hooks';
 import { upload } from '../../lib/upload';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
-import { Button, Field, Modal } from '../ui';
+import { Button, Field, Modal, useConfirm } from '../ui';
+import { PlannedAccountSelect, usePaymentAccounts } from './PlannedAccount';
 
 type Direction = 'receivable' | 'payable';
 const kindOf = (direction: Direction) => (direction === 'payable' ? 'expense' : 'income');
 const F = t.contracts.fields;
+const P = t.contracts.payment;
+
+/** Percentual do formulário: vazio = sem (null). */
+const percentOf = (text: string) => (text.trim() === '' ? null : Number(text.replace(',', '.')));
 
 /**
  * Cadastro e edição do contrato (spec 020). Rascunho: tudo editável. Vigente:
@@ -77,6 +82,17 @@ export function ContractFormModal({
   const [readjustmentBaseDate, setReadjustmentBaseDate] = useState(contract?.readjustmentBaseDate ?? '');
   const [penaltyText, setPenaltyText] = useState(contract?.terminationPenaltyText ?? '');
   const [penaltyCents, setPenaltyCents] = useState<number | null>(contract?.terminationPenaltyCents ?? null);
+  // Conta das parcelas, encargos e conciliação (spec 033).
+  const accounts = usePaymentAccounts();
+  const confirm = useConfirm();
+  const [paymentAccountId, setPaymentAccountId] = useState<string | null>(contract?.paymentAccountId ?? null);
+  const [transitAccountId, setTransitAccountId] = useState<string | null>(contract?.transitAccountId ?? null);
+  const [lateFee, setLateFee] = useState(contract?.lateFeePercent?.toString() ?? '');
+  const [interest, setInterest] = useState(contract?.interestMonthPercent?.toString() ?? '');
+  const [discount, setDiscount] = useState(contract?.earlyDiscountPercent?.toString() ?? '');
+  const [toleranceCents, setToleranceCents] = useState<number | null>(contract?.toleranceCents ?? 0);
+  const [matchWindowDays, setMatchWindowDays] = useState(contract?.matchWindowDays ?? 15);
+  const [autoSettle, setAutoSettle] = useState(contract?.autoSettle ?? false);
 
   const [held, setHeld] = useState<EntityDetail['caixas'] | null>(null);
   const [mirrorCaixaId, setMirrorCaixaId] = useState<string | null>(contract?.counterpartyCaixaId ?? null);
@@ -171,12 +187,36 @@ export function ContractFormModal({
       readjustmentBaseDate: readjustmentBaseDate || null,
       terminationPenaltyText: penaltyText,
       terminationPenaltyCents: penaltyCents,
+      paymentAccountId,
+      transitAccountId,
+      lateFeePercent: percentOf(lateFee),
+      interestMonthPercent: percentOf(interest),
+      earlyDiscountPercent: percentOf(discount),
+      toleranceCents: toleranceCents ?? 0,
+      matchWindowDays,
+      autoSettle,
     };
+    const selected = accounts.data?.find((a) => a.id === paymentAccountId);
+    if (selected && selected.caixaId !== caixaId && !transitAccountId) return setError(P.plannedTransitNeeded);
     const terms = { startsOn, durationMonths, periodicity, totalCents: totalCents!, dueDay, dueMonthOffset };
     if (contract) {
-      const body: ContractUpdateInput = draft
-        ? { ...settings, ...terms, entityId: entity.id, categoryId, mirrorCaixaId: held && held.length > 0 ? mirrorCaixaId : null }
-        : settings;
+      // Trocou a conta das parcelas: pergunta se as parcelas em aberto que seguem o contrato mudam junto.
+      const accountChanged = paymentAccountId !== contract.paymentAccountId || transitAccountId !== contract.transitAccountId;
+      const applyAccountToInstallments =
+        accountChanged && contract.followingOpenInstallments > 0
+          ? await confirm({
+              title: P.applyTitle,
+              description: P.applyBody(contract.followingOpenInstallments),
+              confirmLabel: P.applyYes,
+              cancelLabel: P.applyNo,
+            })
+          : false;
+      const body: ContractUpdateInput = {
+        ...(draft
+          ? { ...settings, ...terms, entityId: entity.id, categoryId, mirrorCaixaId: held && held.length > 0 ? mirrorCaixaId : null }
+          : settings),
+        ...(applyAccountToInstallments ? { applyAccountToInstallments } : {}),
+      };
       const saved = await run(() => api.patch<ContractDetail>(`/api/contracts/${contract.id}`, body), t.contracts.saved);
       if (saved) onSaved(saved);
       return;
@@ -478,6 +518,77 @@ export function ContractFormModal({
             <Field label={F.notes} className="span-all">
               <textarea className="field" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} aria-label={F.notes} />
             </Field>
+
+            <fieldset className="span-all form-grid cols-2" aria-label={P.section}>
+              <legend className="span-all text-sm font-semibold">{P.section}</legend>
+              <p className="hint span-all !mt-0">{P.sectionHint}</p>
+              {caixaId && (
+                <PlannedAccountSelect
+                  caixaId={caixaId}
+                  accounts={accounts.data ?? []}
+                  accountId={paymentAccountId}
+                  transitId={transitAccountId}
+                  onChange={(a, tr) => {
+                    setPaymentAccountId(a);
+                    setTransitAccountId(tr);
+                  }}
+                />
+              )}
+              <Field label={P.lateFee}>
+                <input
+                  className="field"
+                  type="number"
+                  min={0}
+                  max={20}
+                  step="0.01"
+                  value={lateFee}
+                  onChange={(e) => setLateFee(e.target.value)}
+                  aria-label={P.lateFee}
+                />
+              </Field>
+              <Field label={P.interest}>
+                <input
+                  className="field"
+                  type="number"
+                  min={0}
+                  max={10}
+                  step="0.01"
+                  value={interest}
+                  onChange={(e) => setInterest(e.target.value)}
+                  aria-label={P.interest}
+                />
+              </Field>
+              <Field label={P.discount}>
+                <input
+                  className="field"
+                  type="number"
+                  min={0}
+                  max={50}
+                  step="0.01"
+                  value={discount}
+                  onChange={(e) => setDiscount(e.target.value)}
+                  aria-label={P.discount}
+                />
+              </Field>
+              <Field label={P.tolerance} hint={P.toleranceHint}>
+                <MoneyInput value={toleranceCents} onChange={setToleranceCents} ariaLabel={P.tolerance} />
+              </Field>
+              <Field label={P.window} hint={P.windowHint}>
+                <input
+                  className="field"
+                  type="number"
+                  min={0}
+                  max={45}
+                  value={matchWindowDays}
+                  onChange={(e) => setMatchWindowDays(Number(e.target.value))}
+                  aria-label={P.window}
+                />
+              </Field>
+              <label className="check span-all">
+                <input type="checkbox" checked={autoSettle} onChange={(e) => setAutoSettle(e.target.checked)} /> {P.autoSettle}
+                <span className="hint !mt-0 block">{P.autoSettleHint}</span>
+              </label>
+            </fieldset>
           </div>
           <FormError>{error}</FormError>
         </div>

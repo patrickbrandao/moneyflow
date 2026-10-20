@@ -29,9 +29,11 @@ export function SettlementModal({
   const [interest, setInterest] = useState<number | null>(null);
   const [fine, setFine] = useState<number | null>(null);
   const [discount, setDiscount] = useState<number | null>(null);
-  const [accountId, setAccountId] = useState<string>('');
-  const [useOther, setUseOther] = useState(false);
-  const [sourceId, setSourceId] = useState('');
+  // A baixa vem com a conta prevista (spec 033); de outra caixa, pela conta de passagem com a transferência.
+  const plannedElsewhere = Boolean(title.plannedAccountId && title.plannedAccountCaixaId && title.plannedAccountCaixaId !== title.caixaId);
+  const [accountId, setAccountId] = useState<string>((plannedElsewhere ? title.plannedTransitAccountId : title.plannedAccountId) ?? '');
+  const [useOther, setUseOther] = useState(plannedElsewhere);
+  const [sourceId, setSourceId] = useState(plannedElsewhere ? (title.plannedAccountId ?? '') : '');
   const [mirrorAccountId, setMirrorAccountId] = useState<string>(LATER);
   const [notes, setNotes] = useState('');
   const [error, setError] = useState<string | null>(null);

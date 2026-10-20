@@ -10,6 +10,7 @@ import {
   Pencil,
   PlusCircle,
   Wallet,
+  Wand2,
 } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -18,6 +19,7 @@ import { AccountOverview, monthEnd, monthStart } from '../components/caixa/Accou
 import { AccountFormModal, AdjustmentModal } from '../components/caixa/AccountsTab';
 import { StatementTab } from '../components/caixa/StatementTab';
 import { LoadError, Money, PageHead } from '../components/domain';
+import { RulesPanel } from '../components/reconciliation/RulesPanel';
 import { StatementImportPanel } from '../components/reconciliation/StatementImportPanel';
 import { useCrumbs } from '../components/shell/Layout';
 import { Badge, Button, ButtonLink, EmptyState, Skel, Tabs } from '../components/ui';
@@ -26,7 +28,7 @@ import { useApi } from '../lib/hooks';
 import { type AccountTab, accountLink, caixaTab } from '../lib/links';
 
 const a = t.caixa.account;
-const TABS = ['overview', 'statement', 'reconciliation'] as const;
+const TABS = ['overview', 'statement', 'reconciliation', 'rules'] as const;
 
 /**
  * Tela da conta financeira dentro da caixa (spec 004): o saldo, o resumo com os gráficos,
@@ -64,11 +66,12 @@ export function FinancialAccountPage() {
   useRegisterCommands(
     caixa && account
       ? [
-          ...TABS.filter((key) => key !== 'reconciliation' || reconciles).map((key) => ({
+          ...TABS.filter((key) => (key !== 'reconciliation' && key !== 'rules') || reconciles).map((key) => ({
             id: `account-${key}`,
-            label: `${caixa.name} › ${account.name} › ${key === 'overview' ? a.overview : t.caixa[key]}`,
+            label: `${caixa.name} › ${account.name} › ${key === 'overview' ? a.overview : key === 'rules' ? a.rules : t.caixa[key]}`,
             group: 'Ir para' as const,
-            icon: key === 'overview' ? <LayoutDashboard /> : key === 'statement' ? <FileText /> : <ListChecks />,
+            icon:
+              key === 'overview' ? <LayoutDashboard /> : key === 'statement' ? <FileText /> : key === 'rules' ? <Wand2 /> : <ListChecks />,
             run: () => navigate(accountLink(caixa.id, account.id, key)),
           })),
           ...(writable
@@ -249,6 +252,7 @@ export function FinancialAccountPage() {
                   count: rec ? rec.newLines + rec.suggestedLines || undefined : undefined,
                   to: accountLink(caixa.id, account.id, 'reconciliation'),
                 },
+                { key: 'rules', label: a.rules, icon: <Wand2 />, to: accountLink(caixa.id, account.id, 'rules') },
               ]
             : []),
         ]}
@@ -260,24 +264,21 @@ export function FinancialAccountPage() {
       )}
       {tab === 'reconciliation' &&
         (reconciles ? (
-          <>
-            <StatementImportPanel
-              key={account.id}
-              caixaId={caixa.id}
-              accountId={account.id}
-              canWrite={caixa.canWrite}
-              onChanged={changed}
-            />
-            <p className="hint mt-3">
-              {a.rulesHint}{' '}
-              <Link className="link" to={`${caixaTab(caixa.id, 'reconciliation')}?view=rules`}>
-                {a.rulesLink}
-              </Link>
-              .
-            </p>
-          </>
+          <StatementImportPanel key={account.id} caixaId={caixa.id} accountId={account.id} canWrite={caixa.canWrite} onChanged={changed} />
         ) : (
           <EmptyState icon={<ListChecks />} title={a.noReconciliation} description={a.reconciliationKinds} />
+        ))}
+      {tab === 'rules' &&
+        (reconciles ? (
+          <RulesPanel
+            key={account.id}
+            caixaId={caixa.id}
+            target={{ accountId: account.id }}
+            targetName={account.name}
+            canWrite={writable}
+          />
+        ) : (
+          <EmptyState icon={<Wand2 />} title={a.noReconciliation} description={a.reconciliationKinds} />
         ))}
 
       {editing && (

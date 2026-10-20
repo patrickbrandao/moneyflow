@@ -410,6 +410,116 @@ function legacyCapabilities(file: BackupFile): BackupFile {
   return { ...file, tables };
 }
 
+/**
+ * Arquivo anterior às regras por conta (spec 032, migration 0050): a regra de
+ * caixa ou global vira, pelo critério da migração, uma regra por alvo — cada
+ * conta corrente/poupança ativa da caixa (na global, de todas as caixas, e
+ * todos os cartões ativos), as do arquivo e as já cadastradas, mais o alvo de
+ * cada linha do arquivo classificada por ela. A original fica no alvo com mais
+ * linhas, as outras são cópias novas com a mesma origem; as linhas passam para
+ * a regra do alvo delas e o uso é recontado. Regra de cartão só ganha a coluna;
+ * sem alvo e sem linha, sai do arquivo. Conflito de unicidade volta como
+ * conflito da importação.
+ */
+async function legacyClassificationRules(ctx: ServiceContext, file: BackupFile): Promise<BackupFile> {
+  const rules = file.tables.classification_rules ?? [];
+  const legacy = new Set(rules.filter((row) => row && typeof row === 'object' && !('financial_account_id' in row)));
+  if (legacy.size === 0) return file;
+  const key = (value: unknown) => (typeof value === 'string' ? value.toLowerCase() : null);
+
+  const caixas = new Map<string, { kind: string; active: boolean }>();
+  const accounts = new Map<string, { caixaId: string; kind: string; active: boolean }>();
+  const dbCaixas = await ctx.db.execute<{ id: string; kind: string; active: boolean }>(
+    sql`SELECT id::text AS id, kind, archived_at IS NULL AS active FROM caixas`,
+  );
+  for (const c of dbCaixas.rows) caixas.set(c.id, { kind: c.kind, active: c.active });
+  const dbAccounts = await ctx.db.execute<{ id: string; caixa_id: string; kind: string; active: boolean }>(
+    sql`SELECT id::text AS id, caixa_id::text AS caixa_id, kind, archived_at IS NULL AS active FROM financial_accounts`,
+  );
+  for (const a of dbAccounts.rows) accounts.set(a.id, { caixaId: a.caixa_id, kind: a.kind, active: a.active });
+  for (const c of file.tables.caixas ?? []) {
+    const id = key(c?.id);
+    if (id && !caixas.has(id)) caixas.set(id, { kind: String(c.kind ?? 'general'), active: !c.archived_at });
+  }
+  for (const a of file.tables.financial_accounts ?? []) {
+    const id = key(a?.id);
+    const caixaId = key(a?.caixa_id);
+    if (id && caixaId && !accounts.has(id)) accounts.set(id, { caixaId, kind: String(a.kind ?? ''), active: !a.archived_at });
+  }
+  const statementKinds = new Set(['checking', 'savings']);
+  const lines = file.tables.statement_lines ?? [];
+
+  type Target = { caixaId: string; accountId: string | null };
+  const out: BackupRow[] = [];
+  const lineRule = new Map<BackupRow, string | null>();
+  for (const rule of rules) {
+    if (!legacy.has(rule)) {
+      out.push(rule);
+      continue;
+    }
+    const ruleId = key(rule.id);
+    const caixaId = key(rule.caixa_id);
+    if (caixaId && caixas.get(caixaId)?.kind === 'credit_card') {
+      out.push({ ...rule, financial_account_id: null });
+      continue;
+    }
+    const targets = new Map<string, Target & { lines: BackupRow[] }>();
+    const add = (target: Target) => {
+      const k = `${target.caixaId}|${target.accountId ?? ''}`;
+      if (!targets.has(k)) targets.set(k, { ...target, lines: [] });
+      return targets.get(k)!;
+    };
+    for (const [id, a] of accounts) {
+      if (a.active && statementKinds.has(a.kind) && (!caixaId || a.caixaId === caixaId)) add({ caixaId: a.caixaId, accountId: id });
+    }
+    if (!caixaId) for (const [id, c] of caixas) if (c.active && c.kind === 'credit_card') add({ caixaId: id, accountId: null });
+    for (const line of lines) {
+      if (!ruleId || key(line?.classification_rule_id) !== ruleId) continue;
+      const accountId = key(line.financial_account_id);
+      const account = accountId ? accounts.get(accountId) : undefined;
+      const target = account
+        ? statementKinds.has(account.kind)
+          ? add({ caixaId: account.caixaId, accountId })
+          : null
+        : key(line.card_caixa_id)
+          ? add({ caixaId: key(line.card_caixa_id)!, accountId: null })
+          : null;
+      if (target) target.lines.push(line);
+      else lineRule.set(line, null);
+    }
+    const ordered = [...targets.values()].sort((a, b) => b.lines.length - a.lines.length);
+    if (ordered.length === 0) continue;
+    ordered.forEach((target, index) => {
+      const id = index === 0 ? rule.id : randomUUID();
+      const fromLine = key(rule.created_from_line_id);
+      out.push({
+        ...rule,
+        id,
+        caixa_id: target.caixaId,
+        financial_account_id: target.accountId,
+        usage_count: target.lines.length,
+        last_used_at: target.lines.length > 0 ? (rule.last_used_at ?? null) : null,
+        created_from_line_id: fromLine && target.lines.some((l) => key(l.id) === fromLine) ? rule.created_from_line_id : null,
+      });
+      if (index > 0) for (const line of target.lines) lineRule.set(line, id as string);
+    });
+  }
+  return {
+    ...file,
+    tables: {
+      ...file.tables,
+      classification_rules: out,
+      ...(file.tables.statement_lines
+        ? {
+            statement_lines: lines.map((line) =>
+              lineRule.has(line) ? { ...line, classification_rule_id: lineRule.get(line) ?? null } : line,
+            ),
+          }
+        : {}),
+    },
+  };
+}
+
 function describe(error: unknown): string {
   const translated = translateDbError(error);
   if (translated) return t.backup.reasons.db(translated.message);
@@ -420,7 +530,7 @@ function describe(error: unknown): string {
 export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, kind: BackupKind, dryRun: boolean): Promise<ImportReport> {
   ctx.access.assertAdmin();
   const started = Date.now();
-  const file = legacyCapabilities(kind === 'full' ? await legacyAgentKits(ctx, uploaded) : uploaded);
+  const file = legacyCapabilities(kind === 'full' ? await legacyClassificationRules(ctx, await legacyAgentKits(ctx, uploaded)) : uploaded);
   const catalog = await loadCatalog(ctx.db);
   const ranks = tableRanks(catalog);
 

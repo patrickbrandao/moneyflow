@@ -6,6 +6,7 @@ import { useAction } from '../../lib/hooks';
 import { CategoryLabel } from '../domain';
 import { useToast } from '../Toast';
 import { cx } from '../ui';
+import { ContractSplit } from './ContractSplit';
 import { CreateModal, MatchModal, UnmatchModal } from './LineModals';
 
 const s = t.statements;
@@ -28,6 +29,8 @@ export function LinePair({ line }: { line: StatementLineRow }) {
         {s.targetKinds[line.target.kind]} · {formatDate(line.target.date)}
         {line.target.entityName ? ` · ${line.target.entityName}` : ''}
       </span>
+      {line.target.contract && <ContractSplit info={line.target.contract} />}
+      {line.autoSettled && <span className="ai-tag">{s.contractSplit.autoSettled}</span>}
     </span>
   );
 }

@@ -30,7 +30,10 @@ SELECT has_table(t) FROM unnest(ARRAY['contracts', 'contract_cycles', 'contract_
 SELECT columns_are('contracts', ARRAY['id', 'caixa_id', 'entity_id', 'direction', 'name', 'contract_number', 'category_id',
   'counterparty_caixa_id', 'status', 'auto_renew', 'notice_days', 'renewal_lead_days', 'reminder_every_days',
   'readjustment_index', 'readjustment_base_date', 'termination_penalty_text', 'termination_penalty_cents', 'terminated_on',
-  'termination_notes', 'notes', 'created_by', 'archived_at', 'created_at', 'updated_at']);
+  'termination_notes', 'notes', 'created_by', 'archived_at', 'created_at', 'updated_at',
+  -- 0051 (pagamentos no extrato)
+  'payment_account_id', 'transit_account_id', 'late_fee_percent', 'interest_month_percent', 'early_discount_percent',
+  'tolerance_cents', 'match_window_days', 'auto_settle']);
 SELECT columns_are('contract_cycles', ARRAY['id', 'contract_id', 'seq', 'starts_on', 'duration_months', 'ends_on',
   'periodicity', 'installments_count', 'total_cents', 'due_day', 'due_month_offset', 'readjustment_percent',
   'created_at', 'updated_at']);
