@@ -18,5 +18,6 @@ export * from './reconcile';
 export * from './recurrence';
 export * from './reports';
 export * from './schemas';
+export * from './supersede';
 export * from './text-diff';
 export type * from './types';

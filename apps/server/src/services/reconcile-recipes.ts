@@ -25,7 +25,7 @@ import type { Config } from '../config';
 import type { ServiceContext } from '../context';
 import { AppError, forbidden, notFound, translateDbError, unprocessable } from '../errors';
 import { assertCanStartRun, assertRunRate, exceededBudget } from './ai-budgets';
-import { getImport } from './statements';
+import { assertNotSuperseded, getImport } from './statements';
 import { withTx } from './tx';
 import { iso } from './util';
 
@@ -499,6 +499,7 @@ export async function runRecipe(
 ): Promise<ReconcileRecipeRunResult> {
   const detail = await getImport(ctx, importId);
   ctx.access.assertWrite(detail.caixaId);
+  assertNotSuperseded(detail);
   const recipe = await loadRecipe(ctx, recipeId);
   if (recipe.archived_at || !recipe.is_active) throw unprocessable(t.agents.recipes.inactive, 'recipe_inactive');
   const info = (await importInfo(ctx.db, importId))!;

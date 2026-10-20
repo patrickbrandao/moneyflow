@@ -16,3 +16,4 @@
 14. **F14, Limites e uso**: orçamentos mensais com aviso e bloqueio, limite de execuções por minuto e painel de uso ([028](028-limites-e-uso.md)).
 15. **F15, Fluxos autônomos**: tarefas agendadas, conciliação completa ao importar e conversa pelo Telegram por webhook ([029](029-fluxos-autonomos.md)).
 16. **F16, Receitas de conciliação**: instruções reutilizáveis de conciliação, cada uma com o seu agente, rodadas pelo play na tela do lote numa sessão nova e em sequência ao importar ([030](030-receitas-de-conciliacao.md); entregue).
+17. **F17, Lote provisório**: extrato parcial do mês como lote provisório e a troca pelo consolidado do banco, transferindo as conciliações sem relançar ([031](031-lote-provisorio-e-consolidado.md); entregue).

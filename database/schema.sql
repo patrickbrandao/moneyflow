@@ -6731,6 +6731,33 @@ COMMENT ON FUNCTION public.period_assert_open(p_caixa_id uuid, p_on date, p_what
 
 
 --
+-- Name: period_closings_provisional_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.period_closings_provisional_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  imports text;
+BEGIN
+  SELECT string_agg(DISTINCT l.statement_import_id::text, ', ') INTO imports
+    FROM statement_lines l
+    JOIN financial_accounts a ON a.id = l.financial_account_id
+    JOIN statement_imports i ON i.id = l.statement_import_id
+   WHERE a.caixa_id = NEW.caixa_id
+     AND l.posted_on >= NEW.month AND l.posted_on < (NEW.month + interval '1 month')::date
+     AND ((i.provisional AND i.superseded_by_import_id IS NULL) OR l.supersede_outcome = 'pending');
+  IF imports IS NOT NULL THEN
+    RAISE EXCEPTION 'period_closings: month % of caixa % has lines of an active provisional import or pending lines (imports: %)',
+      to_char(NEW.month, 'YYYY-MM'), NEW.caixa_id, imports
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'period_closings_provisional_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: period_closings_validate(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7393,6 +7420,121 @@ $$;
 
 
 --
+-- Name: statement_imports_supersede_commit_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.statement_imports_supersede_commit_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  imp   statement_imports;
+  other uuid;
+BEGIN
+  SELECT * INTO imp FROM statement_imports i WHERE i.id = NEW.id;
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  IF imp.provisional AND imp.superseded_by_import_id IS NULL THEN
+    -- Serializa os provisórios da conta: quem chega depois relê depois do COMMIT do outro.
+    PERFORM pg_advisory_xact_lock(hashtextextended('statement_imports_provisional:' || imp.financial_account_id::text, 0));
+    SELECT s.id INTO other
+      FROM statement_imports s
+     WHERE s.financial_account_id = imp.financial_account_id AND s.id <> imp.id
+       AND s.provisional AND s.superseded_by_import_id IS NULL
+       AND s.period_start <= imp.period_end AND imp.period_start <= s.period_end
+     LIMIT 1;
+    IF FOUND THEN
+      RAISE EXCEPTION 'statement_imports: provisional import % overlaps active provisional import % of the same account',
+        imp.id, other
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_imports_provisional_overlap_check';
+    END IF;
+  END IF;
+
+  IF imp.superseded_by_import_id IS NOT NULL
+     AND EXISTS (SELECT 1 FROM statement_lines l WHERE l.statement_import_id = imp.id AND l.supersede_outcome IS NULL) THEN
+    RAISE EXCEPTION 'statement_imports: every line of superseded import % needs a supersede_outcome', imp.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_imports_superseded_lines_check';
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: statement_imports_supersede_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.statement_imports_supersede_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  target statement_imports;
+  caixa  uuid;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.superseded_by_import_id IS NOT NULL THEN
+      RAISE EXCEPTION 'statement_imports: import % was superseded and cannot be deleted', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_imports_superseded_immutable_check';
+    END IF;
+    RETURN OLD;
+  END IF;
+
+  IF TG_OP = 'UPDATE' AND OLD.superseded_by_import_id IS NOT NULL
+     AND (NEW.provisional IS DISTINCT FROM OLD.provisional
+          OR NEW.superseded_by_import_id IS DISTINCT FROM OLD.superseded_by_import_id
+          OR NEW.superseded_at IS DISTINCT FROM OLD.superseded_at) THEN
+    RAISE EXCEPTION 'statement_imports: import % was superseded; provisional and the supersession are final', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_imports_superseded_immutable_check';
+  END IF;
+
+  -- A troca: o substituto é da mesma conta e, no UPDATE (a troca ao vivo), não está substituído. No INSERT (restauração
+  -- de um backup) a cadeia já aconteceu e o substituto pode ter sido substituído depois.
+  IF NEW.superseded_by_import_id IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.superseded_by_import_id IS NULL) THEN
+    SELECT * INTO target FROM statement_imports i WHERE i.id = NEW.superseded_by_import_id;
+    IF FOUND AND (target.financial_account_id IS DISTINCT FROM NEW.financial_account_id
+                  OR (TG_OP = 'UPDATE' AND target.superseded_by_import_id IS NOT NULL)) THEN
+      RAISE EXCEPTION 'statement_imports: import % can only be superseded by an import of the same account that is not superseded',
+        NEW.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_imports_superseded_by_check';
+    END IF;
+  END IF;
+
+  -- Marcar como provisório.
+  IF TG_OP = 'UPDATE' AND NEW.provisional AND NOT OLD.provisional THEN
+    IF EXISTS (SELECT 1 FROM statement_imports s WHERE s.superseded_by_import_id = NEW.id) THEN
+      RAISE EXCEPTION 'statement_imports: import % already superseded another import and cannot become provisional', NEW.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_imports_provisional_supersedes_check';
+    END IF;
+    SELECT a.caixa_id INTO caixa FROM financial_accounts a WHERE a.id = NEW.financial_account_id;
+    IF EXISTS (SELECT 1 FROM statement_lines l
+                WHERE l.statement_import_id = NEW.id AND period_is_closed(caixa, l.posted_on)) THEN
+      RAISE EXCEPTION 'statement_imports: import % has lines in a closed month of caixa % and cannot become provisional',
+        NEW.id, caixa
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_provisional_closed_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: statement_imports_sync_provisional(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.statement_imports_sync_provisional() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE statement_lines SET provisional = NEW.provisional
+   WHERE statement_import_id = NEW.id AND provisional IS DISTINCT FROM NEW.provisional;
+  RETURN NULL;
+END
+$$;
+
+
+--
 -- Name: statement_imports_validate(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7469,6 +7611,158 @@ $$;
 --
 
 COMMENT ON FUNCTION public.statement_line_inferred_created_entry(p_line_id uuid) IS 'Uso interno (backfill da 0048): created_entry inferido para uma linha matched pelo instante de criação do lançamento igual ao matched_at (mesma transação). Nulo se o lançamento é mais antigo que a conciliação. Não é usado pela aplicação, que grava created_entry ao conciliar.';
+
+
+--
+-- Name: statement_lines_supersede_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.statement_lines_supersede_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  imp            statement_imports;
+  target         statement_lines;
+  caixa          uuid;
+  links_changed  boolean;
+  class_changed  boolean;
+  sugg_changed   boolean;
+  line_changed   boolean;
+  swap_ok        boolean;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM statement_imports i
+                WHERE i.id = OLD.statement_import_id AND i.superseded_by_import_id IS NOT NULL) THEN
+      RAISE EXCEPTION 'statement_lines: line % belongs to a superseded import and cannot be deleted', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_superseded_immutable_check';
+    END IF;
+    RETURN OLD;
+  END IF;
+
+  SELECT * INTO imp FROM statement_imports i WHERE i.id = NEW.statement_import_id;
+  IF NOT FOUND THEN
+    RETURN NEW;  -- a FK recusa
+  END IF;
+
+  -- A marca é a do lote: copiada no INSERT; só muda acompanhando o lote.
+  IF TG_OP = 'INSERT' THEN
+    NEW.provisional := imp.provisional;
+  ELSIF NEW.provisional IS DISTINCT FROM OLD.provisional AND NEW.provisional IS DISTINCT FROM imp.provisional THEN
+    RAISE EXCEPTION 'statement_lines: provisional of line % follows its import %', OLD.id, imp.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_provisional_check';
+  END IF;
+
+  -- Provisório ativo não entra em mês fechado.
+  IF TG_OP = 'INSERT' AND imp.provisional AND imp.superseded_by_import_id IS NULL THEN
+    SELECT a.caixa_id INTO caixa FROM financial_accounts a WHERE a.id = imp.financial_account_id;
+    IF period_is_closed(caixa, NEW.posted_on) THEN
+      RAISE EXCEPTION 'statement_lines: provisional import % cannot have a line in closed month % of caixa %',
+        imp.id, to_char(NEW.posted_on, 'YYYY-MM'), caixa
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_provisional_closed_check';
+    END IF;
+  END IF;
+
+  -- Desfecho só em lote substituído; linha de lote substituído sempre com desfecho.
+  IF imp.superseded_by_import_id IS NULL THEN
+    IF NEW.supersede_outcome IS NOT NULL THEN
+      RAISE EXCEPTION 'statement_lines: supersede_outcome only on lines of a superseded import (line %)', NEW.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_supersede_import_check';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'INSERT' AND NEW.supersede_outcome IS NULL THEN
+    RAISE EXCEPTION 'statement_lines: a line of superseded import % needs a supersede_outcome', imp.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_imports_superseded_lines_check';
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    links_changed := NEW.status IS DISTINCT FROM OLD.status
+                     OR NEW.movement_id IS DISTINCT FROM OLD.movement_id
+                     OR NEW.title_id IS DISTINCT FROM OLD.title_id
+                     OR NEW.card_invoice_item_id IS DISTINCT FROM OLD.card_invoice_item_id
+                     OR NEW.matched_at IS DISTINCT FROM OLD.matched_at
+                     OR NEW.created_entry IS DISTINCT FROM OLD.created_entry;
+    -- A regra excluída (FK ON DELETE SET NULL) pode soltar classification_rule_id.
+    class_changed := NEW.entity_id IS DISTINCT FROM OLD.entity_id
+                     OR NEW.category_id IS DISTINCT FROM OLD.category_id
+                     OR NEW.classification_source IS DISTINCT FROM OLD.classification_source
+                     OR (NEW.classification_rule_id IS DISTINCT FROM OLD.classification_rule_id
+                         AND NEW.classification_rule_id IS NOT NULL);
+    sugg_changed  := NEW.supersede_suggested_line_id IS DISTINCT FROM OLD.supersede_suggested_line_id
+                     OR NEW.supersede_suggestion_reason IS DISTINCT FROM OLD.supersede_suggestion_reason;
+    line_changed  := NEW.superseded_by_line_id IS DISTINCT FROM OLD.superseded_by_line_id;
+
+    -- A troca: a conciliada transfere ou fica pendente (como está); as demais casam ou são descartadas.
+    swap_ok := CASE NEW.supersede_outcome
+                 WHEN 'transferred' THEN OLD.status = 'matched'
+                 WHEN 'pending'     THEN OLD.status = 'matched' AND NOT links_changed
+                 WHEN 'paired'      THEN OLD.status <> 'matched'
+                 WHEN 'dropped'     THEN OLD.status <> 'matched'
+                 ELSE false
+               END;
+
+    IF class_changed THEN
+      RAISE EXCEPTION 'statement_lines: line % of a superseded import cannot change its classification', OLD.id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_superseded_immutable_check';
+    END IF;
+
+    IF OLD.supersede_outcome IS NULL THEN
+      IF NEW.supersede_outcome IS NULL THEN
+        IF links_changed OR line_changed OR sugg_changed THEN
+          RAISE EXCEPTION 'statement_lines: line % of a superseded import only changes by its supersede outcome', OLD.id
+            USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_superseded_immutable_check';
+        END IF;
+      ELSIF NOT swap_ok THEN
+        RAISE EXCEPTION 'statement_lines: line % (status %) cannot be superseded as %', OLD.id, OLD.status, NEW.supersede_outcome
+          USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_supersede_transition_check';
+      END IF;
+    ELSIF OLD.supersede_outcome = 'pending' THEN
+      IF NEW.supersede_outcome = 'pending' THEN
+        IF links_changed OR line_changed THEN
+          RAISE EXCEPTION 'statement_lines: pending line % only changes by leaving pending or by its suggestion', OLD.id
+            USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_superseded_immutable_check';
+        END IF;
+      ELSIF NOT coalesce(NEW.supersede_outcome IN ('transferred', 'kept')
+                         OR (NEW.supersede_outcome = 'entry_deleted' AND OLD.created_entry IS NOT NULL), false) THEN
+        RAISE EXCEPTION 'statement_lines: pending line % cannot become %', OLD.id, coalesce(NEW.supersede_outcome, 'NULL')
+          USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_supersede_transition_check';
+      END IF;
+    ELSE
+      IF NEW.supersede_outcome IS DISTINCT FROM OLD.supersede_outcome THEN
+        RAISE EXCEPTION 'statement_lines: supersede outcome % of line % is final', OLD.supersede_outcome, OLD.id
+          USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_supersede_transition_check';
+      END IF;
+      IF links_changed OR line_changed OR sugg_changed THEN
+        RAISE EXCEPTION 'statement_lines: line % of a superseded import is read-only', OLD.id
+          USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_superseded_immutable_check';
+      END IF;
+    END IF;
+  END IF;
+
+  -- A linha que ficou no lugar e a sugestão: do lote substituto (a sugestão com o mesmo valor).
+  IF NEW.superseded_by_line_id IS NOT NULL
+     AND (TG_OP = 'INSERT' OR NEW.superseded_by_line_id IS DISTINCT FROM OLD.superseded_by_line_id) THEN
+    SELECT * INTO target FROM statement_lines l WHERE l.id = NEW.superseded_by_line_id;
+    IF FOUND AND (target.statement_import_id <> imp.superseded_by_import_id
+                  OR target.financial_account_id IS DISTINCT FROM NEW.financial_account_id) THEN
+      RAISE EXCEPTION 'statement_lines: line % must be superseded by a line of import %', NEW.id, imp.superseded_by_import_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_superseded_by_line_check';
+    END IF;
+  END IF;
+
+  IF NEW.supersede_suggested_line_id IS NOT NULL
+     AND (TG_OP = 'INSERT' OR NEW.supersede_suggested_line_id IS DISTINCT FROM OLD.supersede_suggested_line_id) THEN
+    SELECT * INTO target FROM statement_lines l WHERE l.id = NEW.supersede_suggested_line_id;
+    IF FOUND AND (target.statement_import_id <> imp.superseded_by_import_id OR target.amount_cents <> NEW.amount_cents) THEN
+      RAISE EXCEPTION 'statement_lines: suggestion for line % must be a line of import % with the same amount',
+        NEW.id, imp.superseded_by_import_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_supersede_suggestion_target_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
 
 
 --
@@ -8648,7 +8942,7 @@ CREATE TABLE public.ai_conversations (
     CONSTRAINT ai_conversations_archived_reason_archived_check CHECK (((archived_reason IS NULL) OR (archived_at IS NOT NULL))),
     CONSTRAINT ai_conversations_archived_reason_check CHECK ((archived_reason = ANY (ARRAY['finished'::text, 'forked'::text, 'migrated_from_multi'::text, 'import_conflict'::text]))),
     CONSTRAINT ai_conversations_fork_check CHECK ((forked_from_conversation_id <> id)),
-    CONSTRAINT ai_conversations_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'scheduled_task'::text, 'reconcile_statement'::text]))),
+    CONSTRAINT ai_conversations_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'scheduled_task'::text, 'reconcile_statement'::text, 'supersede_pairs'::text]))),
     CONSTRAINT ai_conversations_screen_context_check CHECK ((jsonb_typeof(screen_context) = 'object'::text)),
     CONSTRAINT ai_conversations_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 200))),
     CONSTRAINT ai_conversations_title_source_check CHECK ((title_source = ANY (ARRAY['auto'::text, 'user'::text])))
@@ -8722,7 +9016,7 @@ COMMENT ON COLUMN public.ai_conversations.last_message_at IS 'Instante da últim
 -- Name: COLUMN ai_conversations.purpose; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_conversations.purpose IS 'Finalidade, definida no INSERT e imutável: chat (sessão do usuário, padrão) ou o fluxo automático que a criou (document_reading, classify_lines, contract_reading, contract_markdown, scheduled_task = um disparo de tarefa agendada, reconcile_statement = conciliação completa de um lote de extrato; mesmo vocabulário de ai_usage.purpose). Conversas de fluxo ficam fora da sessão ativa (ai_conversations_active_chat_key), da lista e da busca; scheduled_task e reconcile_statement rodam com as tools do kit do agente, os demais fluxos sem tools. A bifurcação é sempre chat.';
+COMMENT ON COLUMN public.ai_conversations.purpose IS 'Finalidade, definida no INSERT e imutável: chat (sessão do usuário, padrão) ou o fluxo automático que a criou (document_reading, classify_lines, contract_reading, contract_markdown, supersede_pairs = pares das sobras do lote provisório substituído, scheduled_task = um disparo de tarefa agendada, reconcile_statement = conciliação completa de um lote de extrato; mesmo vocabulário de ai_usage.purpose). Conversas de fluxo ficam fora da sessão ativa (ai_conversations_active_chat_key), da lista e da busca; scheduled_task e reconcile_statement rodam com as tools do kit do agente, os demais fluxos sem tools. A bifurcação é sempre chat.';
 
 
 --
@@ -9042,7 +9336,7 @@ CREATE TABLE public.ai_usage (
     CONSTRAINT ai_usage_cost_check CHECK (((cost_micros >= 0) AND ((cost_micros IS NULL) = (currency IS NULL)) AND ((price_id IS NULL) OR (cost_micros IS NOT NULL)))),
     CONSTRAINT ai_usage_currency_check CHECK ((currency = ANY (ARRAY['USD'::text, 'BRL'::text]))),
     CONSTRAINT ai_usage_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
-    CONSTRAINT ai_usage_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'scheduled_task'::text, 'reconcile_statement'::text]))),
+    CONSTRAINT ai_usage_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'scheduled_task'::text, 'reconcile_statement'::text, 'supersede_pairs'::text]))),
     CONSTRAINT ai_usage_tokens_check CHECK (((input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)))
 );
 
@@ -9065,7 +9359,7 @@ COMMENT ON COLUMN public.ai_usage.message_id IS 'Mensagem do assistente que a ch
 -- Name: COLUMN ai_usage.purpose; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_usage.purpose IS 'chat (loop do agente), title (título automático), embedding (indexação/busca semântica), vision_describe (descrição de anexo pelo provedor de visão), transcription (áudio→texto), speech (texto→áudio) ou a finalidade de um fluxo automático: document_reading (leitura de documento), classify_lines (sugestões da conciliação), contract_reading (leitura do PDF do contrato), contract_markdown (PDF do contrato → markdown), scheduled_task (tarefa agendada) e reconcile_statement (conciliação completa ao importar). chat numa conversa de fluxo vira a finalidade da conversa.';
+COMMENT ON COLUMN public.ai_usage.purpose IS 'chat (loop do agente), title (título automático), embedding (indexação/busca semântica), vision_describe (descrição de anexo pelo provedor de visão), transcription (áudio→texto), speech (texto→áudio) ou a finalidade de um fluxo automático: document_reading (leitura de documento), classify_lines (sugestões da conciliação), contract_reading (leitura do PDF do contrato), contract_markdown (PDF do contrato → markdown), scheduled_task (tarefa agendada), reconcile_statement (conciliação completa ao importar) e supersede_pairs (pares das sobras do lote provisório substituído). chat numa conversa de fluxo vira a finalidade da conversa.';
 
 
 --
@@ -9555,7 +9849,7 @@ CREATE TABLE public.ai_requests (
     CONSTRAINT ai_requests_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text)),
     CONSTRAINT ai_requests_operation_check CHECK ((operation = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'test_connection'::text, 'list_models'::text]))),
     CONSTRAINT ai_requests_path_check CHECK (((path ~ '^[^[:space:]]+$'::text) AND (length(path) <= 2000))),
-    CONSTRAINT ai_requests_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'scheduled_task'::text, 'reconcile_statement'::text]))),
+    CONSTRAINT ai_requests_purpose_check CHECK ((purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'scheduled_task'::text, 'reconcile_statement'::text, 'supersede_pairs'::text]))),
     CONSTRAINT ai_requests_purpose_null_check CHECK (((purpose IS NULL) = (operation = ANY (ARRAY['test_connection'::text, 'list_models'::text])))),
     CONSTRAINT ai_requests_status_check CHECK ((status = ANY (ARRAY['running'::text, 'ok'::text, 'error'::text, 'canceled'::text]))),
     CONSTRAINT ai_requests_tokens_check CHECK (((input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)))
@@ -10387,10 +10681,15 @@ CREATE TABLE public.statement_imports (
     notes text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    provisional boolean DEFAULT false NOT NULL,
+    superseded_by_import_id uuid,
+    superseded_at timestamp with time zone,
     CONSTRAINT statement_imports_bank_balance_check CHECK (((bank_balance_cents IS NULL) = (bank_balance_on IS NULL))),
     CONSTRAINT statement_imports_csv_mapping_check CHECK (((format = 'csv'::text) OR (csv_mapping_id IS NULL))),
     CONSTRAINT statement_imports_format_check CHECK ((format = ANY (ARRAY['ofx'::text, 'csv'::text]))),
     CONSTRAINT statement_imports_period_check CHECK ((period_end >= period_start)),
+    CONSTRAINT statement_imports_provisional_check CHECK (((NOT provisional) OR (financial_account_id IS NOT NULL))),
+    CONSTRAINT statement_imports_superseded_check CHECK ((((superseded_by_import_id IS NULL) = (superseded_at IS NULL)) AND ((superseded_by_import_id IS NULL) OR (provisional AND (superseded_by_import_id <> id))))),
     CONSTRAINT statement_imports_target_check CHECK (((num_nonnulls(financial_account_id, card_caixa_id) = 1) AND ((card_invoice_id IS NULL) OR (card_caixa_id IS NOT NULL))))
 );
 
@@ -10428,6 +10727,27 @@ COMMENT ON COLUMN public.statement_imports.card_invoice_id IS 'Fatura do app a q
 --
 
 COMMENT ON COLUMN public.statement_imports.bank_balance_cents IS 'Saldo informado pelo banco (OFX LEDGERBAL ou digitado) em bank_balance_on; comparado com o do app em statement_import_balances.';
+
+
+--
+-- Name: COLUMN statement_imports.provisional; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.statement_imports.provisional IS 'Lote provisório (spec 031): extrato parcial de conta (nunca de cartão) importado antes do consolidado do mês. As linhas dele ficam fora da deduplicação da conta (statement_lines.provisional). Provisórios ativos da mesma conta não se sobrepõem (no COMMIT); não vira provisório com linha em mês fechado nem se já substituiu outro lote.';
+
+
+--
+-- Name: COLUMN statement_imports.superseded_by_import_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.statement_imports.superseded_by_import_id IS 'Lote (da mesma conta, não substituído no momento da troca) que substituiu este provisório; preenchido junto com superseded_at. Final: provisional, superseded_by_import_id e superseded_at não mudam mais, o lote não é excluído e o substituto também não (FK). Toda linha do substituído tem supersede_outcome (no COMMIT).';
+
+
+--
+-- Name: COLUMN statement_imports.superseded_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.statement_imports.superseded_at IS 'Instante da troca pelo consolidado (junto com superseded_by_import_id).';
 
 
 --
@@ -13288,6 +13608,11 @@ CREATE TABLE public.statement_lines (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     created_entry text,
+    provisional boolean DEFAULT false NOT NULL,
+    superseded_by_line_id uuid,
+    supersede_outcome text,
+    supersede_suggested_line_id uuid,
+    supersede_suggestion_reason text,
     CONSTRAINT statement_lines_amount_cents_check CHECK ((amount_cents <> 0)),
     CONSTRAINT statement_lines_classification_source_check CHECK (((classification_source = ANY (ARRAY['rule'::text, 'agent'::text, 'user'::text])) AND ((classification_rule_id IS NULL) OR (NOT (classification_source IS DISTINCT FROM 'rule'::text))))),
     CONSTRAINT statement_lines_created_entry_check CHECK (((created_entry IS NULL) OR ((created_entry = ANY (ARRAY['adjustment'::text, 'title'::text, 'settlement'::text, 'purchase'::text])) AND (status = 'matched'::text)))),
@@ -13308,7 +13633,9 @@ CASE status
     ELSE (num_nonnulls(movement_id, title_id, card_invoice_item_id) = 0)
 END AND ((status = 'matched'::text) = (matched_at IS NOT NULL)))),
     CONSTRAINT statement_lines_raw_check CHECK ((jsonb_typeof(raw) = 'object'::text)),
-    CONSTRAINT statement_lines_status_check CHECK ((status = ANY (ARRAY['matched'::text, 'suggested'::text, 'new'::text, 'ignored'::text]))),
+    CONSTRAINT statement_lines_status_check CHECK ((status = ANY (ARRAY['matched'::text, 'suggested'::text, 'new'::text, 'ignored'::text, 'superseded'::text]))),
+    CONSTRAINT statement_lines_supersede_outcome_check CHECK ((((supersede_outcome IS NULL) OR (supersede_outcome = ANY (ARRAY['transferred'::text, 'paired'::text, 'dropped'::text, 'pending'::text, 'kept'::text, 'entry_deleted'::text]))) AND ((status = 'superseded'::text) = COALESCE((supersede_outcome <> 'pending'::text), false)) AND ((supersede_outcome IS DISTINCT FROM 'pending'::text) OR (status = 'matched'::text)) AND ((superseded_by_line_id IS NOT NULL) = COALESCE((supersede_outcome = ANY (ARRAY['transferred'::text, 'paired'::text])), false)) AND (superseded_by_line_id IS DISTINCT FROM id))),
+    CONSTRAINT statement_lines_supersede_suggestion_check CHECK ((((supersede_suggested_line_id IS NULL) OR (NOT (supersede_outcome IS DISTINCT FROM 'pending'::text))) AND ((supersede_suggestion_reason IS NULL) OR ((supersede_suggested_line_id IS NOT NULL) AND (btrim(supersede_suggestion_reason) <> ''::text) AND (length(supersede_suggestion_reason) <= 500))))),
     CONSTRAINT statement_lines_target_check CHECK ((num_nonnulls(financial_account_id, card_caixa_id) = 1))
 );
 
@@ -13317,7 +13644,7 @@ END AND ((status = 'matched'::text) = (matched_at IS NOT NULL)))),
 -- Name: TABLE statement_lines; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.statement_lines IS 'Linhas de um extrato importado (spec 009), deduplicadas por conta (ou cartão) via dedup_hash. matched = conciliada (movimento ou item de fatura), suggested = casamento proposto aguardando confirmação, new = sem par (vira baixa ou movimento avulso), ignored = descartada.';
+COMMENT ON TABLE public.statement_lines IS 'Linhas de um extrato importado (spec 009), deduplicadas por conta (só entre lotes não provisórios) ou cartão via dedup_hash. matched = conciliada (movimento ou item de fatura), suggested = casamento proposto aguardando confirmação, new = sem par (vira baixa ou movimento avulso), ignored = descartada, superseded = linha de um lote provisório substituído pelo consolidado (spec 031), sem vínculo, com o desfecho em supersede_outcome.';
 
 
 --
@@ -13426,6 +13753,41 @@ COMMENT ON COLUMN public.statement_lines.created_entry IS 'Só em matched: o lan
 
 
 --
+-- Name: COLUMN statement_lines.provisional; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.statement_lines.provisional IS 'Cópia de statement_imports.provisional, mantida pelo banco (preenchida no INSERT; acompanha o lote ao marcar ou desmarcar). Linha provisória fica fora de statement_lines_account_dedup_key; desmarcar um lote cujas linhas repetem as de outro lote não provisório dá 23505.';
+
+
+--
+-- Name: COLUMN statement_lines.superseded_by_line_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.statement_lines.superseded_by_line_id IS 'transferred/paired: a linha do lote que substituiu o desta linha (statement_imports.superseded_by_import_id), que ficou no lugar dela.';
+
+
+--
+-- Name: COLUMN statement_lines.supersede_outcome; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.statement_lines.supersede_outcome IS 'Só em linha de lote substituído (spec 031), e toda linha dele tem um: transferred (conciliação passada à linha do consolidado), paired (ignorada/nova com par; a classificação passou), dropped (ignorada/nova sem par), pending (conciliada sem par: continua matched, aguardando o usuário), kept (pendente que soltou o vínculo e manteve o lançamento), entry_deleted (pendente cujo lançamento criado pela linha foi excluído). Na troca, matched vira transferred ou pending e as demais, paired ou dropped; pending só sai para transferred, kept ou entry_deleted (este só com created_entry); os outros são finais.';
+
+
+--
+-- Name: COLUMN statement_lines.supersede_suggested_line_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.statement_lines.supersede_suggested_line_id IS 'Só em pending: par sugerido pela IA (fluxo supersede_pairs), uma linha do lote substituto com o mesmo amount_cents. A aplicação limpa ao aprovar, descartar ou sair de pending.';
+
+
+--
+-- Name: COLUMN statement_lines.supersede_suggestion_reason; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.statement_lines.supersede_suggestion_reason IS 'Motivo curto da sugestão da IA (até 500 caracteres).';
+
+
+--
 -- Name: statement_import_balances; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -13449,7 +13811,9 @@ CREATE VIEW public.statement_import_balances WITH (security_invoker='true') AS
     (COALESCE(c.matched, (0)::bigint))::integer AS matched_lines,
     (COALESCE(c.suggested, (0)::bigint))::integer AS suggested_lines,
     (COALESCE(c.new, (0)::bigint))::integer AS new_lines,
-    (COALESCE(c.ignored, (0)::bigint))::integer AS ignored_lines
+    (COALESCE(c.ignored, (0)::bigint))::integer AS ignored_lines,
+    i.provisional,
+    (i.superseded_by_import_id IS NOT NULL) AS superseded
    FROM (public.statement_imports i
      LEFT JOIN LATERAL ( SELECT count(*) AS lines,
             count(*) FILTER (WHERE (l.status = 'matched'::text)) AS matched,
@@ -13464,7 +13828,7 @@ CREATE VIEW public.statement_import_balances WITH (security_invoker='true') AS
 -- Name: VIEW statement_import_balances; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.statement_import_balances IS 'Por lote: saldo informado pelo banco × saldo do app na mesma data (difference_cents = banco − app; 0 = sem divergência) e contagem de linhas por status. Saldo só para contas (não para cartão).';
+COMMENT ON VIEW public.statement_import_balances IS 'Por lote: saldo informado pelo banco × saldo do app na mesma data (difference_cents = banco − app; 0 = sem divergência) e contagem de linhas por status (lines inclui as superseded). Saldo só para contas (não para cartão). provisional e superseded (spec 031): a aplicação tira os substituídos da divergência e do "lote anterior".';
 
 
 --
@@ -16247,10 +16611,24 @@ CREATE INDEX statement_imports_imported_by_user_id_idx ON public.statement_impor
 
 
 --
+-- Name: statement_imports_provisional_active_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX statement_imports_provisional_active_idx ON public.statement_imports USING btree (financial_account_id, period_start) WHERE (provisional AND (superseded_by_import_id IS NULL));
+
+
+--
+-- Name: statement_imports_superseded_by_import_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX statement_imports_superseded_by_import_id_idx ON public.statement_imports USING btree (superseded_by_import_id);
+
+
+--
 -- Name: statement_lines_account_dedup_key; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX statement_lines_account_dedup_key ON public.statement_lines USING btree (financial_account_id, dedup_hash) WHERE (financial_account_id IS NOT NULL);
+CREATE UNIQUE INDEX statement_lines_account_dedup_key ON public.statement_lines USING btree (financial_account_id, dedup_hash) WHERE ((financial_account_id IS NOT NULL) AND (NOT provisional));
 
 
 --
@@ -16335,6 +16713,27 @@ CREATE UNIQUE INDEX statement_lines_movement_matched_key ON public.statement_lin
 --
 
 CREATE INDEX statement_lines_status_idx ON public.statement_lines USING btree (statement_import_id, status);
+
+
+--
+-- Name: statement_lines_supersede_pending_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX statement_lines_supersede_pending_idx ON public.statement_lines USING btree (financial_account_id, posted_on) WHERE (supersede_outcome = 'pending'::text);
+
+
+--
+-- Name: statement_lines_supersede_suggested_line_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX statement_lines_supersede_suggested_line_id_idx ON public.statement_lines USING btree (supersede_suggested_line_id);
+
+
+--
+-- Name: statement_lines_superseded_by_line_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX statement_lines_superseded_by_line_id_idx ON public.statement_lines USING btree (superseded_by_line_id);
 
 
 --
@@ -17759,6 +18158,13 @@ CREATE TRIGGER period_closings_audit AFTER INSERT OR DELETE OR UPDATE ON public.
 
 
 --
+-- Name: period_closings period_closings_provisional_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER period_closings_provisional_check BEFORE INSERT ON public.period_closings FOR EACH ROW EXECUTE FUNCTION public.period_closings_provisional_check();
+
+
+--
 -- Name: period_closings period_closings_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -17892,6 +18298,27 @@ CREATE TRIGGER statement_imports_set_updated_at BEFORE UPDATE ON public.statemen
 
 
 --
+-- Name: statement_imports statement_imports_supersede_commit_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER statement_imports_supersede_commit_check AFTER INSERT OR UPDATE OF provisional, period_start, period_end, superseded_by_import_id ON public.statement_imports DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.statement_imports_supersede_commit_check();
+
+
+--
+-- Name: statement_imports statement_imports_supersede_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER statement_imports_supersede_validate BEFORE INSERT OR DELETE OR UPDATE ON public.statement_imports FOR EACH ROW EXECUTE FUNCTION public.statement_imports_supersede_validate();
+
+
+--
+-- Name: statement_imports statement_imports_sync_provisional; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER statement_imports_sync_provisional AFTER UPDATE OF provisional ON public.statement_imports FOR EACH ROW WHEN ((new.provisional IS DISTINCT FROM old.provisional)) EXECUTE FUNCTION public.statement_imports_sync_provisional();
+
+
+--
 -- Name: statement_imports statement_imports_validate; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -17902,7 +18329,7 @@ CREATE TRIGGER statement_imports_validate BEFORE INSERT OR UPDATE ON public.stat
 -- Name: statement_lines statement_lines_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER statement_lines_audit AFTER INSERT OR DELETE OR UPDATE ON public.statement_lines FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+CREATE TRIGGER statement_lines_audit AFTER INSERT OR DELETE OR UPDATE ON public.statement_lines FOR EACH ROW EXECUTE FUNCTION public.audit_row('provisional');
 
 
 --
@@ -17910,6 +18337,13 @@ CREATE TRIGGER statement_lines_audit AFTER INSERT OR DELETE OR UPDATE ON public.
 --
 
 CREATE TRIGGER statement_lines_set_updated_at BEFORE UPDATE ON public.statement_lines FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: statement_lines statement_lines_supersede_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER statement_lines_supersede_validate BEFORE INSERT OR DELETE OR UPDATE ON public.statement_lines FOR EACH ROW EXECUTE FUNCTION public.statement_lines_supersede_validate();
 
 
 --
@@ -19506,6 +19940,14 @@ ALTER TABLE ONLY public.statement_imports
 
 
 --
+-- Name: statement_imports statement_imports_superseded_by_import_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.statement_imports
+    ADD CONSTRAINT statement_imports_superseded_by_import_id_fkey FOREIGN KEY (superseded_by_import_id) REFERENCES public.statement_imports(id);
+
+
+--
 -- Name: statement_lines statement_lines_card_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -19567,6 +20009,22 @@ ALTER TABLE ONLY public.statement_lines
 
 ALTER TABLE ONLY public.statement_lines
     ADD CONSTRAINT statement_lines_statement_import_id_fkey FOREIGN KEY (statement_import_id) REFERENCES public.statement_imports(id) ON DELETE CASCADE;
+
+
+--
+-- Name: statement_lines statement_lines_supersede_suggested_line_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.statement_lines
+    ADD CONSTRAINT statement_lines_supersede_suggested_line_id_fkey FOREIGN KEY (supersede_suggested_line_id) REFERENCES public.statement_lines(id);
+
+
+--
+-- Name: statement_lines statement_lines_superseded_by_line_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.statement_lines
+    ADD CONSTRAINT statement_lines_superseded_by_line_id_fkey FOREIGN KEY (superseded_by_line_id) REFERENCES public.statement_lines(id);
 
 
 --

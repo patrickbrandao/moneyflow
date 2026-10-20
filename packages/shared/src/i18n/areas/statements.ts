@@ -134,7 +134,10 @@ export const statementsStrings = {
 
   /* detalhe do lote */
   back: 'Voltar aos lotes',
-  statuses: { matched: 'Conciliada', suggested: 'Sugerida', new: 'Nova', ignored: 'Ignorada' } as Record<string, string>,
+  statuses: { matched: 'Conciliada', suggested: 'Sugerida', new: 'Nova', ignored: 'Ignorada', superseded: 'Substituída' } as Record<
+    string,
+    string
+  >,
   filterAll: 'Todas',
   pair: 'Par no app',
   noPair: 'sem par',
@@ -259,4 +262,75 @@ export const statementsStrings = {
   showArchivedRules: 'Mostrar arquivadas',
   entity: 'Entidade',
   category: 'Categoria',
+
+  /* lote provisório e a troca pelo consolidado (spec 031) */
+  supersede: {
+    provisional: 'Provisório',
+    provisionalOption: 'Extrato parcial (provisório)',
+    provisionalHint: 'Use para um extrato que ainda não fechou o mês; quando o banco liberar o consolidado, troque por ele.',
+    supersededBy: (file: string) => `Substituído por ${file}`,
+    supersededNote: (file: string, date: string) =>
+      `Este lote provisório foi substituído por ${file} em ${date}. Ele fica só para consulta, fora da divergência; cada linha mostra o que aconteceu com ela.`,
+    markProvisional: 'Marcar como provisório',
+    unmarkProvisional: 'Desmarcar provisório',
+    markedProvisional: 'Lote marcado como provisório.',
+    unmarkedProvisional: 'O lote deixou de ser provisório.',
+    replaceOption: (file: string, period: string) => `Substituir o lote provisório ${file} (${period}) por este extrato`,
+    replaceHint: 'As conciliações do provisório passam para as linhas deste extrato, sem lançar de novo.',
+    provisionalReplacesHint: (files: string) => `Este provisório substitui o anterior que ele cobre: ${files}.`,
+    overlapWarning: (files: string) =>
+      `A conta tem lote provisório ativo no período (${files}): passe supersedeImportIds para trocá-lo por este extrato, ou as transações dele entram em dobro.`,
+    overlapBanner: (file: string) => `Este extrato cobre o período do lote provisório ${file}.`,
+    overlapAiSkipped:
+      'A conciliação com IA ao importar não rodou: troque antes o lote provisório do período, para o agente não lançar de novo o que ele já conciliou.',
+    replace: 'Substituir',
+    replaceWithConsolidated: 'Substituir pelo consolidado',
+    chooseConsolidated: 'Lote consolidado',
+    noConsolidated: 'Nenhum lote não provisório desta conta cobre o período deste provisório. Importe o consolidado primeiro.',
+    previewTitle: 'Substituir o provisório pelo consolidado',
+    previewing: 'Calculando a troca…',
+    confirmReplace: 'Substituir',
+    replaced: (n: number) => `Provisório substituído: ${n} conciliação(ões) passaram para o consolidado.`,
+    transferred: 'Conciliações transferidas',
+    paired: 'Linhas casadas sem conciliação',
+    dropped: 'Linhas descartadas (nada a fazer)',
+    pending: 'Sobras do provisório (pendentes)',
+    consolidatedLeftover: 'Linhas do consolidado sem par',
+    pendingWarning: (n: number) =>
+      `${n} linha(s) conciliada(s) do provisório ficam sem par: decida cada uma (casar, manter ou excluir o lançamento). O mês não fecha antes disso.`,
+    leftoverTitle: (n: number) => `Sobras do provisório (${n})`,
+    leftoverHint:
+      'Conciliadas no provisório e sem par neste extrato: o lançamento está no saldo do app, mas o banco não o confirmou aqui. Decida cada uma.',
+    leftoverBadge: (n: number) => `${n} sobra(s) do provisório`,
+    reasons: {
+      no_pair: 'Sem linha de mesma data e valor no consolidado',
+      consolidated_taken: 'A linha do consolidado já está conciliada com outro lançamento',
+    } as Record<string, string>,
+    actions: { pair: 'Casar com uma linha do consolidado', keep: 'Manter o lançamento', delete_entry: 'Excluir o lançamento' } as Record<
+      string,
+      string
+    >,
+    pairWith: 'Casar com',
+    choosePair: 'Escolha a linha do consolidado (mesmo valor, sem par)',
+    noPairCandidates: 'Nenhuma linha do consolidado sem par com esse valor.',
+    deleteWarning: (n: number) => `${n} lançamento(s) serão excluídos, como no "Desfazer e excluir o lançamento".`,
+    resolved: (n: number) => `${n} sobra(s) resolvida(s).`,
+    suggestAi: 'Sugerir pares com IA',
+    suggestQueued: 'A IA está procurando os pares…',
+    aiProposes: (n: number) => `A IA propõe ${n} par(es)`,
+    approveAll: 'Aprovar todos',
+    approveSelected: 'Aprovar selecionados',
+    rejectSuggestions: 'Descartar',
+    suggestionOf: (date: string, description: string) => `Par sugerido: ${date} · ${description}`,
+    outcomes: {
+      transferred: 'Transferida',
+      paired: 'Casada',
+      dropped: 'Descartada',
+      pending: 'Pendente',
+      kept: 'Lançamento mantido',
+      entry_deleted: 'Lançamento excluído',
+    } as Record<string, string>,
+    supersedesNote: (files: string) => `Substituiu o provisório ${files}.`,
+    viewLine: 'Ver a linha no consolidado',
+  },
 } as const;

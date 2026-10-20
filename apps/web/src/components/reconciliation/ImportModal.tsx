@@ -7,7 +7,9 @@ import {
   formatDate,
   formatMonth,
   parseCsv,
+  periodsOverlap,
   type StatementImportDetail,
+  type StatementImportSummary,
   type StatementInspect,
   t,
   todayIso,
@@ -23,6 +25,7 @@ import { useToast } from '../Toast';
 import { Badge, Button, cx, Field, Modal, useConfirm } from '../ui';
 
 const s = t.statements;
+const S = t.statements.supersede;
 
 export type StatementTarget = { accountId: string } | { cardCaixaId: string };
 
@@ -110,12 +113,15 @@ export function ImportModal({
   initialFile,
   onClose,
   onImported,
+  provisionals = [],
 }: {
   target: StatementTarget;
   card: CardOverview | null;
   initialFile?: File | null;
   onClose: () => void;
   onImported: (detail: StatementImportDetail) => void;
+  /** Lotes provisórios ativos da conta (spec 031): o consolidado os substitui na importação. */
+  provisionals?: StatementImportSummary[];
 }) {
   const [file, setFile] = useState<File | null>(null);
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
@@ -138,6 +144,12 @@ export function ImportModal({
   const fileBalance = inspect?.format === 'ofx' ? (ofx?.ledgerBalance ?? null) : null;
   const [ownBalance, setOwnBalance] = useState(false);
   const typedBalance = !fileBalance || ownBalance ? bankBalance : null;
+  // Lote provisório e a troca pelo consolidado (spec 031). O período do OFX marca os provisórios sobrepostos.
+  const [provisional, setProvisional] = useState(false);
+  const filePeriod = ofx?.periodStart && ofx.periodEnd ? { periodStart: ofx.periodStart, periodEnd: ofx.periodEnd } : null;
+  const overlapping = provisionals.filter((p) => !filePeriod || periodsOverlap(p, filePeriod));
+  const [replaceIds, setReplaceIds] = useState<Set<string> | null>(null);
+  const replacing = replaceIds ?? new Set(overlapping.map((p) => p.id));
 
   async function pick(next: File) {
     setFile(next);
@@ -182,6 +194,8 @@ export function ImportModal({
         bankBalanceCents: typedBalance ?? undefined,
         bankBalanceOn: typedBalance !== null ? bankBalanceOn : undefined,
         ofxStatement: manyAccounts ? (ofxPosition ?? undefined) : undefined,
+        provisional: provisional || undefined,
+        supersede: !isCard && !provisional && replacing.size ? [...replacing].join(',') : undefined,
       });
       toast.success(s.imported(detail.lineCount, detail.skippedDuplicates ?? 0));
       onImported(detail);
@@ -226,6 +240,39 @@ export function ImportModal({
           >
             {s.otherBalance}
           </Button>
+        </div>
+      )}
+      {!isCard && (
+        <div className="flex flex-col gap-2" data-testid="provisional-options">
+          <label className="inline-flex items-start gap-2 text-[13px]">
+            <input type="checkbox" checked={provisional} onChange={(e) => setProvisional(e.target.checked)} />
+            <span>
+              <strong>{S.provisionalOption}</strong>
+              <span className="hint block">{S.provisionalHint}</span>
+            </span>
+          </label>
+          {provisional && overlapping.length > 0 && (
+            <span className="hint">{S.provisionalReplacesHint(overlapping.map((p) => p.fileName).join(', '))}</span>
+          )}
+          {!provisional &&
+            provisionals.map((p) => (
+              <label key={p.id} className="inline-flex items-start gap-2 text-[13px]">
+                <input
+                  type="checkbox"
+                  checked={replacing.has(p.id)}
+                  onChange={(e) => {
+                    const next = new Set(replacing);
+                    if (e.target.checked) next.add(p.id);
+                    else next.delete(p.id);
+                    setReplaceIds(next);
+                  }}
+                />
+                <span>
+                  {S.replaceOption(p.fileName, `${formatDate(p.periodStart)} – ${formatDate(p.periodEnd)}`)}
+                  <span className="hint block">{S.replaceHint}</span>
+                </span>
+              </label>
+            ))}
         </div>
       )}
       {!isCard && (!fileBalance || ownBalance) && (

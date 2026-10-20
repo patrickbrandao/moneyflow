@@ -133,6 +133,7 @@ export const agentsStrings = {
   flows: {
     documentConversation: (file: string) => `Leitura de documento: ${file}`,
     classifyConversation: (file: string) => `Sugestões de classificação: ${file}`,
+    supersedeConversation: (file: string) => `Pares do provisório: ${file}`,
     reconcileConversation: (file: string) => `Conciliação com IA: ${file}`,
     taskConversation: (name: string, when: string) => `Tarefa: ${name} (${when})`,
     reconcileMessage: (file: string, importId: string, lines: number) =>

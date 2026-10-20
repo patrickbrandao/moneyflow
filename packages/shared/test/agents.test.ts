@@ -49,8 +49,8 @@ describe('registro de tools', () => {
       expect(t.agents.toolCategories[category]).toBeTruthy();
       expect(AGENT_TOOLS.some((tool) => tool.category === category)).toBe(true);
     }
-    // 13 da conciliação e as 5 das receitas (spec 030).
-    expect(AGENT_TOOLS.filter((tool) => tool.category === 'reconciliation')).toHaveLength(18);
+    // 13 da conciliação, as 5 das receitas (spec 030) e as 3 do lote provisório (spec 031).
+    expect(AGENT_TOOLS.filter((tool) => tool.category === 'reconciliation')).toHaveLength(21);
     expect(agentTool('send_telegram_message')).toMatchObject({ category: 'messages', suggestedMode: 'ask' });
   });
 

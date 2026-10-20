@@ -64,8 +64,8 @@ export const users = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
   },
   (table) => [
-    unique('users_username_key').on(table.username),
     unique('users_email_key').on(table.email),
+    unique('users_username_key').on(table.username),
     check(
       'users_email_format_check',
       sql`(email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'::citext) AND (length((email)::text) <= 254)`,
@@ -1015,8 +1015,8 @@ export const cardInvoiceItems = pgTable(
       foreignColumns: [caixas.id],
       name: 'card_invoice_items_payer_caixa_id_fkey',
     }),
-    unique('card_invoice_items_purchase_installment_key').on(table.cardPurchaseId, table.installmentNumber),
     unique('card_invoice_items_carryover_key').on(table.carriedFromInvoiceId, table.payerCaixaId),
+    unique('card_invoice_items_purchase_installment_key').on(table.cardPurchaseId, table.installmentNumber),
     check('card_invoice_items_amount_cents_check', sql`amount_cents <> 0`),
     check('card_invoice_items_carried_self_check', sql`carried_from_invoice_id <> card_invoice_id`),
     check('card_invoice_items_installment_number_check', sql`(installment_number >= 1) AND (installment_number <= 99)`),
@@ -1126,82 +1126,6 @@ export const statementCsvMappings = pgTable(
   ],
 );
 
-export const statementImports = pgTable(
-  'statement_imports',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    financialAccountId: uuid('financial_account_id'),
-    cardCaixaId: uuid('card_caixa_id'),
-    cardInvoiceId: uuid('card_invoice_id'),
-    format: text().notNull(),
-    attachmentId: uuid('attachment_id').notNull(),
-    csvMappingId: uuid('csv_mapping_id'),
-    periodStart: date('period_start').notNull(),
-    periodEnd: date('period_end').notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    bankBalanceCents: bigint('bank_balance_cents', { mode: 'number' }),
-    bankBalanceOn: date('bank_balance_on'),
-    importedByUserId: uuid('imported_by_user_id'),
-    notes: text(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('statement_imports_attachment_id_idx').using('btree', table.attachmentId.asc().nullsLast().op('uuid_ops')),
-    index('statement_imports_card_caixa_id_idx').using(
-      'btree',
-      table.cardCaixaId.asc().nullsLast().op('date_ops'),
-      table.periodStart.asc().nullsLast().op('date_ops'),
-    ),
-    index('statement_imports_card_invoice_id_idx').using('btree', table.cardInvoiceId.asc().nullsLast().op('uuid_ops')),
-    index('statement_imports_csv_mapping_id_idx').using('btree', table.csvMappingId.asc().nullsLast().op('uuid_ops')),
-    index('statement_imports_financial_account_id_idx').using(
-      'btree',
-      table.financialAccountId.asc().nullsLast().op('uuid_ops'),
-      table.periodStart.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('statement_imports_imported_by_user_id_idx').using('btree', table.importedByUserId.asc().nullsLast().op('uuid_ops')),
-    foreignKey({
-      columns: [table.attachmentId],
-      foreignColumns: [attachments.id],
-      name: 'statement_imports_attachment_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.cardCaixaId],
-      foreignColumns: [caixas.id],
-      name: 'statement_imports_card_caixa_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.cardInvoiceId],
-      foreignColumns: [cardInvoices.id],
-      name: 'statement_imports_card_invoice_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.csvMappingId],
-      foreignColumns: [statementCsvMappings.id],
-      name: 'statement_imports_csv_mapping_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.financialAccountId],
-      foreignColumns: [financialAccounts.id],
-      name: 'statement_imports_financial_account_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.importedByUserId],
-      foreignColumns: [users.id],
-      name: 'statement_imports_imported_by_user_id_fkey',
-    }).onDelete('set null'),
-    check('statement_imports_bank_balance_check', sql`(bank_balance_cents IS NULL) = (bank_balance_on IS NULL)`),
-    check('statement_imports_csv_mapping_check', sql`(format = 'csv'::text) OR (csv_mapping_id IS NULL)`),
-    check('statement_imports_format_check', sql`format = ANY (ARRAY['ofx'::text, 'csv'::text])`),
-    check('statement_imports_period_check', sql`period_end >= period_start`),
-    check(
-      'statement_imports_target_check',
-      sql`(num_nonnulls(financial_account_id, card_caixa_id) = 1) AND ((card_invoice_id IS NULL) OR (card_caixa_id IS NOT NULL))`,
-    ),
-  ],
-);
-
 export const classificationRules = pgTable(
   'classification_rules',
   {
@@ -1264,152 +1188,6 @@ export const classificationRules = pgTable(
       sql`(num_nonnulls(entity_id, category_id) >= 1) AND ((category_id IS NULL) OR (direction IS NOT NULL))`,
     ),
     check('classification_rules_usage_count_check', sql`usage_count >= 0`),
-  ],
-);
-
-export const statementLines = pgTable(
-  'statement_lines',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    statementImportId: uuid('statement_import_id').notNull(),
-    financialAccountId: uuid('financial_account_id'),
-    cardCaixaId: uuid('card_caixa_id'),
-    lineNumber: integer('line_number').notNull(),
-    postedOn: date('posted_on').notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
-    description: text().notNull(),
-    fitid: text(),
-    dedupHash: text('dedup_hash').notNull(),
-    status: text().default('new').notNull(),
-    movementId: uuid('movement_id'),
-    titleId: uuid('title_id'),
-    cardInvoiceItemId: uuid('card_invoice_item_id'),
-    entityId: uuid('entity_id'),
-    categoryId: uuid('category_id'),
-    classificationRuleId: uuid('classification_rule_id'),
-    classificationSource: text('classification_source'),
-    raw: jsonb(),
-    matchedAt: timestamp('matched_at', { withTimezone: true, mode: 'string' }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    createdEntry: text('created_entry'),
-  },
-  (table) => [
-    uniqueIndex('statement_lines_account_dedup_key')
-      .using('btree', table.financialAccountId.asc().nullsLast().op('text_ops'), table.dedupHash.asc().nullsLast().op('uuid_ops'))
-      .where(sql`(financial_account_id IS NOT NULL)`),
-    index('statement_lines_card_caixa_id_posted_on_idx').using(
-      'btree',
-      table.cardCaixaId.asc().nullsLast().op('uuid_ops'),
-      table.postedOn.asc().nullsLast().op('uuid_ops'),
-    ),
-    uniqueIndex('statement_lines_card_dedup_key')
-      .using('btree', table.cardCaixaId.asc().nullsLast().op('text_ops'), table.dedupHash.asc().nullsLast().op('uuid_ops'))
-      .where(sql`(card_caixa_id IS NOT NULL)`),
-    index('statement_lines_card_invoice_item_id_idx').using('btree', table.cardInvoiceItemId.asc().nullsLast().op('uuid_ops')),
-    uniqueIndex('statement_lines_card_item_matched_key')
-      .using('btree', table.cardInvoiceItemId.asc().nullsLast().op('uuid_ops'))
-      .where(sql`(status = 'matched'::text)`),
-    index('statement_lines_category_id_idx').using('btree', table.categoryId.asc().nullsLast().op('uuid_ops')),
-    index('statement_lines_classification_rule_id_idx').using('btree', table.classificationRuleId.asc().nullsLast().op('uuid_ops')),
-    index('statement_lines_description_trgm_idx').using('gin', table.description.asc().nullsLast().op('gin_trgm_ops')),
-    index('statement_lines_entity_id_idx').using('btree', table.entityId.asc().nullsLast().op('uuid_ops')),
-    index('statement_lines_financial_account_id_posted_on_idx').using(
-      'btree',
-      table.financialAccountId.asc().nullsLast().op('date_ops'),
-      table.postedOn.asc().nullsLast().op('date_ops'),
-    ),
-    index('statement_lines_movement_id_idx').using('btree', table.movementId.asc().nullsLast().op('uuid_ops')),
-    uniqueIndex('statement_lines_movement_matched_key')
-      .using('btree', table.movementId.asc().nullsLast().op('uuid_ops'))
-      .where(sql`(status = 'matched'::text)`),
-    index('statement_lines_status_idx').using(
-      'btree',
-      table.statementImportId.asc().nullsLast().op('uuid_ops'),
-      table.status.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('statement_lines_title_id_idx').using('btree', table.titleId.asc().nullsLast().op('uuid_ops')),
-    foreignKey({
-      columns: [table.cardCaixaId],
-      foreignColumns: [caixas.id],
-      name: 'statement_lines_card_caixa_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.cardInvoiceItemId],
-      foreignColumns: [cardInvoiceItems.id],
-      name: 'statement_lines_card_invoice_item_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.categoryId],
-      foreignColumns: [categories.id],
-      name: 'statement_lines_category_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.classificationRuleId],
-      foreignColumns: [classificationRules.id],
-      name: 'statement_lines_classification_rule_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.entityId],
-      foreignColumns: [entities.id],
-      name: 'statement_lines_entity_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.financialAccountId],
-      foreignColumns: [financialAccounts.id],
-      name: 'statement_lines_financial_account_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.movementId],
-      foreignColumns: [movements.id],
-      name: 'statement_lines_movement_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.statementImportId],
-      foreignColumns: [statementImports.id],
-      name: 'statement_lines_statement_import_id_fkey',
-    }).onDelete('cascade'),
-    foreignKey({
-      columns: [table.titleId],
-      foreignColumns: [titles.id],
-      name: 'statement_lines_title_id_fkey',
-    }),
-    unique('statement_lines_line_number_key').on(table.lineNumber, table.statementImportId),
-    check('statement_lines_amount_cents_check', sql`amount_cents <> 0`),
-    check(
-      'statement_lines_classification_source_check',
-      sql`(classification_source = ANY (ARRAY['rule'::text, 'agent'::text, 'user'::text])) AND ((classification_rule_id IS NULL) OR (NOT (classification_source IS DISTINCT FROM 'rule'::text)))`,
-    ),
-    check(
-      'statement_lines_created_entry_check',
-      sql`(created_entry IS NULL) OR ((created_entry = ANY (ARRAY['adjustment'::text, 'title'::text, 'settlement'::text, 'purchase'::text])) AND (status = 'matched'::text))`,
-    ),
-    check(
-      'statement_lines_created_entry_links_check',
-      sql`CHECK (
-CASE created_entry
-    WHEN 'adjustment'::text THEN (movement_id IS NOT NULL)
-    WHEN 'title'::text THEN (movement_id IS NOT NULL)
-    WHEN 'settlement'::text THEN (movement_id IS NOT NULL)
-    WHEN 'purchase'::text THEN (card_invoice_item_id IS NOT NULL)
-    ELSE true
-END)`,
-    ),
-    check('statement_lines_dedup_hash_check', sql`(btrim(dedup_hash) <> ''::text) AND (length(dedup_hash) <= 200)`),
-    check('statement_lines_line_number_check', sql`line_number >= 1`),
-    check(
-      'statement_lines_links_check',
-      sql`((movement_id IS NULL) OR (financial_account_id IS NOT NULL)) AND ((title_id IS NULL) OR (financial_account_id IS NOT NULL)) AND ((card_invoice_item_id IS NULL) OR (card_caixa_id IS NOT NULL)) AND
-CASE status
-    WHEN 'matched'::text THEN ((num_nonnulls(movement_id, card_invoice_item_id) = 1) AND (title_id IS NULL))
-    WHEN 'suggested'::text THEN (num_nonnulls(movement_id, title_id, card_invoice_item_id) = 1)
-    ELSE (num_nonnulls(movement_id, title_id, card_invoice_item_id) = 0)
-END AND ((status = 'matched'::text) = (matched_at IS NOT NULL))`,
-    ),
-    check('statement_lines_raw_check', sql`jsonb_typeof(raw) = 'object'::text`),
-    check('statement_lines_status_check', sql`status = ANY (ARRAY['matched'::text, 'suggested'::text, 'new'::text, 'ignored'::text])`),
-    check('statement_lines_target_check', sql`num_nonnulls(financial_account_id, card_caixa_id) = 1`),
   ],
 );
 
@@ -2025,241 +1803,6 @@ export const mcpServers = pgTable(
   ],
 );
 
-export const aiUsage = pgTable(
-  'ai_usage',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    runId: uuid('run_id'),
-    messageId: uuid('message_id'),
-    conversationId: uuid('conversation_id'),
-    userId: uuid('user_id'),
-    agentId: uuid('agent_id'),
-    providerId: uuid('provider_id').notNull(),
-    model: text().notNull(),
-    purpose: text().default('chat').notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    inputTokens: bigint('input_tokens', { mode: 'number' }).default(0).notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    outputTokens: bigint('output_tokens', { mode: 'number' }).default(0).notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }).default(0).notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }).default(0).notNull(),
-    priceId: uuid('price_id'),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    costMicros: bigint('cost_micros', { mode: 'number' }),
-    currency: text(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    requestId: uuid('request_id'),
-    audioSeconds: numeric('audio_seconds', { precision: 12, scale: 3 }).default('0').notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    characters: bigint({ mode: 'number' }).default(0).notNull(),
-  },
-  (table) => [
-    index('ai_usage_agent_id_idx').using(
-      'btree',
-      table.agentId.asc().nullsLast().op('uuid_ops'),
-      table.createdAt.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('ai_usage_conversation_id_idx').using('btree', table.conversationId.asc().nullsLast().op('uuid_ops')),
-    index('ai_usage_created_at_idx').using('btree', table.createdAt.asc().nullsLast().op('timestamptz_ops')),
-    index('ai_usage_message_id_idx').using('btree', table.messageId.asc().nullsLast().op('uuid_ops')),
-    index('ai_usage_price_id_idx').using('btree', table.priceId.asc().nullsLast().op('uuid_ops')),
-    index('ai_usage_provider_id_idx').using('btree', table.providerId.asc().nullsLast().op('uuid_ops')),
-    index('ai_usage_request_id_idx').using('btree', table.requestId.asc().nullsLast().op('uuid_ops')),
-    index('ai_usage_run_id_idx').using('btree', table.runId.asc().nullsLast().op('uuid_ops')),
-    index('ai_usage_sp_day_idx').using('btree', sql`(((created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date)`),
-    index('ai_usage_user_id_idx').using(
-      'btree',
-      table.userId.asc().nullsLast().op('timestamptz_ops'),
-      table.createdAt.asc().nullsLast().op('timestamptz_ops'),
-    ),
-    foreignKey({
-      columns: [table.agentId],
-      foreignColumns: [aiAgents.id],
-      name: 'ai_usage_agent_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.conversationId],
-      foreignColumns: [aiConversations.id],
-      name: 'ai_usage_conversation_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.messageId],
-      foreignColumns: [aiMessages.id],
-      name: 'ai_usage_message_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.priceId],
-      foreignColumns: [aiModelPrices.id],
-      name: 'ai_usage_price_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.providerId],
-      foreignColumns: [aiProviders.id],
-      name: 'ai_usage_provider_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.requestId],
-      foreignColumns: [aiRequests.id],
-      name: 'ai_usage_request_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.runId],
-      foreignColumns: [aiRuns.id],
-      name: 'ai_usage_run_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.userId],
-      foreignColumns: [users.id],
-      name: 'ai_usage_user_id_fkey',
-    }).onDelete('set null'),
-    check('ai_usage_audio_check', sql`(audio_seconds >= (0)::numeric) AND (characters >= 0)`),
-    check(
-      'ai_usage_cost_check',
-      sql`(cost_micros >= 0) AND ((cost_micros IS NULL) = (currency IS NULL)) AND ((price_id IS NULL) OR (cost_micros IS NOT NULL))`,
-    ),
-    check('ai_usage_currency_check', sql`currency = ANY (ARRAY['USD'::text, 'BRL'::text])`),
-    check('ai_usage_model_check', sql`model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text`),
-    check(
-      'ai_usage_purpose_check',
-      sql`purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'scheduled_task'::text, 'reconcile_statement'::text])`,
-    ),
-    check(
-      'ai_usage_tokens_check',
-      sql`(input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)`,
-    ),
-  ],
-);
-
-export const aiRequests = pgTable(
-  'ai_requests',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    providerId: uuid('provider_id'),
-    agentId: uuid('agent_id'),
-    userId: uuid('user_id'),
-    conversationId: uuid('conversation_id'),
-    runId: uuid('run_id'),
-    operation: text().notNull(),
-    purpose: text(),
-    model: text(),
-    method: text().default('POST').notNull(),
-    path: text().notNull(),
-    streaming: boolean().default(false).notNull(),
-    status: text().default('running').notNull(),
-    httpStatus: integer('http_status'),
-    errorMessage: text('error_message'),
-    startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' }).default(sql`clock_timestamp()`).notNull(),
-    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'string' }),
-    durationMs: integer('duration_ms').generatedAlwaysAs(
-      sql`(floor((EXTRACT(epoch FROM (finished_at - started_at)) * (1000)::numeric)))::integer`,
-    ),
-    firstByteMs: integer('first_byte_ms'),
-    attempts: integer().default(0).notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    inputTokens: bigint('input_tokens', { mode: 'number' }).default(0).notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    outputTokens: bigint('output_tokens', { mode: 'number' }).default(0).notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }).default(0).notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }).default(0).notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    requestBytes: bigint('request_bytes', { mode: 'number' }),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    responseBytes: bigint('response_bytes', { mode: 'number' }),
-    requestHeaders: jsonb('request_headers'),
-    requestBody: text('request_body'),
-    responseHeaders: jsonb('response_headers'),
-    responseBody: text('response_body'),
-    responseStream: text('response_stream'),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('ai_requests_agent_id_idx').using(
-      'btree',
-      table.agentId.asc().nullsLast().op('timestamptz_ops'),
-      table.startedAt.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('ai_requests_conversation_id_idx').using('btree', table.conversationId.asc().nullsLast().op('uuid_ops')),
-    index('ai_requests_provider_id_idx').using(
-      'btree',
-      table.providerId.asc().nullsLast().op('uuid_ops'),
-      table.startedAt.desc().nullsFirst().op('uuid_ops'),
-      table.id.desc().nullsFirst().op('timestamptz_ops'),
-    ),
-    index('ai_requests_run_id_idx').using('btree', table.runId.asc().nullsLast().op('uuid_ops')),
-    index('ai_requests_started_at_idx').using(
-      'btree',
-      table.startedAt.asc().nullsLast().op('uuid_ops'),
-      table.id.asc().nullsLast().op('timestamptz_ops'),
-    ),
-    index('ai_requests_user_id_idx').using(
-      'btree',
-      table.userId.asc().nullsLast().op('uuid_ops'),
-      table.startedAt.asc().nullsLast().op('timestamptz_ops'),
-    ),
-    foreignKey({
-      columns: [table.agentId],
-      foreignColumns: [aiAgents.id],
-      name: 'ai_requests_agent_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.conversationId],
-      foreignColumns: [aiConversations.id],
-      name: 'ai_requests_conversation_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.providerId],
-      foreignColumns: [aiProviders.id],
-      name: 'ai_requests_provider_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.runId],
-      foreignColumns: [aiRuns.id],
-      name: 'ai_requests_run_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.userId],
-      foreignColumns: [users.id],
-      name: 'ai_requests_user_id_fkey',
-    }).onDelete('set null'),
-    check('ai_requests_attempts_check', sql`attempts >= 0`),
-    check('ai_requests_bytes_check', sql`(request_bytes >= 0) AND (response_bytes >= 0)`),
-    check('ai_requests_error_message_check', sql`(error_message IS NULL) OR ((length(error_message) <= 4000) AND (status <> 'ok'::text))`),
-    check('ai_requests_finished_check', sql`((status = 'running'::text) = (finished_at IS NULL)) AND (finished_at >= started_at)`),
-    check('ai_requests_first_byte_check', sql`first_byte_ms >= 0`),
-    check(
-      'ai_requests_headers_check',
-      sql`(jsonb_typeof(request_headers) = 'object'::text) AND (jsonb_typeof(response_headers) = 'object'::text)`,
-    ),
-    check('ai_requests_http_status_check', sql`(http_status >= 100) AND (http_status <= 599)`),
-    check('ai_requests_method_check', sql`method = ANY (ARRAY['GET'::text, 'POST'::text, 'PUT'::text, 'PATCH'::text, 'DELETE'::text])`),
-    check('ai_requests_model_check', sql`model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text`),
-    check(
-      'ai_requests_operation_check',
-      sql`operation = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'test_connection'::text, 'list_models'::text])`,
-    ),
-    check('ai_requests_path_check', sql`(path ~ '^[^[:space:]]+$'::text) AND (length(path) <= 2000)`),
-    check(
-      'ai_requests_purpose_check',
-      sql`purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'scheduled_task'::text, 'reconcile_statement'::text])`,
-    ),
-    check(
-      'ai_requests_purpose_null_check',
-      sql`(purpose IS NULL) = (operation = ANY (ARRAY['test_connection'::text, 'list_models'::text]))`,
-    ),
-    check('ai_requests_status_check', sql`status = ANY (ARRAY['running'::text, 'ok'::text, 'error'::text, 'canceled'::text])`),
-    check(
-      'ai_requests_tokens_check',
-      sql`(input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)`,
-    ),
-  ],
-);
-
 export const aiBudgets = pgTable(
   'ai_budgets',
   {
@@ -2465,6 +2008,114 @@ export const titles = pgTable(
       sql`((recurrence_rule_id IS NULL) = (occurrence IS NULL)) AND ((origin = 'recurrence'::text) = (recurrence_rule_id IS NOT NULL))`,
     ),
     check('titles_status_check', sql`status = ANY (ARRAY['open'::text, 'partial'::text, 'paid'::text, 'canceled'::text])`),
+  ],
+);
+
+export const aiUsage = pgTable(
+  'ai_usage',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    runId: uuid('run_id'),
+    messageId: uuid('message_id'),
+    conversationId: uuid('conversation_id'),
+    userId: uuid('user_id'),
+    agentId: uuid('agent_id'),
+    providerId: uuid('provider_id').notNull(),
+    model: text().notNull(),
+    purpose: text().default('chat').notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    inputTokens: bigint('input_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    outputTokens: bigint('output_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }).default(0).notNull(),
+    priceId: uuid('price_id'),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    costMicros: bigint('cost_micros', { mode: 'number' }),
+    currency: text(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    requestId: uuid('request_id'),
+    audioSeconds: numeric('audio_seconds', { precision: 12, scale: 3 }).default('0').notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    characters: bigint({ mode: 'number' }).default(0).notNull(),
+  },
+  (table) => [
+    index('ai_usage_agent_id_idx').using(
+      'btree',
+      table.agentId.asc().nullsLast().op('uuid_ops'),
+      table.createdAt.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('ai_usage_conversation_id_idx').using('btree', table.conversationId.asc().nullsLast().op('uuid_ops')),
+    index('ai_usage_created_at_idx').using('btree', table.createdAt.asc().nullsLast().op('timestamptz_ops')),
+    index('ai_usage_message_id_idx').using('btree', table.messageId.asc().nullsLast().op('uuid_ops')),
+    index('ai_usage_price_id_idx').using('btree', table.priceId.asc().nullsLast().op('uuid_ops')),
+    index('ai_usage_provider_id_idx').using('btree', table.providerId.asc().nullsLast().op('uuid_ops')),
+    index('ai_usage_request_id_idx').using('btree', table.requestId.asc().nullsLast().op('uuid_ops')),
+    index('ai_usage_run_id_idx').using('btree', table.runId.asc().nullsLast().op('uuid_ops')),
+    index('ai_usage_sp_day_idx').using('btree', sql`(((created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date)`),
+    index('ai_usage_user_id_idx').using(
+      'btree',
+      table.userId.asc().nullsLast().op('timestamptz_ops'),
+      table.createdAt.asc().nullsLast().op('timestamptz_ops'),
+    ),
+    foreignKey({
+      columns: [table.agentId],
+      foreignColumns: [aiAgents.id],
+      name: 'ai_usage_agent_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.conversationId],
+      foreignColumns: [aiConversations.id],
+      name: 'ai_usage_conversation_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.messageId],
+      foreignColumns: [aiMessages.id],
+      name: 'ai_usage_message_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.priceId],
+      foreignColumns: [aiModelPrices.id],
+      name: 'ai_usage_price_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.providerId],
+      foreignColumns: [aiProviders.id],
+      name: 'ai_usage_provider_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.requestId],
+      foreignColumns: [aiRequests.id],
+      name: 'ai_usage_request_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.runId],
+      foreignColumns: [aiRuns.id],
+      name: 'ai_usage_run_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'ai_usage_user_id_fkey',
+    }).onDelete('set null'),
+    check('ai_usage_audio_check', sql`(audio_seconds >= (0)::numeric) AND (characters >= 0)`),
+    check(
+      'ai_usage_cost_check',
+      sql`(cost_micros >= 0) AND ((cost_micros IS NULL) = (currency IS NULL)) AND ((price_id IS NULL) OR (cost_micros IS NOT NULL))`,
+    ),
+    check('ai_usage_currency_check', sql`currency = ANY (ARRAY['USD'::text, 'BRL'::text])`),
+    check('ai_usage_model_check', sql`model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text`),
+    check(
+      'ai_usage_purpose_check',
+      sql`purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'scheduled_task'::text, 'reconcile_statement'::text, 'supersede_pairs'::text])`,
+    ),
+    check(
+      'ai_usage_tokens_check',
+      sql`(input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)`,
+    ),
   ],
 );
 
@@ -2802,7 +2453,7 @@ export const aiConversations = pgTable(
     check('ai_conversations_fork_check', sql`forked_from_conversation_id <> id`),
     check(
       'ai_conversations_purpose_check',
-      sql`purpose = ANY (ARRAY['chat'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'scheduled_task'::text, 'reconcile_statement'::text])`,
+      sql`purpose = ANY (ARRAY['chat'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'scheduled_task'::text, 'reconcile_statement'::text, 'supersede_pairs'::text])`,
     ),
     check('ai_conversations_screen_context_check', sql`jsonb_typeof(screen_context) = 'object'::text`),
     check('ai_conversations_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
@@ -2962,6 +2613,99 @@ export const messageDestinations = pgTable(
     check('message_destinations_owner_check', sql`num_nonnulls(owner_user_id, owner_caixa_id) <= 1`),
     check('message_destinations_telegram_check', sql`(channel <> 'telegram'::text) OR ((bot_token IS NOT NULL) AND (chat_id IS NOT NULL))`),
     check('message_destinations_webhook_secret_hash_check', sql`webhook_secret_hash ~ '^[0-9a-f]{64}$'::text`),
+  ],
+);
+
+export const statementImports = pgTable(
+  'statement_imports',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    financialAccountId: uuid('financial_account_id'),
+    cardCaixaId: uuid('card_caixa_id'),
+    cardInvoiceId: uuid('card_invoice_id'),
+    format: text().notNull(),
+    attachmentId: uuid('attachment_id').notNull(),
+    csvMappingId: uuid('csv_mapping_id'),
+    periodStart: date('period_start').notNull(),
+    periodEnd: date('period_end').notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    bankBalanceCents: bigint('bank_balance_cents', { mode: 'number' }),
+    bankBalanceOn: date('bank_balance_on'),
+    importedByUserId: uuid('imported_by_user_id'),
+    notes: text(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    provisional: boolean().default(false).notNull(),
+    supersededByImportId: uuid('superseded_by_import_id'),
+    supersededAt: timestamp('superseded_at', { withTimezone: true, mode: 'string' }),
+  },
+  (table) => [
+    index('statement_imports_attachment_id_idx').using('btree', table.attachmentId.asc().nullsLast().op('uuid_ops')),
+    index('statement_imports_card_caixa_id_idx').using(
+      'btree',
+      table.cardCaixaId.asc().nullsLast().op('uuid_ops'),
+      table.periodStart.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('statement_imports_card_invoice_id_idx').using('btree', table.cardInvoiceId.asc().nullsLast().op('uuid_ops')),
+    index('statement_imports_csv_mapping_id_idx').using('btree', table.csvMappingId.asc().nullsLast().op('uuid_ops')),
+    index('statement_imports_financial_account_id_idx').using(
+      'btree',
+      table.financialAccountId.asc().nullsLast().op('uuid_ops'),
+      table.periodStart.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('statement_imports_imported_by_user_id_idx').using('btree', table.importedByUserId.asc().nullsLast().op('uuid_ops')),
+    index('statement_imports_provisional_active_idx')
+      .using('btree', table.financialAccountId.asc().nullsLast().op('date_ops'), table.periodStart.asc().nullsLast().op('date_ops'))
+      .where(sql`(provisional AND (superseded_by_import_id IS NULL))`),
+    index('statement_imports_superseded_by_import_id_idx').using('btree', table.supersededByImportId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.attachmentId],
+      foreignColumns: [attachments.id],
+      name: 'statement_imports_attachment_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.cardCaixaId],
+      foreignColumns: [caixas.id],
+      name: 'statement_imports_card_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.cardInvoiceId],
+      foreignColumns: [cardInvoices.id],
+      name: 'statement_imports_card_invoice_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.csvMappingId],
+      foreignColumns: [statementCsvMappings.id],
+      name: 'statement_imports_csv_mapping_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.financialAccountId],
+      foreignColumns: [financialAccounts.id],
+      name: 'statement_imports_financial_account_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.importedByUserId],
+      foreignColumns: [users.id],
+      name: 'statement_imports_imported_by_user_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.supersededByImportId],
+      foreignColumns: [table.id],
+      name: 'statement_imports_superseded_by_import_id_fkey',
+    }),
+    check('statement_imports_bank_balance_check', sql`(bank_balance_cents IS NULL) = (bank_balance_on IS NULL)`),
+    check('statement_imports_csv_mapping_check', sql`(format = 'csv'::text) OR (csv_mapping_id IS NULL)`),
+    check('statement_imports_format_check', sql`format = ANY (ARRAY['ofx'::text, 'csv'::text])`),
+    check('statement_imports_period_check', sql`period_end >= period_start`),
+    check('statement_imports_provisional_check', sql`(NOT provisional) OR (financial_account_id IS NOT NULL)`),
+    check(
+      'statement_imports_superseded_check',
+      sql`((superseded_by_import_id IS NULL) = (superseded_at IS NULL)) AND ((superseded_by_import_id IS NULL) OR (provisional AND (superseded_by_import_id <> id)))`,
+    ),
+    check(
+      'statement_imports_target_check',
+      sql`(num_nonnulls(financial_account_id, card_caixa_id) = 1) AND ((card_invoice_id IS NULL) OR (card_caixa_id IS NOT NULL))`,
+    ),
   ],
 );
 
@@ -3130,6 +2874,186 @@ export const aiReconcileRecipeRuns = pgTable(
       sql`status = ANY (ARRAY['queued'::text, 'started'::text, 'completed'::text, 'skipped'::text, 'failed'::text])`,
     ),
     check('ai_reconcile_recipe_runs_trigger_kind_check', sql`trigger_kind = ANY (ARRAY['manual'::text, 'import'::text])`),
+  ],
+);
+
+export const statementLines = pgTable(
+  'statement_lines',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    statementImportId: uuid('statement_import_id').notNull(),
+    financialAccountId: uuid('financial_account_id'),
+    cardCaixaId: uuid('card_caixa_id'),
+    lineNumber: integer('line_number').notNull(),
+    postedOn: date('posted_on').notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
+    description: text().notNull(),
+    fitid: text(),
+    dedupHash: text('dedup_hash').notNull(),
+    status: text().default('new').notNull(),
+    movementId: uuid('movement_id'),
+    titleId: uuid('title_id'),
+    cardInvoiceItemId: uuid('card_invoice_item_id'),
+    entityId: uuid('entity_id'),
+    categoryId: uuid('category_id'),
+    classificationRuleId: uuid('classification_rule_id'),
+    classificationSource: text('classification_source'),
+    raw: jsonb(),
+    matchedAt: timestamp('matched_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    createdEntry: text('created_entry'),
+    provisional: boolean().default(false).notNull(),
+    supersededByLineId: uuid('superseded_by_line_id'),
+    supersedeOutcome: text('supersede_outcome'),
+    supersedeSuggestedLineId: uuid('supersede_suggested_line_id'),
+    supersedeSuggestionReason: text('supersede_suggestion_reason'),
+  },
+  (table) => [
+    uniqueIndex('statement_lines_account_dedup_key')
+      .using('btree', table.financialAccountId.asc().nullsLast().op('uuid_ops'), table.dedupHash.asc().nullsLast().op('uuid_ops'))
+      .where(sql`((financial_account_id IS NOT NULL) AND (NOT provisional))`),
+    index('statement_lines_card_caixa_id_posted_on_idx').using(
+      'btree',
+      table.cardCaixaId.asc().nullsLast().op('uuid_ops'),
+      table.postedOn.asc().nullsLast().op('uuid_ops'),
+    ),
+    uniqueIndex('statement_lines_card_dedup_key')
+      .using('btree', table.cardCaixaId.asc().nullsLast().op('uuid_ops'), table.dedupHash.asc().nullsLast().op('uuid_ops'))
+      .where(sql`(card_caixa_id IS NOT NULL)`),
+    index('statement_lines_card_invoice_item_id_idx').using('btree', table.cardInvoiceItemId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('statement_lines_card_item_matched_key')
+      .using('btree', table.cardInvoiceItemId.asc().nullsLast().op('uuid_ops'))
+      .where(sql`(status = 'matched'::text)`),
+    index('statement_lines_category_id_idx').using('btree', table.categoryId.asc().nullsLast().op('uuid_ops')),
+    index('statement_lines_classification_rule_id_idx').using('btree', table.classificationRuleId.asc().nullsLast().op('uuid_ops')),
+    index('statement_lines_description_trgm_idx').using('gin', table.description.asc().nullsLast().op('gin_trgm_ops')),
+    index('statement_lines_entity_id_idx').using('btree', table.entityId.asc().nullsLast().op('uuid_ops')),
+    index('statement_lines_financial_account_id_posted_on_idx').using(
+      'btree',
+      table.financialAccountId.asc().nullsLast().op('date_ops'),
+      table.postedOn.asc().nullsLast().op('date_ops'),
+    ),
+    index('statement_lines_movement_id_idx').using('btree', table.movementId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('statement_lines_movement_matched_key')
+      .using('btree', table.movementId.asc().nullsLast().op('uuid_ops'))
+      .where(sql`(status = 'matched'::text)`),
+    index('statement_lines_status_idx').using(
+      'btree',
+      table.statementImportId.asc().nullsLast().op('uuid_ops'),
+      table.status.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('statement_lines_supersede_pending_idx')
+      .using('btree', table.financialAccountId.asc().nullsLast().op('uuid_ops'), table.postedOn.asc().nullsLast().op('uuid_ops'))
+      .where(sql`(supersede_outcome = 'pending'::text)`),
+    index('statement_lines_supersede_suggested_line_id_idx').using(
+      'btree',
+      table.supersedeSuggestedLineId.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('statement_lines_superseded_by_line_id_idx').using('btree', table.supersededByLineId.asc().nullsLast().op('uuid_ops')),
+    index('statement_lines_title_id_idx').using('btree', table.titleId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.cardCaixaId],
+      foreignColumns: [caixas.id],
+      name: 'statement_lines_card_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.cardInvoiceItemId],
+      foreignColumns: [cardInvoiceItems.id],
+      name: 'statement_lines_card_invoice_item_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.categoryId],
+      foreignColumns: [categories.id],
+      name: 'statement_lines_category_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.classificationRuleId],
+      foreignColumns: [classificationRules.id],
+      name: 'statement_lines_classification_rule_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.entityId],
+      foreignColumns: [entities.id],
+      name: 'statement_lines_entity_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.financialAccountId],
+      foreignColumns: [financialAccounts.id],
+      name: 'statement_lines_financial_account_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.movementId],
+      foreignColumns: [movements.id],
+      name: 'statement_lines_movement_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.statementImportId],
+      foreignColumns: [statementImports.id],
+      name: 'statement_lines_statement_import_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.supersedeSuggestedLineId],
+      foreignColumns: [table.id],
+      name: 'statement_lines_supersede_suggested_line_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.supersededByLineId],
+      foreignColumns: [table.id],
+      name: 'statement_lines_superseded_by_line_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.titleId],
+      foreignColumns: [titles.id],
+      name: 'statement_lines_title_id_fkey',
+    }),
+    unique('statement_lines_line_number_key').on(table.lineNumber, table.statementImportId),
+    check('statement_lines_amount_cents_check', sql`amount_cents <> 0`),
+    check(
+      'statement_lines_classification_source_check',
+      sql`(classification_source = ANY (ARRAY['rule'::text, 'agent'::text, 'user'::text])) AND ((classification_rule_id IS NULL) OR (NOT (classification_source IS DISTINCT FROM 'rule'::text)))`,
+    ),
+    check(
+      'statement_lines_created_entry_check',
+      sql`(created_entry IS NULL) OR ((created_entry = ANY (ARRAY['adjustment'::text, 'title'::text, 'settlement'::text, 'purchase'::text])) AND (status = 'matched'::text))`,
+    ),
+    check(
+      'statement_lines_created_entry_links_check',
+      sql`CHECK (
+CASE created_entry
+    WHEN 'adjustment'::text THEN (movement_id IS NOT NULL)
+    WHEN 'title'::text THEN (movement_id IS NOT NULL)
+    WHEN 'settlement'::text THEN (movement_id IS NOT NULL)
+    WHEN 'purchase'::text THEN (card_invoice_item_id IS NOT NULL)
+    ELSE true
+END)`,
+    ),
+    check('statement_lines_dedup_hash_check', sql`(btrim(dedup_hash) <> ''::text) AND (length(dedup_hash) <= 200)`),
+    check('statement_lines_line_number_check', sql`line_number >= 1`),
+    check(
+      'statement_lines_links_check',
+      sql`((movement_id IS NULL) OR (financial_account_id IS NOT NULL)) AND ((title_id IS NULL) OR (financial_account_id IS NOT NULL)) AND ((card_invoice_item_id IS NULL) OR (card_caixa_id IS NOT NULL)) AND
+CASE status
+    WHEN 'matched'::text THEN ((num_nonnulls(movement_id, card_invoice_item_id) = 1) AND (title_id IS NULL))
+    WHEN 'suggested'::text THEN (num_nonnulls(movement_id, title_id, card_invoice_item_id) = 1)
+    ELSE (num_nonnulls(movement_id, title_id, card_invoice_item_id) = 0)
+END AND ((status = 'matched'::text) = (matched_at IS NOT NULL))`,
+    ),
+    check('statement_lines_raw_check', sql`jsonb_typeof(raw) = 'object'::text`),
+    check(
+      'statement_lines_status_check',
+      sql`status = ANY (ARRAY['matched'::text, 'suggested'::text, 'new'::text, 'ignored'::text, 'superseded'::text])`,
+    ),
+    check(
+      'statement_lines_supersede_outcome_check',
+      sql`((supersede_outcome IS NULL) OR (supersede_outcome = ANY (ARRAY['transferred'::text, 'paired'::text, 'dropped'::text, 'pending'::text, 'kept'::text, 'entry_deleted'::text]))) AND ((status = 'superseded'::text) = COALESCE((supersede_outcome <> 'pending'::text), false)) AND ((supersede_outcome IS DISTINCT FROM 'pending'::text) OR (status = 'matched'::text)) AND ((superseded_by_line_id IS NOT NULL) = COALESCE((supersede_outcome = ANY (ARRAY['transferred'::text, 'paired'::text])), false)) AND (superseded_by_line_id IS DISTINCT FROM id)`,
+    ),
+    check(
+      'statement_lines_supersede_suggestion_check',
+      sql`((supersede_suggested_line_id IS NULL) OR (NOT (supersede_outcome IS DISTINCT FROM 'pending'::text))) AND ((supersede_suggestion_reason IS NULL) OR ((supersede_suggested_line_id IS NOT NULL) AND (btrim(supersede_suggestion_reason) <> ''::text) AND (length(supersede_suggestion_reason) <= 500)))`,
+    ),
+    check('statement_lines_target_check', sql`num_nonnulls(financial_account_id, card_caixa_id) = 1`),
   ],
 );
 
@@ -3780,6 +3704,133 @@ export const aiReconcileRecipeTargets = pgTable(
   ],
 );
 
+export const aiRequests = pgTable(
+  'ai_requests',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    providerId: uuid('provider_id'),
+    agentId: uuid('agent_id'),
+    userId: uuid('user_id'),
+    conversationId: uuid('conversation_id'),
+    runId: uuid('run_id'),
+    operation: text().notNull(),
+    purpose: text(),
+    model: text(),
+    method: text().default('POST').notNull(),
+    path: text().notNull(),
+    streaming: boolean().default(false).notNull(),
+    status: text().default('running').notNull(),
+    httpStatus: integer('http_status'),
+    errorMessage: text('error_message'),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' }).default(sql`clock_timestamp()`).notNull(),
+    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'string' }),
+    durationMs: integer('duration_ms').generatedAlwaysAs(
+      sql`(floor((EXTRACT(epoch FROM (finished_at - started_at)) * (1000)::numeric)))::integer`,
+    ),
+    firstByteMs: integer('first_byte_ms'),
+    attempts: integer().default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    inputTokens: bigint('input_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    outputTokens: bigint('output_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }).default(0).notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    requestBytes: bigint('request_bytes', { mode: 'number' }),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    responseBytes: bigint('response_bytes', { mode: 'number' }),
+    requestHeaders: jsonb('request_headers'),
+    requestBody: text('request_body'),
+    responseHeaders: jsonb('response_headers'),
+    responseBody: text('response_body'),
+    responseStream: text('response_stream'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_requests_agent_id_idx').using(
+      'btree',
+      table.agentId.asc().nullsLast().op('timestamptz_ops'),
+      table.startedAt.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('ai_requests_conversation_id_idx').using('btree', table.conversationId.asc().nullsLast().op('uuid_ops')),
+    index('ai_requests_provider_id_idx').using(
+      'btree',
+      table.providerId.asc().nullsLast().op('uuid_ops'),
+      table.startedAt.desc().nullsFirst().op('uuid_ops'),
+      table.id.desc().nullsFirst().op('timestamptz_ops'),
+    ),
+    index('ai_requests_run_id_idx').using('btree', table.runId.asc().nullsLast().op('uuid_ops')),
+    index('ai_requests_started_at_idx').using(
+      'btree',
+      table.startedAt.asc().nullsLast().op('uuid_ops'),
+      table.id.asc().nullsLast().op('timestamptz_ops'),
+    ),
+    index('ai_requests_user_id_idx').using(
+      'btree',
+      table.userId.asc().nullsLast().op('uuid_ops'),
+      table.startedAt.asc().nullsLast().op('timestamptz_ops'),
+    ),
+    foreignKey({
+      columns: [table.agentId],
+      foreignColumns: [aiAgents.id],
+      name: 'ai_requests_agent_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.conversationId],
+      foreignColumns: [aiConversations.id],
+      name: 'ai_requests_conversation_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.providerId],
+      foreignColumns: [aiProviders.id],
+      name: 'ai_requests_provider_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.runId],
+      foreignColumns: [aiRuns.id],
+      name: 'ai_requests_run_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'ai_requests_user_id_fkey',
+    }).onDelete('set null'),
+    check('ai_requests_attempts_check', sql`attempts >= 0`),
+    check('ai_requests_bytes_check', sql`(request_bytes >= 0) AND (response_bytes >= 0)`),
+    check('ai_requests_error_message_check', sql`(error_message IS NULL) OR ((length(error_message) <= 4000) AND (status <> 'ok'::text))`),
+    check('ai_requests_finished_check', sql`((status = 'running'::text) = (finished_at IS NULL)) AND (finished_at >= started_at)`),
+    check('ai_requests_first_byte_check', sql`first_byte_ms >= 0`),
+    check(
+      'ai_requests_headers_check',
+      sql`(jsonb_typeof(request_headers) = 'object'::text) AND (jsonb_typeof(response_headers) = 'object'::text)`,
+    ),
+    check('ai_requests_http_status_check', sql`(http_status >= 100) AND (http_status <= 599)`),
+    check('ai_requests_method_check', sql`method = ANY (ARRAY['GET'::text, 'POST'::text, 'PUT'::text, 'PATCH'::text, 'DELETE'::text])`),
+    check('ai_requests_model_check', sql`model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text`),
+    check(
+      'ai_requests_operation_check',
+      sql`operation = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'test_connection'::text, 'list_models'::text])`,
+    ),
+    check('ai_requests_path_check', sql`(path ~ '^[^[:space:]]+$'::text) AND (length(path) <= 2000)`),
+    check(
+      'ai_requests_purpose_check',
+      sql`purpose = ANY (ARRAY['chat'::text, 'title'::text, 'embedding'::text, 'document_reading'::text, 'classify_lines'::text, 'contract_reading'::text, 'contract_markdown'::text, 'vision_describe'::text, 'transcription'::text, 'speech'::text, 'scheduled_task'::text, 'reconcile_statement'::text, 'supersede_pairs'::text])`,
+    ),
+    check(
+      'ai_requests_purpose_null_check',
+      sql`(purpose IS NULL) = (operation = ANY (ARRAY['test_connection'::text, 'list_models'::text]))`,
+    ),
+    check('ai_requests_status_check', sql`status = ANY (ARRAY['running'::text, 'ok'::text, 'error'::text, 'canceled'::text])`),
+    check(
+      'ai_requests_tokens_check',
+      sql`(input_tokens >= 0) AND (output_tokens >= 0) AND (cache_write_tokens >= 0) AND (cache_read_tokens >= 0)`,
+    ),
+  ],
+);
+
 export const telegramUpdatesSeen = pgTable(
   'telegram_updates_seen',
   {
@@ -4059,30 +4110,6 @@ export const cardLimits = pgView('card_limits', {
     sql`SELECT c.id AS card_caixa_id, c.credit_limit_cents, (COALESCE(it.items_cents, 0::numeric) - COALESCE(st.paid_cents, 0::numeric))::bigint AS used_cents, (c.credit_limit_cents::numeric - COALESCE(it.items_cents, 0::numeric) + COALESCE(st.paid_cents, 0::numeric))::bigint AS available_cents FROM caixas c LEFT JOIN LATERAL ( SELECT sum(i.amount_cents) AS items_cents FROM card_invoice_items i JOIN card_invoices v ON v.id = i.card_invoice_id WHERE v.card_caixa_id = c.id AND i.kind = 'installment'::text) it ON true LEFT JOIN LATERAL ( SELECT sum(s.amount_cents) AS paid_cents FROM settlements s JOIN titles t ON t.id = s.title_id WHERE t.caixa_id = c.id AND t.card_invoice_id IS NOT NULL AND s.reversed_at IS NULL) st ON true WHERE c.kind = 'credit_card'::text`,
   );
 
-export const statementImportBalances = pgView('statement_import_balances', {
-  statementImportId: uuid('statement_import_id'),
-  financialAccountId: uuid('financial_account_id'),
-  cardCaixaId: uuid('card_caixa_id'),
-  periodStart: date('period_start'),
-  periodEnd: date('period_end'),
-  bankBalanceOn: date('bank_balance_on'),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  bankBalanceCents: bigint('bank_balance_cents', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  appBalanceCents: bigint('app_balance_cents', { mode: 'number' }),
-  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-  differenceCents: bigint('difference_cents', { mode: 'number' }),
-  lines: integer(),
-  matchedLines: integer('matched_lines'),
-  suggestedLines: integer('suggested_lines'),
-  newLines: integer('new_lines'),
-  ignoredLines: integer('ignored_lines'),
-})
-  .with({ securityInvoker: true })
-  .as(
-    sql`SELECT i.id AS statement_import_id, i.financial_account_id, i.card_caixa_id, i.period_start, i.period_end, i.bank_balance_on, i.bank_balance_cents, CASE WHEN i.financial_account_id IS NOT NULL AND i.bank_balance_on IS NOT NULL THEN financial_account_balance_at(i.financial_account_id, i.bank_balance_on) ELSE NULL::bigint END AS app_balance_cents, CASE WHEN i.financial_account_id IS NOT NULL AND i.bank_balance_on IS NOT NULL THEN i.bank_balance_cents - financial_account_balance_at(i.financial_account_id, i.bank_balance_on) ELSE NULL::bigint END AS difference_cents, COALESCE(c.lines, 0::bigint)::integer AS lines, COALESCE(c.matched, 0::bigint)::integer AS matched_lines, COALESCE(c.suggested, 0::bigint)::integer AS suggested_lines, COALESCE(c.new, 0::bigint)::integer AS new_lines, COALESCE(c.ignored, 0::bigint)::integer AS ignored_lines FROM statement_imports i LEFT JOIN LATERAL ( SELECT count(*) AS lines, count(*) FILTER (WHERE l.status = 'matched'::text) AS matched, count(*) FILTER (WHERE l.status = 'suggested'::text) AS suggested, count(*) FILTER (WHERE l.status = 'new'::text) AS new, count(*) FILTER (WHERE l.status = 'ignored'::text) AS ignored FROM statement_lines l WHERE l.statement_import_id = i.id) c ON true`,
-  );
-
 export const aiMessageUsage = pgView('ai_message_usage', {
   messageId: uuid('message_id'),
   currency: text(),
@@ -4267,4 +4294,30 @@ export const aiUsageMonthlyByAgent = pgView('ai_usage_monthly_by_agent', {
   .with({ securityInvoker: true })
   .as(
     sql`SELECT date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date AS month, agent_id, provider_id, model, currency, count(*)::integer AS calls, count(DISTINCT run_id)::integer AS runs, count(DISTINCT user_id)::integer AS users, sum(input_tokens)::bigint AS input_tokens, sum(output_tokens)::bigint AS output_tokens, sum(cache_write_tokens)::bigint AS cache_write_tokens, sum(cache_read_tokens)::bigint AS cache_read_tokens, sum(cost_micros)::bigint AS cost_micros, bool_or(cost_micros IS NULL) AS has_unpriced, sum(audio_seconds) AS audio_seconds, sum(characters)::bigint AS characters FROM ai_usage u GROUP BY (date_trunc('month'::text, (created_at AT TIME ZONE 'America/Sao_Paulo'::text))::date), agent_id, provider_id, model, currency`,
+  );
+
+export const statementImportBalances = pgView('statement_import_balances', {
+  statementImportId: uuid('statement_import_id'),
+  financialAccountId: uuid('financial_account_id'),
+  cardCaixaId: uuid('card_caixa_id'),
+  periodStart: date('period_start'),
+  periodEnd: date('period_end'),
+  bankBalanceOn: date('bank_balance_on'),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  bankBalanceCents: bigint('bank_balance_cents', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  appBalanceCents: bigint('app_balance_cents', { mode: 'number' }),
+  // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+  differenceCents: bigint('difference_cents', { mode: 'number' }),
+  lines: integer(),
+  matchedLines: integer('matched_lines'),
+  suggestedLines: integer('suggested_lines'),
+  newLines: integer('new_lines'),
+  ignoredLines: integer('ignored_lines'),
+  provisional: boolean(),
+  superseded: boolean(),
+})
+  .with({ securityInvoker: true })
+  .as(
+    sql`SELECT i.id AS statement_import_id, i.financial_account_id, i.card_caixa_id, i.period_start, i.period_end, i.bank_balance_on, i.bank_balance_cents, CASE WHEN i.financial_account_id IS NOT NULL AND i.bank_balance_on IS NOT NULL THEN financial_account_balance_at(i.financial_account_id, i.bank_balance_on) ELSE NULL::bigint END AS app_balance_cents, CASE WHEN i.financial_account_id IS NOT NULL AND i.bank_balance_on IS NOT NULL THEN i.bank_balance_cents - financial_account_balance_at(i.financial_account_id, i.bank_balance_on) ELSE NULL::bigint END AS difference_cents, COALESCE(c.lines, 0::bigint)::integer AS lines, COALESCE(c.matched, 0::bigint)::integer AS matched_lines, COALESCE(c.suggested, 0::bigint)::integer AS suggested_lines, COALESCE(c.new, 0::bigint)::integer AS new_lines, COALESCE(c.ignored, 0::bigint)::integer AS ignored_lines, i.provisional, i.superseded_by_import_id IS NOT NULL AS superseded FROM statement_imports i LEFT JOIN LATERAL ( SELECT count(*) AS lines, count(*) FILTER (WHERE l.status = 'matched'::text) AS matched, count(*) FILTER (WHERE l.status = 'suggested'::text) AS suggested, count(*) FILTER (WHERE l.status = 'new'::text) AS new, count(*) FILTER (WHERE l.status = 'ignored'::text) AS ignored FROM statement_lines l WHERE l.statement_import_id = i.id) c ON true`,
   );

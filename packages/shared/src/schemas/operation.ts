@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ptBR } from '../i18n/pt-BR';
+import { SUPERSEDE_OUTCOMES, SUPERSEDE_RESOLVE_ACTIONS } from '../supersede';
 import { cents, id, idListQuery, isoDate, nonNegativeCents, optionalText, positiveCents, queryBool, requiredText } from './common';
 
 /*
@@ -207,6 +208,10 @@ export const statementImportQuery = z
     bankBalanceOn: isoDate.optional(),
     /** OFX com várias contas: a posição (1, 2, …) do extrato a importar; omitida = o que casa com a conta de destino. */
     ofxStatement: z.coerce.number().int().min(1).max(100).optional(),
+    /** Extrato parcial do mês (spec 031): só lote de conta. */
+    provisional: queryBool,
+    /** Lotes provisórios da conta que este extrato substitui na mesma transação (spec 031). */
+    supersede: idListQuery(20),
   })
   .refine((v) => (v.accountId ? 1 : 0) + (v.cardCaixaId ? 1 : 0) === 1, { message: E.statementTarget })
   .refine((v) => (v.bankBalanceCents === undefined) === (v.bankBalanceOn === undefined), {
@@ -214,7 +219,7 @@ export const statementImportQuery = z
     message: E.validation,
   });
 
-export const LINE_STATUSES = ['matched', 'suggested', 'new', 'ignored'] as const;
+export const LINE_STATUSES = ['matched', 'suggested', 'new', 'ignored', 'superseded'] as const;
 
 export const lineIdsInput = z.object({ lineIds: z.array(id).min(1).max(1000) });
 
@@ -232,6 +237,33 @@ export const LINE_CREATE_MODES = ['adjustment', 'title', 'purchase'] as const;
 export const LINE_CREATED_ENTRIES = ['adjustment', 'title', 'settlement', 'purchase'] as const;
 
 /** Desfazer a conciliação; deleteEntry = excluir junto o lançamento que nasceu da linha. */
+/** Marcar ou desmarcar o lote como provisório (spec 031). */
+export const importProvisionalInput = z.object({ provisional: z.boolean() });
+
+/** Substituir os provisórios por este lote (spec 031); omitidos = os provisórios ativos da conta sobrepostos a ele. */
+export const importSupersedeInput = z.object({
+  provisionalImportIds: z.array(id).min(1).max(20).optional(),
+  dryRun: z.boolean().default(false),
+});
+
+export const supersedeResolveItem = z
+  .object({
+    lineId: id,
+    action: z.enum(SUPERSEDE_RESOLVE_ACTIONS),
+    /** pair: a linha do consolidado (mesmo valor, sem par e não conciliada). */
+    consolidatedLineId: id.optional(),
+  })
+  .refine((v) => (v.action === 'pair') === Boolean(v.consolidatedLineId), { path: ['consolidatedLineId'], message: E.validation });
+
+export const supersedeResolveInput = z.object({ items: z.array(supersedeResolveItem).min(1).max(500) });
+
+export const supersedeSuggestionsDecisionInput = z.object({
+  lineIds: z.array(id).min(1).max(500),
+  decision: z.enum(['approve', 'reject']),
+});
+
+export const supersededLinesQuery = z.object({ outcome: z.enum(SUPERSEDE_OUTCOMES).optional() });
+
 export const lineUnmatchInput = z.object({ deleteEntry: z.boolean().default(false) });
 
 export const lineCreateInput = z.object({

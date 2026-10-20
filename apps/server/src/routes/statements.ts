@@ -5,7 +5,9 @@ import {
   csvMappingInput,
   csvMappingUpdateInput,
   importBankBalanceInput,
+  importProvisionalInput,
   importRenameInput,
+  importSupersedeInput,
   lineClassifyInput,
   lineCreateInput,
   lineIdsInput,
@@ -17,6 +19,10 @@ import {
   statementInspectQuery,
   statementLineSearchQuery,
   statementTargetQuery,
+  supersededLinesQuery,
+  supersedeResolveInput,
+  supersedeSuggestionsDecisionInput,
+  t,
 } from '@moneyflow/shared';
 import type { FastifyInstance } from 'fastify';
 import { param, parse, type Req } from '../http';
@@ -29,6 +35,7 @@ import {
 } from '../services/ai-flows';
 import { assertUpload } from '../services/attachments';
 import * as rec from '../services/reconciliation';
+import * as supersede from '../services/statement-supersede';
 import * as statements from '../services/statements';
 import { UPLOAD_BODY_LIMIT } from './attachments';
 
@@ -48,6 +55,14 @@ export async function statementRoutes(app: FastifyInstance) {
     // "Conciliar com IA ao importar" ligado na conta/cartão (spec 029): a conciliação completa vai à fila do worker.
     // Desligado: as linhas sem regra recebem sugestão do agente dos fluxos (spec 009/011), em segundo plano.
     const auto = await autoReconcileEnabled(r.ctx, result.id).catch(() => false);
+    // Provisório ativo sobreposto sem a troca (spec 031): o agente lançaria de novo o que o provisório já conciliou.
+    if (auto && result.provisionalOverlap?.length) {
+      const lines = result.lines.filter((l) => l.status === 'new' || l.status === 'suggested').length;
+      return {
+        ...result,
+        aiReconcile: { queued: false, runId: null, conversationId: null, lines, skippedReason: t.statements.supersede.overlapAiSkipped },
+      };
+    }
     if (auto) {
       const aiReconcile = await reconcileImportWithAi(r.ctx, result.id, { auto: true }).catch((error) => {
         r.log.warn({ err: error }, 'conciliação: conciliação com IA não enfileirada');
@@ -68,6 +83,24 @@ export async function statementRoutes(app: FastifyInstance) {
     setReconcileAuto(r.ctx, id(r), parse(reconcileAiAutoInput, r.body).enabled),
   );
   app.get('/api/statement-imports/:id', (r: Req) => statements.getImport(r.ctx, id(r)));
+  // Lote provisório e a troca pelo consolidado (spec 031).
+  app.put('/api/statement-imports/:id/provisional', (r: Req) =>
+    supersede.setProvisional(r.ctx, id(r), parse(importProvisionalInput, r.body).provisional),
+  );
+  app.post('/api/statement-imports/:id/supersede', (r: Req) =>
+    supersede.supersedeImports(r.ctx, id(r), parse(importSupersedeInput, r.body ?? {})),
+  );
+  app.get('/api/statement-imports/:id/superseded-lines', (r: Req) =>
+    supersede.listSupersededLines(r.ctx, id(r), parse(supersededLinesQuery, r.query).outcome),
+  );
+  app.post('/api/statement-imports/:id/superseded-lines/resolve', (r: Req) =>
+    supersede.resolveSupersededLines(r.ctx, id(r), parse(supersedeResolveInput, r.body).items),
+  );
+  app.post('/api/statement-imports/:id/superseded-lines/suggest', (r: Req) => supersede.suggestSupersedePairs(r.ctx, id(r)));
+  app.post('/api/statement-imports/:id/superseded-lines/suggestions', (r: Req) => {
+    const input = parse(supersedeSuggestionsDecisionInput, r.body);
+    return supersede.decideSupersedeSuggestions(r.ctx, id(r), input.lineIds, input.decision);
+  });
   app.delete('/api/statement-imports/:id', (r: Req) => statements.deleteImport(r.ctx, id(r)));
   app.post('/api/statement-imports/:id/rematch', (r: Req) => statements.rematchImport(r.ctx, id(r)));
   app.put('/api/statement-imports/:id/bank-balance', (r: Req) =>

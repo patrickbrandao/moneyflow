@@ -22,6 +22,7 @@ import {
   type StatementImportSummary,
   type StatementInspect,
   type StatementLineRow,
+  type SupersedeResult,
   type statementImportQuery,
   t,
 } from '@moneyflow/shared';
@@ -32,6 +33,7 @@ import { AppError, notFound, unprocessable } from '../errors';
 import { cleanFileName, storeAttachment } from './attachments';
 import { getAccount } from './caixas';
 import { loadCard } from './card-core';
+import { activeProvisionals, lockImports, previewSupersedeForFile, supersedeInTx } from './statement-supersede';
 import { withTx } from './tx';
 import { camel, iso } from './util';
 
@@ -252,6 +254,10 @@ export function dedupHashes(lines: Pick<ParsedLine, 'postedOn' | 'amountCents' |
   });
 }
 
+/** A deduplicação não conta as linhas dos lotes provisórios (spec 031): o consolidado traz o mês inteiro. */
+const notProvisional = sql`NOT EXISTS (SELECT 1 FROM statement_imports si
+                                    WHERE si.id = statement_lines.statement_import_id AND si.provisional)`;
+
 /**
  * Prévia de um import (sem gravar): formato, período e quantas linhas são
  * novas ou já importadas (spec 027, cartão de aprovação do import_statement).
@@ -260,9 +266,11 @@ export async function previewStatementImport(
   ctx: ServiceContext,
   ref: { accountId?: string; cardCaixaId?: string },
   bytes: Buffer,
-  opts: { mappingId?: string; inline?: InlineCsvMapping; ofxStatement?: number },
+  opts: { mappingId?: string; inline?: InlineCsvMapping; ofxStatement?: number; provisional?: boolean; supersede?: string[] },
 ) {
   const target = await resolveTarget(ctx, ref, true);
+  if (opts.provisional && target.kind !== 'account')
+    throw unprocessable(t.errors.statementProvisionalAccountOnly, 'statement_provisional_account_only');
   const parsed = await parseStatementFile(ctx.db, target, bytes, opts);
   if (parsed.lines.length === 0) throw unprocessable(t.errors.statementEmpty, 'statement_empty');
   const hashes = dedupHashes(parsed.lines);
@@ -270,6 +278,7 @@ export async function previewStatementImport(
   const ownerId = target.kind === 'account' ? target.accountId : target.cardId;
   const existing = await ctx.db.execute<{ dedup_hash: string }>(sql`
     SELECT dedup_hash FROM statement_lines WHERE ${ownerColumn} = ${ownerId}::uuid
+       AND ${notProvisional}
        AND dedup_hash IN (${sql.join(
          hashes.map((h) => sql`${h}`),
          sql`, `,
@@ -277,11 +286,23 @@ export async function previewStatementImport(
   const known = new Set(existing.rows.map((r) => r.dedup_hash));
   const dates = parsed.lines.map((l) => l.postedOn).sort();
   const fresh = parsed.lines.filter((_, i) => !known.has(hashes[i]!));
+  const periodStart = [parsed.periodStart, dates[0]].filter(Boolean).sort()[0] ?? null;
+  const periodEnd = [parsed.periodEnd, dates.at(-1)].filter(Boolean).sort().at(-1) ?? null;
+  // Spec 031: os provisórios ativos sobrepostos e, com a troca, o resultado dela sem gravar.
+  const overlap =
+    target.kind === 'account' && periodStart && periodEnd
+      ? await activeProvisionals(ctx.db, target.accountId, { periodStart, periodEnd })
+      : [];
+  const supersedeIds = opts.provisional ? [...new Set([...overlap.map((p) => p.id), ...(opts.supersede ?? [])])] : (opts.supersede ?? []);
+  const superseded = supersedeIds.length ? await previewSupersedeForFile(ctx.db, supersedeIds, fresh) : null;
   return {
     target,
+    provisional: Boolean(opts.provisional),
+    provisionalOverlap: overlap,
+    superseded,
     format: parsed.format,
-    periodStart: [parsed.periodStart, dates[0]].filter(Boolean).sort()[0] ?? null,
-    periodEnd: [parsed.periodEnd, dates.at(-1)].filter(Boolean).sort().at(-1) ?? null,
+    periodStart,
+    periodEnd,
     lines: parsed.lines.length,
     fresh: fresh.length,
     duplicated: parsed.lines.length - fresh.length,
@@ -351,6 +372,8 @@ export async function importStatement(
   file: { mime: string; content: Buffer },
 ): Promise<StatementImportDetail> {
   const target = await resolveTarget(ctx, query, true);
+  if ((query.provisional || query.supersede.length > 0) && target.kind !== 'account')
+    throw unprocessable(t.errors.statementProvisionalAccountOnly, 'statement_provisional_account_only');
   const parsed = await parseStatementFile(ctx.db, target, file.content, query);
   if (parsed.lines.length === 0) throw unprocessable(t.errors.statementEmpty, 'statement_empty');
   const hashes = dedupHashes(parsed.lines);
@@ -360,6 +383,7 @@ export async function importStatement(
     const ownerId = target.kind === 'account' ? target.accountId : target.cardId;
     const existing = await tx.execute<{ dedup_hash: string }>(sql`
       SELECT dedup_hash FROM statement_lines WHERE ${ownerColumn} = ${ownerId}::uuid
+         AND ${notProvisional}
          AND dedup_hash IN (${sql.join(
            hashes.map((h) => sql`${h}`),
            sql`, `,
@@ -393,6 +417,7 @@ export async function importStatement(
         bankBalanceCents: bank?.amountCents ?? null,
         bankBalanceOn: bank?.date ?? null,
         importedByUserId: ctx.access.actor.id,
+        provisional: query.provisional,
       })
       .returning({ id: statementImports.id });
 
@@ -424,11 +449,31 @@ export async function importStatement(
         sql`UPDATE classification_rules SET usage_count = usage_count + ${count}, last_used_at = now() WHERE id = ${ruleId}`,
       );
     }
+    // Spec 031: a troca dos provisórios antes do casamento automático (as conciliações passam, nada é lançado de novo).
+    // Um provisório novo substitui sempre os provisórios ativos que ele cobre; o consolidado, os escolhidos.
+    let superseded: SupersedeResult | undefined;
+    let provisionalOverlap: StatementImportDetail['provisionalOverlap'];
+    if (target.kind === 'account') {
+      const active = await activeProvisionals(tx, target.accountId, { periodStart, periodEnd }, imp!.id);
+      const ids = query.provisional ? [...new Set([...active.map((p) => p.id), ...query.supersede])] : query.supersede;
+      if (ids.length > 0) {
+        await lockImports(tx, ids);
+        superseded = await supersedeInTx(tx, imp!.id, ids);
+      }
+      const left = active.filter((p) => !ids.includes(p.id));
+      if (!query.provisional && left.length > 0) provisionalOverlap = left;
+    }
     await autoMatch(tx, imp!.id);
-    return { id: imp!.id, skipped: parsed.lines.length - fresh.length };
+    return { id: imp!.id, skipped: parsed.lines.length - fresh.length, superseded, provisionalOverlap };
   });
   const detail = await getImport(ctx, result.id);
-  return { ...detail, skippedDuplicates: result.skipped, ...(parsed.ofxLeftOut.length ? { ofxLeftOut: parsed.ofxLeftOut } : {}) };
+  return {
+    ...detail,
+    skippedDuplicates: result.skipped,
+    ...(parsed.ofxLeftOut.length ? { ofxLeftOut: parsed.ofxLeftOut } : {}),
+    ...(result.superseded ? { superseded: result.superseded } : {}),
+    ...(result.provisionalOverlap ? { provisionalOverlap: result.provisionalOverlap } : {}),
+  };
 }
 
 type Rule = { id: string; entityId: string | null; categoryId: string | null };
@@ -564,20 +609,35 @@ export async function autoMatch(tx: Tx, importId: string) {
 const importSql = sql`
   SELECT b.statement_import_id AS id, b.financial_account_id, a.name AS account_name, b.card_caixa_id, i.card_invoice_id,
          coalesce(a.caixa_id, b.card_caixa_id) AS caixa_id, i.format, f.file_name, i.attachment_id,
-         b.period_start, b.period_end, b.bank_balance_on, b.bank_balance_cents, b.app_balance_cents, b.difference_cents,
-         b.difference_cents - prev.difference_cents AS interval_difference_cents, a.opening_date AS account_opening_date,
-         b.lines AS line_count, b.matched_lines, b.suggested_lines, b.new_lines, b.ignored_lines, u.username AS imported_by, i.created_at
+         b.period_start, b.period_end, b.bank_balance_on, b.bank_balance_cents,
+         -- Lote substituído (spec 031): fora da divergência.
+         CASE WHEN i.superseded_by_import_id IS NULL THEN b.app_balance_cents END AS app_balance_cents,
+         CASE WHEN i.superseded_by_import_id IS NULL THEN b.difference_cents END AS difference_cents,
+         CASE WHEN i.superseded_by_import_id IS NULL THEN b.difference_cents - prev.difference_cents END AS interval_difference_cents,
+         a.opening_date AS account_opening_date,
+         b.lines AS line_count, b.matched_lines, b.suggested_lines, b.new_lines, b.ignored_lines, u.username AS imported_by, i.created_at,
+         i.provisional,
+         CASE WHEN i.superseded_by_import_id IS NOT NULL
+              THEN json_build_object('id', i.superseded_by_import_id, 'fileName', sf.file_name, 'at', i.superseded_at) END AS superseded_by,
+         coalesce((SELECT json_agg(json_build_object('id', x.id, 'fileName', xf.file_name) ORDER BY x.period_start)
+                     FROM statement_imports x JOIN attachments xf ON xf.id = x.attachment_id
+                    WHERE x.superseded_by_import_id = i.id), '[]'::json) AS supersedes,
+         (SELECT count(*)::int FROM statement_lines pl JOIN statement_imports px ON px.id = pl.statement_import_id
+           WHERE px.superseded_by_import_id = i.id AND pl.supersede_outcome = 'pending') AS supersede_pending
     FROM statement_import_balances b
     JOIN statement_imports i ON i.id = b.statement_import_id
     JOIN attachments f ON f.id = i.attachment_id
     LEFT JOIN financial_accounts a ON a.id = b.financial_account_id
     LEFT JOIN users u ON u.id = i.imported_by_user_id
+    LEFT JOIN statement_imports si ON si.id = i.superseded_by_import_id
+    LEFT JOIN attachments sf ON sf.id = si.attachment_id
     -- Divergência do intervalo (spec 009): a acumulada menos a do lote anterior com saldo, na ordem da data do saldo.
     LEFT JOIN LATERAL (
       SELECT pb.difference_cents
         FROM statement_import_balances pb
         JOIN statement_imports pi ON pi.id = pb.statement_import_id
        WHERE pb.financial_account_id = b.financial_account_id AND pb.bank_balance_on IS NOT NULL
+         AND pi.superseded_by_import_id IS NULL
          AND (pb.bank_balance_on, pi.created_at) < (b.bank_balance_on, i.created_at)
        ORDER BY pb.bank_balance_on DESC, pi.created_at DESC
        LIMIT 1
@@ -586,7 +646,14 @@ const importSql = sql`
 const toImport = (row: Record<string, unknown>): StatementImportSummary => {
   const r = camel<StatementImportSummary>(row);
   const interval = r.intervalDifferenceCents as number | string | null;
-  return { ...r, intervalDifferenceCents: interval === null ? null : Number(interval), createdAt: iso(r.createdAt)! };
+  const supersededBy = r.supersededBy ? { ...r.supersededBy, at: iso(r.supersededBy.at)! } : null;
+  return {
+    ...r,
+    intervalDifferenceCents: interval === null ? null : Number(interval),
+    createdAt: iso(r.createdAt)!,
+    supersededBy,
+    supersedePending: Number(r.supersedePending ?? 0),
+  };
 };
 
 export async function listImports(ctx: ServiceContext, ref: { accountId?: string; cardCaixaId?: string }) {
@@ -604,6 +671,11 @@ export async function getImport(ctx: ServiceContext, id: string, withLines = tru
   ctx.access.assertRead(summary.caixaId);
   const lines = withLines ? await listLines(ctx.db, sql`l.statement_import_id = ${id}`) : [];
   return { ...summary, canWrite: ctx.access.canWrite(summary.caixaId), lines };
+}
+
+/** Lote substituído (spec 031) é somente leitura. */
+export function assertNotSuperseded(detail: { supersededBy: unknown }) {
+  if (detail.supersededBy) throw unprocessable(t.errors.statementImportSuperseded, 'statement_import_superseded');
 }
 
 type Page = { limit: number; offset: number };
@@ -656,6 +728,9 @@ export async function listLines(
     SELECT l.id, l.statement_import_id AS import_id, l.line_number, l.posted_on, l.amount_cents, l.description, l.fitid, l.status, l.movement_id, l.title_id,
            l.card_invoice_item_id, l.created_entry, l.entity_id, e.name AS entity_name, l.category_id, c.name AS category_name,
            coalesce(c.color_slot, pc.color_slot) AS category_color_slot, l.classification_source, l.classification_rule_id,
+           l.supersede_outcome, l.superseded_by_line_id,
+           CASE WHEN sg.id IS NOT NULL THEN json_build_object('lineId', sg.id, 'reason', l.supersede_suggestion_reason,
+             'postedOn', sg.posted_on, 'description', sg.description) END AS supersede_suggestion,
            CASE
              WHEN l.movement_id IS NOT NULL THEN json_build_object('kind', 'movement', 'date', m.occurred_on,
                'description', coalesce(m.description, mt.description, ''), 'amountCents', m.amount_cents, 'entityName', me.name)
@@ -678,6 +753,7 @@ export async function listLines(
       LEFT JOIN card_invoice_items ci ON ci.id = l.card_invoice_item_id
       LEFT JOIN card_purchases p ON p.id = ci.card_purchase_id
       LEFT JOIN entities pe ON pe.id = p.entity_id
+      LEFT JOIN statement_lines sg ON sg.id = l.supersede_suggested_line_id
      WHERE ${where}
      ORDER BY ${order}${limit}`);
   return result.rows.map((row) => {
@@ -698,6 +774,7 @@ export async function setImportBankBalance(
 ): Promise<StatementImportDetail> {
   const detail = await getImport(ctx, id);
   ctx.access.assertWrite(detail.caixaId);
+  assertNotSuperseded(detail);
   if (!detail.financialAccountId) throw unprocessable(t.errors.statementBalanceAccountOnly, 'statement_balance_account_only');
   let balance: { amountCents: number; date: string } | null = null;
   if (input.mode === 'set') balance = { amountCents: input.amountCents, date: input.on };
@@ -784,6 +861,9 @@ export async function searchLines(
 export async function deleteImport(ctx: ServiceContext, id: string) {
   const detail = await getImport(ctx, id);
   ctx.access.assertWrite(detail.caixaId);
+  // O substituído guarda o histórico da troca, e o substituto é referenciado por ele (spec 031).
+  assertNotSuperseded(detail);
+  if (detail.supersedes.length > 0) throw unprocessable(t.errors.statementImportSupersedes, 'statement_import_supersedes');
   await withTx(ctx, async (tx) => {
     await tx.delete(statementImports).where(eq(statementImports.id, id));
     const rest = await tx.execute(sql`SELECT 1 FROM attachment_links WHERE attachment_id = ${detail.attachmentId} LIMIT 1`);
@@ -796,6 +876,7 @@ export async function deleteImport(ctx: ServiceContext, id: string) {
 export async function rematchImport(ctx: ServiceContext, id: string) {
   const detail = await getImport(ctx, id);
   ctx.access.assertWrite(detail.caixaId);
+  assertNotSuperseded(detail);
   await withTx(ctx, (tx) => autoMatch(tx, id));
   return getImport(ctx, id);
 }

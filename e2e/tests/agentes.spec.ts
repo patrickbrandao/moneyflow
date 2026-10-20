@@ -490,7 +490,7 @@ test('kit de ferramentas: marcar a Conciliação, pôr uma escrita em ask, ligar
   await form.getByLabel('Nome').fill(kitName);
   await form.getByRole('checkbox', { name: 'Incluir todas as tools de Conciliação' }).check();
   const category = form.getByTestId('kit-category-reconciliation');
-  await expect(category).toContainText('18 de 18');
+  await expect(category).toContainText('21 de 21');
   await category.getByRole('button', { name: 'todas allow' }).click();
   const tool = form.getByTestId('kit-tool-ignore_statement_lines');
   await expect(tool.getByRole('radio', { name: 'allow' })).toHaveAttribute('aria-checked', 'true');
@@ -501,7 +501,7 @@ test('kit de ferramentas: marcar a Conciliação, pôr uma escrita em ask, ligar
   await form.getByRole('button', { name: 'Salvar' }).click();
   await expect(form).toBeHidden();
   const kitRow = page.getByRole('row').filter({ hasText: kitName });
-  await expect(kitRow).toContainText('4 leitura · 14 escrita');
+  await expect(kitRow).toContainText('4 leitura · 17 escrita');
   await expect(kitRow).toContainText('1 em ask');
   await expect(kitRow).toContainText('Nenhum agente');
 
@@ -524,7 +524,7 @@ test('kit de ferramentas: marcar a Conciliação, pôr uma escrita em ask, ligar
   await expect(card).toContainText('Ignorar linhas do extrato');
   const sent = llm.calls.slice(before).find((c) => c.path === '/v1/messages' && Array.isArray(c.body.tools) && c.body.tools.length > 0);
   const offered: string[] = sent!.body.tools.map((x: { name: string }) => x.name);
-  expect(offered).toHaveLength(18);
+  expect(offered).toHaveLength(21);
   expect(offered).toContain('ignore_statement_lines');
   expect(offered).not.toContain('list_caixas');
   await card.getByTestId('agent-approve').first().click();

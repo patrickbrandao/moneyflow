@@ -992,3 +992,112 @@ describe('backup: JSON completo num sistema novo', () => {
     }
   }, 180_000);
 });
+
+describe('backup: lote provisório substituído (spec 031) num sistema novo', () => {
+  it('o substituído, o vínculo, os desfechos e a conciliação da linha do consolidado chegam iguais, sem conflito', async () => {
+    const url = await freshDatabase();
+    if (!url) return;
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const acc = s.accountA.id;
+
+    const ofx = (start: string, end: string, txs: { date: string; cents: number; name: string }[]) => {
+      const d = (iso: string) => iso.replaceAll('-', '');
+      const list = txs
+        .map(
+          (tx) => `<STMTTRN><TRNTYPE>${tx.cents < 0 ? 'DEBIT' : 'CREDIT'}</TRNTYPE><DTPOSTED>${d(tx.date)}100000</DTPOSTED>
+<TRNAMT>${(tx.cents / 100).toFixed(2)}</TRNAMT><FITID>${uid()}</FITID><NAME>${tx.name}</NAME></STMTTRN>`,
+        )
+        .join('\n');
+      return Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<?OFX OFXHEADER="200" VERSION="211" SECURITY="NONE" OLDFILEUID="NONE" NEWFILEUID="NONE"?>
+<OFX><BANKMSGSRSV1><STMTTRNRS><TRNUID>1</TRNUID><STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS><STMTRS><CURDEF>BRL</CURDEF>
+<BANKACCTFROM><BANKID>077</BANKID><BRANCHID>0001</BRANCHID><ACCTID>12345-6</ACCTID><ACCTTYPE>CHECKING</ACCTTYPE></BANKACCTFROM>
+<BANKTRANLIST><DTSTART>${d(start)}</DTSTART><DTEND>${d(end)}</DTEND>
+${list}
+</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`);
+    };
+    const importOfx = async (file: Buffer, query = '') => {
+      const res = await h.app.inject({
+        method: 'POST',
+        url: `/api/statement-imports?accountId=${acc}&fileName=extrato-${uid()}.ofx${query}`,
+        payload: file,
+        headers: { cookie: session.cookie, 'content-type': 'application/x-ofx' },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      return res.json();
+    };
+    const byName = (lines: any[], name: string) => lines.find((l) => l.description === name);
+
+    // Provisório com duas linhas conciliadas: a tarifa acha o par no consolidado; o lanche, com a data deslocada, não.
+    const prov = await importOfx(
+      ofx('2026-10-01', '2026-10-15', [
+        { date: '2026-10-03', cents: -5_990, name: 'TARIFA PACOTE' },
+        { date: '2026-10-10', cents: -7_700, name: 'LANCHE' },
+      ]),
+      '&provisional=true',
+    );
+    for (const name of ['TARIFA PACOTE', 'LANCHE']) {
+      await admin.post(`/api/statement-lines/${byName(prov.lines, name).id}/create`, {
+        mode: 'adjustment',
+        entityId: s.supplier.id,
+        categoryId: s.expense.id,
+      });
+    }
+    const cons = await importOfx(
+      ofx('2026-10-01', '2026-10-31', [
+        { date: '2026-10-03', cents: -5_990, name: 'TARIFA PCT MENSAL' },
+        { date: '2026-10-12', cents: -7_700, name: 'LANCHONETE' },
+      ]),
+    );
+    const result = await admin.post(`/api/statement-imports/${cons.id}/supersede`, {});
+    expect(result.transferred.map((i: any) => i.description)).toEqual(['TARIFA PACOTE']);
+    expect(result.pending.map((i: any) => i.description)).toEqual(['LANCHE']);
+
+    /** O que importa da troca, lido do banco: lotes, desfechos, vínculos e a conciliação. */
+    const snapshot = async (target: Harness) => {
+      const imports = await target.db.execute(sql`
+        SELECT id, provisional, superseded_by_import_id, superseded_at IS NOT NULL AS superseded
+          FROM statement_imports WHERE id IN (${prov.id}, ${cons.id}) ORDER BY provisional DESC`);
+      const lines = await target.db.execute(sql`
+        SELECT id, description, status, provisional, supersede_outcome, superseded_by_line_id, movement_id, created_entry
+          FROM statement_lines WHERE statement_import_id IN (${prov.id}, ${cons.id}) ORDER BY description`);
+      return { imports: imports.rows, lines: lines.rows };
+    };
+    const before = await snapshot(h);
+    const tarifa = before.lines.find((l: any) => l.description === 'TARIFA PACOTE') as any;
+    const tarifaCons = before.lines.find((l: any) => l.description === 'TARIFA PCT MENSAL') as any;
+    expect(before.imports[0]).toMatchObject({ id: prov.id, provisional: true, superseded_by_import_id: cons.id, superseded: true });
+    expect(tarifa).toMatchObject({ status: 'superseded', supersede_outcome: 'transferred', superseded_by_line_id: tarifaCons.id });
+    expect(tarifaCons).toMatchObject({ status: 'matched', created_entry: 'adjustment' });
+    expect(tarifaCons.movement_id).toBeTruthy();
+    expect(before.lines.find((l: any) => l.description === 'LANCHE')).toMatchObject({
+      status: 'matched',
+      supersede_outcome: 'pending',
+      superseded_by_line_id: null,
+    });
+
+    const res = await h.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: session.cookie } });
+    expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
+    const b = await startApp({}, url);
+    try {
+      const adminB = await userSession(b, 'admin');
+      const report = await importFile(b, adminB.cookie, 'full', res.rawPayload);
+      expect(failures(report)).toEqual([]);
+      expect(issuesOf(report, 'statement_imports')).toEqual([]);
+      expect(issuesOf(report, 'statement_lines')).toEqual([]);
+      expect(await snapshot(b)).toEqual(before);
+
+      // A API do sistema novo mostra a mesma troca.
+      const apiB = client(b, adminB.cookie);
+      const provB = await apiB.get(`/api/statement-imports/${prov.id}`);
+      const consB = await apiB.get(`/api/statement-imports/${cons.id}`);
+      expect(provB.supersededBy).toMatchObject({ id: cons.id });
+      expect(consB.supersedes.map((x: any) => x.id)).toEqual([prov.id]);
+      expect(consB.supersedePending).toBe(1);
+    } finally {
+      await b.close();
+    }
+  }, 180_000);
+});

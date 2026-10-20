@@ -12,12 +12,14 @@ SELECT has_view('statement_import_balances');
 SELECT has_function('classification_rule_for', ARRAY['uuid', 'text', 'bigint']);
 SELECT columns_are('statement_imports', ARRAY['id', 'financial_account_id', 'card_caixa_id', 'card_invoice_id', 'format',
                                               'attachment_id', 'csv_mapping_id', 'period_start', 'period_end', 'bank_balance_cents',
-                                              'bank_balance_on', 'imported_by_user_id', 'notes', 'created_at', 'updated_at']);
+                                              'bank_balance_on', 'imported_by_user_id', 'notes', 'created_at', 'updated_at',
+                                              'provisional', 'superseded_by_import_id', 'superseded_at']);
 SELECT columns_are('statement_lines', ARRAY['id', 'statement_import_id', 'financial_account_id', 'card_caixa_id', 'line_number',
                                             'posted_on', 'amount_cents', 'description', 'fitid', 'dedup_hash', 'status',
                                             'movement_id', 'title_id', 'card_invoice_item_id', 'entity_id', 'category_id',
                                             'classification_rule_id', 'classification_source', 'raw', 'matched_at',
-                                            'created_at', 'updated_at', 'created_entry']);
+                                            'created_at', 'updated_at', 'created_entry', 'provisional', 'superseded_by_line_id',
+                                            'supersede_outcome', 'supersede_suggested_line_id', 'supersede_suggestion_reason']);
 SELECT columns_are('classification_rules', ARRAY['id', 'caixa_id', 'match_kind', 'pattern', 'direction', 'entity_id',
                                                  'category_id', 'priority', 'origin', 'created_from_line_id', 'created_by_user_id',
                                                  'usage_count', 'last_used_at', 'archived_at', 'created_at', 'updated_at']);

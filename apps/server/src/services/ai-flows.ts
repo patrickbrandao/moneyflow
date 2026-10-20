@@ -22,7 +22,7 @@ import { assertUpload, storeAttachment } from './attachments';
 import { updateAccount, updateCaixa } from './caixas';
 import { assertReadsImages, createConversation, sendMessage } from './conversations';
 import { enqueueImportRecipes, importBusy, insertReconcileSession, lockImport, recipeNameOf, startNextRecipe } from './reconcile-recipes';
-import { getImport } from './statements';
+import { assertNotSuperseded, getImport } from './statements';
 import { withTx } from './tx';
 
 /*
@@ -238,6 +238,10 @@ export async function reconcileImportWithAi(
   if (!detail.canWrite) {
     if (opts.auto) return none(0);
     ctx.access.assertWrite(detail.caixaId);
+  }
+  if (detail.supersededBy) {
+    if (opts.auto) return none(0);
+    assertNotSuperseded(detail);
   }
   const lines = detail.lines.filter((l) => l.status === 'new' || l.status === 'suggested').length;
   if (lines === 0) {
