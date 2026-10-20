@@ -151,3 +151,22 @@ Na categoria **Conciliação**; não entram sozinhas em kit nenhum e ficam no `/
 - Provisório de fatura de cartão.
 - Casamento automático por data deslocada ou por descrição parecida (fica para a IA ou para o usuário).
 - Aviso no sino das pendências do provisório (a tela do lote, a lista de lotes e o fechamento de mês já mostram).
+
+## Decisões da implementação (F17)
+Entregue nas tarefas [037](../tasks/037-lote-provisorio-no-banco.md) (banco, migration 0049) e [038](../tasks/038-lote-provisorio-na-aplicacao.md) (aplicação).
+
+### Banco
+- A marca do lote é copiada pelo banco para `statement_lines.provisional` (o INSERT ignora o valor informado; marcar ou desmarcar o lote atualiza as linhas), e o índice `statement_lines_account_dedup_key` vale só `WHERE NOT provisional`. Desmarcar com linha repetida dá `23505` nesse índice, que a aplicação devolve como 409 `statement_provisional_duplicated`.
+- Transições mais estritas que a tabela: na troca, linha `matched` só vira `transferred` ou `pending`, as demais só `paired` ou `dropped`; `kept` e `entry_deleted` só saem de `pending` (e `entry_deleted` exige `created_entry`). "Toda linha do substituído tem desfecho" e "provisórios ativos sem sobreposição" são conferidos no COMMIT (`statement_imports_supersede_commit_check`). A classificação da linha do substituído também é imutável.
+- A ordem da troca é obrigatória: marca o lote como substituído, depois as linhas do provisório (soltam o vínculo), depois as do consolidado (casam com os mesmos movimentos).
+- `supersede_pairs` entrou também em `ai_requests.purpose`. O backup não precisou de ajuste (as FKs próprias entram pela ordem topológica e o banco aceita o estado final no INSERT).
+
+### Aplicação
+- Serviço `services/statement-supersede.ts` (`setProvisional`, `supersedeImports`/`supersedeInTx`, `planSupersede`, `previewSupersedeForFile`, `listSupersededLines`, `resolveSupersededLines`, `suggestSupersedePairs`, `applySupersedePairs`, `decideSupersedeSuggestions`); a regra fixa pura em `packages/shared/src/supersede.ts` (`pairSupersedeLines`, com teste unitário). A troca toma `ai_reconcile_import_lock` de cada lote e recusa com 409 `run_active` se algum estiver ocupado.
+- Importação: `provisional=true` e `supersede=<id>,<id>` na query; o provisório novo substitui sozinho os provisórios ativos que ele cobre; a troca roda antes do casamento automático. Sem a troca, `provisionalOverlap` na resposta, e com "Conciliar com IA ao importar" ligado a conciliação não roda: `aiReconcile.skippedReason` com o aviso (em vez de um campo `skipped`).
+- Somente leitura do substituído: `loadLine` da conciliação (toda ação por linha), casar de novo, editar saldo, excluir, conciliação com IA e receitas respondem 422 `statement_import_superseded`; excluir o lote que substituiu outro, 422 `statement_import_supersedes`. A divergência (acumulada e do intervalo) e o saldo do app saem nulos no substituído, e ele não conta como "lote anterior"; o aviso `reconciliation_divergence` o ignora.
+- Fechamento de mês: o banco recusa (`period_closings_provisional_check`, 422 com a mensagem); a aplicação não pré-confere.
+- Fluxo `supersede_pairs`: até 200 sobras e 400 linhas do consolidado de mesmo valor; sem nenhuma sobra com candidata, 422 `supersede_nothing_to_suggest`.
+- Tools em `packages/shared/src/agents/tools-supersede.ts` (`SUPERSEDE_TOOLS`) e `agents/tool-handlers-supersede.ts`; a prévia do `import_statement` mostra as contagens da troca.
+- Telas: opção "Extrato parcial (provisório)" e a escolha dos provisórios a substituir no `ImportModal` (marcados os que se sobrepõem ao período do OFX); selos na lista de lotes; no detalhe, marcar/desmarcar, "Substituir pelo consolidado" e o aviso de provisório sobreposto, ambos com a prévia (`SupersedeModal`), o lote substituído em leitura com o desfecho por linha e o painel das sobras (`LeftoversPanel`, em `components/reconciliation/SupersedePanel.tsx`).
+- Testes: `apps/server/test/statement-supersede.test.ts` e `e2e/tests/conciliacao-provisoria.spec.ts`.

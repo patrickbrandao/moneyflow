@@ -205,6 +205,18 @@ export const ptBR = {
     statementOfxStatement: 'Esse extrato não existe no arquivo.',
     apiTokenUserInactive: 'O usuário está desativado: a chave não autenticaria. Reative-o antes.',
     statementAllDuplicated: 'Todas as linhas do arquivo já tinham sido importadas.',
+    statementImportSuperseded: 'Este lote provisório já foi substituído pelo consolidado: ele fica só para consulta.',
+    statementImportSupersedes: 'Este lote substituiu um provisório e guarda o histórico da troca: ele não é excluído.',
+    statementProvisionalDuplicated:
+      'Linhas deste lote repetem as de outro lote da conta: ele só deixa de ser provisório depois de substituído ou excluído.',
+    statementProvisionalAccountOnly: 'Só o lote de uma conta corrente ou poupança pode ser provisório.',
+    supersedeNothing: 'Não há lote provisório ativo desta conta para substituir por este extrato.',
+    supersedeInvalidTarget: 'Escolha lotes provisórios ativos da mesma conta, diferentes deste.',
+    supersedeLineNotPending: 'Esta linha não é uma sobra pendente do provisório substituído por este lote.',
+    supersedePairInvalid:
+      'A linha do consolidado precisa ser deste lote, ter o mesmo valor, estar sem par e não estar conciliada nem ignorada.',
+    supersedeNoSuggestion: 'Esta sobra não tem par sugerido pela IA.',
+    supersedeNothingToSuggest: 'Não há sobras pendentes com linha do consolidado do mesmo valor para a IA sugerir.',
     csvMappingRequired: 'Escolha ou crie o mapeamento de colunas do CSV.',
     ruleTarget: 'A regra precisa de entidade ou categoria.',
     ruleDirection: 'Regra com categoria precisa da direção (entrada ou saída).',

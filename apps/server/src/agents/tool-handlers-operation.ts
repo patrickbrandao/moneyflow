@@ -27,6 +27,7 @@ import * as statements from '../services/statements';
 import { nfeEntry, pixEntry, readDocument } from '../services/title-entry';
 import * as titles from '../services/titles';
 import * as transfers from '../services/transfers';
+import { supersedeRows } from './tool-handlers-supersede';
 import { type Handlers, nameOf, toolAttachment, withNames } from './tool-helpers';
 
 /*
@@ -466,6 +467,8 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         mappingId: i.mappingId,
         inline: i.csvMapping,
         ofxStatement: i.ofxStatement,
+        provisional: i.provisional,
+        supersede: i.supersedeImportIds,
       });
       const where = i.accountId ? await nameOf(ctx, 'account', i.accountId) : await nameOf(ctx, 'caixa', i.cardCaixaId);
       if (info.fresh === 0) throw unprocessable(t.errors.statementAllDuplicated, 'statement_duplicated');
@@ -482,6 +485,8 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         { label: 'Saídas', after: formatBRL(info.outCents) },
       ];
       if (i.csvMapping) rows.push({ label: 'Mapeamento CSV (salvo)', after: i.csvMapping.name });
+      if (info.provisional) rows.push({ label: 'Lote', after: 'Provisório (extrato parcial do mês)' });
+      if (info.superseded) rows.push(...supersedeRows(info.superseded));
       return {
         title: 'Importar extrato',
         summary: file.fileName,
@@ -490,6 +495,9 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         warnings: [
           ...(info.duplicated > 0 ? [`${info.duplicated} linha(s) já importada(s) ficam de fora.`] : []),
           ...(info.ofxLeftOut.length ? [t.statements.ofxLeftOut(info.ofxLeftOut.join(', '))] : []),
+          ...(!info.superseded && info.provisionalOverlap.length
+            ? [t.statements.supersede.overlapWarning(info.provisionalOverlap.map((p) => `${p.fileName} (${p.id})`).join(', '))]
+            : []),
         ],
       };
     },
@@ -515,6 +523,8 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
           bankBalanceCents: i.bankBalanceCents,
           bankBalanceOn: i.bankBalanceOn,
           ofxStatement: i.ofxStatement,
+          provisional: Boolean(i.provisional),
+          supersede: i.supersedeImportIds ?? [],
         },
         { mime: file.mime, content: file.content },
       );

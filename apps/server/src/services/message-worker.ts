@@ -272,6 +272,7 @@ async function divergences(db: Executor, minDifference: number, since: Date | st
       JOIN financial_accounts a ON a.id = b.financial_account_id
       JOIN caixas c ON c.id = a.caixa_id
      WHERE b.difference_cents IS NOT NULL AND abs(b.difference_cents) > ${minDifference}
+       AND i.superseded_by_import_id IS NULL
        AND i.created_at <= now() - ${DIVERGENCE_GRACE}::interval
        AND i.created_at >= greatest(${since}::timestamptz - ${DIVERGENCE_GRACE}::interval, now() - ${DIVERGENCE_WINDOW}::interval)
        ${caixaIds ? sql`AND a.caixa_id = ANY (${uuidArray(caixaIds)})` : sql``}`);

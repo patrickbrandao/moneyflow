@@ -17,6 +17,7 @@ import { LineActions, LineClassification, LinePair } from './LineActions';
 import '../../styles/reconciliation.css';
 
 const s = t.statements;
+const S = t.statements.supersede;
 
 type SortKey = 'period' | 'file' | 'imported';
 type Sort = { key: SortKey; dir: 'asc' | 'desc' };
@@ -294,7 +295,11 @@ export function StatementImportPanel({
               {!imports.data && <SkelRows cols={8} />}
               {imports.data?.length === 0 && <EmptyRow colSpan={8}>{isCard ? s.noImportsCard : s.noImports}</EmptyRow>}
               {rows?.map((row) => (
-                <tr key={row.id} className={cx('cursor-pointer', scope.has(row.id) && 'is-selected')} onClick={() => setImportId(row.id)}>
+                <tr
+                  key={row.id}
+                  className={cx('cursor-pointer', scope.has(row.id) && 'is-selected', row.supersededBy && 'is-off')}
+                  onClick={() => setImportId(row.id)}
+                >
                   <td onClick={(e) => e.stopPropagation()}>
                     <input
                       type="checkbox"
@@ -315,6 +320,13 @@ export function StatementImportPanel({
                       {row.format.toUpperCase()}
                       {row.importedBy ? ` · ${row.importedBy}` : ''}
                     </span>
+                    {(row.provisional || row.supersedePending > 0) && (
+                      <span className="row-sub inline-flex flex-wrap items-center gap-1">
+                        {row.provisional && !row.supersededBy && <Badge tone="accent">{S.provisional}</Badge>}
+                        {row.supersededBy && <Badge tone="outline">{S.supersededBy(row.supersededBy.fileName)}</Badge>}
+                        {row.supersedePending > 0 && <Badge tone="warn">{S.leftoverBadge(row.supersedePending)}</Badge>}
+                      </span>
+                    )}
                     {row.financialAccountId && openingAfterStart(row) && (
                       <span className="row-sub inline-flex flex-wrap items-center gap-1" onClick={(e) => e.stopPropagation()}>
                         <Badge tone="warn" title={s.openingAfterStart(formatDate(row.accountOpeningDate!))}>
@@ -356,7 +368,7 @@ export function StatementImportPanel({
                       <a className="row-action" href={attachmentUrl(row.attachmentId)} title={s.download} aria-label={s.download}>
                         <Download />
                       </a>
-                      {canWrite && (
+                      {canWrite && !row.supersededBy && row.supersedes.length === 0 && (
                         <button
                           type="button"
                           className="row-action danger"
@@ -381,6 +393,7 @@ export function StatementImportPanel({
           target={target}
           card={card.data ?? null}
           initialFile={importing.file}
+          provisionals={(imports.data ?? []).filter((row) => row.provisional && !row.supersededBy)}
           onClose={() => setImporting(null)}
           onImported={(detail) => {
             setImporting(null);
@@ -389,6 +402,8 @@ export function StatementImportPanel({
             setSuggestion(ai?.queued && ai.runId ? { importId: detail.id, runId: ai.runId, lines: ai.lines } : null);
             // Sugestão pulada (spec 028): orçamento de IA atingido ou limite por minuto.
             if (ai?.skippedReason) toast.error(ai.skippedReason);
+            if (detail.superseded) toast.success(S.replaced(detail.superseded.transferred.length));
+            if (detail.aiReconcile?.skippedReason) toast.error(detail.aiReconcile.skippedReason);
             setImportId(detail.id);
           }}
         />

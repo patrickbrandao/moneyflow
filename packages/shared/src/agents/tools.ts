@@ -21,6 +21,7 @@ import { RECIPE_TOOLS } from './recipes';
 import { type AgentToolDef, type AgentToolMode, date, define, limit, optionalDate } from './tool-def';
 import { ADMIN_TOOLS } from './tools-admin';
 import { OPERATION_TOOLS } from './tools-operation';
+import { SUPERSEDE_TOOLS } from './tools-supersede';
 
 /*
  * Registro único das tools dos agentes (specs 011 e 021): nome, título e
@@ -553,6 +554,8 @@ export const AGENT_TOOLS = [
   ...ADMIN_TOOLS,
   /* ---------------- receitas de conciliação (spec 030) ---------------- */
   ...RECIPE_TOOLS,
+  /* ---------------- lote provisório e consolidado (spec 031) ---------------- */
+  ...SUPERSEDE_TOOLS,
 ] as const satisfies readonly AgentToolDef[];
 
 export type AgentToolName = (typeof AGENT_TOOLS)[number]['name'];

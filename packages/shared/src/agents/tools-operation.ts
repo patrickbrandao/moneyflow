@@ -220,6 +220,19 @@ export const OPERATION_TOOLS = [
           .describe(
             'OFX com extratos de várias contas (ex.: corrente e poupança juntas): a posição (1, 2, …) do extrato a importar. Omitida = o que casa com a conta de destino; sem casamento, o erro lista as contas do arquivo.',
           ),
+        provisional: z
+          .boolean()
+          .optional()
+          .describe(
+            'Extrato parcial do mês (só conta): lote provisório, fora da deduplicação, depois substituído pelo consolidado. Substitui sozinho o provisório ativo que ele cobre.',
+          ),
+        supersedeImportIds: z
+          .array(id)
+          .max(20)
+          .optional()
+          .describe(
+            'Lotes provisórios ativos da conta que este extrato (o consolidado) substitui na mesma transação: as conciliações passam para as linhas novas sem lançar de novo. A prévia lista os provisórios sobrepostos.',
+          ),
       })
       .refine((v) => (v.accountId ? 1 : 0) + (v.cardCaixaId ? 1 : 0) === 1, {
         path: ['accountId'],

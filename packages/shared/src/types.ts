@@ -35,6 +35,7 @@ export type { EntityKind } from './documents';
 
 import type { EntityKind } from './documents';
 import type { LINE_CREATED_ENTRIES } from './schemas/operation';
+import type { SupersedeOutcome } from './supersede';
 
 /** Tag de entidade como aparece na entidade (chip): `archived` = tag arquivada (esmaecida). */
 export type EntityTagRef = { id: string; name: string; colorSlot: number; archived: boolean };
@@ -544,7 +545,7 @@ export type CardPurchaseDetail = CardPurchaseRow & {
 
 /* ---------------- extratos e conciliação (spec 009) ---------------- */
 
-export type LineStatus = 'matched' | 'suggested' | 'new' | 'ignored';
+export type LineStatus = 'matched' | 'suggested' | 'new' | 'ignored' | 'superseded';
 export type LineCreatedEntry = (typeof LINE_CREATED_ENTRIES)[number];
 
 export type StatementImportSummary = {
@@ -574,6 +575,14 @@ export type StatementImportSummary = {
   ignoredLines: number;
   importedBy: string | null;
   createdAt: string;
+  /** Extrato parcial do mês (spec 031): fora da deduplicação, na divergência só até ser substituído. */
+  provisional: boolean;
+  /** O lote que substituiu este provisório; substituído = somente leitura e fora da divergência. */
+  supersededBy: { id: string; fileName: string; at: string } | null;
+  /** Os provisórios que este lote substituiu. */
+  supersedes: { id: string; fileName: string }[];
+  /** Sobras pendentes dos provisórios que este lote substituiu (linhas conciliadas sem par). */
+  supersedePending: number;
 };
 
 export type StatementLineRow = {
@@ -606,7 +615,39 @@ export type StatementLineRow = {
   categoryColorSlot: number | null;
   classificationSource: 'rule' | 'agent' | 'user' | null;
   classificationRuleId: string | null;
+  /** Lote substituído (spec 031): o que aconteceu com a linha e a linha do consolidado que ficou no lugar. */
+  supersedeOutcome: SupersedeOutcome | null;
+  supersededByLineId: string | null;
+  /** Sobra pendente: o par sugerido pela IA, esperando aprovação. */
+  supersedeSuggestion: { lineId: string; reason: string | null; postedOn: string; description: string } | null;
 };
+
+/** Uma linha no resultado da troca do provisório (spec 031). */
+export type SupersedeItem = {
+  provisionalLineId: string;
+  consolidatedLineId: string | null;
+  postedOn: string;
+  amountCents: number;
+  description: string;
+  /** Pendente: no_pair (sem par) ou consolidated_taken (a linha do consolidado já está conciliada ou ignorada). */
+  reason?: 'no_pair' | 'consolidated_taken';
+};
+
+/** Resultado (ou prévia, com dryRun) da troca dos provisórios pelo consolidado (spec 031). */
+export type SupersedeResult = {
+  consolidatedImportId: string;
+  provisionalImportIds: string[];
+  dryRun: boolean;
+  transferred: SupersedeItem[];
+  paired: SupersedeItem[];
+  dropped: SupersedeItem[];
+  pending: SupersedeItem[];
+  /** Linhas do consolidado sem par: seguem a conciliação normal. */
+  consolidatedLeftover: { id: string; postedOn: string; amountCents: number; description: string }[];
+};
+
+/** Resultado do lote de decisões sobre as sobras (spec 031). */
+export type SupersedeResolveResult = { done: number; failed: { lineId: string; message: string }[] };
 
 /** Resultado do "Aplicar regras" (spec 009): linhas novas cuja classificação mudou. */
 export type ApplyRulesResult = { updated: number };
@@ -620,6 +661,10 @@ export type StatementImportDetail = StatementImportSummary & {
   ofxLeftOut?: string[];
   /** Só na resposta do import: a sugestão do agente dos fluxos enfileirada para as linhas novas (a tela acompanha a execução). */
   aiSuggestion?: { queued: boolean; runId: string | null; lines: number; skippedReason?: string } | null;
+  /** Só na resposta do import (spec 031): a troca dos provisórios feita na mesma transação. */
+  superseded?: SupersedeResult;
+  /** Só na resposta do import sem a troca: provisórios ativos da conta sobrepostos ao período (a tela oferece a troca). */
+  provisionalOverlap?: { id: string; fileName: string; periodStart: string; periodEnd: string }[];
   /** Só na resposta do import, com "Conciliar com IA ao importar" ligado (spec 029): a conciliação enfileirada. */
   aiReconcile?: {
     queued: boolean;

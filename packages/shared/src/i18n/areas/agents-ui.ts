@@ -593,6 +593,7 @@ export const agentsUiStrings = {
         embedding: 'Embeddings',
         document_reading: 'Leitura de documento',
         classify_lines: 'Sugestões da conciliação',
+        supersede_pairs: 'Pares do provisório',
         contract_reading: 'Leitura do contrato',
         contract_markdown: 'Contrato em markdown',
         vision_describe: 'Descrição de anexo',

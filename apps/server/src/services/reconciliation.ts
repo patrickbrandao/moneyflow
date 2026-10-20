@@ -54,12 +54,16 @@ import { camel, iso } from './util';
 type Line = typeof statementLines.$inferSelect & { caixaId: string };
 
 async function loadLine(ctx: ServiceContext, tx: Tx, id: string): Promise<Line> {
-  const result = await tx.execute<{ caixa_id: string }>(sql`
-    SELECT coalesce(a.caixa_id, l.card_caixa_id) AS caixa_id
-      FROM statement_lines l LEFT JOIN financial_accounts a ON a.id = l.financial_account_id WHERE l.id = ${id}`);
+  const result = await tx.execute<{ caixa_id: string; superseded: boolean }>(sql`
+    SELECT coalesce(a.caixa_id, l.card_caixa_id) AS caixa_id, i.superseded_by_import_id IS NOT NULL AS superseded
+      FROM statement_lines l
+      JOIN statement_imports i ON i.id = l.statement_import_id
+      LEFT JOIN financial_accounts a ON a.id = l.financial_account_id WHERE l.id = ${id}`);
   const caixaId = result.rows[0]?.caixa_id;
   if (!caixaId) throw notFound();
   ctx.access.assertWrite(caixaId);
+  // Linha de lote substituído (spec 031): só as decisões das sobras, pela troca.
+  if (result.rows[0]!.superseded) throw unprocessable(t.errors.statementImportSuperseded, 'statement_import_superseded');
   const [line] = await tx.select().from(statementLines).where(eq(statementLines.id, id)).for('update');
   return { ...line!, caixaId };
 }
@@ -228,7 +232,11 @@ const uuids = (ids: string[]) =>
  * a compra no cartão (faturas abertas, sem estorno). Se o lançamento mudou
  * depois (outra baixa, estorno, outra conciliação), nada sai.
  */
-async function deleteCreatedEntry(ctx: ServiceContext, tx: Tx, line: Line) {
+export async function deleteCreatedEntry(
+  ctx: ServiceContext,
+  tx: Tx,
+  line: Pick<Line, 'createdEntry' | 'movementId' | 'cardInvoiceItemId'>,
+) {
   if (line.createdEntry === 'purchase') {
     const [item] = await tx
       .select({ purchaseId: cardInvoiceItems.cardPurchaseId })

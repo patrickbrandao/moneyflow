@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
 import { suggestClassifications } from '../services/reconciliation';
+import { applySupersedePairs } from '../services/statement-supersede';
 
 /*
  * IA nos fluxos existentes (specs 009, 010, 011): leitura de documento
@@ -10,7 +11,7 @@ import { suggestClassifications } from '../services/reconciliation';
  * marcada em ai_conversations.purpose; o agente responde JSON e não usa tools.
  */
 
-export const FLOW_PURPOSES = ['document_reading', 'classify_lines', 'contract_reading', 'contract_markdown'] as const;
+export const FLOW_PURPOSES = ['document_reading', 'classify_lines', 'contract_reading', 'contract_markdown', 'supersede_pairs'] as const;
 /** Fluxos que a API espera terminar (a resposta volta na requisição): não avisam no sino. */
 export const SYNC_FLOW_PURPOSES: readonly string[] = ['document_reading', 'contract_reading', 'contract_markdown'];
 export type FlowPurpose = (typeof FLOW_PURPOSES)[number];
@@ -70,6 +71,15 @@ export function flowSystemPrompt(purpose: PromptPurpose): string {
       'Responda SOMENTE com o markdown do documento, sem cercas de código em volta.',
     ].join('\n');
   }
+  if (purpose === 'supersede_pairs') {
+    return [
+      'Tarefa: um extrato provisório foi substituído pelo consolidado do banco. Algumas linhas conciliadas do provisório',
+      '(lista provisional, com o lançamento de cada uma) ficaram sem par no consolidado (lista consolidated).',
+      'Proponha os pares que são a mesma transação: o valor é sempre igual; a data pode diferir em alguns dias e a descrição pode mudar.',
+      'Use APENAS os lineId fornecidos, cada linha no máximo uma vez. Omita o que não tiver confiança razoável.',
+      'Responda SOMENTE com um objeto JSON: {"pairs": [{"provisionalLineId": "...", "consolidatedLineId": "...", "reason": "motivo curto"}]}.',
+    ].join('\n');
+  }
   if (purpose === 'document_reading') {
     return [
       'Tarefa: ler o documento anexado (boleto, nota fiscal, recibo ou comprovante) e extrair os dados de um título a pagar.',
@@ -106,6 +116,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Aplica o resultado do fluxo (classificação: grava as sugestões como agente). */
 export async function applyFlowResult(ctx: ServiceContext, purpose: FlowPurpose, screen: Record<string, unknown>, text: string) {
+  if (purpose === 'supersede_pairs') return applySupersedePairs(ctx, screen, text);
   if (purpose !== 'classify_lines') return;
   const parsed = extractJson(text) as { suggestions?: { lineId?: string; entityId?: string | null; categoryId?: string | null }[] } | null;
   const allowed = new Set(Array.isArray(screen.lineIds) ? (screen.lineIds as string[]) : []);

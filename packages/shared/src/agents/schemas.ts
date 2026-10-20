@@ -357,6 +357,7 @@ export const AI_USAGE_PURPOSES = [
   'embedding',
   'document_reading',
   'classify_lines',
+  'supersede_pairs',
   'contract_reading',
   'contract_markdown',
   'vision_describe',

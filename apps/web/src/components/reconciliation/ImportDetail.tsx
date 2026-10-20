@@ -6,10 +6,25 @@ import {
   formatSignedBRL,
   type LineStatus,
   type StatementImportDetail,
+  type StatementImportSummary,
   type StatementLineRow,
   t,
 } from '@moneyflow/shared';
-import { ArrowLeft, Check, CheckCheck, Download, Landmark, Loader2, Pencil, RefreshCw, RotateCcw, Sparkles, Wand2, X } from 'lucide-react';
+import {
+  ArrowLeft,
+  Check,
+  CheckCheck,
+  Download,
+  Landmark,
+  Loader2,
+  Pencil,
+  RefreshCw,
+  Replace,
+  RotateCcw,
+  Sparkles,
+  Wand2,
+  X,
+} from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { followRun } from '../../agents/stream';
@@ -17,7 +32,7 @@ import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction, useApi } from '../../lib/hooks';
 import { caixaTab } from '../../lib/links';
-import { useParamState } from '../../lib/params';
+import { useParamState, useSetParams } from '../../lib/params';
 import { attachmentUrl } from '../../lib/upload';
 import { LoadError, Money, SkelRows } from '../domain';
 import { ModalActions, MoneyInput } from '../forms';
@@ -26,11 +41,19 @@ import { Badge, Button, cx, EmptyRow, Field, Modal, Skel, Tabs, type Tone } from
 import { LineActions, LineClassification, LinePair } from './LineActions';
 import { RecipesPanel } from './RecipesPanel';
 import { ReconcileAiPanel } from './ReconcileAiPanel';
+import { consolidatedCandidates, LeftoversPanel, overlappingProvisionals, SupersedeModal } from './SupersedePanel';
 
 const s = t.statements;
 const ai = t.agentsUi.flows;
+const S = t.statements.supersede;
 
-const STATUS_TONE: Record<LineStatus, Tone> = { matched: 'ok', suggested: 'accent', new: 'warn', ignored: 'outline' };
+const STATUS_TONE: Record<LineStatus, Tone> = {
+  matched: 'ok',
+  suggested: 'accent',
+  new: 'warn',
+  ignored: 'outline',
+  superseded: 'outline',
+};
 
 export function LineStatusBadge({ status }: { status: LineStatus }) {
   return <Badge tone={STATUS_TONE[status]}>{s.statuses[status]}</Badge>;
@@ -193,7 +216,16 @@ export function ImportDetail({
   const { run, busy } = useAction();
   const data = detail.data;
   const isCard = Boolean(data?.cardCaixaId);
-  const canWrite = Boolean(data?.canWrite);
+  // Lote substituído pelo consolidado (spec 031): só consulta.
+  const superseded = Boolean(data?.supersededBy);
+  const canWrite = Boolean(data?.canWrite) && !superseded;
+  const setParams = useSetParams();
+  const accountImports = useApi<StatementImportSummary[]>(
+    data?.financialAccountId ? `/api/statement-imports?accountId=${data.financialAccountId}` : null,
+  );
+  const [supersede, setSupersede] = useState<{ options: StatementImportSummary[]; provisionalIds?: string[] } | null>(null);
+  const overlapping =
+    data && accountImports.data && !data.provisional && !superseded ? overlappingProvisionals(accountImports.data, data) : [];
   const suggested = data?.lines.filter((l) => l.status === 'suggested') ?? [];
   // Sugestões do agente (classificationSource 'agent'): aprovar vira classificação do usuário; descartar limpa.
   const agentLines = data?.lines.filter((l) => l.classificationSource === 'agent') ?? [];
@@ -211,8 +243,17 @@ export function ImportDetail({
 
   const changed = () => {
     void reload();
+    void accountImports.reload();
     onChanged();
   };
+
+  async function toggleProvisional(provisional: boolean) {
+    const ok = await run(
+      () => api.put(`/api/statement-imports/${importId}/provisional`, { provisional }),
+      provisional ? S.markedProvisional : S.unmarkedProvisional,
+    );
+    if (ok) changed();
+  }
 
   // As sugestões chegam pelo worker: segue o SSE da execução e recarrega as linhas quando ela termina.
   const suggestingRunId = suggesting?.runId ?? null;
@@ -284,7 +325,7 @@ export function ImportDetail({
 
   if (detail.error) return <LoadError error={detail.error} onRetry={() => void detail.reload()} />;
 
-  const counts: Record<string, number> = { all: data?.lines.length ?? 0, matched: 0, suggested: 0, new: 0, ignored: 0 };
+  const counts: Record<string, number> = { all: data?.lines.length ?? 0, matched: 0, suggested: 0, new: 0, ignored: 0, superseded: 0 };
   for (const line of data?.lines ?? []) counts[line.status] = (counts[line.status] ?? 0) + 1;
   const status = filter ?? 'all';
   const lines = (data?.lines ?? []).filter((l) => status === 'all' || l.status === status);
@@ -311,6 +352,16 @@ export function ImportDetail({
           <ArrowLeft /> {s.back}
         </Button>
         <span className="flex-1" />
+        {canWrite && data?.provisional && accountImports.data && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSupersede({ options: consolidatedCandidates(accountImports.data!, data), provisionalIds: [data.id] })}
+            disabled={busy}
+          >
+            <Replace /> {S.replaceWithConsolidated}
+          </Button>
+        )}
         {canWrite && (
           <Button variant="ghost" size="sm" onClick={() => void rematch()} disabled={busy}>
             <RefreshCw /> {s.rematch}
@@ -349,6 +400,17 @@ export function ImportDetail({
               <button type="button" className="link mt-1 inline-flex items-center gap-1 text-xs" onClick={() => setRenaming(true)}>
                 <Pencil className="size-3" /> {s.renameFile}
               </button>
+            )}
+            {data.financialAccountId && (data.provisional || canWrite) && (
+              <span className="mt-1 flex flex-wrap items-center gap-2 text-xs" data-testid="provisional-state">
+                {data.provisional && !superseded && <Badge tone="accent">{S.provisional}</Badge>}
+                {superseded && <Badge tone="outline">{S.supersededBy(data.supersededBy!.fileName)}</Badge>}
+                {canWrite && (data.provisional || data.supersedes.length === 0) && (
+                  <button type="button" className="link" onClick={() => void toggleProvisional(!data.provisional)} disabled={busy}>
+                    {data.provisional ? S.unmarkProvisional : S.markProvisional}
+                  </button>
+                )}
+              </span>
             )}
           </div>
           <div>
@@ -394,6 +456,29 @@ export function ImportDetail({
         </div>
       )}
 
+      {superseded && data?.supersededBy && (
+        <div className="notice info mb-3 flex flex-wrap items-center gap-2" data-testid="superseded-note">
+          <span className="min-w-0 flex-1">
+            {S.supersededNote(data.supersededBy.fileName, formatDate(data.supersededBy.at.slice(0, 10)))}
+          </span>
+          <Button size="sm" variant="ghost" onClick={() => setParams({ import: data.supersededBy!.id, lines: null })}>
+            {data.supersededBy.fileName}
+          </Button>
+        </div>
+      )}
+      {data && data.supersedes.length > 0 && (
+        <p className="mb-2 text-[13px] text-muted">{S.supersedesNote(data.supersedes.map((x) => x.fileName).join(', '))}</p>
+      )}
+      {canWrite && data && overlapping.length > 0 && (
+        <div className="notice warn mb-3 flex flex-wrap items-center gap-2" data-testid="provisional-overlap">
+          <span className="min-w-0 flex-1">{S.overlapBanner(overlapping.map((x) => x.fileName).join(', '))}</span>
+          <Button size="sm" onClick={() => setSupersede({ options: [data], provisionalIds: overlapping.map((x) => x.id) })}>
+            <Replace /> {S.replace}
+          </Button>
+        </div>
+      )}
+      {data && data.supersedes.length > 0 && <LeftoversPanel detail={data} canWrite={canWrite} onChanged={changed} />}
+
       {failures.length > 0 && (
         <div className="notice danger mb-3">
           <strong>{s.confirmFailures}:</strong>
@@ -410,7 +495,7 @@ export function ImportDetail({
         </div>
       )}
 
-      {data && (
+      {data && !superseded && (
         <RecipesPanel
           importId={importId}
           selectedLineIds={selectedPending}
@@ -418,7 +503,7 @@ export function ImportDetail({
           onStarted={() => setAiPanelKey((n) => n + 1)}
         />
       )}
-      {data && (
+      {data && !superseded && (
         <ReconcileAiPanel
           key={aiPanelKey}
           importId={importId}
@@ -455,11 +540,13 @@ export function ImportDetail({
       <Tabs
         value={status}
         onChange={(key) => setFilter(key === 'all' ? null : key)}
-        items={(['all', 'suggested', 'new', 'matched', 'ignored'] as const).map((key) => ({
-          key,
-          label: key === 'all' ? s.filterAll : s.statuses[key]!,
-          count: counts[key] ?? 0,
-        }))}
+        items={(['all', 'suggested', 'new', 'matched', 'ignored', 'superseded'] as const)
+          .filter((key) => key !== 'superseded' || (counts.superseded ?? 0) > 0)
+          .map((key) => ({
+            key,
+            label: key === 'all' ? s.filterAll : s.statuses[key]!,
+            count: counts[key] ?? 0,
+          }))}
       />
 
       <div className="table-wrap">
@@ -515,6 +602,11 @@ export function ImportDetail({
                 </td>
                 <td>
                   <LineStatusBadge status={line.status} />
+                  {line.supersedeOutcome && (
+                    <span className="row-sub" data-testid="supersede-outcome">
+                      {S.outcomes[line.supersedeOutcome]}
+                    </span>
+                  )}
                 </td>
                 <td className="rec-wide">
                   <LinePair line={line} />
@@ -546,6 +638,18 @@ export function ImportDetail({
           onSaved={() => {
             setRenaming(false);
             changed();
+          }}
+        />
+      )}
+      {supersede && (
+        <SupersedeModal
+          consolidatedOptions={supersede.options}
+          provisionalIds={supersede.provisionalIds}
+          onClose={() => setSupersede(null)}
+          onDone={(result) => {
+            setSupersede(null);
+            changed();
+            if (result.consolidatedImportId !== importId) setParams({ import: result.consolidatedImportId, lines: null });
           }}
         />
       )}

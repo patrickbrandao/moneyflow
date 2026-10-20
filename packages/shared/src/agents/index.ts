@@ -15,4 +15,5 @@ export * from './tools';
 export * from './tools-admin';
 export * from './tools-mcp';
 export * from './tools-operation';
+export * from './tools-supersede';
 export type * from './types';

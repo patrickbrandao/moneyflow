@@ -4,6 +4,8 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 
 | Nº | Tarefa | Status | Tipo | Responsável | Origem |
 |---|---|---|---|---|---|
+| 038 | [Lote provisório e a troca pelo consolidado na aplicação (F17)](038-lote-provisorio-na-aplicacao.md) (depois da 037) | concluida | melhoria | app | usuario |
+| 037 | [Lote provisório e a troca pelo consolidado no banco (F17)](037-lote-provisorio-no-banco.md) | concluida | banco | dba | usuario |
 | 035 | [Receitas de conciliação no banco (F16)](035-receitas-de-conciliacao-no-banco.md) | concluida | banco | dba | usuario |
 | 036 | [Receitas de conciliação na aplicação (F16)](036-receitas-de-conciliacao-na-aplicacao.md) (depois da 035) | concluida | melhoria | app | usuario |
 | 030 | [Orçamentos, visões de uso e avisos no banco (F14)](030-orcamentos-e-limites-no-banco.md) (depois da F13) | concluida | banco | dba | usuario |
