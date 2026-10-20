@@ -23,6 +23,8 @@ import { ADMIN_TOOLS } from './tools-admin';
 import { OPERATION_TOOLS } from './tools-operation';
 import { SUPERSEDE_TOOLS } from './tools-supersede';
 
+const cnpjField = z.string().trim().min(14).max(20).describe('CNPJ com ou sem máscara (14 caracteres; o alfanumérico também).');
+
 /*
  * Registro único das tools dos agentes (specs 011 e 021): nome, título e
  * descrição em pt-BR, schema Zod de entrada (convertido para JSON Schema para
@@ -305,6 +307,15 @@ export const AGENT_TOOLS = [
     input: z.object({ lineId: id }),
   }),
   define({
+    name: 'lookup_cnpj',
+    category: 'entities',
+    title: 'Consultar CNPJ',
+    description:
+      'Consulta um CNPJ (numérico ou alfanumérico) na Receita pelo CNPJ Aberto ou pela BrasilAPI: razão social, nome fantasia, situação cadastral, e-mail, telefone e endereço. existingEntity diz se ele já está cadastrado. Para cadastrar com esses dados, use create_entity_from_cnpj.',
+    kind: 'read',
+    input: z.object({ cnpj: cnpjField }),
+  }),
+  define({
     name: 'list_message_destinations',
     category: 'messages',
     title: 'Listar destinos de mensagem',
@@ -322,6 +333,20 @@ export const AGENT_TOOLS = [
       'Cadastra uma pessoa (CPF) ou empresa (CNPJ), com tags (tagIds) e favorita opcionais. Verifique antes com search_records se já existe.',
     kind: 'write',
     input: entityCreateInput,
+  }),
+  define({
+    name: 'create_entity_from_cnpj',
+    category: 'entities',
+    title: 'Cadastrar empresa pelo CNPJ',
+    description:
+      'Consulta o CNPJ (como lookup_cnpj) e cadastra a empresa com a razão social, o nome fantasia, o e-mail e o telefone como contatos principais e o endereço. Recusa se o CNPJ já está cadastrado (use get_entity/update_entity). Tags (tagIds), favorita e observações opcionais.',
+    kind: 'write',
+    input: z.object({
+      cnpj: cnpjField,
+      notes: z.string().trim().max(2000).nullish().describe('Observações da entidade.'),
+      tagIds: z.array(id).max(200).default([]),
+      isFavorite: z.boolean().default(false),
+    }),
   }),
   define({
     name: 'update_entity',

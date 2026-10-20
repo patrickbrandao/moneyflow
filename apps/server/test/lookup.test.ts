@@ -1,8 +1,11 @@
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { t } from '@moneyflow/shared';
+import { AGENT_TOOLS, t } from '@moneyflow/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { TOOL_HANDLERS } from '../src/agents/tool-handlers';
+import { loadAccess } from '../src/authz/access';
 import { loadConfig } from '../src/config';
+import type { ServiceContext } from '../src/context';
 import { client, type Harness, startApp, userSession } from './helpers';
 
 /*
@@ -155,6 +158,71 @@ describe('consulta de CNPJ', () => {
 
   it('exige sessão', async () => {
     expect((await h.app.inject({ method: 'GET', url: `/api/lookup/cnpj/${CNPJ}` })).statusCode).toBe(401);
+  });
+});
+
+/** Contexto de serviço de um usuário (como o das tools do agente). */
+async function toolCtx(session: Awaited<ReturnType<typeof userSession>>, role: 'admin' | 'user'): Promise<ServiceContext> {
+  const actor = { id: session.id, username: session.username, email: `${session.username}@teste.local`, role, isActive: true };
+  return { db: h.db, access: await loadAccess(h.db, actor), config: h.config };
+}
+
+async function tool(ctx: ServiceContext, name: string, raw: Record<string, unknown>) {
+  const input = AGENT_TOOLS.find((d) => d.name === name)!.input.parse(raw);
+  const handler = TOOL_HANDLERS[name as keyof typeof TOOL_HANDLERS]!;
+  return { preview: () => handler.preview!(ctx, input as never), run: () => handler.run(ctx, input as never, {} as never) as Promise<any> };
+}
+
+describe('tools do agente: lookup_cnpj e create_entity_from_cnpj', () => {
+  it('estão no registro, na categoria entidades (leitura e escrita)', () => {
+    expect(AGENT_TOOLS.find((d) => d.name === 'lookup_cnpj')).toMatchObject({ category: 'entities', kind: 'read' });
+    expect(AGENT_TOOLS.find((d) => d.name === 'create_entity_from_cnpj')).toMatchObject({ category: 'entities', kind: 'write' });
+  });
+
+  it('consulta, mostra a prévia, cadastra com contatos e endereço, e depois acusa o cadastro existente', async () => {
+    const ctx = await toolCtx(await userSession(h, 'admin'), 'admin');
+    const before = await (await tool(ctx, 'lookup_cnpj', { cnpj: '41.278.833/0001-04' })).run();
+    expect(before).toMatchObject({ source: 'cnpjaberto', name: 'EMPRESA FICTICIA LTDA', existingEntity: null });
+    expect(JSON.stringify(before)).not.toContain(KEY);
+
+    const create = await tool(ctx, 'create_entity_from_cnpj', { cnpj: CNPJ, notes: 'Fornecedor', isFavorite: true });
+    const preview = await create.preview();
+    expect(preview).toMatchObject({ title: 'Cadastrar empresa pelo CNPJ', summary: 'EMPRESA FICTICIA LTDA', action: 'create' });
+    const rows = Object.fromEntries(preview.rows.map((r) => [r.label, r.after]));
+    expect(rows).toMatchObject({ 'Nome fantasia': 'FICTICIA', 'E-mail': 'contato@ficticia.teste', Telefone: '8197723466' });
+    expect(rows['Endereço']).toContain('RECIFE/PE');
+    expect(preview.warnings?.[0]).toContain('Inapta');
+
+    const entity = await create.run();
+    expect(entity).toMatchObject({
+      kind: 'company',
+      name: 'EMPRESA FICTICIA LTDA',
+      tradeName: 'FICTICIA',
+      document: CNPJ,
+      isFavorite: true,
+      notes: 'Fornecedor',
+    });
+    expect(entity.contacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: 'email', value: 'contato@ficticia.teste', isPrimary: true }),
+        expect.objectContaining({ kind: 'phone', value: '8197723466', isPrimary: true }),
+      ]),
+    );
+    expect(entity.addresses).toEqual([expect.objectContaining({ city: 'RECIFE', state: 'PE', postalCode: '51160330', number: '221' })]);
+
+    const after = await (await tool(ctx, 'lookup_cnpj', { cnpj: CNPJ })).run();
+    expect(after.existingEntity).toEqual({ id: entity.id, name: 'EMPRESA FICTICIA LTDA', archived: false });
+    await expect(create.preview()).rejects.toThrow(t.errors.entityDocumentExists);
+    await expect(create.run()).rejects.toThrow(t.errors.entityDocumentExists);
+  });
+
+  it('quem não edita cadastros não cadastra; CNPJ inexistente é recusado', async () => {
+    const userCtx = await toolCtx(await userSession(h), 'user');
+    await expect((await tool(userCtx, 'create_entity_from_cnpj', { cnpj: '11222333000181' })).preview()).rejects.toThrow();
+    const adminCtx = await toolCtx(await userSession(h, 'admin'), 'admin');
+    await expect((await tool(adminCtx, 'create_entity_from_cnpj', { cnpj: '11222333000181' })).run()).rejects.toThrow(
+      t.errors.lookupNotFound,
+    );
   });
 });
 

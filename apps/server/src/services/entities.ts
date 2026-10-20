@@ -11,6 +11,7 @@ import {
 import {
   type addressInput,
   type bankAccountInput,
+  type CnpjLookup,
   type contactInput,
   type DeleteResult,
   type EntityDetail,
@@ -31,6 +32,7 @@ import { and, asc, desc, eq, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { AppError, notFound } from '../errors';
+import { lookupCnpj } from '../integrations/lookup';
 import { entityFilterCondition, replaceEntityTags } from './entity-tags';
 import { deleteOrArchive, withTx } from './tx';
 import { camel } from './util';
@@ -174,6 +176,61 @@ export async function createEntity(ctx: ServiceContext, input: z.output<typeof e
       .returning({ id: entities.id });
     if (input.tagIds?.length) await replaceEntityTags(tx, row!.id, input.tagIds);
     return row!.id;
+  });
+  return getEntity(ctx, id);
+}
+
+/* ---- consulta de CNPJ e cadastro a partir dela (tools dos agentes) ---- */
+
+/** Entidade já cadastrada com o documento (arquivada inclusive; o documento é único). */
+export async function findByDocument(ctx: ServiceContext, document: string) {
+  const [row] = await ctx.db
+    .select({ id: entities.id, name: entities.name, archivedAt: entities.archivedAt })
+    .from(entities)
+    .where(eq(entities.document, normalizeDocument(document)));
+  return row ? { id: row.id, name: row.name, archived: row.archivedAt !== null } : null;
+}
+
+/** A ficha do CNPJ (spec 003) com a entidade que já o usa, se houver. */
+export async function lookupCnpjWithEntity(ctx: ServiceContext, cnpj: string) {
+  const data = await lookupCnpj(cnpj, ctx.config);
+  return { ...data, existingEntity: await findByDocument(ctx, data.document) };
+}
+
+/**
+ * Cadastra a empresa com a ficha do CNPJ: razão social, fantasia, e-mail e
+ * telefone (contatos principais) e o endereço, tudo numa transação.
+ */
+export async function createEntityFromCnpj(
+  ctx: ServiceContext,
+  input: { cnpj: string; notes?: string | null; tagIds: string[]; isFavorite: boolean },
+  data?: CnpjLookup,
+): Promise<EntityDetail> {
+  ctx.access.assertRegistryWrite();
+  const ficha = data ?? (await lookupCnpj(input.cnpj, ctx.config));
+  if (!ficha.name) throw new AppError(404, 'lookup_not_found', t.errors.lookupNotFound);
+  if (await findByDocument(ctx, ficha.document)) throw new AppError(409, 'conflict', t.errors.entityDocumentExists);
+  const id = await withTx(ctx, async (tx) => {
+    const [row] = await tx
+      .insert(entities)
+      .values({
+        kind: 'company',
+        name: ficha.name.slice(0, 200),
+        tradeName: ficha.tradeName?.slice(0, 200) ?? null,
+        document: ficha.document,
+        notes: input.notes?.trim() || null,
+        isFavorite: input.isFavorite,
+      })
+      .returning({ id: entities.id });
+    const entityId = row!.id;
+    const contacts = [
+      ficha.email ? { kind: 'email' as const, value: ficha.email.slice(0, 200) } : null,
+      ficha.phone ? { kind: 'phone' as const, value: ficha.phone.slice(0, 200) } : null,
+    ].filter((c) => c !== null);
+    if (contacts.length > 0) await tx.insert(entityContacts).values(contacts.map((c) => ({ entityId, ...c, isPrimary: true })));
+    if (ficha.address) await tx.insert(entityAddresses).values({ entityId, ...ficha.address });
+    if (input.tagIds.length > 0) await replaceEntityTags(tx, entityId, [...new Set(input.tagIds.map((v) => v.toLowerCase()))]);
+    return entityId;
   });
   return getEntity(ctx, id);
 }

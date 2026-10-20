@@ -13,7 +13,7 @@ import {
 } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
-import { forbidden, notFound, unprocessable } from '../errors';
+import { AppError, forbidden, notFound, unprocessable } from '../errors';
 import * as caixas from '../services/caixas';
 import { calendarItems } from '../services/calendar';
 import * as cards from '../services/cards';
@@ -259,6 +259,7 @@ export const TOOL_HANDLERS: Handlers = {
       return { ...page, lines: page.lines.map(compactLine) };
     },
   },
+  lookup_cnpj: { run: (ctx, i) => entities.lookupCnpjWithEntity(ctx, i.cnpj) },
   list_message_destinations: {
     run: async (ctx) =>
       (await listDestinations(ctx))
@@ -275,6 +276,47 @@ export const TOOL_HANDLERS: Handlers = {
       return { title: 'Criar entidade', summary: i.name, action: 'create', rows };
     },
     run: (ctx, i) => entities.createEntity(ctx, i),
+  },
+  create_entity_from_cnpj: {
+    preview: async (ctx, i) => {
+      ctx.access.assertRegistryWrite();
+      const ficha = await entities.lookupCnpjWithEntity(ctx, i.cnpj);
+      if (ficha.existingEntity) throw new AppError(409, 'conflict', t.errors.entityDocumentExists);
+      const address = ficha.address
+        ? [
+            ficha.address.street,
+            ficha.address.number,
+            ficha.address.complement,
+            ficha.address.district,
+            `${ficha.address.city}/${ficha.address.state}`,
+            ficha.address.postalCode,
+          ]
+            .filter(Boolean)
+            .join(', ')
+        : null;
+      const rows = diffRows(ENTITY_FIELDS, {
+        kind: 'company',
+        name: ficha.name,
+        tradeName: ficha.tradeName,
+        document: ficha.document,
+        notes: i.notes ?? null,
+        isFavorite: i.isFavorite,
+      });
+      for (const [label, value] of [
+        ['E-mail', ficha.email],
+        ['Telefone', ficha.phone],
+        ['Endereço', address],
+        ['Situação cadastral', ficha.registrationStatus],
+      ] as const)
+        if (value) rows.push({ label, after: value });
+      if (i.tagIds.length > 0) rows.push({ label: 'Tags', after: await tagNames(ctx, i.tagIds) });
+      const warnings =
+        ficha.registrationStatus && ficha.registrationStatus !== 'Ativa'
+          ? [`Situação cadastral na Receita: ${ficha.registrationStatus}.`]
+          : undefined;
+      return { title: 'Cadastrar empresa pelo CNPJ', summary: ficha.name, action: 'create', rows, warnings };
+    },
+    run: (ctx, i) => entities.createEntityFromCnpj(ctx, i),
   },
   update_entity: {
     preview: async (ctx, i) => {

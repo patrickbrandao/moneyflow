@@ -161,6 +161,7 @@ export const ptBR = {
     invalidAmount: 'Valor inválido.',
     lookupUnavailable: 'Consulta indisponível no momento; preencha à mão.',
     lookupNotFound: 'Nada encontrado para esse número.',
+    entityDocumentExists: 'Já existe uma entidade com esse documento.',
     selfDelete: 'Você não pode excluir o próprio usuário.',
     selfDeactivate: 'Você não pode desativar o próprio usuário.',
     lastAdmin: 'É preciso manter ao menos um administrador ativo.',
