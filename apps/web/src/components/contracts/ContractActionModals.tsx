@@ -8,7 +8,7 @@ import {
   type ContractPeriodicity,
   type ContractRenewalInput,
   type ContractTerminationInput,
-  formatBRL,
+  formatAccounting,
   formatDate,
   formatMonth,
   installmentsCount,
@@ -204,8 +204,8 @@ export function AmendmentModal({
               <ul className="mt-2 space-y-1 text-xs">
                 {preview.affected.slice(0, 24).map((row) => (
                   <li key={row.titleId} className="mono">
-                    {formatMonth(row.competenceDate)} · {formatBRL(row.before.amountCents)} → {formatBRL(row.after.amountCents)} ·{' '}
-                    {formatDate(row.before.dueDate)} → {formatDate(row.after.dueDate)}
+                    {formatMonth(row.competenceDate)} · {formatAccounting(row.before.amountCents)} →{' '}
+                    {formatAccounting(row.after.amountCents)} · {formatDate(row.before.dueDate)} → {formatDate(row.after.dueDate)}
                   </li>
                 ))}
                 {preview.skipped.map((row) => (
@@ -301,7 +301,7 @@ export function TerminationModal({
             {preview?.current && !preview.current.settled && (
               <Field
                 label={`${R.currentInstallment} (${formatMonth(preview.current.competenceDate)})`}
-                hint={R.prorated(formatBRL(preview.current.proratedCents))}
+                hint={R.prorated(formatAccounting(preview.current.proratedCents))}
               >
                 <MoneyInput value={currentCents} onChange={setCurrentCents} ariaLabel={R.currentInstallment} />
               </Field>
@@ -366,7 +366,7 @@ export function TerminationModal({
               <ul className="mt-2 space-y-1 text-xs">
                 {preview.canceled.slice(0, 24).map((row) => (
                   <li key={row.titleId} className="mono">
-                    {formatMonth(row.competenceDate)} · {formatBRL(row.amountCents)}
+                    {formatMonth(row.competenceDate)} · {formatAccounting(row.amountCents)}
                   </li>
                 ))}
               </ul>
@@ -484,7 +484,7 @@ export function RenewalModal({
               label={t.contracts.fields.totalCents}
               hint={
                 split && count
-                  ? t.contracts.splitPreview(formatBRL(split[0]!), formatBRL(split[1] ?? split[0]!), count)
+                  ? t.contracts.splitPreview(formatAccounting(split[0]!), formatAccounting(split[1] ?? split[0]!), count)
                   : t.contracts.durationNotMultiple
               }
             >

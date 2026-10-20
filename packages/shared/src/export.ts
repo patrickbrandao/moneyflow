@@ -42,7 +42,7 @@ export function centsToCsv(cents: number): string {
   return `${negative ? '-' : ''}${Math.floor(abs / 100)},${String(abs % 100).padStart(2, '0')}`;
 }
 
-/** Formata a célula conforme o tipo da coluna (para CSV e PDF). */
+/** Formata a célula conforme o tipo da coluna (para CSV e PDF; no PDF, dinheiro no formato contábil). */
 export function formatCell(value: ExportCell, type: ExportColumnType = 'text', target: 'csv' | 'display' = 'csv'): string {
   if (value === null || value === undefined || value === '') return '';
   switch (type) {
@@ -51,7 +51,7 @@ export function formatCell(value: ExportCell, type: ExportColumnType = 'text', t
       if (!Number.isFinite(cents)) return '';
       if (target === 'csv') return centsToCsv(cents);
       const text = centsToCsv(Math.abs(cents)).replace(/\B(?=(\d{3})+(?!\d),)/g, '.');
-      return `${cents < 0 ? '−' : ''}R$ ${text}`;
+      return cents < 0 ? `(R$ ${text})` : `R$ ${text}`;
     }
     case 'date':
       return formatDate(String(value));

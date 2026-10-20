@@ -1,4 +1,4 @@
-import { type AuditEntry, type EntityTag, formatBRL, formatDate, formatDateTime, t } from '@moneyflow/shared';
+import { type AuditEntry, type EntityTag, formatAccounting, formatDate, formatDateTime, t } from '@moneyflow/shared';
 import { Bot, Cog, UserRound } from 'lucide-react';
 import '../../styles/attachments.css';
 import { useApi } from '../../lib/hooks';
@@ -24,7 +24,7 @@ export function formatAuditValue(column: string, value: unknown, names?: Map<str
   if (value === null || value === undefined || value === '') return '—';
   if (typeof value === 'boolean') return value ? t.common.yes : t.common.no;
   if (column.endsWith('_cents') && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+$/.test(value)))) {
-    return formatBRL(Number(value));
+    return formatAccounting(Number(value));
   }
   if (typeof value === 'string') {
     if (ISO_DATE.test(value)) return formatDate(value);

@@ -13,6 +13,7 @@ export * from './links';
 export * from './messages';
 export * from './money';
 export * from './parsers';
+export * from './period';
 export * from './pix';
 export * from './reconcile';
 export * from './recurrence';

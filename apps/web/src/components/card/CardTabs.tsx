@@ -1,4 +1,4 @@
-import { type CardOverview, formatBRL, formatDate, type InvoiceDetail, t } from '@moneyflow/shared';
+import { type CardOverview, formatAccounting, formatDate, type InvoiceDetail, t } from '@moneyflow/shared';
 import { CalendarClock, CircleDollarSign, Lock, Plus, Receipt } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useApi } from '../../lib/hooks';
@@ -204,7 +204,7 @@ export function LimitTab({ overview }: { overview: CardOverview }) {
                 <span className="bar" aria-hidden>
                   <span style={{ width: `${(c.amountCents / max) * 100}%` }} />
                 </span>
-                <span className="mono text-xs" title={formatBRL(c.amountCents)}>
+                <span className="mono text-xs" title={formatAccounting(c.amountCents)}>
                   <Money cents={c.amountCents} />
                 </span>
               </li>

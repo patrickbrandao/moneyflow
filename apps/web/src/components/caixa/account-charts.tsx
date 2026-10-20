@@ -1,4 +1,4 @@
-import { formatBRL, formatMonth } from '@moneyflow/shared';
+import { formatAccounting, formatMonth } from '@moneyflow/shared';
 import { useState } from 'react';
 import { Legend, niceTicks, TipRow, Tooltip, topRounded, useKeyboardIndex, useWidth } from '../admin-ai/usage-charts';
 
@@ -92,7 +92,7 @@ export function MonthColumns({
           <Tooltip x={PAD.left + band * hover + band / 2} width={width}>
             <div className="uc-tip-head">{formatMonth(months[hover]!)}</div>
             {series.map((s) => (
-              <TipRow key={s.key} color={s.color} label={s.label} value={formatBRL(s.values[hover] ?? 0)} />
+              <TipRow key={s.key} color={s.color} label={s.label} value={formatAccounting(s.values[hover] ?? 0)} />
             ))}
           </Tooltip>
         )}
@@ -195,7 +195,7 @@ export function BalanceLine({
         {hover !== null && months[hover] && (
           <Tooltip x={x(hover)} width={width}>
             <div className="uc-tip-head">{formatMonth(months[hover]!)}</div>
-            <TipRow color={color} line label={label} value={values[hover] === null ? '—' : formatBRL(values[hover]!)} />
+            <TipRow color={color} line label={label} value={values[hover] === null ? '—' : formatAccounting(values[hover]!)} />
           </Tooltip>
         )}
       </div>
@@ -242,7 +242,7 @@ export function Donut({ slices, label, testId }: { slices: DonutSlice[]; label: 
                 onPointerEnter={() => setHover(s.key)}
                 onPointerLeave={() => setHover(null)}
               >
-                <title>{`${s.label}: ${formatBRL(s.value)} (${share(s.value)})`}</title>
+                <title>{`${s.label}: ${formatAccounting(s.value)} (${share(s.value)})`}</title>
               </circle>
             );
             offset += length;
@@ -272,7 +272,7 @@ export function Donut({ slices, label, testId }: { slices: DonutSlice[]; label: 
               {s.label}
             </span>
             <span className="acc-donut-share">{share(s.value)}</span>
-            <span className="acc-donut-value money">{formatBRL(s.value)}</span>
+            <span className="acc-donut-value money">{formatAccounting(s.value)}</span>
           </button>
         ))}
       </figcaption>

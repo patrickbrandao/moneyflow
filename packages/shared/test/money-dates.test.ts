@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { addMonths, diffDays, formatDate, isIsoDate, isoWeekday, parseDateBR, todayIso } from '../src/dates';
-import { formatBRL, formatSignedBRL, parseBRL } from '../src/money';
+import { formatAccounting, formatBRL, formatSignedBRL, parseBRL } from '../src/money';
 import { occurrenceCompetenceDate, occurrenceDueDate, pendingOccurrences, type RecurrenceRule } from '../src/recurrence';
 
 const nbsp = (s: string) => s.replace(/ /g, ' ');
@@ -10,6 +10,11 @@ describe('dinheiro', () => {
     expect(nbsp(formatBRL(123456))).toBe('R$ 1.234,56');
     expect(nbsp(formatBRL(5))).toBe('R$ 0,05');
     expect(nbsp(formatSignedBRL(-1000))).toBe('−R$ 10,00');
+  });
+  it('formato contábil: negativo entre parênteses, sem sinal', () => {
+    expect(nbsp(formatAccounting(-123456))).toBe('(R$ 1.234,56)');
+    expect(nbsp(formatAccounting(0))).toBe('R$ 0,00');
+    expect(nbsp(formatAccounting(500))).toBe('R$ 5,00');
   });
   it('lê valores digitados', () => {
     expect(parseBRL('1.234,56')).toBe(123456);

@@ -15,6 +15,14 @@ export function formatCents(cents: number): string {
   return plain.format(cents / 100);
 }
 
+/**
+ * Formato contábil das telas e relatórios: negativo entre parênteses, sem o sinal
+ * ("(R$ 10,00)"); zero e positivo como `formatBRL`.
+ */
+export function formatAccounting(cents: number): string {
+  return cents < 0 ? `(${formatBRL(Math.abs(cents))})` : formatBRL(cents);
+}
+
 /** Com sinal explícito para movimentos: "+R$ 10,00" / "−R$ 10,00". */
 export function formatSignedBRL(cents: number): string {
   if (cents === 0) return formatBRL(0);

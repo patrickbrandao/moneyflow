@@ -1,6 +1,7 @@
-import { formatBRL, t } from '@moneyflow/shared';
+import { formatAccounting, t } from '@moneyflow/shared';
 import { BaseEdge, EdgeLabelRenderer, type EdgeProps, getBezierPath } from '@xyflow/react';
 import { createContext, memo, useContext } from 'react';
+import { negClass } from '../domain';
 import { cx } from '../ui';
 import { EDGE_COLOR, type MoneyEdge } from './graph';
 
@@ -63,7 +64,7 @@ function MoneyEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePosition,
         >
           <span className="dot" />
           <span>{t.flow.edgeKinds[data.kind]}</span>
-          <span className="money">{formatBRL(value)}</span>
+          <span className={cx('money', negClass(value))}>{formatAccounting(value)}</span>
         </div>
       </EdgeLabelRenderer>
     </>

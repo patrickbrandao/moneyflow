@@ -1,5 +1,7 @@
-import { formatBRL, formatMonth } from '@moneyflow/shared';
+import { formatAccounting, formatMonth } from '@moneyflow/shared';
 import type { CSSProperties } from 'react';
+import { negClass } from '../domain';
+import { cx } from '../ui';
 
 /*
  * Gráficos leves dos relatórios, em HTML/CSS (sem biblioteca): barras
@@ -24,7 +26,7 @@ export function StackedBars({ months, series, label }: { months: string[]; serie
     <figure className="chart" aria-label={label}>
       <div className="chart-bars" style={{ '--n': months.length } as CSSProperties}>
         {months.map((month, i) => (
-          <div key={month} className="chart-col" title={`${formatMonth(month)}: ${formatBRL(totals[i]!)}`}>
+          <div key={month} className="chart-col" title={`${formatMonth(month)}: ${formatAccounting(totals[i]!)}`}>
             <span className="chart-total money">{totals[i] ? short(totals[i]!) : ''}</span>
             <div className="chart-stack">
               {series.map((s) => {
@@ -34,7 +36,7 @@ export function StackedBars({ months, series, label }: { months: string[]; serie
                   <i
                     key={s.key}
                     style={{ height: `${(value / max) * 100}%`, background: color(s.colorSlot) }}
-                    title={`${s.label} · ${formatMonth(month)}: ${formatBRL(value)}`}
+                    title={`${s.label} · ${formatMonth(month)}: ${formatAccounting(value)}`}
                   />
                 );
               })}
@@ -76,7 +78,7 @@ export function RankBars({
             </span>
           </span>
           <span className="rank-v">
-            <span className="money">{formatBRL(row.value)}</span>
+            <span className={cx('money', negClass(row.value))}>{formatAccounting(row.value)}</span>
             <span className="rank-share">{(row.share * 100).toFixed(1).replace('.', ',')}%</span>
           </span>
         </li>

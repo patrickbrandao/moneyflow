@@ -1,4 +1,4 @@
-import { contractLink, formatBRL, formatDate, formatDateTime, type TitleDetail, t } from '@moneyflow/shared';
+import { contractLink, formatAccounting, formatDate, formatDateTime, type TitleDetail, t } from '@moneyflow/shared';
 import {
   Ban,
   CalendarDays,
@@ -397,10 +397,10 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                         {!s.reversedAt && !s.financialAccountId && s.cashCents !== 0 && <Badge tone="warn">{t.title.pendingAccount}</Badge>}
                       </div>
                       <div className="text-[12px] text-muted">
-                        {t.settlement.principal} {formatBRL(s.amountCents)}
-                        {s.interestCents > 0 && ` · ${t.settlement.interest} ${formatBRL(s.interestCents)}`}
-                        {s.fineCents > 0 && ` · ${t.settlement.fine} ${formatBRL(s.fineCents)}`}
-                        {s.discountCents > 0 && ` · ${t.settlement.discount} ${formatBRL(s.discountCents)}`}
+                        {t.settlement.principal} {formatAccounting(s.amountCents)}
+                        {s.interestCents > 0 && ` · ${t.settlement.interest} ${formatAccounting(s.interestCents)}`}
+                        {s.fineCents > 0 && ` · ${t.settlement.fine} ${formatAccounting(s.fineCents)}`}
+                        {s.discountCents > 0 && ` · ${t.settlement.discount} ${formatAccounting(s.discountCents)}`}
                         {s.financialAccountName && ` · ${s.financialAccountName}`}
                         {s.transferId && ` · via ${s.transferOtherAccountName}`}
                       </div>

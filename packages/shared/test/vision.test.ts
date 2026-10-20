@@ -191,7 +191,7 @@ describe('exportação CSV', () => {
   it('formatos de célula e nome de arquivo', () => {
     expect(centsToCsv(-123_456)).toBe('-1234,56');
     expect(formatCell(123_456_789, 'money', 'display')).toBe('R$ 1.234.567,89');
-    expect(formatCell(-1_000, 'money', 'display')).toBe('−R$ 10,00');
+    expect(formatCell(-1_000, 'money', 'display')).toBe('(R$ 10,00)');
     expect(formatCell(12.345, 'percent')).toBe('12,3%');
     expect(exportFileName('Relatório', 'Despesas por categoria', '2026')).toBe('relatorio-despesas-por-categoria-2026');
   });

@@ -1,7 +1,8 @@
-import { formatBRL, t } from '@moneyflow/shared';
+import { formatAccounting, t } from '@moneyflow/shared';
 import { Handle, type NodeProps, Position } from '@xyflow/react';
 import { Building2, CreditCard, Layers, UserRound, Wallet } from 'lucide-react';
 import { type CSSProperties, memo } from 'react';
+import { negClass } from '../domain';
 import { cx } from '../ui';
 import type { CaixaFlowNode, ClusterFlowNode, EntityFlowNode } from './graph';
 
@@ -43,10 +44,10 @@ function CaixaNodeImpl({ data, selected }: NodeProps<CaixaFlowNode>) {
         </span>
       </div>
       {data.isCard ? (
-        <div className="flow-meter" title={`${t.flow.cardUsed}: ${formatBRL(used)} / ${formatBRL(limit)}`}>
+        <div className="flow-meter" title={`${t.flow.cardUsed}: ${formatAccounting(used)} / ${formatAccounting(limit)}`}>
           <div className="flow-meter-row">
             <span>{t.flow.cardUsed}</span>
-            <b className="money">{formatBRL(used)}</b>
+            <b className={cx('money', negClass(used))}>{formatAccounting(used)}</b>
           </div>
           <div className="flow-bar" aria-hidden>
             <i style={{ width: `${percent}%` }} className={percent >= 100 ? 'over' : percent >= 80 ? 'high' : ''} />
@@ -55,15 +56,15 @@ function CaixaNodeImpl({ data, selected }: NodeProps<CaixaFlowNode>) {
       ) : (
         <div className="flow-balance">
           <span>{t.flow.balance}</span>
-          <b className={cx('money', (ref.balanceCents ?? 0) < 0 && 'out')}>{formatBRL(ref.balanceCents ?? 0)}</b>
+          <b className={cx('money', negClass(ref.balanceCents))}>{formatAccounting(ref.balanceCents ?? 0)}</b>
         </div>
       )}
       <div className="flow-io">
         <span className="in">
-          ↓ <span className="money">{formatBRL(data.inCents)}</span>
+          ↓ <span className={cx('money', negClass(data.inCents))}>{formatAccounting(data.inCents)}</span>
         </span>
         <span className="out">
-          ↑ <span className="money">{formatBRL(data.outCents)}</span>
+          ↑ <span className={cx('money', negClass(data.outCents))}>{formatAccounting(data.outCents)}</span>
         </span>
       </div>
     </div>
@@ -89,7 +90,7 @@ function EntityNodeImpl({ data, selected }: NodeProps<EntityFlowNode>) {
           {data.groupName ?? (data.ref.holderEntityId ? t.flow.outside : t.flow.entityNode)}
         </span>
       </span>
-      <span className="flow-amt money">{formatBRL(value)}</span>
+      <span className={cx('flow-amt money', negClass(value))}>{formatAccounting(value)}</span>
     </div>
   );
 }
@@ -110,7 +111,7 @@ function ClusterNodeImpl({ data, selected }: NodeProps<ClusterFlowNode>) {
         <span className="nm">{data.name || t.flow.otherGroup}</span>
         <span className="sl">
           <i className="flow-dot" aria-hidden />
-          {formatBRL(value)}
+          {formatAccounting(value)}
         </span>
       </span>
       <span className="cnt">

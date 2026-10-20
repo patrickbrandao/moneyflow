@@ -123,3 +123,69 @@ test('tela da conta: abrir pela faixa da caixa, Resumo, Extrato e Conciliação 
   await page.getByRole('link', { name: 'Voltar para a caixa' }).click();
   await expect(page).toHaveURL(new RegExp(`/caixas/${caixa.id}/accounts$`));
 });
+
+/** Soma dias a uma data YYYY-MM-DD (UTC, sem fuso). */
+const plusDays = (iso: string, days: number) => {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
+test('faixa só com nome e saldo, período do extrato lembrado e negativo no formato contábil', async ({ page }) => {
+  const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+  await loginAsAdmin(page);
+  const { caixa, checking } = await setup(page, tag);
+
+  // A faixa mostra o nome e o saldo, sem o tipo da conta.
+  await page.goto(`/caixas/${caixa.id}`);
+  const strip = page.getByRole('navigation', { name: 'Contas desta caixa' });
+  const chip = strip.getByRole('link', { name: new RegExp(checking.name) });
+  await expect(chip).toContainText('R$');
+  await expect(chip).not.toContainText('Corrente/pagamento');
+  await expect(strip).not.toContainText('Poupança/investimento');
+
+  // Extrato da conta: começa nos últimos 60 dias e nos próximos 30.
+  await page.goto(`/caixas/${caixa.id}/accounts/${checking.id}/statement`);
+  const from = page.getByLabel('De', { exact: true });
+  const to = page.getByLabel('Até', { exact: true });
+  const on = today();
+  await expect(from).toHaveValue(plusDays(on, -60));
+  await expect(to).toHaveValue(plusDays(on, 30));
+  await expect(page.getByRole('button', { name: 'Padrão' })).toHaveAttribute('aria-pressed', 'true');
+
+  // A tarifa sai entre parênteses, sem sinal, com a classe do negativo.
+  const fee = page
+    .locator('tr', { hasText: `Tarifa ${tag}` })
+    .locator('.money')
+    .first();
+  await expect(fee).toHaveText(/^\(R\$\s123,45\)$/);
+  await expect(fee).toHaveClass(/\bneg\b/);
+
+  // Mês atual e depois o anterior (anda a partir do mês mostrado).
+  await page.getByRole('button', { name: 'Mês atual' }).click();
+  const monthStart = `${on.slice(0, 7)}-01`;
+  await expect(from).toHaveValue(monthStart);
+  await page.getByRole('button', { name: 'Mês anterior' }).click();
+  const prevEnd = plusDays(monthStart, -1);
+  await expect(from).toHaveValue(`${prevEnd.slice(0, 7)}-01`);
+  await expect(to).toHaveValue(prevEnd);
+
+  // Sair e voltar: o filtro continua o mês anterior, na tela da conta e no Extrato da caixa.
+  await page.getByRole('tab', { name: 'Resumo' }).click();
+  await page.getByRole('tab', { name: 'Extrato' }).click();
+  await expect(from).toHaveValue(`${prevEnd.slice(0, 7)}-01`);
+  await page.goto(`/caixas/${caixa.id}/statement?account=${checking.id}`);
+  await expect(page.getByLabel('De', { exact: true })).toHaveValue(`${prevEnd.slice(0, 7)}-01`);
+
+  // Hoje e de volta ao padrão.
+  await page.getByRole('button', { name: 'Hoje' }).click();
+  await expect(page.getByLabel('De', { exact: true })).toHaveValue(on);
+  await expect(page.getByLabel('Até', { exact: true })).toHaveValue(on);
+  await page.getByRole('button', { name: 'Padrão' }).click();
+  await expect(page.getByLabel('De', { exact: true })).toHaveValue(plusDays(on, -60));
+
+  // Os títulos a pagar têm o mesmo filtro, com a memória própria (começam no padrão).
+  await page.goto(`/caixas/${caixa.id}/payables`);
+  await expect(page.getByLabel('Vencimento de')).toHaveValue(plusDays(on, -60));
+  await expect(page.getByLabel('Vencimento até')).toHaveValue(plusDays(on, 30));
+});

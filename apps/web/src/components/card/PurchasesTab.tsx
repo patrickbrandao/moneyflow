@@ -7,6 +7,7 @@ import { purchasesTable } from '../../lib/export-tables';
 import { useApi } from '../../lib/hooks';
 import { entityLink } from '../../lib/links';
 import { useParamState } from '../../lib/params';
+import { DateRangeFilter, useStoredPeriod } from '../DateRangeFilter';
 import { CategoryLabel, LoadError, Money, SkelRows } from '../domain';
 import { ExportMenu } from '../ExportMenu';
 import { Badge, Button, cx, EmptyRow, useDebounced } from '../ui';
@@ -32,8 +33,9 @@ export function PurchasesTab({
   const [purchaseId, setPurchaseId] = useParamState('purchase');
   const [payer, setPayer] = useParamState('payer');
   const [kind, setKind] = useParamState('kind');
-  const [from, setFrom] = useState('');
-  const [to, setTo] = useState('');
+  // data da compra: lembrada por cartão
+  const [period, setPeriod] = useStoredPeriod(`card-purchases:${cardCaixaId}`);
+  const { from, to } = period;
   const [q, setQ] = useState('');
   const query = useDebounced(q, 250);
   const payers = useGeneralCaixas();
@@ -63,21 +65,11 @@ export function PurchasesTab({
             aria-label={t.card.searchPurchases}
           />
         </label>
-        <input
-          type="date"
-          className="field field-auto"
-          value={from}
-          onChange={(e) => setFrom(e.target.value)}
-          aria-label={`${t.card.purchasedOn}: ${t.common.from}`}
-          title={`${t.card.purchasedOn}: ${t.common.from}`}
-        />
-        <input
-          type="date"
-          className="field field-auto"
-          value={to}
-          onChange={(e) => setTo(e.target.value)}
-          aria-label={`${t.card.purchasedOn}: ${t.common.to}`}
-          title={`${t.card.purchasedOn}: ${t.common.to}`}
+        <DateRangeFilter
+          value={period}
+          onChange={setPeriod}
+          fromLabel={`${t.card.purchasedOn}: ${t.common.from}`}
+          toLabel={`${t.card.purchasedOn}: ${t.common.to}`}
         />
         <select
           className="field field-auto"

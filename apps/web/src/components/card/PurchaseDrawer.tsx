@@ -1,4 +1,4 @@
-import { type CardPurchaseDetail, formatBRL, formatDate, t, todayIso } from '@moneyflow/shared';
+import { type CardPurchaseDetail, formatAccounting, formatDate, t, todayIso } from '@moneyflow/shared';
 import { Pencil, Trash2, Undo2, X } from 'lucide-react';
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -270,7 +270,7 @@ function RefundModal({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!amount || amount <= 0 || amount > max) return setError(t.card.refundAmountHint(formatBRL(max)));
+    if (!amount || amount <= 0 || amount > max) return setError(t.card.refundAmountHint(formatAccounting(max)));
     setError(null);
     const next = await run(
       () => api.post<CardPurchaseDetail>(`/api/card-purchases/${purchase.id}/refund`, { amountCents: amount, refundedOn, description }),
@@ -283,7 +283,7 @@ function RefundModal({
     <Modal open title={t.card.refundTitle} onClose={onClose}>
       <form onSubmit={submit}>
         <div className="form-grid cols-2">
-          <Field label={t.common.amount} hint={t.card.refundAmountHint(formatBRL(max))}>
+          <Field label={t.common.amount} hint={t.card.refundAmountHint(formatAccounting(max))}>
             <MoneyInput value={amount} onChange={setAmount} ariaLabel={t.common.amount} autoFocus />
           </Field>
           <Field label={t.card.refundDate}>

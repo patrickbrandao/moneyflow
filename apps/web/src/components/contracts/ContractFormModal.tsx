@@ -8,7 +8,7 @@ import {
   type ContractUpdateInput,
   cycleEnd,
   type EntityDetail,
-  formatBRL,
+  formatAccounting,
   formatDate,
   installmentsCount,
   READJUSTMENT_INDEXES,
@@ -358,7 +358,7 @@ export function ContractFormModal({
                   !count
                     ? t.contracts.durationNotMultiple
                     : split
-                      ? `${t.contracts.installmentsSummary(count, t.contracts.periodicities[periodicity]!)} · ${t.contracts.splitPreview(formatBRL(split[0]!), formatBRL(split[1] ?? split[0]!), count)}`
+                      ? `${t.contracts.installmentsSummary(count, t.contracts.periodicities[periodicity]!)} · ${t.contracts.splitPreview(formatAccounting(split[0]!), formatAccounting(split[1] ?? split[0]!), count)}`
                       : undefined
                 }
               >

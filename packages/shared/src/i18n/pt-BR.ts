@@ -69,6 +69,18 @@ export const ptBR = {
     noResults: 'Nada encontrado.',
     deletedOrArchived: (archived: boolean) => (archived ? 'Registro arquivado (tinha vínculos).' : 'Registro excluído.'),
   },
+  period: {
+    label: 'Período',
+    shortcuts: {
+      default: 'Padrão',
+      prevMonth: 'Mês anterior',
+      thisMonth: 'Mês atual',
+      nextMonth: 'Próximo mês',
+      today: 'Hoje',
+    } as Record<string, string>,
+    defaultHint: 'Últimos 60 dias e próximos 30',
+    remembered: 'O período fica lembrado nesta visão.',
+  },
 
   nav: {
     overview: 'Visão geral',

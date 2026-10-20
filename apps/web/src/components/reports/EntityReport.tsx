@@ -5,12 +5,13 @@ import {
   type ExportTable,
   entityLink,
   exportFileName,
-  formatBRL,
+  formatAccounting,
   t,
 } from '@moneyflow/shared';
 import { ArrowRight, Building2, ChevronDown, ChevronRight, CreditCard } from 'lucide-react';
 import { Fragment, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { negClass } from '../domain';
 import { Badge, cx, EmptyState } from '../ui';
 
 /** Totais por entidade, com o rastreio caixa pagadora → cartão → recebedor final. */
@@ -58,9 +59,11 @@ export function EntityReport({ data, scope }: { data: EntityReportData; scope: s
                       )}
                     </span>
                   </td>
-                  <td className={cx('num money', row.outflowCents === 0 && 'muted')}>{formatBRL(row.outflowCents)}</td>
-                  <td className={cx('num money', row.inflowCents === 0 && 'muted')}>{formatBRL(row.inflowCents)}</td>
-                  <td className={cx('num money', row.netCents > 0 ? 'in' : row.netCents < 0 ? 'out' : '')}>{formatBRL(row.netCents)}</td>
+                  <td className={cx('num money', row.outflowCents === 0 && 'muted')}>{formatAccounting(row.outflowCents)}</td>
+                  <td className={cx('num money', row.inflowCents === 0 && 'muted')}>{formatAccounting(row.inflowCents)}</td>
+                  <td className={cx('num money', row.netCents > 0 ? 'in' : row.netCents < 0 ? 'neg' : '')}>
+                    {formatAccounting(row.netCents)}
+                  </td>
                   <td className="num">{row.entries}</td>
                 </tr>
                 {open.has(row.entityId) &&
@@ -82,9 +85,11 @@ export function EntityReport({ data, scope }: { data: EntityReportData; scope: s
                           <Badge tone="neutral">{t.reports.sources[x.source]}</Badge>
                         </span>
                       </td>
-                      <td className={cx('num money', x.outflowCents === 0 && 'muted')}>{formatBRL(x.outflowCents)}</td>
-                      <td className={cx('num money', x.inflowCents === 0 && 'muted')}>{formatBRL(x.inflowCents)}</td>
-                      <td className="num money muted">{formatBRL(x.inflowCents - x.outflowCents)}</td>
+                      <td className={cx('num money', x.outflowCents === 0 && 'muted')}>{formatAccounting(x.outflowCents)}</td>
+                      <td className={cx('num money', x.inflowCents === 0 && 'muted')}>{formatAccounting(x.inflowCents)}</td>
+                      <td className={cx('num money muted', negClass(x.inflowCents - x.outflowCents))}>
+                        {formatAccounting(x.inflowCents - x.outflowCents)}
+                      </td>
                       <td className="num">{x.entries}</td>
                     </tr>
                   ))}
@@ -92,9 +97,9 @@ export function EntityReport({ data, scope }: { data: EntityReportData; scope: s
             ))}
             <tr className="report-total">
               <td>{t.reports.totalLine}</td>
-              <td className="num money">{formatBRL(totals.out)}</td>
-              <td className="num money">{formatBRL(totals.in)}</td>
-              <td className="num money">{formatBRL(totals.in - totals.out)}</td>
+              <td className={cx('num money', negClass(totals.out))}>{formatAccounting(totals.out)}</td>
+              <td className={cx('num money', negClass(totals.in))}>{formatAccounting(totals.in)}</td>
+              <td className={cx('num money', negClass(totals.in - totals.out))}>{formatAccounting(totals.in - totals.out)}</td>
               <td className="num">{rows.reduce((acc, r) => acc + r.entries, 0)}</td>
             </tr>
           </tbody>

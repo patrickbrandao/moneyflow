@@ -5,14 +5,14 @@ import {
   type CategoryTree,
   type ExportTable,
   exportFileName,
-  formatBRL,
+  formatAccounting,
   formatMonth,
   rankCategories,
   t,
 } from '@moneyflow/shared';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { Fragment, useMemo, useState } from 'react';
-import { CategoryLabel } from '../domain';
+import { CategoryLabel, negClass } from '../domain';
 import { Badge, cx, EmptyState, Panel } from '../ui';
 import { RankBars, type Series, StackedBars } from './charts';
 
@@ -117,11 +117,11 @@ export function CategoryReport({ data, kind, scope }: { data: CategoryReportData
             <tr className="report-total">
               <td>{t.reports.totalLine}</td>
               {tree.byMonth.map((v, i) => (
-                <td key={tree.months[i]} className="num money">
-                  {formatBRL(v)}
+                <td key={tree.months[i]} className={cx('num money', negClass(v))}>
+                  {formatAccounting(v)}
                 </td>
               ))}
-              <td className="num money">{formatBRL(tree.total)}</td>
+              <td className={cx('num money', negClass(tree.total))}>{formatAccounting(tree.total)}</td>
               <td className="num">
                 <Variation value={tree.variation} kind={kind} />
               </td>
@@ -164,11 +164,11 @@ function Row({
         </span>
       </td>
       {row.byMonth.map((v, i) => (
-        <td key={i} className={cx('num money', v === 0 && 'muted')}>
-          {v === 0 ? '—' : formatBRL(v)}
+        <td key={i} className={cx('num money', v === 0 && 'muted', negClass(v))}>
+          {v === 0 ? '—' : formatAccounting(v)}
         </td>
       ))}
-      <td className="num money">{formatBRL(row.total)}</td>
+      <td className={cx('num money', negClass(row.total))}>{formatAccounting(row.total)}</td>
       <td className="num">
         <Variation value={row.variation} kind={kind} />
       </td>

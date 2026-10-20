@@ -5,6 +5,7 @@
 - Parcelado: a compra-mãe gera N parcelas nas faturas futuras (limite comprometido). Estorno: crédito vinculado à compra original, na fatura aberta.
 - No **fechamento**, gera-se uma fatura-título por caixa pagadora (soma das compras dela): "a receber" na caixa do cartão, espelhada como "a pagar" na pagadora ([006](006-espelhamento-entre-caixas.md)). A pagadora navega da fatura para o detalhe das compras.
 - Pagamento parcial ou antecipado abate a fatura; o restante rola para a próxima, com juros/IOF/multa lançados como encargos do emissor. A fatura pode ser reaberta enquanto não houver pagamento.
+- A aba **Compras** filtra pela data da compra com o mesmo período do extrato: padrão dos últimos 60 dias e próximos 30, atalhos Mês anterior, Mês atual, Próximo mês e Hoje, e a última escolha lembrada por cartão ([004](004-caixas-e-contas.md)).
 - Import de fatura OFX/CSV ([009](009-extratos-e-conciliacao.md)): as linhas casam com as parcelas lançadas (valor oposto, data da compra ±3 dias) ou viram compras.
 
 ## Regras de operação (F2)

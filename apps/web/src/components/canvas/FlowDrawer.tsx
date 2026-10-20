@@ -1,10 +1,10 @@
-import { entityLink, type FlowLineDto, formatBRL, formatDate, t } from '@moneyflow/shared';
+import { entityLink, type FlowLineDto, formatAccounting, formatDate, t } from '@moneyflow/shared';
 import { ArrowRight, Building2, CreditCard, Crosshair, ExternalLink, Layers, Ungroup, UserRound, Wallet, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useApi } from '../../lib/hooks';
-import { CategoryDot, LoadError } from '../domain';
-import { Badge, Button, ButtonLink, Skel } from '../ui';
+import { CategoryDot, LoadError, negClass } from '../domain';
+import { Badge, Button, ButtonLink, cx, Skel } from '../ui';
 import { EDGE_COLOR, type EndRef, type FlowNode, type MoneyEdge } from './graph';
 
 /*
@@ -84,9 +84,9 @@ export function FlowDrawer({
         </p>
         <dl className="kv mt-3">
           <dt>{t.flow.realized}</dt>
-          <dd className="money">{formatBRL(data.realizedCents)}</dd>
+          <dd className={cx('money', negClass(data.realizedCents))}>{formatAccounting(data.realizedCents)}</dd>
           <dt>{t.flow.forecast}</dt>
-          <dd className="money">{formatBRL(data.forecastCents)}</dd>
+          <dd className={cx('money', negClass(data.forecastCents))}>{formatAccounting(data.forecastCents)}</dd>
           <dt>{t.flow.lines}</dt>
           <dd>{data.lines}</dd>
         </dl>
@@ -106,24 +106,24 @@ export function FlowDrawer({
             {node.data.isCard ? (
               <>
                 <dt>{t.flow.cardUsed}</dt>
-                <dd className="money">{formatBRL(ref.cardUsedCents ?? 0)}</dd>
+                <dd className={cx('money', negClass(ref.cardUsedCents ?? 0))}>{formatAccounting(ref.cardUsedCents ?? 0)}</dd>
                 <dt>{t.flow.cardLimit}</dt>
-                <dd className="money">{formatBRL(ref.cardLimitCents ?? 0)}</dd>
+                <dd className={cx('money', negClass(ref.cardLimitCents ?? 0))}>{formatAccounting(ref.cardLimitCents ?? 0)}</dd>
               </>
             ) : (
               <>
                 <dt>{t.flow.balance}</dt>
-                <dd className="money">{formatBRL(ref.balanceCents ?? 0)}</dd>
+                <dd className={cx('money', negClass(ref.balanceCents ?? 0))}>{formatAccounting(ref.balanceCents ?? 0)}</dd>
               </>
             )}
             <dt>{t.flow.inflow}</dt>
-            <dd className="money">{formatBRL(ref.realizedInCents)}</dd>
+            <dd className={cx('money', negClass(ref.realizedInCents))}>{formatAccounting(ref.realizedInCents)}</dd>
             <dt>{t.flow.outflow}</dt>
-            <dd className="money">{formatBRL(ref.realizedOutCents)}</dd>
+            <dd className={cx('money', negClass(ref.realizedOutCents))}>{formatAccounting(ref.realizedOutCents)}</dd>
             <dt>{t.flow.forecastIn}</dt>
-            <dd className="money">{formatBRL(ref.forecastInCents)}</dd>
+            <dd className={cx('money', negClass(ref.forecastInCents))}>{formatAccounting(ref.forecastInCents)}</dd>
             <dt>{t.flow.forecastOut}</dt>
-            <dd className="money">{formatBRL(ref.forecastOutCents)}</dd>
+            <dd className={cx('money', negClass(ref.forecastOutCents))}>{formatAccounting(ref.forecastOutCents)}</dd>
           </dl>
           <div className="mt-3 flex flex-wrap gap-2">
             <ButtonLink to={`/caixas/${ref.id}`} size="sm">
@@ -147,13 +147,13 @@ export function FlowDrawer({
           )}
           <dl className="kv mt-3">
             <dt>{t.flow.inflow}</dt>
-            <dd className="money">{formatBRL(ref.realizedInCents)}</dd>
+            <dd className={cx('money', negClass(ref.realizedInCents))}>{formatAccounting(ref.realizedInCents)}</dd>
             <dt>{t.flow.outflow}</dt>
-            <dd className="money">{formatBRL(ref.realizedOutCents)}</dd>
+            <dd className={cx('money', negClass(ref.realizedOutCents))}>{formatAccounting(ref.realizedOutCents)}</dd>
             <dt>{t.flow.forecastIn}</dt>
-            <dd className="money">{formatBRL(ref.forecastInCents)}</dd>
+            <dd className={cx('money', negClass(ref.forecastInCents))}>{formatAccounting(ref.forecastInCents)}</dd>
             <dt>{t.flow.forecastOut}</dt>
-            <dd className="money">{formatBRL(ref.forecastOutCents)}</dd>
+            <dd className={cx('money', negClass(ref.forecastOutCents))}>{formatAccounting(ref.forecastOutCents)}</dd>
           </dl>
           <div className="mt-3 flex flex-wrap gap-2">
             <ButtonLink to={entityLink(ref.id)} size="sm">
@@ -246,7 +246,9 @@ function FlowLine({ line }: { line: FlowLineDto }) {
         </span>
       </span>
       <span className="fl-val">
-        <span className="money">{formatBRL(forecast ? line.forecastCents : line.realizedCents)}</span>
+        <span className={cx('money', negClass(forecast ? line.forecastCents : line.realizedCents))}>
+          {formatAccounting(forecast ? line.forecastCents : line.realizedCents)}
+        </span>
         {forecast && <Badge tone="outline">{t.flow.forecast.toLowerCase()}</Badge>}
       </span>
     </>

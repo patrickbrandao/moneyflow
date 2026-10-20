@@ -1,4 +1,4 @@
-import { type AccountRow, formatBRL, type SettlementCreateInput, type TitleDetail, t, todayIso } from '@moneyflow/shared';
+import { type AccountRow, formatAccounting, type SettlementCreateInput, type TitleDetail, t, todayIso } from '@moneyflow/shared';
 import { type FormEvent, useMemo, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
@@ -49,7 +49,8 @@ export function SettlementModal({
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!principal || principal <= 0) return setError(t.errors.invalidAmount);
-    if (principal > title.openCents) return setError(`O principal não pode passar do saldo em aberto (${formatBRL(title.openCents)}).`);
+    if (principal > title.openCents)
+      return setError(`O principal não pode passar do saldo em aberto (${formatAccounting(title.openCents)}).`);
     if (cash < 0) return setError(t.errors.invalidAmount);
     if (useOther && !sourceId) return setError('Escolha a conta da outra caixa.');
     if (useOther && ownAccount === LATER) return setError(t.errors.accountRequiredForTransfer);
@@ -74,7 +75,7 @@ export function SettlementModal({
       <form onSubmit={submit}>
         <div className="modal-body">
           <p className="d mb-3">
-            {title.entityName} · em aberto <span className="mono">{formatBRL(title.openCents)}</span>
+            {title.entityName} · em aberto <span className="mono">{formatAccounting(title.openCents)}</span>
           </p>
           <div className="form-grid cols-2">
             <Field label={t.settlement.settledOn}>
@@ -93,7 +94,7 @@ export function SettlementModal({
               <MoneyInput value={discount} onChange={setDiscount} ariaLabel={t.settlement.discount} />
             </Field>
             <Field label={t.settlement.cash}>
-              <input className="field field-mono" value={formatBRL(cash)} readOnly tabIndex={-1} />
+              <input className="field field-mono" value={formatAccounting(cash)} readOnly tabIndex={-1} />
             </Field>
 
             <Field
@@ -103,7 +104,7 @@ export function SettlementModal({
               <select className="field" value={ownAccount} onChange={(e) => setAccountId(e.target.value)} aria-label={t.settlement.account}>
                 {own.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.name} · {formatBRL(a.balanceCents)}
+                    {a.name} · {formatAccounting(a.balanceCents)}
                   </option>
                 ))}
                 {!useOther && <option value={LATER}>{t.settlement.accountLater}</option>}
@@ -127,7 +128,7 @@ export function SettlementModal({
                   <option value="">Escolha…</option>
                   {others.map((a) => (
                     <option key={a.id} value={a.id}>
-                      {a.caixaName} › {a.name} · {formatBRL(a.balanceCents)}
+                      {a.caixaName} › {a.name} · {formatAccounting(a.balanceCents)}
                     </option>
                   ))}
                 </select>

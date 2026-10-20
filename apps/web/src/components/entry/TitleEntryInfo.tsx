@@ -1,4 +1,4 @@
-import { barcodeToDigitableLine, formatBRL, formatDate, type NfeDetail, parseBrCode, type TitleRow, t } from '@moneyflow/shared';
+import { barcodeToDigitableLine, formatAccounting, formatDate, type NfeDetail, parseBrCode, type TitleRow, t } from '@moneyflow/shared';
 import { Download } from 'lucide-react';
 import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
@@ -58,7 +58,7 @@ function PixInfo({ payload }: { payload: string }) {
           {parsed.amountCents ? (
             <>
               <dt>{t.title.amount}</dt>
-              <dd className="mono">{formatBRL(parsed.amountCents)}</dd>
+              <dd className="mono">{formatAccounting(parsed.amountCents)}</dd>
             </>
           ) : null}
         </dl>
@@ -94,7 +94,7 @@ function NfeInfo({ id }: { id: string }) {
             <dt>{t.entry.nfeIssued}</dt>
             <dd className="mono">{formatDate(nfe.issuedAt.slice(0, 10))}</dd>
             <dt>{t.entry.nfeTotal}</dt>
-            <dd className="mono">{formatBRL(nfe.totalCents)}</dd>
+            <dd className="mono">{formatAccounting(nfe.totalCents)}</dd>
             <dt>{t.entry.nfeKey}</dt>
             <dd className="flex items-center gap-1">
               <span className="code-line">{nfe.accessKey.replace(/(.{4})(?=.)/g, '$1 ')}</span>
@@ -123,8 +123,8 @@ function NfeInfo({ id }: { id: string }) {
                       <td className="num">
                         {item.quantity.toLocaleString('pt-BR')} {item.unit ?? ''}
                       </td>
-                      <td className="num">{formatBRL(item.unitPriceCents)}</td>
-                      <td className="num">{formatBRL(item.totalCents)}</td>
+                      <td className="num">{formatAccounting(item.unitPriceCents)}</td>
+                      <td className="num">{formatAccounting(item.totalCents)}</td>
                     </tr>
                   ))}
                 </tbody>

@@ -1,4 +1,4 @@
-import { addDays, type CaixaDetail, formatDate, type Statement, t, todayIso } from '@moneyflow/shared';
+import { addDays, type CaixaDetail, formatDate, type Statement, t } from '@moneyflow/shared';
 import { ExternalLink, FileText, Paperclip, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -8,6 +8,7 @@ import { useAction, useApi } from '../../lib/hooks';
 import { accountLink, titleLink } from '../../lib/links';
 import { useParamState } from '../../lib/params';
 import { AttachmentsModal } from '../attachments/AttachmentsPanel';
+import { DateRangeFilter, useStoredPeriod } from '../DateRangeFilter';
 import { LoadError, Money, SkelRows } from '../domain';
 import { ExportMenu } from '../ExportMenu';
 import { Badge, EmptyRow, EmptyState, useConfirm } from '../ui';
@@ -20,8 +21,9 @@ export function StatementTab({ caixa, fixedAccountId, onChanged }: { caixa: Caix
   const active = caixa.accounts.filter((a) => !a.archivedAt);
   const [accountParam, setAccount] = useParamState('account');
   const accountId = fixedAccountId ?? accountParam ?? active[0]?.id ?? caixa.accounts[0]?.id ?? null;
-  const [from, setFrom] = useState(addDays(todayIso(), -30));
-  const [to, setTo] = useState('');
+  // o período fica lembrado por conta, na caixa e na tela da conta
+  const [period, setPeriod] = useStoredPeriod(`statement:${accountId ?? 'none'}`);
+  const { from, to } = period;
   const qs = new URLSearchParams();
   if (from) qs.set('from', from);
   if (to) qs.set('to', to);
@@ -68,22 +70,7 @@ export function StatementTab({ caixa, fixedAccountId, onChanged }: { caixa: Caix
             </Link>
           </>
         )}
-        <input
-          type="date"
-          className="field field-auto"
-          value={from}
-          onChange={(e) => setFrom(e.target.value)}
-          aria-label={t.common.from}
-          title={t.common.from}
-        />
-        <input
-          type="date"
-          className="field field-auto"
-          value={to}
-          onChange={(e) => setTo(e.target.value)}
-          aria-label={t.common.to}
-          title={t.common.to}
-        />
+        <DateRangeFilter value={period} onChange={setPeriod} />
         <span className="flex-1" />
         <ExportMenu disabled={!data} build={() => statementTable(data!, caixa.name)} />
         {data && (

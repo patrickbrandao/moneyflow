@@ -9,7 +9,7 @@ import {
   cycleSchedule,
   type DeleteResult,
   entityLink,
-  formatBRL,
+  formatAccounting,
   formatDate,
   formatDateTime,
   formatMonth,
@@ -562,7 +562,7 @@ function Amendments({ contract }: { contract: ContractDetail }) {
     value === null || value === undefined
       ? '—'
       : key.endsWith('Cents')
-        ? formatBRL(Number(value))
+        ? formatAccounting(Number(value))
         : key === 'dueMonthOffset'
           ? C.offsets[Number(value)]
           : String(value);

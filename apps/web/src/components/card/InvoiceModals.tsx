@@ -1,6 +1,6 @@
 import {
   type AccountRow,
-  formatBRL,
+  formatAccounting,
   type InvoiceAdvanceInput,
   type InvoiceDetail,
   type InvoicePaymentInput,
@@ -47,7 +47,7 @@ function AccountSelect({
       {!allowLater && list.length === 0 && <option value="">{t.card.noAccounts}</option>}
       {list.map((a) => (
         <option key={a.id} value={a.id}>
-          {a.name} · {formatBRL(a.balanceCents)}
+          {a.name} · {formatAccounting(a.balanceCents)}
         </option>
       ))}
       {allowLater && <option value={LATER}>{t.card.accountLater}</option>}
@@ -184,7 +184,7 @@ export function PayInvoiceModal({
     event.preventDefault();
     if (!payer) return;
     if (amount === null || amount < 0) return setError(t.errors.invalidAmount);
-    if (amount > open) return setError(t.card.overOpen(formatBRL(open)));
+    if (amount > open) return setError(t.card.overOpen(formatAccounting(open)));
     for (const c of charges) {
       if (!c.amountCents || c.amountCents <= 0) return setError(t.errors.invalidAmount);
       if (!c.categoryId) return setError(t.card.chargeCategory);
@@ -222,7 +222,7 @@ export function PayInvoiceModal({
                 <select className="field" value={payerId ?? ''} onChange={(e) => pickPayer(e.target.value)} aria-label={t.card.payer}>
                   {payable.map((p) => (
                     <option key={p.payerCaixaId} value={p.payerCaixaId}>
-                      {p.payerCaixaName} · {formatBRL(p.openCents)}
+                      {p.payerCaixaName} · {formatAccounting(p.openCents)}
                     </option>
                   ))}
                 </select>
@@ -233,11 +233,11 @@ export function PayInvoiceModal({
               <Field label={t.card.settledOn}>
                 <input type="date" className="field" value={settledOn} onChange={(e) => setSettledOn(e.target.value)} required />
               </Field>
-              <Field label={t.card.amountPaid} hint={`${t.card.open}: ${formatBRL(open)}`}>
+              <Field label={t.card.amountPaid} hint={`${t.card.open}: ${formatAccounting(open)}`}>
                 <MoneyInput key={payerId ?? ''} value={amount} onChange={setAmount} ariaLabel={t.card.amountPaid} />
               </Field>
               {amount !== null && rest > 0 && (
-                <p className="notice warn span-all">{amount === 0 ? t.card.nothingPaid : t.card.rollsOver(formatBRL(rest))}</p>
+                <p className="notice warn span-all">{amount === 0 ? t.card.nothingPaid : t.card.rollsOver(formatAccounting(rest))}</p>
               )}
               {amount !== null && rest > 0 && (
                 <div className="span-all">

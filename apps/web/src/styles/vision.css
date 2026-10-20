@@ -336,6 +336,12 @@
   color: var(--text);
   border-top: 1px solid var(--border-strong);
 }
+/* negativo do formato contábil vence a cor da linha (grupo, filho, total) */
+.report-table tr td.money.neg,
+.flow-io .money.neg,
+.flow-edge-label .money.neg {
+  color: var(--negative);
+}
 .report-caret {
   display: inline-grid;
   place-items: center;

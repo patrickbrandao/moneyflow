@@ -1,4 +1,4 @@
-import { type CardChargeInput, type CardPurchaseDetail, type CardPurchaseInput, formatBRL, t, todayIso } from '@moneyflow/shared';
+import { type CardChargeInput, type CardPurchaseDetail, type CardPurchaseInput, formatAccounting, t, todayIso } from '@moneyflow/shared';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { api } from '../../lib/api';
@@ -103,7 +103,7 @@ export function PurchaseFormModal({
             <Field label={t.card.totalAmount}>
               <MoneyInput value={amount} onChange={setAmount} ariaLabel={t.card.totalAmount} />
             </Field>
-            <Field label={t.card.installments} hint={amount ? t.card.perInstallment(n, formatBRL(per)) : undefined}>
+            <Field label={t.card.installments} hint={amount ? t.card.perInstallment(n, formatAccounting(per)) : undefined}>
               <input
                 type="number"
                 className="field field-mono"

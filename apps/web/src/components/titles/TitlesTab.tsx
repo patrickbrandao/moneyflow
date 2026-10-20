@@ -8,6 +8,7 @@ import { useRegisterCommands } from '../../lib/commands';
 import { titlesTable } from '../../lib/export-tables';
 import { useApi } from '../../lib/hooks';
 import { useParamState, useSetParams } from '../../lib/params';
+import { DateRangeFilter, useStoredPeriod } from '../DateRangeFilter';
 import { CategoryLabel, LoadError, MirrorBadge, Money, SkelRows, TitleStatusBadge } from '../domain';
 import { ExportMenu } from '../ExportMenu';
 import { Badge, Button, cx, EmptyRow, Tabs, useDebounced } from '../ui';
@@ -40,8 +41,9 @@ export function TitlesTab({
   const setParams = useSetParams();
   const [archived, setArchived] = useState(false);
   const [q, setQ] = useState('');
-  const [from, setFrom] = useState('');
-  const [to, setTo] = useState('');
+  // vencimento: lembrado por caixa e direção
+  const [period, setPeriod] = useStoredPeriod(`titles:${caixa.id}:${direction}`);
+  const { from, to } = period;
   const query = useDebounced(q, 250);
   const filter = status ?? 'unpaid';
   const params = new URLSearchParams({ caixaId: caixa.id, direction });
@@ -83,22 +85,7 @@ export function TitlesTab({
             aria-label="Buscar títulos"
           />
         </label>
-        <input
-          type="date"
-          className="field field-auto"
-          value={from}
-          onChange={(e) => setFrom(e.target.value)}
-          aria-label="Vencimento de"
-          title="Vencimento de"
-        />
-        <input
-          type="date"
-          className="field field-auto"
-          value={to}
-          onChange={(e) => setTo(e.target.value)}
-          aria-label="Vencimento até"
-          title="Vencimento até"
-        />
+        <DateRangeFilter value={period} onChange={setPeriod} fromLabel="Vencimento de" toLabel="Vencimento até" />
         <label className="check">
           <input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} /> {t.common.showArchived}
         </label>

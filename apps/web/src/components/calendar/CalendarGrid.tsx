@@ -1,5 +1,6 @@
-import { type CalendarItem, type DailyBalance, formatBRL, formatDate, t } from '@moneyflow/shared';
+import { type CalendarItem, type DailyBalance, formatAccounting, formatDate, t } from '@moneyflow/shared';
 import { type DragEvent, type MouseEvent, useState } from 'react';
+import { negClass } from '../domain';
 import { cx } from '../ui';
 import { dayNumber, daysBetween } from './dates';
 
@@ -26,7 +27,7 @@ export function CalendarChip({
 }) {
   const movable = isMovable(item);
   const status = t.calendar.statuses[item.calendarStatus];
-  const label = `${item.description} · ${formatBRL(item.amountCents)} · ${status}`;
+  const label = `${item.description} · ${formatAccounting(item.amountCents)} · ${status}`;
   return (
     <button
       type="button"
@@ -50,7 +51,7 @@ export function CalendarChip({
       onClick={(event: MouseEvent<HTMLButtonElement>) => onOpen(item, event.currentTarget)}
     >
       <span className="d">{item.description}</span>
-      <span className="v">{formatBRL(item.amountCents)}</span>
+      <span className={cx('v', negClass(item.amountCents))}>{formatAccounting(item.amountCents)}</span>
       {full && <span className="sub">{[item.entityName, item.caixaName].filter(Boolean).join(' · ')}</span>}
     </button>
   );
@@ -63,14 +64,14 @@ export function DayBalance({ balance, today }: { balance: DailyBalance | undefin
   const value = future ? balance.projectedCents : (balance.realizedCents ?? balance.projectedCents);
   if (value === null) return null;
   const tip = t.calendar.balanceTip(
-    balance.realizedCents === null ? '—' : formatBRL(balance.realizedCents),
-    formatBRL(balance.scheduledCents),
-    balance.projectedCents === null ? '—' : formatBRL(balance.projectedCents),
+    balance.realizedCents === null ? '—' : formatAccounting(balance.realizedCents),
+    formatAccounting(balance.scheduledCents),
+    balance.projectedCents === null ? '—' : formatAccounting(balance.projectedCents),
   );
   return (
     <div className={cx('cal-bal', value < 0 && 'neg', future && 'future')} title={tip}>
       <span className="sr-only">{future ? t.calendar.projected : t.calendar.realized}: </span>
-      {formatBRL(value)}
+      {formatAccounting(value)}
     </div>
   );
 }

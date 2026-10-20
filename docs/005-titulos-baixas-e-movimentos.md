@@ -9,6 +9,7 @@
   - **Estender**: escolher uma data mais adiante ou "sem data de fim" reabre as ocorrências canceladas que vencem depois do fim anterior (até a nova data) e materializa o que faltar até o horizonte. Ocorrências canceladas avulsas antes do fim anterior continuam canceladas.
   - O vencimento de referência é o do lado original; encerrar pede escrita na caixa do título original (a série é dele). Vale só para recorrência: parcelamento não tem data de fim. A data não pode ser anterior ao início da série.
   - "Excluir este e os próximos" continua existindo para apagar ocorrências lançadas por engano (some com elas e falha se houver baixa).
+- **Listagem de títulos** (abas A pagar e A receber da caixa): filtro de vencimento com o padrão dos últimos 60 dias e próximos 30, os atalhos Mês anterior, Mês atual, Próximo mês e Hoje e a última escolha lembrada por caixa e direção, como no extrato ([004](004-caixas-e-contas.md)). As abas de situação (em aberto, vencido…) combinam com o período.
 - **Transferência** = par de movimentos ligados por `transfer_id`; não conta como receita nem despesa.
 - Pagar um título da caixa B com uma conta da caixa A (com permissão) gera automaticamente a transferência A → B e a baixa em B.
 - Títulos cuja contraparte é titular de uma caixa são espelhados ([006](006-espelhamento-entre-caixas.md)).

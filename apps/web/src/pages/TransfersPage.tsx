@@ -1,4 +1,4 @@
-import { type AccountRow, type CaixaSummary, formatBRL, formatDate, type TransferRow, t, todayIso } from '@moneyflow/shared';
+import { type AccountRow, type CaixaSummary, formatAccounting, formatDate, type TransferRow, t, todayIso } from '@moneyflow/shared';
 import { ArrowRight, Plus, Trash2 } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -27,7 +27,7 @@ export function TransfersPage() {
   async function remove(row: TransferRow) {
     const ok = await confirm({
       title: 'Excluir a transferência?',
-      description: `${formatBRL(row.amountCents)} de ${row.fromAccountName} para ${row.toAccountName}. Os dois movimentos saem dos extratos.`,
+      description: `${formatAccounting(row.amountCents)} de ${row.fromAccountName} para ${row.toAccountName}. Os dois movimentos saem dos extratos.`,
       confirmLabel: t.common.delete,
       danger: true,
     });
@@ -163,7 +163,7 @@ export function TransferModal({ onClose, onSaved }: { onClose: () => void; onSav
       .filter((a) => a.id !== exclude)
       .map((a) => (
         <option key={a.id} value={a.id}>
-          {a.caixaName} › {a.name} · {formatBRL(a.balanceCents)}
+          {a.caixaName} › {a.name} · {formatAccounting(a.balanceCents)}
         </option>
       ));
 

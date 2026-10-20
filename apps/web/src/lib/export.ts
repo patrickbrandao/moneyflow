@@ -32,6 +32,8 @@ const PDF_INK: [number, number, number] = [31, 33, 38];
 const PDF_MUTED: [number, number, number] = [108, 111, 120];
 const PDF_HEAD: [number, number, number] = [233, 235, 241];
 const PDF_LINE: [number, number, number] = [211, 213, 221];
+/** Negativo no formato contábil: vermelho escuro (o mesmo `--negative` do tema claro). */
+const PDF_NEGATIVE: [number, number, number] = [143, 29, 24];
 
 export async function downloadPdf(table: ExportTable) {
   const [{ jsPDF }, { autoTable }] = await Promise.all([import('jspdf'), import('jspdf-autotable')]);
@@ -62,6 +64,10 @@ export async function downloadPdf(table: ExportTable) {
     columnStyles: Object.fromEntries(table.columns.map((c, i) => [i, numeric(c.type) ? { halign: 'right' } : {}])),
     didParseCell: (data) => {
       if (data.section === 'body' && bold.has(data.row.index)) data.cell.styles.fontStyle = 'bold';
+      if (data.section === 'body' && table.columns[data.column.index]?.type === 'money') {
+        const cents = Number(table.rows[data.row.index]?.[table.columns[data.column.index]!.key]);
+        if (cents < 0) data.cell.styles.textColor = PDF_NEGATIVE;
+      }
       if (data.section === 'head' && numeric(table.columns[data.column.index]?.type)) data.cell.styles.halign = 'right';
     },
   });

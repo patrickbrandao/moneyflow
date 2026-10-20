@@ -1,6 +1,6 @@
 import {
   type DocumentReadingDto,
-  formatBRL,
+  formatAccounting,
   formatDate,
   formatDocument,
   type NfeEntryResult,
@@ -141,7 +141,7 @@ function BoletoSource({ initial, onApply }: { initial: string; onApply: (patch: 
             <dt>{t.entry.line}</dt>
             <dd className="code-line">{parsed.digitableLine}</dd>
             <dt>{t.title.amount}</dt>
-            <dd className="mono">{parsed.amountCents ? formatBRL(parsed.amountCents) : '—'}</dd>
+            <dd className="mono">{parsed.amountCents ? formatAccounting(parsed.amountCents) : '—'}</dd>
             <dt>{t.title.due}</dt>
             <dd className="mono">{parsed.dueDate ? formatDate(parsed.dueDate) : '—'}</dd>
           </dl>
@@ -249,7 +249,7 @@ function PixSource({ initial, onApply }: { initial: string; onApply: (patch: Ent
               </>
             )}
             <dt>{t.title.amount}</dt>
-            <dd className="mono">{parsed.amountCents ? formatBRL(parsed.amountCents) : '—'}</dd>
+            <dd className="mono">{parsed.amountCents ? formatAccounting(parsed.amountCents) : '—'}</dd>
             {parsed.txid && parsed.txid !== '***' && (
               <>
                 <dt>{t.entry.pixTxid}</dt>
@@ -364,14 +364,14 @@ function NfeSource({ direction, onApply }: { direction: 'payable' | 'receivable'
             <dt>{t.entry.nfeIssued}</dt>
             <dd className="mono">{formatDate(nfe.issuedAt.slice(0, 10))}</dd>
             <dt>{t.entry.nfeTotal}</dt>
-            <dd className="mono">{formatBRL(nfe.totalCents)}</dd>
+            <dd className="mono">{formatAccounting(nfe.totalCents)}</dd>
             {dups.length > 0 && (
               <>
                 <dt>{t.entry.nfeDuplicates(dups.length)}</dt>
                 <dd className="mono">
                   {dups.map((d, i) => (
                     <span key={`${d.number}-${i}`} className="block">
-                      {d.number ?? i + 1} · {d.dueDate ? formatDate(d.dueDate) : '—'} · {formatBRL(d.amountCents)}
+                      {d.number ?? i + 1} · {d.dueDate ? formatDate(d.dueDate) : '—'} · {formatAccounting(d.amountCents)}
                     </span>
                   ))}
                 </dd>
@@ -470,7 +470,7 @@ function DocumentSource({ onApply }: { onApply: (patch: EntryPatch) => void }) {
               </>
             )}
             <dt>{t.title.amount}</dt>
-            <dd className="mono">{result.amountCents ? formatBRL(result.amountCents) : '—'}</dd>
+            <dd className="mono">{result.amountCents ? formatAccounting(result.amountCents) : '—'}</dd>
             <dt>{t.title.due}</dt>
             <dd className="mono">{result.dueDate ? formatDate(result.dueDate) : '—'}</dd>
             {result.description && (

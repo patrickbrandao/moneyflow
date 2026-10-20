@@ -1,7 +1,7 @@
 import {
   type ExportTable,
   exportFileName,
-  formatBRL,
+  formatAccounting,
   formatDate,
   type ProjectionLine,
   type ProjectionReportData,
@@ -74,10 +74,12 @@ export function ProjectionReport({ data }: { data: ProjectionReportData }) {
                 <tr key={m.key} className={cx(m.bold && 'report-total')}>
                   <td>{m.label}</td>
                   {data.horizons.map((h) => {
-                    const value = Number(at(block.rows, h)?.[m.key] ?? 0);
+                    const raw = Number(at(block.rows, h)?.[m.key] ?? 0);
+                    // saída (sign −1) vem positiva da API e aparece negativa, entre parênteses
+                    const value = m.sign === -1 ? -raw : raw;
                     return (
-                      <td key={h} className={cx('num money', value === 0 && !m.bold && 'muted', m.bold && value < 0 && 'out')}>
-                        {m.sign === -1 && value !== 0 ? `−${formatBRL(value)}` : formatBRL(value)}
+                      <td key={h} className={cx('num money', value === 0 && !m.bold && 'muted', value < 0 && 'neg')}>
+                        {formatAccounting(value)}
                       </td>
                     );
                   })}
@@ -91,11 +93,14 @@ export function ProjectionReport({ data }: { data: ProjectionReportData }) {
                         <Landmark className="h-3.5 w-3.5" /> {rows[0]?.accountName}
                       </span>
                     </td>
-                    {data.horizons.map((h) => (
-                      <td key={h} className="num money muted">
-                        {formatBRL(Number(at(rows, h)?.projectedCents ?? 0))}
-                      </td>
-                    ))}
+                    {data.horizons.map((h) => {
+                      const value = Number(at(rows, h)?.projectedCents ?? 0);
+                      return (
+                        <td key={h} className={cx('num money', value < 0 ? 'neg' : 'muted')}>
+                          {formatAccounting(value)}
+                        </td>
+                      );
+                    })}
                   </tr>
                 </Fragment>
               ))}

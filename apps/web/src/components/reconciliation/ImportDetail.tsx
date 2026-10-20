@@ -3,7 +3,6 @@ import {
   type CardOverview,
   type ClassificationSuggestResult,
   formatDate,
-  formatSignedBRL,
   type LineStatus,
   type StatementImportDetail,
   type StatementImportSummary,
@@ -79,14 +78,14 @@ export function BalanceCompare({
       </span>
       {diff !== null && diff !== 0 ? (
         <span className="rec-diff text-xs">
-          {s.difference}: {formatSignedBRL(diff)}
+          {s.difference}: <Money cents={diff} />
         </span>
       ) : (
         <span className="row-sub">{s.noDifference}</span>
       )}
       {interval !== null && (
         <span className={cx('text-xs', interval !== 0 ? 'rec-diff' : 'row-sub')} title={s.intervalDifferenceHint}>
-          {s.intervalDifference}: {formatSignedBRL(interval)}
+          {s.intervalDifference}: <Money cents={interval} />
         </span>
       )}
     </span>

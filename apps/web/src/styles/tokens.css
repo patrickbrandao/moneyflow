@@ -52,6 +52,8 @@
   --warn-tint: rgba(201, 146, 43, 0.16);
   --danger: #d7322d;
   --danger-tint: rgba(215, 50, 45, 0.16);
+  /* valor negativo (formato contábil): vermelho escuro; no tema escuro, um tom que ainda passa AA no fundo */
+  --negative: #e06a63;
   --info: #4a9aa8;
   --info-tint: rgba(74, 154, 168, 0.18);
 
@@ -123,6 +125,7 @@
   --warn-tint: rgba(168, 116, 28, 0.12);
   --danger: #c42b27;
   --danger-tint: rgba(196, 43, 39, 0.1);
+  --negative: #8f1d18;
   --info: #256f80;
   --info-tint: rgba(37, 111, 128, 0.12);
 

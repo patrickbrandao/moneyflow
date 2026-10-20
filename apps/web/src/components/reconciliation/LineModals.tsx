@@ -1,7 +1,7 @@
 import {
   type CaixaSummary,
   type CardOverview,
-  formatBRL,
+  formatAccounting,
   formatDate,
   type MatchCandidateRow,
   type StatementLineRow,
@@ -25,7 +25,7 @@ function LineHeader({ line }: { line: StatementLineRow }) {
   return (
     <div className="well mb-3">
       <span className="row-title">{line.description}</span>
-      <span className="row-sub">{s.lineInfo(formatDate(line.postedOn), formatBRL(line.amountCents))}</span>
+      <span className="row-sub">{s.lineInfo(formatDate(line.postedOn), formatAccounting(line.amountCents))}</span>
     </div>
   );
 }

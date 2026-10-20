@@ -263,17 +263,21 @@ export function CaixaPage() {
   );
 }
 
-/** Atalho para trabalhar numa conta (spec 004): cada conta ativa com o saldo, abrindo a tela dela. */
+/** Atalho para trabalhar numa conta (spec 004): cada conta ativa só com o nome e o saldo (o tipo fica na dica), abrindo a tela dela. */
 function AccountsStrip({ caixa }: { caixa: CaixaDetail }) {
   const active = caixa.accounts.filter((a) => !a.archivedAt);
   if (active.length === 0) return null;
   return (
     <nav className="acc-strip" aria-label={t.caixa.account.accountsStrip}>
       {active.map((account) => (
-        <Link key={account.id} to={accountLink(caixa.id, account.id)} className="acc-chip" title={t.caixa.account.open}>
+        <Link
+          key={account.id}
+          to={accountLink(caixa.id, account.id)}
+          className="acc-chip"
+          title={`${t.caixa.account.open} · ${t.caixa.accountKinds[account.kind]}`}
+        >
           <Wallet />
           <span className="acc-chip-name">{account.name}</span>
-          <span className="acc-chip-kind">{t.caixa.accountKinds[account.kind]}</span>
           <Money cents={account.balanceCents} />
         </Link>
       ))}

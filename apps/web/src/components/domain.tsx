@@ -1,4 +1,4 @@
-import { formatBRL, formatSignedBRL, type MirrorStatus, type TitleRow, t } from '@moneyflow/shared';
+import { formatAccounting, type MirrorStatus, type TitleRow, t } from '@moneyflow/shared';
 import { AlertCircle, RotateCw } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { ApiError } from '../lib/api';
@@ -20,10 +20,16 @@ export function CategoryLabel({ name, slot }: { name: string; slot: number | nul
   );
 }
 
-/** Valor em BRL. `signed`: verde entrando, vermelho saindo. */
+/** Classe do valor negativo (vermelho escuro do formato contábil) para quem escreve o `.money` à mão. */
+export const negClass = (cents: number | null | undefined) => ((cents ?? 0) < 0 ? 'neg' : undefined);
+
+/**
+ * Valor em BRL no formato contábil: negativo entre parênteses, sem sinal, em vermelho escuro.
+ * `signed`: o positivo (entrando) fica verde.
+ */
 export function Money({ cents, signed, muted, className }: { cents: number; signed?: boolean; muted?: boolean; className?: string }) {
-  const tone = muted ? 'muted' : signed ? (cents > 0 ? 'in' : cents < 0 ? 'out' : '') : '';
-  return <span className={cx('money', tone, className)}>{signed ? formatSignedBRL(cents) : formatBRL(cents)}</span>;
+  const tone = cents < 0 ? 'neg' : muted ? 'muted' : signed && cents > 0 ? 'in' : '';
+  return <span className={cx('money', tone, className)}>{formatAccounting(cents)}</span>;
 }
 
 export function TitleStatusBadge({ title }: { title: Pick<TitleRow, 'status' | 'overdue' | 'direction'> }) {
