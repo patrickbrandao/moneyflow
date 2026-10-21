@@ -4,6 +4,7 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 
 | Nº | Tarefa | Status | Tipo | Responsável | Origem |
 |---|---|---|---|---|---|
+| 045 | [Corrigir a data do estorno de uma baixa, com auditoria](045-corrigir-data-do-estorno.md) | aberta | melhoria | — | usuario |
 | 043 | [Contratos sobre séries recorrentes no banco (F20)](043-contratos-sobre-series-no-banco.md) | concluida | banco | dba | usuario |
 | 044 | [Contratos sobre séries recorrentes na aplicação (F20)](044-contratos-sobre-series-na-aplicacao.md) (depois da 043) | concluida | melhoria | app | usuario |
 | 041 | [Pagamentos de contrato no extrato no banco (F19)](041-pagamentos-de-contrato-no-banco.md) (depois da 039) | concluida | banco | dba | usuario |

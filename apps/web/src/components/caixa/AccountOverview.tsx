@@ -1,4 +1,5 @@
 import {
+  type AccountCategoryEntry,
   type AccountRow,
   type AccountSummary,
   type AccountSummaryCategory,
@@ -6,18 +7,22 @@ import {
   addMonths,
   type ExportTable,
   exportFileName,
+  formatDate,
   formatMonth,
   t,
+  titleLink,
   todayIso,
 } from '@moneyflow/shared';
 import { BarChart3, PieChart, TrendingUp } from 'lucide-react';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useApi } from '../../lib/hooks';
 import { useParamState } from '../../lib/params';
 import { useStored } from '../../lib/storage';
-import { LoadError, Money } from '../domain';
+import { LoadError, Money, SkelRows } from '../domain';
 import { ExportMenu } from '../ExportMenu';
-import { Panel, Skel } from '../ui';
+import { ModalActions } from '../forms';
+import { Button, EmptyRow, Modal, Panel, Skel } from '../ui';
 import { BalanceLine, Donut, type DonutSlice, MonthColumns } from './account-charts';
 
 const a = t.caixa.account;
@@ -39,9 +44,13 @@ function periodRange(period: Period, today = todayIso()) {
   return { from: addMonths(monthStart(today), -back), to: monthEnd(today) };
 }
 
+/** Fatia da pizza com os grupos que ela soma (id do grupo ou `none`; vários em "Outras"). */
+type CategorySlice = DonutSlice & { groups: string[] };
+type SliceSelection = CategorySlice & { kind: 'income' | 'expense' };
+
 /** Grupos de categoria de um tipo, do maior para o menor, com "Outras" no fim. */
-function donutSlices(lines: AccountSummaryCategory[], kind: 'income' | 'expense'): DonutSlice[] {
-  const groups = new Map<string, DonutSlice>();
+function donutSlices(lines: AccountSummaryCategory[], kind: 'income' | 'expense'): CategorySlice[] {
+  const groups = new Map<string, CategorySlice>();
   for (const line of lines) {
     if (line.kind !== kind) continue;
     const key = line.groupCategoryId ?? 'none';
@@ -53,12 +62,103 @@ function donutSlices(lines: AccountSummaryCategory[], kind: 'income' | 'expense'
         label: line.groupName ?? t.reports.noCategory,
         color: line.groupColorSlot ? `var(--port-${line.groupColorSlot})` : 'var(--chart-other)',
         value: line.amountCents,
+        groups: [key],
       });
   }
   const sorted = [...groups.values()].filter((g) => g.value > 0).sort((x, y) => y.value - x.value);
   if (sorted.length <= DONUT_GROUPS + 1) return sorted;
-  const rest = sorted.slice(DONUT_GROUPS).reduce((acc, g) => acc + g.value, 0);
-  return [...sorted.slice(0, DONUT_GROUPS), { key: 'rest', label: t.flow.otherGroup, color: 'var(--chart-other)', value: rest }];
+  const tail = sorted.slice(DONUT_GROUPS);
+  const rest = tail.reduce((acc, g) => acc + g.value, 0);
+  return [
+    ...sorted.slice(0, DONUT_GROUPS),
+    { key: 'rest', label: t.flow.otherGroup, color: 'var(--chart-other)', value: rest, groups: tail.flatMap((g) => g.groups) },
+  ];
+}
+
+/** Lançamentos que somam uma fatia da pizza, do mais recente ao mais antigo, com o total no rodapé. */
+function CategoryEntriesModal({
+  account,
+  from,
+  to,
+  slice,
+  onClose,
+}: {
+  account: AccountRow;
+  from: string;
+  to: string;
+  slice: SliceSelection;
+  onClose: () => void;
+}) {
+  const query = new URLSearchParams({ from, to, kind: slice.kind, groups: slice.groups.join(',') });
+  const { data, error, reload } = useApi<AccountCategoryEntry[]>(`/api/accounts/${account.id}/category-entries?${query}`);
+  const kindLabel = t.category.kinds[slice.kind] ?? slice.kind;
+  const total = data?.reduce((acc, e) => acc + e.amountCents, 0) ?? 0;
+
+  return (
+    <Modal open title={a.categoryEntries(kindLabel, slice.label)} onClose={onClose} wide>
+      <p className="hint mb-2">
+        {formatDate(from)} a {formatDate(to)}
+        {data && ` · ${a.categoryEntriesCount(data.length)}`}
+      </p>
+      {error ? (
+        <LoadError error={error} onRetry={() => void reload()} />
+      ) : (
+        <div className="table-wrap acc-entries">
+          <table className="data" data-testid="account-category-entries">
+            <thead>
+              <tr>
+                <th>{t.common.date}</th>
+                <th>{a.entry}</th>
+                <th className="num">{t.common.amount}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!data && <SkelRows cols={3} />}
+              {data && data.length === 0 && <EmptyRow colSpan={3}>{a.noEntries}</EmptyRow>}
+              {data?.map((entry) => (
+                <tr key={entry.movementId}>
+                  <td className="mono text-xs">{formatDate(entry.occurredOn)}</td>
+                  <td>
+                    {entry.titleId && entry.titleDirection ? (
+                      <Link
+                        to={titleLink({ id: entry.titleId, caixaId: account.caixaId, direction: entry.titleDirection })}
+                        className="row-title hover:text-[var(--accent-soft)]"
+                      >
+                        {entry.titleDescription ?? entry.description}
+                      </Link>
+                    ) : (
+                      <span className="row-title">{entry.description ?? '—'}</span>
+                    )}
+                    <span className="row-sub">
+                      {[entry.entityName, entry.categoryName ?? t.reports.noCategory, t.statement.movementKinds[entry.movementKind]]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </span>
+                  </td>
+                  <td className="num">
+                    <Money cents={entry.amountCents} />
+                  </td>
+                </tr>
+              ))}
+              {data && data.length > 0 && (
+                <tr className="font-semibold">
+                  <td colSpan={2}>{a.total}</td>
+                  <td className="num">
+                    <Money cents={total} />
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <ModalActions>
+        <Button variant="ghost" onClick={onClose}>
+          {t.common.close}
+        </Button>
+      </ModalActions>
+    </Modal>
+  );
 }
 
 function monthsTable(summary: AccountSummary, caixaName: string): ExportTable {
@@ -94,6 +194,7 @@ export function AccountOverview({ account, caixaName }: { account: AccountRow; c
   const range = periodRange(period);
   const { data, error, reload } = useApi<AccountSummary>(`/api/accounts/${account.id}/summary?from=${range.from}&to=${range.to}`);
   const [withTransfers, setWithTransfers] = useStored<boolean>('account-flows-transfers', false);
+  const [selected, setSelected] = useState<SliceSelection | null>(null);
 
   const view = useMemo(() => {
     if (!data) return null;
@@ -167,20 +268,33 @@ export function AccountOverview({ account, caixaName }: { account: AccountRow; c
           <div className="acc-donuts mt-4">
             <Panel title={a.expenseByCategory} icon={<PieChart />}>
               {view.expense.length > 0 ? (
-                <Donut slices={view.expense} label={a.expenseByCategory} testId="account-expense-donut" />
+                <Donut
+                  slices={view.expense}
+                  label={a.expenseByCategory}
+                  testId="account-expense-donut"
+                  onSelect={(slice) => setSelected({ ...slice, kind: 'expense' })}
+                />
               ) : (
                 <p className="hint">{a.noCategoryData}</p>
               )}
             </Panel>
             <Panel title={a.incomeByCategory} icon={<PieChart />}>
               {view.income.length > 0 ? (
-                <Donut slices={view.income} label={a.incomeByCategory} testId="account-income-donut" />
+                <Donut
+                  slices={view.income}
+                  label={a.incomeByCategory}
+                  testId="account-income-donut"
+                  onSelect={(slice) => setSelected({ ...slice, kind: 'income' })}
+                />
               ) : (
                 <p className="hint">{a.noCategoryData}</p>
               )}
             </Panel>
           </div>
           <p className="hint mt-2">{a.categoriesHint}</p>
+          {selected && (
+            <CategoryEntriesModal account={account} from={data.from} to={data.to} slice={selected} onClose={() => setSelected(null)} />
+          )}
 
           <Panel title={a.monthByMonth} className="mt-4">
             <div className="table-wrap">

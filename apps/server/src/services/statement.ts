@@ -1,7 +1,9 @@
 import {
+  type AccountCategoryEntry,
   type AccountSummary,
   type AccountSummaryCategory,
   type AccountSummaryMonth,
+  type accountCategoryEntriesQuery,
   type accountSummaryQuery,
   addDays,
   type Statement,
@@ -59,6 +61,33 @@ export async function accountStatement(ctx: ServiceContext, accountId: string, q
 }
 
 /**
+ * Linhas por categoria do resumo da conta, pelo regime de caixa (as mesmas regras de
+ * report_category_totals, só com os movimentos desta conta): baixas pela categoria do título e
+ * avulsos pela deles (sem categoria, o tipo vem do sinal). Base da pizza e da lista de cada fatia.
+ */
+function categoryLines(accountId: string, from: string, to: string) {
+  return sql`
+      SELECT c.kind, coalesce(c.parent_id, c.id) AS group_category_id, c.id AS category_id, m.id AS movement_id,
+             CASE c.kind WHEN 'expense' THEN -m.amount_cents ELSE m.amount_cents END AS amount_cents
+        FROM movements m
+        JOIN settlements s ON s.id = m.settlement_id
+        JOIN titles t ON t.id = s.title_id
+        JOIN categories c ON c.id = t.category_id
+       WHERE m.kind = 'settlement'
+         AND m.financial_account_id = ${accountId}
+         AND m.occurred_on BETWEEN ${from}::date AND ${to}::date
+      UNION ALL
+      SELECT x.kind, coalesce(c.parent_id, c.id), c.id, m.id,
+             CASE x.kind WHEN 'expense' THEN -m.amount_cents ELSE m.amount_cents END
+        FROM movements m
+        LEFT JOIN categories c ON c.id = m.category_id
+        CROSS JOIN LATERAL (SELECT coalesce(c.kind, CASE WHEN m.amount_cents > 0 THEN 'income' ELSE 'expense' END) AS kind) x
+       WHERE m.kind = 'adjustment'
+         AND m.financial_account_id = ${accountId}
+         AND m.occurred_on BETWEEN ${from}::date AND ${to}::date`;
+}
+
+/**
  * Resumo da conta (spec 004): entradas e saídas por mês (transferências à parte) com o saldo ao fim
  * de cada mês, despesa e receita por categoria pelo regime de caixa (as mesmas regras de
  * report_category_totals, só com os movimentos desta conta) e a situação da conciliação.
@@ -101,26 +130,7 @@ export async function accountSummary(
      ORDER BY mo.month`);
 
   const categories = await ctx.db.execute(sql`
-    WITH lines AS (
-      SELECT c.kind, coalesce(c.parent_id, c.id) AS group_category_id, c.id AS category_id,
-             CASE c.kind WHEN 'expense' THEN -m.amount_cents ELSE m.amount_cents END AS amount_cents
-        FROM movements m
-        JOIN settlements s ON s.id = m.settlement_id
-        JOIN titles t ON t.id = s.title_id
-        JOIN categories c ON c.id = t.category_id
-       WHERE m.kind = 'settlement'
-         AND m.financial_account_id = ${accountId}
-         AND m.occurred_on BETWEEN ${from}::date AND ${to}::date
-      UNION ALL
-      SELECT x.kind, coalesce(c.parent_id, c.id), c.id,
-             CASE x.kind WHEN 'expense' THEN -m.amount_cents ELSE m.amount_cents END
-        FROM movements m
-        LEFT JOIN categories c ON c.id = m.category_id
-        CROSS JOIN LATERAL (SELECT coalesce(c.kind, CASE WHEN m.amount_cents > 0 THEN 'income' ELSE 'expense' END) AS kind) x
-       WHERE m.kind = 'adjustment'
-         AND m.financial_account_id = ${accountId}
-         AND m.occurred_on BETWEEN ${from}::date AND ${to}::date
-    )
+    WITH lines AS (${categoryLines(accountId, from, to)})
     SELECT l.kind, l.group_category_id, g.name AS group_name, g.color_slot AS group_color_slot,
            l.category_id, c.name AS category_name, c.color_slot,
            sum(l.amount_cents)::bigint AS amount_cents, count(*)::int AS entries
@@ -152,4 +162,39 @@ export async function accountSummary(
     categories: categories.rows.map((row) => camel<AccountSummaryCategory>(row)),
     reconciliation,
   };
+}
+
+/** Lançamentos de uma fatia da pizza do resumo (spec 004): as linhas que somam os grupos pedidos, por data. */
+export async function accountCategoryEntries(
+  ctx: ServiceContext,
+  accountId: string,
+  query: z.output<typeof accountCategoryEntriesQuery>,
+): Promise<AccountCategoryEntry[]> {
+  await getAccount(ctx, accountId);
+  const { from, to, kind, groups } = query;
+  const ids = groups.filter((g) => g !== 'none');
+  const withNone = groups.includes('none');
+  const result = await ctx.db.execute(sql`
+    WITH lines AS (${categoryLines(accountId, from, to)})
+    SELECT l.movement_id, m.occurred_on, l.amount_cents::bigint AS amount_cents, m.kind AS movement_kind, m.description,
+           t.id AS title_id, t.description AS title_description, t.direction AS title_direction,
+           en.name AS entity_name, l.group_category_id, l.category_id, c.name AS category_name
+      FROM lines l
+      JOIN movements m ON m.id = l.movement_id
+      LEFT JOIN settlements s ON s.id = m.settlement_id
+      LEFT JOIN titles t ON t.id = s.title_id
+      LEFT JOIN entities en ON en.id = coalesce(m.entity_id, t.entity_id)
+      LEFT JOIN categories c ON c.id = l.category_id
+     WHERE l.kind = ${kind}
+       AND (${
+         ids.length > 0
+           ? sql`l.group_category_id IN (${sql.join(
+               ids.map((g) => sql`${g}::uuid`),
+               sql`, `,
+             )})`
+           : sql`false`
+       }
+            ${withNone ? sql`OR l.group_category_id IS NULL` : sql``})
+     ORDER BY m.occurred_on DESC, m.created_at DESC, m.id`);
+  return result.rows.map((row) => camel<AccountCategoryEntry>(row));
 }

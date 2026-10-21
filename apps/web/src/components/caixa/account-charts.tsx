@@ -205,8 +205,21 @@ export function BalanceLine({
 
 export type DonutSlice = { key: string; label: string; color: string; value: number };
 
-/** Pizza em rosca com a legenda ao lado (valor e parte do total); fatias ≤ 0 não entram. */
-export function Donut({ slices, label, testId }: { slices: DonutSlice[]; label: string; testId?: string }) {
+/**
+ * Pizza em rosca com a legenda ao lado (valor e parte do total); fatias ≤ 0 não entram. Com
+ * `onSelect`, a fatia e o item da legenda abrem o detalhe dela.
+ */
+export function Donut<S extends DonutSlice>({
+  slices,
+  label,
+  testId,
+  onSelect,
+}: {
+  slices: S[];
+  label: string;
+  testId?: string;
+  onSelect?: (slice: S) => void;
+}) {
   const [hover, setHover] = useState<string | null>(null);
   const visible = slices.filter((s) => s.value > 0);
   const total = visible.reduce((acc, s) => acc + s.value, 0);
@@ -239,8 +252,10 @@ export function Donut({ slices, label, testId }: { slices: DonutSlice[]; label: 
                 strokeWidth={hover === s.key ? stroke + 4 : stroke}
                 strokeDasharray={dash}
                 strokeDashoffset={-offset}
+                className={onSelect ? 'is-clickable' : undefined}
                 onPointerEnter={() => setHover(s.key)}
                 onPointerLeave={() => setHover(null)}
+                onClick={onSelect ? () => onSelect(s) : undefined}
               >
                 <title>{`${s.label}: ${formatAccounting(s.value)} (${share(s.value)})`}</title>
               </circle>
@@ -261,11 +276,12 @@ export function Donut({ slices, label, testId }: { slices: DonutSlice[]; label: 
           <button
             key={s.key}
             type="button"
-            className={hover === s.key ? 'is-hover' : undefined}
+            className={[hover === s.key && 'is-hover', onSelect && 'is-clickable'].filter(Boolean).join(' ') || undefined}
             onPointerEnter={() => setHover(s.key)}
             onPointerLeave={() => setHover(null)}
             onFocus={() => setHover(s.key)}
             onBlur={() => setHover(null)}
+            onClick={onSelect ? () => onSelect(s) : undefined}
           >
             <i style={{ background: s.color }} />
             <span className="acc-donut-name" title={s.label}>

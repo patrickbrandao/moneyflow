@@ -93,6 +93,15 @@ test('tela da conta: abrir pela faixa da caixa, Resumo, Extrato e Conciliação 
   await expect(page.getByTestId('account-balance').locator('svg')).toBeVisible();
   await expect(page.getByTestId('account-expense-donut')).toContainText(expense.name);
   await expect(page.getByTestId('account-income-donut')).toContainText(income.name);
+  // Clicar na categoria lista os lançamentos que somam a fatia.
+  await page
+    .getByTestId('account-expense-donut')
+    .getByRole('button', { name: new RegExp(expense.name) })
+    .click();
+  const entries = page.getByTestId('account-category-entries');
+  await expect(entries.getByRole('row', { name: /^Total/ })).toBeVisible();
+  await page.getByRole('dialog').getByRole('button', { name: 'Fechar' }).click();
+  await expect(entries).toHaveCount(0);
   const months = page.getByTestId('account-months');
   await expect(months.getByRole('row', { name: /^Total/ })).toContainText('100,00'); // transferência enviada
 

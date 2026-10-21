@@ -374,7 +374,12 @@ export const ptBR = {
       balanceTrend: 'Saldo ao fim de cada mês',
       expenseByCategory: 'Despesas por categoria',
       incomeByCategory: 'Receitas por categoria',
-      categoriesHint: 'Pelo regime de caixa: baixas pagas ou recebidas nesta conta e os avulsos dela.',
+      categoriesHint:
+        'Pelo regime de caixa: baixas pagas ou recebidas nesta conta e os avulsos dela. Clique numa categoria para ver os lançamentos.',
+      categoryEntries: (kind: string, name: string) => `${kind} · ${name}`,
+      categoryEntriesCount: (n: number) => (n === 1 ? '1 lançamento' : `${n} lançamentos`),
+      entry: 'Lançamento',
+      noEntries: 'Nenhum lançamento.',
       noCategoryData: 'Nada no período.',
       monthByMonth: 'Mês a mês',
       net: 'Resultado',

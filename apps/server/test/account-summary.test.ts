@@ -69,6 +69,28 @@ describe('resumo da conta (spec 004)', () => {
     expect(summary.categories).toHaveLength(3);
     expect(summary.reconciliation).toEqual({ imports: 0, lastImportId: null, lastPeriodEnd: null, newLines: 0, suggestedLines: 0 });
 
+    // A lista de cada fatia soma o mesmo valor da pizza (spec 004).
+    const group = s.expense.parentId ?? s.expense.id;
+    const entries = await admin.get(
+      `/api/accounts/${s.accountA.id}/category-entries?from=2026-08-01&to=2026-10-31&kind=expense&groups=${group}`,
+    );
+    expect(entries.map((e: { amountCents: number }) => e.amountCents)).toEqual([700, 30_000]);
+    expect(entries[0]).toMatchObject({ occurredOn: '2026-10-08', movementKind: 'adjustment', description: 'Tarifa', titleId: null });
+    expect(entries[1]).toMatchObject({
+      occurredOn: '2026-09-10',
+      movementKind: 'settlement',
+      titleId: payable.id,
+      titleDirection: 'payable',
+      entityName: s.supplier.name,
+      categoryName: s.expense.name,
+    });
+    const none = await admin.get(`/api/accounts/${s.accountA.id}/category-entries?from=2026-08-01&to=2026-10-31&kind=income&groups=none`);
+    expect(none).toEqual([expect.objectContaining({ amountCents: 1_500, description: 'Rendimento', categoryId: null })]);
+    const both = await admin.get(
+      `/api/accounts/${s.accountA.id}/category-entries?from=2026-08-01&to=2026-10-31&kind=income&groups=none,${s.income.parentId ?? s.income.id}`,
+    );
+    expect(both).toHaveLength(2);
+
     // A outra conta enxerga só o que é dela; cofre não concilia extrato.
     const other = await admin.get(`/api/accounts/${s.accountB.id}/summary?from=2026-10-01&to=2026-10-31`);
     expect(other.months[0]).toMatchObject({ inflowCents: 0, transferInCents: 10_000, closingCents: 10_000 });
@@ -81,6 +103,12 @@ describe('resumo da conta (spec 004)', () => {
     const s = await scenario(h, admin);
     const outsider = client(h, (await userSession(h)).cookie);
     await outsider.get(`/api/accounts/${s.accountA.id}/summary?from=2026-01-01&to=2026-12-31`, 404);
+    await outsider.get(`/api/accounts/${s.accountA.id}/category-entries?from=2026-01-01&to=2026-12-31&kind=expense&groups=none`, 404);
+    const noGroups = await admin.raw(
+      'GET',
+      `/api/accounts/${s.accountA.id}/category-entries?from=2026-01-01&to=2026-12-31&kind=expense&groups=`,
+    );
+    expect(noGroups.statusCode).toBe(400);
     const backwards = await admin.raw('GET', `/api/accounts/${s.accountA.id}/summary?from=2026-12-01&to=2026-01-31`);
     expect(backwards.statusCode).toBeGreaterThanOrEqual(400);
     const tooLong = await admin.raw('GET', `/api/accounts/${s.accountA.id}/summary?from=2020-01-01&to=2026-12-31`);

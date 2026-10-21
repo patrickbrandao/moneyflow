@@ -1,4 +1,5 @@
 import {
+  accountCategoryEntriesQuery,
   accountCreateInput,
   accountSummaryQuery,
   accountUpdateInput,
@@ -19,7 +20,7 @@ import { z } from 'zod';
 import { param, parse, type Req } from '../http';
 import * as caixas from '../services/caixas';
 import * as categories from '../services/categories';
-import { accountStatement, accountSummary } from '../services/statement';
+import { accountCategoryEntries, accountStatement, accountSummary } from '../services/statement';
 import { obligationMatches } from '../services/statements';
 
 const archivedQuery = z.object({ archived: queryBool });
@@ -56,6 +57,9 @@ export async function caixaRoutes(app: FastifyInstance) {
   });
   app.get('/api/accounts/:id/statement', (r: Req) => accountStatement(r.ctx, id(r), parse(statementQuery, r.query)));
   app.get('/api/accounts/:id/summary', (r: Req) => accountSummary(r.ctx, id(r), parse(accountSummaryQuery, r.query)));
+  app.get('/api/accounts/:id/category-entries', (r: Req) =>
+    accountCategoryEntries(r.ctx, id(r), parse(accountCategoryEntriesQuery, r.query)),
+  );
   app.post('/api/accounts/:id/adjustments', (r: Req) => caixas.addAdjustment(r.ctx, id(r), parse(adjustmentInput, r.body)));
   // "É o pagamento de…?" (spec 034): ocorrências em aberto da conta que o lançamento avulso pode baixar.
   app.get('/api/accounts/:id/obligation-matches', (r: Req) => obligationMatches(r.ctx, id(r), parse(obligationMatchQuery, r.query)));

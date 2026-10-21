@@ -408,6 +408,23 @@ export type AccountSummaryCategory = {
   entries: number;
 };
 
+/** Um lançamento de uma fatia da pizza (as mesmas linhas que somam `AccountSummaryCategory.amountCents`). */
+export type AccountCategoryEntry = {
+  movementId: string;
+  occurredOn: string;
+  /** Positivo = despesa em expense, receita em income; estorno negativo. */
+  amountCents: number;
+  movementKind: 'settlement' | 'adjustment';
+  description: string | null;
+  titleId: string | null;
+  titleDescription: string | null;
+  titleDirection: 'payable' | 'receivable' | null;
+  entityName: string | null;
+  groupCategoryId: string | null;
+  categoryId: string | null;
+  categoryName: string | null;
+};
+
 export type AccountSummary = {
   account: AccountRow;
   from: string;

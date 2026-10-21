@@ -290,6 +290,28 @@ export const accountSummaryQuery = z
   .refine((q) => q.to >= q.from, { message: E.invalidPeriod, path: ['to'] })
   .refine((q) => q.to <= addDays(q.from, 1100), { message: E.invalidPeriod, path: ['to'] });
 
+/**
+ * Lançamentos de uma fatia da pizza do resumo da conta: os grupos de categoria (id do grupo ou
+ * `none`, sem categoria; vários quando a fatia é "Outras") de um tipo, no mesmo período.
+ */
+export const accountCategoryEntriesQuery = z
+  .object({
+    from: isoDate,
+    to: isoDate,
+    kind: z.enum(['income', 'expense']),
+    groups: z
+      .string()
+      .transform((v) => v.split(',').filter(Boolean))
+      .pipe(
+        z
+          .array(z.union([id, z.literal('none')]))
+          .min(1)
+          .max(1000),
+      ),
+  })
+  .refine((q) => q.to >= q.from, { message: E.invalidPeriod, path: ['to'] })
+  .refine((q) => q.to <= addDays(q.from, 1100), { message: E.invalidPeriod, path: ['to'] });
+
 export const hiddenCategoriesInput = z.object({ categoryIds: z.array(id).max(1000) });
 
 /* ---------------- categorias ---------------- */
