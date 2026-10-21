@@ -6876,7 +6876,7 @@ CREATE TABLE public.message_outbox (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT message_outbox_attempts_check CHECK ((((max_attempts >= 1) AND (max_attempts <= 20)) AND ((attempts >= 0) AND (attempts <= max_attempts)))),
     CONSTRAINT message_outbox_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
-    CONSTRAINT message_outbox_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'test'::text]))),
+    CONSTRAINT message_outbox_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'test'::text, 'note_reminder'::text]))),
     CONSTRAINT message_outbox_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
     CONSTRAINT message_outbox_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'sending'::text, 'sent'::text, 'failed'::text, 'canceled'::text]))),
     CONSTRAINT message_outbox_status_fields_check CHECK ((((status = 'sending'::text) = (locked_at IS NOT NULL)) AND ((status = 'sent'::text) = (sent_at IS NOT NULL)) AND ((status <> ALL (ARRAY['failed'::text, 'canceled'::text])) OR (last_error IS NOT NULL))))
@@ -6894,7 +6894,7 @@ COMMENT ON TABLE public.message_outbox IS 'Fila de saída e histórico de mensag
 -- Name: COLUMN message_outbox.event_kind; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.message_outbox.event_kind IS 'Evento que gerou a mensagem (os de message_subscriptions, mais test).';
+COMMENT ON COLUMN public.message_outbox.event_kind IS 'Evento que gerou a mensagem (os de message_subscriptions, mais test e note_reminder: o disparo de lembrete com "Enviar também no Telegram", direto ao destino pessoal do autor, sem assinatura; spec 035).';
 
 
 --
@@ -7330,6 +7330,724 @@ BEGIN
   RETURN NEW;
 END
 $$;
+
+
+--
+-- Name: note_calendar(date, date, uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_calendar(p_from date, p_to date, p_visible_to uuid DEFAULT NULL::uuid, p_entity_id uuid DEFAULT NULL::uuid) RETURNS TABLE(day date, kind text, notes integer)
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT o.occurs_on, o.kind, count(DISTINCT o.note_id)::int
+    FROM note_occurrences(p_from, p_to, p_visible_to, p_entity_id, false) o
+   GROUP BY o.occurs_on, o.kind
+   ORDER BY o.occurs_on, o.kind
+$$;
+
+
+--
+-- Name: FUNCTION note_calendar(p_from date, p_to date, p_visible_to uuid, p_entity_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_calendar(p_from date, p_to date, p_visible_to uuid, p_entity_id uuid) IS 'Bolinhas do calendário (spec 035): por dia e tipo, quantas notas visíveis não arquivadas ocorrem (lembretes expandidos). Mesmos parâmetros de note_occurrences (p_visible_to nulo = admin, todas).';
+
+
+--
+-- Name: note_occurrences(date, date, uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_occurrences(p_from date, p_to date, p_visible_to uuid DEFAULT NULL::uuid, p_entity_id uuid DEFAULT NULL::uuid, p_include_archived boolean DEFAULT false) RETURNS TABLE(note_id uuid, occurs_on date, kind text)
+    LANGUAGE plpgsql STABLE
+    AS $$
+#variable_conflict use_column
+BEGIN
+  IF p_from IS NULL OR p_to IS NULL OR p_to < p_from OR p_to - p_from > 1100 THEN
+    RAISE EXCEPTION 'note_occurrences: invalid period % .. % (max 1100 days)', p_from, p_to
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  RETURN QUERY
+    WITH visible AS (
+      SELECT n.id, n.kind, n.note_date
+        FROM notes n
+       WHERE (p_include_archived OR n.archived_at IS NULL)
+         AND (p_visible_to IS NULL OR n.author_id = p_visible_to OR n.scope = 'global')
+         AND (p_entity_id IS NULL OR n.entity_id = p_entity_id)
+    )
+    SELECT v.id, v.note_date, v.kind
+      FROM visible v
+     WHERE v.note_date BETWEEN p_from AND p_to
+       AND NOT EXISTS (SELECT 1 FROM note_reminders r WHERE r.note_id = v.id)
+    UNION ALL
+    SELECT v.id, o.d, v.kind
+      FROM visible v
+      JOIN note_reminders r ON r.note_id = v.id
+     CROSS JOIN LATERAL note_reminder_occurrences(r.repeat, r.starts_on, r.ends_on, r.every_n_days, r.month_day,
+                                                  p_from, p_to) AS o (d)
+     ORDER BY 2, 1;
+END
+$$;
+
+
+--
+-- Name: FUNCTION note_occurrences(p_from date, p_to date, p_visible_to uuid, p_entity_id uuid, p_include_archived boolean); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_occurrences(p_from date, p_to date, p_visible_to uuid, p_entity_id uuid, p_include_archived boolean) IS 'Ocorrências das notas no período (até 1100 dias, senão 22023): a nota comum na note_date; a de lembrete em cada ocorrência entre o início e o fim (ativo ou pausado), expandida por note_reminder_occurrences. Visibilidade pelo parâmetro que a aplicação (Access) escolhe: p_visible_to nulo = todas (admin); senão as do autor p_visible_to e as globais. p_entity_id filtra a entidade; arquivadas só com p_include_archived. Serve o filtro de período da tabela.';
+
+
+--
+-- Name: note_reminder_assert(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminder_assert(p_note_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  n notes;
+  r note_reminders;
+BEGIN
+  SELECT * INTO r FROM note_reminders WHERE note_id = p_note_id;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+  SELECT * INTO n FROM notes WHERE id = p_note_id;
+  IF n.kind <> 'reminder' THEN
+    RAISE EXCEPTION 'note_reminders: note % is %, not reminder', p_note_id, n.kind
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'note_reminders_note_kind_check';
+  END IF;
+  IF n.note_date <> r.starts_on THEN
+    RAISE EXCEPTION 'note_reminders: note % date % differs from reminder start %', p_note_id, n.note_date, r.starts_on
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'note_reminders_note_date_check';
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION note_reminder_assert(p_note_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_reminder_assert(p_note_id uuid) IS 'Interna (no COMMIT): o lembrete só existe em nota kind = reminder (note_reminders_note_kind_check) e a data da nota é o início do lembrete (note_reminders_note_date_check).';
+
+
+--
+-- Name: note_reminder_claim(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminder_claim(p_limit integer DEFAULT 100) RETURNS TABLE(firing_id uuid, note_id uuid, user_id uuid, title text, kind text, object_type text, object_id uuid, send_telegram boolean, scheduled_for timestamp with time zone, fired_at timestamp with time zone, is_snooze_refire boolean, snooze_count integer)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+DECLARE
+  v_now timestamptz := clock_timestamp();
+  r note_reminders;
+  n notes;
+  s timestamptz;
+  fid uuid;
+  f note_reminder_firings;
+BEGIN
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1000 THEN
+    RAISE EXCEPTION 'note_reminder_claim: limit must be 1..1000' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Lembretes vencidos: um disparo no horário previsto mais recente (vários perdidos viram um) e o próximo depois de
+  -- agora. Autor inativo: avança sem disparar.
+  FOR r IN SELECT x.* FROM note_reminders x
+            WHERE x.is_active AND x.next_fire_at <= v_now
+            ORDER BY x.next_fire_at, x.note_id
+            LIMIT p_limit
+            FOR UPDATE SKIP LOCKED LOOP
+    SELECT * INTO n FROM notes WHERE id = r.note_id;
+    s := greatest(r.next_fire_at,
+                  coalesce(note_reminder_prev_fire(r.repeat, r.time_of_day, r.starts_on, r.ends_on, r.every_n_days,
+                                                   r.month_day, v_now), r.next_fire_at));
+    fid := NULL;
+    IF n.archived_at IS NULL AND EXISTS (SELECT 1 FROM users u WHERE u.id = n.author_id AND u.is_active) THEN
+      INSERT INTO note_reminder_firings AS x (note_id, user_id, scheduled_for, fired_at, last_fired_at)
+      VALUES (r.note_id, n.author_id, s, v_now, v_now)
+      ON CONFLICT ON CONSTRAINT note_reminder_firings_note_scheduled_key DO NOTHING
+      RETURNING x.id INTO fid;
+    END IF;
+
+    UPDATE note_reminders x
+       SET next_fire_at = note_reminders_compute_next(x, greatest(v_now, s))
+     WHERE x.note_id = r.note_id;
+
+    IF fid IS NOT NULL THEN
+      RETURN QUERY SELECT fid, n.id, n.author_id, n.title, n.kind, n.object_type, n.object_id, r.send_telegram, s, v_now,
+                          false, 0;
+    END IF;
+  END LOOP;
+
+  -- Adiados vencidos: o mesmo registro toca de novo (lembrete ativo, nota não arquivada e autor ativo).
+  FOR f IN SELECT x.* FROM note_reminder_firings x
+            WHERE x.snoozed_until <= v_now
+              AND EXISTS (SELECT 1 FROM note_reminders y JOIN notes z ON z.id = y.note_id
+                                   JOIN users u ON u.id = z.author_id
+                           WHERE y.note_id = x.note_id AND y.is_active AND z.archived_at IS NULL AND u.is_active)
+            ORDER BY x.snoozed_until, x.id
+            LIMIT p_limit
+            FOR UPDATE OF x SKIP LOCKED LOOP
+    UPDATE note_reminder_firings x SET snoozed_until = NULL, last_fired_at = v_now WHERE x.id = f.id;
+    SELECT * INTO n FROM notes WHERE id = f.note_id;
+    RETURN QUERY SELECT f.id, n.id, f.user_id, n.title, n.kind, n.object_type, n.object_id,
+                        (SELECT y.send_telegram FROM note_reminders y WHERE y.note_id = f.note_id), f.scheduled_for,
+                        v_now, true, f.snooze_count;
+  END LOOP;
+END
+$$;
+
+
+--
+-- Name: FUNCTION note_reminder_claim(p_limit integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_reminder_claim(p_limit integer) IS 'Worker (spec 035): reserva até p_limit lembretes ativos vencidos (next_fire_at <= agora) com FOR UPDATE SKIP LOCKED, grava UM disparo no horário previsto mais recente (os perdidos com o worker parado viram um só; único por lembrete e horário) e avança next_fire_at para a ocorrência seguinte depois de agora (nulo se acabou: once, fim da vigência). Nota arquivada ou autor inativo: avança sem disparar. Depois, até p_limit disparos adiados vencidos (snoozed_until <= agora, lembrete ativo, nota não arquivada, autor ativo): limpa snoozed_until, last_fired_at = agora. Devolve firing_id, nota, usuário (o autor), título, kind, objeto, send_telegram, scheduled_for, fired_at (o toque agora), is_snooze_refire e snooze_count. Sino: dedup_key note_reminder:<firing_id>:<snooze_count>. 22023 com limite fora de 1–1000.';
+
+
+--
+-- Name: note_reminder_firings_before_write(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminder_firings_before_write() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  author uuid;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    SELECT n.author_id INTO author FROM notes n WHERE n.id = NEW.note_id;
+    NEW.user_id := coalesce(NEW.user_id, author);
+    IF NEW.user_id IS DISTINCT FROM author THEN
+      RAISE EXCEPTION 'note_reminder_firings: firing of note % must go to its author %', NEW.note_id, author
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'note_reminder_firings_user_check';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.note_id <> OLD.note_id OR NEW.user_id <> OLD.user_id OR NEW.scheduled_for <> OLD.scheduled_for
+     OR NEW.fired_at <> OLD.fired_at OR NEW.created_at <> OLD.created_at THEN
+    RAISE EXCEPTION 'note_reminder_firings: note, user, scheduled time and first fire of % are immutable', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'note_reminder_firings_immutable_check';
+  END IF;
+  -- O contador de adiamentos é do banco: soma um a cada adiamento novo (snoozed_until preenchido ou trocado).
+  NEW.snooze_count := OLD.snooze_count
+    + CASE WHEN NEW.snoozed_until IS NOT NULL AND NEW.snoozed_until IS DISTINCT FROM OLD.snoozed_until THEN 1 ELSE 0 END;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION note_reminder_firings_before_write(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_reminder_firings_before_write() IS 'Trigger de note_reminder_firings: o disparo é do autor da nota (preenchido se omitido; note_reminder_firings_user_check), nota, usuário, horário previsto e primeiro disparo imutáveis, e o snooze_count mantido pelo banco.';
+
+
+--
+-- Name: note_reminder_first_on_or_after(text, date, date, integer, integer, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminder_first_on_or_after(p_repeat text, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_day date) RETURNS date
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  d date;
+  r date;
+BEGIN
+  IF p_repeat IS NULL OR p_starts_on IS NULL OR p_day IS NULL THEN
+    RETURN NULL;
+  END IF;
+  d := greatest(p_day, p_starts_on);
+  CASE p_repeat
+    WHEN 'once' THEN
+      RETURN CASE WHEN d = p_starts_on THEN p_starts_on END;
+    WHEN 'daily' THEN
+      r := d;
+    WHEN 'every_n_days' THEN
+      IF p_every_n_days IS NULL OR p_every_n_days < 1 THEN
+        RETURN NULL;
+      END IF;
+      r := p_starts_on + ((d - p_starts_on + p_every_n_days - 1) / p_every_n_days) * p_every_n_days;
+    WHEN 'monthly_day' THEN
+      IF p_month_day IS NULL OR p_month_day NOT BETWEEN 1 AND 31 THEN
+        RETURN NULL;
+      END IF;
+      r := note_reminder_month_day(d, p_month_day);
+      IF r < d THEN
+        r := note_reminder_month_day((date_trunc('month', d) + interval '1 month')::date, p_month_day);
+      END IF;
+    ELSE
+      RETURN NULL;
+  END CASE;
+  IF p_ends_on IS NOT NULL AND r > p_ends_on THEN
+    RETURN NULL;
+  END IF;
+  RETURN r;
+END
+$$;
+
+
+--
+-- Name: FUNCTION note_reminder_first_on_or_after(p_repeat text, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_day date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_reminder_first_on_or_after(p_repeat text, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_day date) IS 'Primeiro dia de ocorrência do lembrete em p_day ou depois (once: o início; daily; every_n_days: início + k·n; monthly_day: o dia do mês, ou o último dia nos meses sem ele), respeitando o fim (ends_on). NULL se não há.';
+
+
+--
+-- Name: note_reminder_last_on_or_before(text, date, date, integer, integer, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminder_last_on_or_before(p_repeat text, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_day date) RETURNS date
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  d date := p_day;
+  r date;
+BEGIN
+  IF p_repeat IS NULL OR p_starts_on IS NULL OR p_day IS NULL THEN
+    RETURN NULL;
+  END IF;
+  IF p_repeat <> 'once' AND p_ends_on IS NOT NULL THEN
+    d := least(d, p_ends_on);
+  END IF;
+  IF d < p_starts_on THEN
+    RETURN NULL;
+  END IF;
+  CASE p_repeat
+    WHEN 'once' THEN
+      r := p_starts_on;
+    WHEN 'daily' THEN
+      r := d;
+    WHEN 'every_n_days' THEN
+      IF p_every_n_days IS NULL OR p_every_n_days < 1 THEN
+        RETURN NULL;
+      END IF;
+      r := p_starts_on + ((d - p_starts_on) / p_every_n_days) * p_every_n_days;
+    WHEN 'monthly_day' THEN
+      IF p_month_day IS NULL OR p_month_day NOT BETWEEN 1 AND 31 THEN
+        RETURN NULL;
+      END IF;
+      r := note_reminder_month_day(d, p_month_day);
+      IF r > d THEN
+        r := note_reminder_month_day((date_trunc('month', d) - interval '1 month')::date, p_month_day);
+      END IF;
+      IF r < p_starts_on THEN
+        RETURN NULL;
+      END IF;
+    ELSE
+      RETURN NULL;
+  END CASE;
+  RETURN r;
+END
+$$;
+
+
+--
+-- Name: FUNCTION note_reminder_last_on_or_before(p_repeat text, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_day date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_reminder_last_on_or_before(p_repeat text, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_day date) IS 'Último dia de ocorrência do lembrete em p_day ou antes, entre o início e o fim. NULL se não há.';
+
+
+--
+-- Name: note_reminder_month_day(date, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminder_month_day(p_month date, p_day integer) RETURNS date
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT date_trunc('month', p_month)::date
+         + (least(p_day, extract(day FROM date_trunc('month', p_month) + interval '1 month - 1 day')::int) - 1)
+$$;
+
+
+--
+-- Name: FUNCTION note_reminder_month_day(p_month date, p_day integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_reminder_month_day(p_month date, p_day integer) IS 'Interna: o dia p_day do mês de p_month, ou o último dia do mês se ele não tem esse dia (31 em fevereiro = 28/29).';
+
+
+--
+-- Name: note_reminder_next_fire(text, time without time zone, date, date, integer, integer, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminder_next_fire(p_repeat text, p_time_of_day time without time zone, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_after timestamp with time zone) RETURNS timestamp with time zone
+    LANGUAGE plpgsql STABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  d date;
+  t timestamptz;
+BEGIN
+  IF p_after IS NULL OR p_time_of_day IS NULL THEN
+    RETURN NULL;
+  END IF;
+  d := note_reminder_first_on_or_after(p_repeat, p_starts_on, p_ends_on, p_every_n_days, p_month_day,
+                                       (p_after AT TIME ZONE 'America/Sao_Paulo')::date);
+  IF d IS NULL THEN
+    RETURN NULL;
+  END IF;
+  t := (d + p_time_of_day) AT TIME ZONE 'America/Sao_Paulo';
+  IF t > p_after THEN
+    RETURN t;
+  END IF;
+  d := note_reminder_first_on_or_after(p_repeat, p_starts_on, p_ends_on, p_every_n_days, p_month_day, d + 1);
+  RETURN CASE WHEN d IS NOT NULL THEN (d + p_time_of_day) AT TIME ZONE 'America/Sao_Paulo' END;
+END
+$$;
+
+
+--
+-- Name: FUNCTION note_reminder_next_fire(p_repeat text, p_time_of_day time without time zone, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_after timestamp with time zone); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_reminder_next_fire(p_repeat text, p_time_of_day time without time zone, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_after timestamp with time zone) IS 'Próximo disparo do lembrete estritamente depois de p_after: o dia da ocorrência no horário, em America/Sao_Paulo. once dispara uma vez (no início); daily; every_n_days a partir do início; monthly_day no dia do mês (último dia nos meses sem ele); nada depois do fim (ends_on). NULL se não há mais ocorrência. Pura (não lê tabelas).';
+
+
+--
+-- Name: note_reminder_occurrences(text, date, date, integer, integer, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminder_occurrences(p_repeat text, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_from date, p_to date) RETURNS SETOF date
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  d date;
+BEGIN
+  IF p_from IS NULL OR p_to IS NULL OR p_to < p_from OR p_to - p_from > 1100 THEN
+    RAISE EXCEPTION 'note_reminder_occurrences: invalid period % .. % (max 1100 days)', p_from, p_to
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  d := note_reminder_first_on_or_after(p_repeat, p_starts_on, p_ends_on, p_every_n_days, p_month_day, p_from);
+  WHILE d IS NOT NULL AND d <= p_to LOOP
+    RETURN NEXT d;
+    d := note_reminder_first_on_or_after(p_repeat, p_starts_on, p_ends_on, p_every_n_days, p_month_day, d + 1);
+  END LOOP;
+END
+$$;
+
+
+--
+-- Name: FUNCTION note_reminder_occurrences(p_repeat text, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_from date, p_to date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_reminder_occurrences(p_repeat text, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_from date, p_to date) IS 'Dias de ocorrência do lembrete entre p_from e p_to (inclusive), para o calendário. Período de até 1100 dias (22023).';
+
+
+--
+-- Name: note_reminder_prev_fire(text, time without time zone, date, date, integer, integer, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminder_prev_fire(p_repeat text, p_time_of_day time without time zone, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_at timestamp with time zone) RETURNS timestamp with time zone
+    LANGUAGE plpgsql STABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  d date;
+  t timestamptz;
+BEGIN
+  IF p_at IS NULL OR p_time_of_day IS NULL THEN
+    RETURN NULL;
+  END IF;
+  d := note_reminder_last_on_or_before(p_repeat, p_starts_on, p_ends_on, p_every_n_days, p_month_day,
+                                       (p_at AT TIME ZONE 'America/Sao_Paulo')::date);
+  IF d IS NULL THEN
+    RETURN NULL;
+  END IF;
+  t := (d + p_time_of_day) AT TIME ZONE 'America/Sao_Paulo';
+  IF t <= p_at THEN
+    RETURN t;
+  END IF;
+  d := note_reminder_last_on_or_before(p_repeat, p_starts_on, p_ends_on, p_every_n_days, p_month_day, d - 1);
+  RETURN CASE WHEN d IS NOT NULL THEN (d + p_time_of_day) AT TIME ZONE 'America/Sao_Paulo' END;
+END
+$$;
+
+
+--
+-- Name: FUNCTION note_reminder_prev_fire(p_repeat text, p_time_of_day time without time zone, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_at timestamp with time zone); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_reminder_prev_fire(p_repeat text, p_time_of_day time without time zone, p_starts_on date, p_ends_on date, p_every_n_days integer, p_month_day integer, p_at timestamp with time zone) IS 'Último disparo previsto do lembrete em p_at ou antes (o "disparo perdido" mais recente), em America/Sao_Paulo. NULL se não há. Pura.';
+
+
+--
+-- Name: note_reminders_audit_row(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminders_audit_row() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL OR changed <@ ARRAY['next_fire_at'] THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed, coalesce(n ->> 'note_id', o ->> 'note_id')::uuid);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION note_reminders_audit_row(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_reminders_audit_row() IS 'Trigger de auditoria de note_reminders: record_id = note_id (no histórico da nota); só o next_fire_at mudando não gera linha.';
+
+
+--
+-- Name: note_reminders_before_write(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminders_before_write() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.note_id <> OLD.note_id THEN
+    RAISE EXCEPTION 'note_reminders: note of reminder % is immutable', OLD.note_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'note_reminders_note_immutable_check';
+  END IF;
+  -- Próximo disparo: recalculado a partir de agora ao criar e a cada mudança da regra ou do ativo; o claim o avança
+  -- sem mudar a regra, e o valor dele fica. Desligado ou com a nota arquivada, nulo.
+  IF TG_OP = 'INSERT'
+     OR (NEW.time_of_day, NEW.repeat, NEW.every_n_days, NEW.month_day, NEW.starts_on, NEW.ends_on, NEW.is_active)
+        IS DISTINCT FROM
+        (OLD.time_of_day, OLD.repeat, OLD.every_n_days, OLD.month_day, OLD.starts_on, OLD.ends_on, OLD.is_active) THEN
+    NEW.next_fire_at := note_reminders_compute_next(NEW, now());
+  ELSIF NOT NEW.is_active OR EXISTS (SELECT 1 FROM notes n WHERE n.id = NEW.note_id AND n.archived_at IS NOT NULL) THEN
+    NEW.next_fire_at := NULL;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION note_reminders_before_write(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_reminders_before_write() IS 'Trigger de note_reminders: nota imutável e next_fire_at recalculado (a partir de agora) ao criar e ao mudar a regra, a vigência ou o ativo; nulo se desligado ou com a nota arquivada.';
+
+
+--
+-- Name: note_reminders; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.note_reminders (
+    note_id uuid NOT NULL,
+    time_of_day time without time zone DEFAULT '09:00:00'::time without time zone NOT NULL,
+    repeat text DEFAULT 'once'::text NOT NULL,
+    every_n_days smallint,
+    month_day smallint,
+    starts_on date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date NOT NULL,
+    ends_on date,
+    sound text,
+    ring_seconds smallint,
+    send_telegram boolean DEFAULT false NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    next_fire_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT note_reminders_ends_on_check CHECK (((ends_on IS NULL) OR ((repeat <> 'once'::text) AND (ends_on >= starts_on)))),
+    CONSTRAINT note_reminders_every_n_days_check CHECK ((((repeat = 'every_n_days'::text) = (every_n_days IS NOT NULL)) AND ((every_n_days >= 2) AND (every_n_days <= 365)))),
+    CONSTRAINT note_reminders_month_day_check CHECK ((((repeat = 'monthly_day'::text) = (month_day IS NOT NULL)) AND ((month_day >= 1) AND (month_day <= 31)))),
+    CONSTRAINT note_reminders_next_fire_check CHECK ((is_active OR (next_fire_at IS NULL))),
+    CONSTRAINT note_reminders_repeat_check CHECK ((repeat = ANY (ARRAY['once'::text, 'daily'::text, 'every_n_days'::text, 'monthly_day'::text]))),
+    CONSTRAINT note_reminders_ring_seconds_check CHECK (((ring_seconds >= 5) AND (ring_seconds <= 600))),
+    CONSTRAINT note_reminders_sound_check CHECK ((sound ~ '^[a-z0-9][a-z0-9_-]{0,62}$'::text)),
+    CONSTRAINT note_reminders_time_of_day_check CHECK ((EXTRACT(second FROM time_of_day) = (0)::numeric))
+);
+
+
+--
+-- Name: TABLE note_reminders; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.note_reminders IS 'Lembrete de uma nota kind = reminder (spec 035), 1:1 (conferido no COMMIT: crie a nota e o lembrete na mesma transação; mudar a nota de tipo exige excluir o lembrete junto). Só o autor é alarmado. next_fire_at mantido pelo banco; disparos em note_reminder_firings por note_reminder_claim. Auditada no histórico da nota (record_id = note_id), sem o avanço do next_fire_at.';
+
+
+--
+-- Name: COLUMN note_reminders.time_of_day; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminders.time_of_day IS 'Horário (HH:MM, sem segundos) em America/Sao_Paulo; padrão 09:00.';
+
+
+--
+-- Name: COLUMN note_reminders.repeat; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminders.repeat IS 'once (uma vez, no início), daily, every_n_days (a cada every_n_days dias a partir do início) ou monthly_day (todo dia month_day; nos meses sem ele, o último dia).';
+
+
+--
+-- Name: COLUMN note_reminders.every_n_days; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminders.every_n_days IS 'X de "a cada X dias" (2–365); só e sempre em every_n_days.';
+
+
+--
+-- Name: COLUMN note_reminders.month_day; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminders.month_day IS 'Dia do mês (1–31); só e sempre em monthly_day.';
+
+
+--
+-- Name: COLUMN note_reminders.starts_on; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminders.starts_on IS 'Início da vigência (padrão hoje em São Paulo); igual a notes.note_date (no COMMIT).';
+
+
+--
+-- Name: COLUMN note_reminders.ends_on; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminders.ends_on IS 'Fim da vigência (opcional, >= início; nulo = sem fim). Sempre nulo em once.';
+
+
+--
+-- Name: COLUMN note_reminders.sound; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminders.sound IS 'Chave do som no manifest do front (minúsculas, dígitos, - e _); nulo = o padrão do usuário (user_reminder_settings). Chave que sumiu do manifest cai no padrão (regra do front).';
+
+
+--
+-- Name: COLUMN note_reminders.ring_seconds; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminders.ring_seconds IS 'Segundos do loop do som (5–600); nulo = o padrão do usuário.';
+
+
+--
+-- Name: COLUMN note_reminders.send_telegram; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminders.send_telegram IS 'Enviar também pelo destino Telegram pessoal do autor (outbox, evento note_reminder).';
+
+
+--
+-- Name: COLUMN note_reminders.is_active; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminders.is_active IS 'Desligado pausa os disparos (next_fire_at nulo) e mantém a nota.';
+
+
+--
+-- Name: COLUMN note_reminders.next_fire_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminders.next_fire_at IS 'Próximo disparo, mantido pelo banco: note_reminder_next_fire a partir de agora ao criar e ao mudar regra, vigência ou ativo, e ao desarquivar a nota; avançado por note_reminder_claim. Nulo se desligado, nota arquivada ou sem ocorrência futura (once já disparado, fim da vigência).';
+
+
+--
+-- Name: note_reminders_compute_next(public.note_reminders, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminders_compute_next(r public.note_reminders, p_after timestamp with time zone) RETURNS timestamp with time zone
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT CASE
+           WHEN NOT r.is_active OR EXISTS (SELECT 1 FROM notes n WHERE n.id = r.note_id AND n.archived_at IS NOT NULL)
+             THEN NULL
+           ELSE note_reminder_next_fire(r.repeat, r.time_of_day, r.starts_on, r.ends_on, r.every_n_days, r.month_day,
+                                        p_after)
+         END
+$$;
+
+
+--
+-- Name: FUNCTION note_reminders_compute_next(r public.note_reminders, p_after timestamp with time zone); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.note_reminders_compute_next(r public.note_reminders, p_after timestamp with time zone) IS 'Interna: próximo disparo do lembrete depois de p_after; NULL se desligado ou com a nota arquivada.';
+
+
+--
+-- Name: note_reminders_integrity_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_reminders_integrity_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_TABLE_NAME = 'notes' THEN
+    PERFORM note_reminder_assert(NEW.id);
+  ELSE
+    PERFORM note_reminder_assert(NEW.note_id);
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: notes_before_write(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.notes_before_write() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.author_id <> OLD.author_id THEN
+    RAISE EXCEPTION 'notes: author of note % is immutable', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'notes_author_immutable_check';
+  END IF;
+  -- Corpo em branco = sem corpo.
+  IF NEW.body IS NOT NULL AND btrim(NEW.body, E' \t\r\n') = '' THEN
+    NEW.body := NULL;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION notes_before_write(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.notes_before_write() IS 'Trigger de notes: autor imutável (notes_author_immutable_check) e corpo em branco gravado como nulo.';
+
+
+--
+-- Name: notes_sync_reminder(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.notes_sync_reminder() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE note_reminders r
+     SET next_fire_at = note_reminders_compute_next(r, now())
+   WHERE r.note_id = NEW.id;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION notes_sync_reminder(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.notes_sync_reminder() IS 'Trigger de notes: ao arquivar ou desarquivar, recalcula o next_fire_at do lembrete (nulo se arquivada).';
 
 
 --
@@ -14246,6 +14964,185 @@ COMMENT ON COLUMN public.nfe_items.total_cents IS 'Valor do item (vProd), em cen
 
 
 --
+-- Name: note_reminder_firings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.note_reminder_firings (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    note_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    scheduled_for timestamp with time zone NOT NULL,
+    fired_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_fired_at timestamp with time zone DEFAULT now() NOT NULL,
+    read_at timestamp with time zone,
+    snoozed_until timestamp with time zone,
+    snooze_count integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT note_reminder_firings_last_fired_check CHECK ((last_fired_at >= fired_at)),
+    CONSTRAINT note_reminder_firings_snooze_check CHECK (((snoozed_until IS NULL) OR (read_at IS NULL))),
+    CONSTRAINT note_reminder_firings_snooze_count_check CHECK (((snooze_count >= 0) AND (snooze_count <= 10000)))
+);
+
+
+--
+-- Name: TABLE note_reminder_firings; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.note_reminder_firings IS 'Log de lembretes (spec 035): um disparo por (lembrete, horário previsto) (note_reminder_firings_note_scheduled_key), sempre para o autor da nota. Criado por note_reminder_claim (o worker); a aplicação marca lido (read_at) e adia (snoozed_until). Some com o lembrete (CASCADE). Fora da auditoria (log operacional, como as notificações); sem DELETE para a aplicação.';
+
+
+--
+-- Name: COLUMN note_reminder_firings.scheduled_for; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminder_firings.scheduled_for IS 'Horário previsto (a ocorrência que disparou). Imutável.';
+
+
+--
+-- Name: COLUMN note_reminder_firings.fired_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminder_firings.fired_at IS 'Quando disparou pela primeira vez (o horário real). Imutável.';
+
+
+--
+-- Name: COLUMN note_reminder_firings.last_fired_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminder_firings.last_fired_at IS 'Último toque: fired_at ou o re-disparo de um adiamento. O front toca o som só para last_fired_at nos últimos 10 min.';
+
+
+--
+-- Name: COLUMN note_reminder_firings.read_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminder_firings.read_at IS 'Lido (Dispensar ou Marcar todos como lidos). Nulo = não lido. Não convive com snoozed_until (note_reminder_firings_snooze_check): ao marcar lido, limpe o adiamento.';
+
+
+--
+-- Name: COLUMN note_reminder_firings.snoozed_until; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminder_firings.snoozed_until IS 'Adiado até (Adiar 5/10/30 min): note_reminder_claim dispara de novo nessa hora (mesmo registro) e o limpa. O próximo disparo da recorrência não muda.';
+
+
+--
+-- Name: COLUMN note_reminder_firings.snooze_count; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.note_reminder_firings.snooze_count IS 'Adiamentos: mantido pelo banco (+1 a cada snoozed_until novo). Use-o na dedup_key do sino e do Telegram do re-disparo.';
+
+
+--
+-- Name: notes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.notes (
+    id uuid DEFAULT uuidv7() NOT NULL,
+    author_id uuid NOT NULL,
+    kind text NOT NULL,
+    scope text DEFAULT 'private'::text NOT NULL,
+    title text NOT NULL,
+    body text,
+    note_date date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date NOT NULL,
+    object_type text NOT NULL,
+    object_id uuid NOT NULL,
+    entity_id uuid GENERATED ALWAYS AS (
+CASE
+    WHEN (object_type = 'entity'::text) THEN object_id
+    ELSE NULL::uuid
+END) STORED,
+    archived_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT notes_body_check CHECK ((length(body) <= 100000)),
+    CONSTRAINT notes_kind_check CHECK ((kind = ANY (ARRAY['info'::text, 'good'::text, 'bad'::text, 'severe'::text, 'reminder'::text]))),
+    CONSTRAINT notes_object_check CHECK (((object_type = 'entity'::text) = (entity_id IS NOT NULL))),
+    CONSTRAINT notes_object_type_check CHECK ((object_type = 'entity'::text)),
+    CONSTRAINT notes_scope_check CHECK ((scope = ANY (ARRAY['private'::text, 'global'::text]))),
+    CONSTRAINT notes_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 120)))
+);
+
+
+--
+-- Name: TABLE notes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.notes IS 'Anotações (spec 035): notas e lembretes do autor presos a um objeto do sistema (hoje, entidade). Visibilidade (o admin vê todas; os demais, as próprias e as globais) e edição (autor e admin) são da aplicação (Access). Excluir = arquivar: moneyflow_app não tem DELETE. O lembrete fica em note_reminders. Auditada.';
+
+
+--
+-- Name: COLUMN notes.author_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notes.author_id IS 'Autor (quem criou). Imutável (notes_author_immutable_check). Só ele é alarmado pelo lembrete.';
+
+
+--
+-- Name: COLUMN notes.kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notes.kind IS 'info (informação), good (nota boa), bad (nota ruim), severe (nota grave) ou reminder (lembrete, com a linha de note_reminders). A cor é o token --note-<kind> do front.';
+
+
+--
+-- Name: COLUMN notes.scope; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notes.scope IS 'private (padrão: só o autor e o admin veem) ou global (todos veem; só o autor e o admin editam).';
+
+
+--
+-- Name: COLUMN notes.title; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notes.title IS 'Título curto (1–120): tabela, alarme, sino e Telegram.';
+
+
+--
+-- Name: COLUMN notes.body; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notes.body IS 'Corpo em markdown (opcional, até 100 mil caracteres). Em branco é gravado como nulo.';
+
+
+--
+-- Name: COLUMN notes.note_date; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notes.note_date IS 'Data da nota no calendário (YYYY-MM-DD em São Paulo; padrão hoje, editável para fatos passados). No lembrete é igual a note_reminders.starts_on (note_reminders_note_date_check, no COMMIT) e o calendário usa as ocorrências.';
+
+
+--
+-- Name: COLUMN notes.object_type; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notes.object_type IS 'Tipo do objeto da nota: hoje só entity (notes_object_type_check).';
+
+
+--
+-- Name: COLUMN notes.object_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notes.object_id IS 'Id do objeto da nota; a existência é conferida pela FK da coluna gerada do tipo (entity_id).';
+
+
+--
+-- Name: COLUMN notes.entity_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notes.entity_id IS 'Gerada: object_id quando object_type = entity, senão nula. Tem a FK para entities (a entidade com notas não é excluída, 23503 notes_entity_id_fkey; arquivada, mantém as notas). Não se grava (coluna gerada).';
+
+
+--
+-- Name: COLUMN notes.archived_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notes.archived_at IS 'Arquivada (a "exclusão"): sai do calendário e da tabela, salvo no filtro Arquivadas; o lembrete para de disparar.';
+
+
+--
 -- Name: notifications; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -14264,7 +15161,7 @@ CREATE TABLE public.notifications (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT notifications_data_check CHECK ((jsonb_typeof(data) = 'object'::text)),
     CONSTRAINT notifications_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
-    CONSTRAINT notifications_kind_check CHECK ((kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'contract_charge_missing'::text]))),
+    CONSTRAINT notifications_kind_check CHECK ((kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'contract_charge_missing'::text, 'note_reminder'::text]))),
     CONSTRAINT notifications_link_check CHECK (((link ~ '^/[^/]'::text) OR (link = '/'::text))),
     CONSTRAINT notifications_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 200)))
 );
@@ -14281,7 +15178,7 @@ COMMENT ON TABLE public.notifications IS 'Notificações do sino, por usuário. 
 -- Name: COLUMN notifications.kind; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.notifications.kind IS 'agent_completed, agent_message, mirror_pending, mirror_disputed, invoice_closed, due_reminder, overdue, card_limit, reconciliation_divergence, message_failed, system, contract_notice_deadline, contract_ending, contract_renewal_pending (histórico), contract_readjustment, ai_budget_alert (spec 028; dedup por orçamento, mês e limiar), ai_awaiting_approval (spec 029) ou contract_charge_missing (spec 034: ocorrência de cobrança no cartão não cobrada, uma vez por ocorrência).';
+COMMENT ON COLUMN public.notifications.kind IS 'agent_completed, agent_message, mirror_pending, mirror_disputed, invoice_closed, due_reminder, overdue, card_limit, reconciliation_divergence, message_failed, system, contract_notice_deadline, contract_ending, contract_renewal_pending, contract_readjustment, ai_budget_alert (spec 028; dedup por orçamento, mês e limiar), ai_awaiting_approval (spec 029: tarefa agendada ou conciliação com IA esperando aprovação), contract_charge_missing (spec 034) ou note_reminder (spec 035: disparo de lembrete; dedup por disparo e adiamento).';
 
 
 --
@@ -15114,6 +16011,42 @@ COMMENT ON COLUMN public.user_api_tokens.last_used_at IS 'Último uso (atualizad
 --
 
 COMMENT ON COLUMN public.user_api_tokens.last_used_ip IS 'IP do último uso.';
+
+
+--
+-- Name: user_reminder_settings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_reminder_settings (
+    user_id uuid NOT NULL,
+    sound text,
+    ring_seconds smallint DEFAULT 30 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_reminder_settings_ring_seconds_check CHECK (((ring_seconds >= 5) AND (ring_seconds <= 600))),
+    CONSTRAINT user_reminder_settings_sound_check CHECK ((sound ~ '^[a-z0-9][a-z0-9_-]{0,62}$'::text))
+);
+
+
+--
+-- Name: TABLE user_reminder_settings; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.user_reminder_settings IS 'Minha conta → Lembretes (spec 035): som e segundos padrão do usuário. Sem linha = os padrões (som do sistema, 30 s). Tabela própria para não tocar em users. Auditada (record_id = user_id). Some com o usuário.';
+
+
+--
+-- Name: COLUMN user_reminder_settings.sound; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_reminder_settings.sound IS 'Chave do som no manifest do front; nulo = o som padrão do sistema (o primeiro do manifest).';
+
+
+--
+-- Name: COLUMN user_reminder_settings.ring_seconds; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_reminder_settings.ring_seconds IS 'Segundos do loop do som (5–600, padrão 30).';
 
 
 --
@@ -16004,6 +16937,38 @@ ALTER TABLE ONLY public.nfe_items
 
 
 --
+-- Name: note_reminder_firings note_reminder_firings_note_scheduled_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.note_reminder_firings
+    ADD CONSTRAINT note_reminder_firings_note_scheduled_key UNIQUE (note_id, scheduled_for);
+
+
+--
+-- Name: note_reminder_firings note_reminder_firings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.note_reminder_firings
+    ADD CONSTRAINT note_reminder_firings_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: note_reminders note_reminders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.note_reminders
+    ADD CONSTRAINT note_reminders_pkey PRIMARY KEY (note_id);
+
+
+--
+-- Name: notes notes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notes
+    ADD CONSTRAINT notes_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: notifications notifications_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -16209,6 +17174,14 @@ ALTER TABLE ONLY public.user_api_tokens
 
 ALTER TABLE ONLY public.user_api_tokens
     ADD CONSTRAINT user_api_tokens_token_hash_key UNIQUE (token_hash);
+
+
+--
+-- Name: user_reminder_settings user_reminder_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_reminder_settings
+    ADD CONSTRAINT user_reminder_settings_pkey PRIMARY KEY (user_id);
 
 
 --
@@ -17542,6 +18515,76 @@ CREATE INDEX nfe_documents_recipient_entity_id_idx ON public.nfe_documents USING
 --
 
 CREATE INDEX nfe_documents_xml_attachment_id_idx ON public.nfe_documents USING btree (xml_attachment_id);
+
+
+--
+-- Name: note_reminder_firings_snoozed_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX note_reminder_firings_snoozed_idx ON public.note_reminder_firings USING btree (snoozed_until) WHERE (snoozed_until IS NOT NULL);
+
+
+--
+-- Name: note_reminder_firings_unread_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX note_reminder_firings_unread_idx ON public.note_reminder_firings USING btree (user_id) WHERE (read_at IS NULL);
+
+
+--
+-- Name: note_reminder_firings_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX note_reminder_firings_user_idx ON public.note_reminder_firings USING btree (user_id, last_fired_at DESC);
+
+
+--
+-- Name: note_reminders_due_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX note_reminders_due_idx ON public.note_reminders USING btree (next_fire_at) WHERE is_active;
+
+
+--
+-- Name: notes_author_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX notes_author_id_idx ON public.notes USING btree (author_id);
+
+
+--
+-- Name: notes_body_trgm_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX notes_body_trgm_idx ON public.notes USING gin (body public.gin_trgm_ops);
+
+
+--
+-- Name: notes_entity_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX notes_entity_id_idx ON public.notes USING btree (entity_id);
+
+
+--
+-- Name: notes_note_date_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX notes_note_date_idx ON public.notes USING btree (note_date) WHERE (archived_at IS NULL);
+
+
+--
+-- Name: notes_object_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX notes_object_idx ON public.notes USING btree (object_type, object_id, kind) WHERE (archived_at IS NULL);
+
+
+--
+-- Name: notes_title_trgm_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX notes_title_trgm_idx ON public.notes USING gin (title public.gin_trgm_ops);
 
 
 --
@@ -19337,6 +20380,83 @@ CREATE TRIGGER nfe_items_set_updated_at BEFORE UPDATE ON public.nfe_items FOR EA
 
 
 --
+-- Name: note_reminder_firings note_reminder_firings_before_write; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER note_reminder_firings_before_write BEFORE INSERT OR UPDATE ON public.note_reminder_firings FOR EACH ROW EXECUTE FUNCTION public.note_reminder_firings_before_write();
+
+
+--
+-- Name: note_reminder_firings note_reminder_firings_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER note_reminder_firings_set_updated_at BEFORE UPDATE ON public.note_reminder_firings FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: note_reminders note_reminders_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER note_reminders_audit AFTER INSERT OR DELETE OR UPDATE ON public.note_reminders FOR EACH ROW EXECUTE FUNCTION public.note_reminders_audit_row();
+
+
+--
+-- Name: note_reminders note_reminders_before_write; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER note_reminders_before_write BEFORE INSERT OR UPDATE ON public.note_reminders FOR EACH ROW EXECUTE FUNCTION public.note_reminders_before_write();
+
+
+--
+-- Name: note_reminders note_reminders_integrity_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER note_reminders_integrity_check AFTER INSERT OR UPDATE OF starts_on ON public.note_reminders DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.note_reminders_integrity_check();
+
+
+--
+-- Name: note_reminders note_reminders_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER note_reminders_set_updated_at BEFORE UPDATE ON public.note_reminders FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: notes notes_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER notes_audit AFTER INSERT OR DELETE OR UPDATE ON public.notes FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: notes notes_before_write; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER notes_before_write BEFORE INSERT OR UPDATE ON public.notes FOR EACH ROW EXECUTE FUNCTION public.notes_before_write();
+
+
+--
+-- Name: notes notes_reminder_integrity_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER notes_reminder_integrity_check AFTER UPDATE OF kind, note_date ON public.notes DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.note_reminders_integrity_check();
+
+
+--
+-- Name: notes notes_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER notes_set_updated_at BEFORE UPDATE ON public.notes FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: notes notes_sync_reminder; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER notes_sync_reminder AFTER UPDATE OF archived_at ON public.notes FOR EACH ROW WHEN (((old.archived_at IS NULL) <> (new.archived_at IS NULL))) EXECUTE FUNCTION public.notes_sync_reminder();
+
+
+--
 -- Name: notifications notifications_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -19761,6 +20881,20 @@ CREATE TRIGGER user_api_tokens_set_updated_at BEFORE UPDATE ON public.user_api_t
 --
 
 CREATE TRIGGER user_api_tokens_validate BEFORE UPDATE ON public.user_api_tokens FOR EACH ROW EXECUTE FUNCTION public.user_api_tokens_validate();
+
+
+--
+-- Name: user_reminder_settings user_reminder_settings_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER user_reminder_settings_audit AFTER INSERT OR DELETE OR UPDATE ON public.user_reminder_settings FOR EACH ROW EXECUTE FUNCTION public.audit_row_keyed('user_id');
+
+
+--
+-- Name: user_reminder_settings user_reminder_settings_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER user_reminder_settings_set_updated_at BEFORE UPDATE ON public.user_reminder_settings FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -21089,6 +22223,46 @@ ALTER TABLE ONLY public.nfe_items
 
 
 --
+-- Name: note_reminder_firings note_reminder_firings_note_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.note_reminder_firings
+    ADD CONSTRAINT note_reminder_firings_note_id_fkey FOREIGN KEY (note_id) REFERENCES public.note_reminders(note_id) ON DELETE CASCADE;
+
+
+--
+-- Name: note_reminder_firings note_reminder_firings_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.note_reminder_firings
+    ADD CONSTRAINT note_reminder_firings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: note_reminders note_reminders_note_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.note_reminders
+    ADD CONSTRAINT note_reminders_note_id_fkey FOREIGN KEY (note_id) REFERENCES public.notes(id) ON DELETE CASCADE;
+
+
+--
+-- Name: notes notes_author_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notes
+    ADD CONSTRAINT notes_author_id_fkey FOREIGN KEY (author_id) REFERENCES public.users(id);
+
+
+--
+-- Name: notes notes_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notes
+    ADD CONSTRAINT notes_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(id);
+
+
+--
 -- Name: notifications notifications_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -21542,6 +22716,14 @@ ALTER TABLE ONLY public.user_ai_settings
 
 ALTER TABLE ONLY public.user_api_tokens
     ADD CONSTRAINT user_api_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_reminder_settings user_reminder_settings_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_reminder_settings
+    ADD CONSTRAINT user_reminder_settings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
