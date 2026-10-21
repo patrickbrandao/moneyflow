@@ -30,16 +30,18 @@ import {
 } from '@moneyflow/shared';
 import { and, asc, desc, eq, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
+import type { Access } from '../authz/access';
 import type { ServiceContext } from '../context';
 import { AppError, notFound } from '../errors';
 import { lookupCnpj } from '../integrations/lookup';
 import { entityFilterCondition, replaceEntityTags } from './entity-tags';
+import { badgeFromCounts, noteCountsSql } from './notes';
 import { deleteOrArchive, withTx } from './tx';
 import { camel } from './util';
 
 /* Entidades (spec 003): cadastro global, visível a todos; escrita para admin ou editores. */
 
-const summarySelect = sql`
+const summarySelect = (access: Access) => sql`
   e.id, e.kind, e.name, e.trade_name, e.document, e.archived_at,
   (SELECT json_build_object('keyType', p.key_type, 'keyValue', p.key_value)
      FROM entity_pix_keys p WHERE p.entity_id = e.id AND p.is_primary) AS primary_pix,
@@ -47,13 +49,14 @@ const summarySelect = sql`
   e.is_favorite,
   coalesce((SELECT json_agg(json_build_object('id', t.id, 'name', t.name::text, 'colorSlot', t.color_slot, 'archived', t.archived_at IS NOT NULL)
                             ORDER BY t.archived_at IS NOT NULL, lower(t.name::text))
-              FROM entity_tag_links l JOIN entity_tags t ON t.id = l.tag_id WHERE l.entity_id = e.id), '[]'::json) AS tags`;
+              FROM entity_tag_links l JOIN entity_tags t ON t.id = l.tag_id WHERE l.entity_id = e.id), '[]'::json) AS tags,
+  ${noteCountsSql(access)} AS note_counts`;
 
-type SummaryRow = Omit<EntitySummary, 'archivedAt'> & { archivedAt: Date | string | null };
+type SummaryRow = Omit<EntitySummary, 'archivedAt' | 'noteBadge'> & { archivedAt: Date | string | null; noteCounts: unknown };
 
 const toSummary = (row: Record<string, unknown>): EntitySummary => {
-  const r = camel<SummaryRow>(row);
-  return { ...r, archivedAt: r.archivedAt ? new Date(r.archivedAt).toISOString() : null };
+  const { noteCounts, ...r } = camel<SummaryRow>(row);
+  return { ...r, archivedAt: r.archivedAt ? new Date(r.archivedAt).toISOString() : null, noteBadge: badgeFromCounts(noteCounts) };
 };
 
 export async function listEntities(
@@ -78,7 +81,7 @@ export async function listEntities(
     ? sql`e.is_favorite DESC, greatest(similarity(e.name, ${q}), similarity(coalesce(e.trade_name, ''), ${q})) DESC, e.name`
     : sql`e.name`;
   const result = await ctx.db.execute(sql`
-    SELECT ${summarySelect} FROM entities e
+    SELECT ${summarySelect(ctx.access)} FROM entities e
      WHERE ${sql.join(conditions, sql` AND `)}
      ORDER BY ${order} LIMIT ${query.limit}`);
   return result.rows.map(toSummary);
@@ -86,7 +89,7 @@ export async function listEntities(
 
 export async function getEntity(ctx: ServiceContext, id: string): Promise<EntityDetail> {
   const result = await ctx.db.execute(
-    sql`SELECT ${summarySelect}, e.birth_date, e.notes, e.created_at, e.updated_at FROM entities e WHERE e.id = ${id}`,
+    sql`SELECT ${summarySelect(ctx.access)}, e.birth_date, e.notes, e.created_at, e.updated_at FROM entities e WHERE e.id = ${id}`,
   );
   const base = result.rows[0];
   if (!base) throw notFound();

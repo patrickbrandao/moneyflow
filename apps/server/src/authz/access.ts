@@ -11,7 +11,13 @@ import { forbidden, notFound } from '../errors';
  *
  * Serviços e, na F4, as tools dos agentes recebem um `Access` e chamam
  * assertRead/assertWrite — nunca consultam caixa_members por conta própria.
+ * Anotações (spec 035) não são da caixa: assertReadNote/assertWriteNote
+ * (o admin vê e edita todas; os demais veem as próprias e as globais e
+ * editam só as próprias).
  */
+
+/** O que decide a visibilidade e a edição de uma anotação (spec 035). */
+export type NoteOwnership = { authorId: string; scope: 'private' | 'global' };
 
 export type Actor = { id: string; username: string; email: string; role: GlobalRole; isActive: boolean };
 
@@ -71,6 +77,34 @@ export class Access {
   /** Registra um papel concedido durante a própria requisição (ex.: quem cria a caixa vira editor). */
   grant(caixaId: string, role: CaixaRole) {
     this.roles.set(caixaId, role);
+  }
+
+  /* ---------------- anotações (spec 035) ---------------- */
+
+  /** Lê a anotação: o admin, todas; os demais, as próprias e as globais. */
+  canReadNote(note: NoteOwnership) {
+    return this.isAdmin || note.authorId === this.actor.id || note.scope === 'global';
+  }
+
+  /** Edita (e arquiva) a anotação: só o autor e o admin. */
+  canWriteNote(note: NoteOwnership) {
+    return this.isAdmin || note.authorId === this.actor.id;
+  }
+
+  /** Sem leitura, a anotação "não existe" (404). */
+  assertReadNote(note: NoteOwnership) {
+    if (!this.canReadNote(note)) throw notFound(t.notes.errors.notFound);
+  }
+
+  /** A global de outro autor é somente leitura (403). */
+  assertWriteNote(note: NoteOwnership) {
+    this.assertReadNote(note);
+    if (!this.canWriteNote(note)) throw forbidden(t.notes.errors.readOnly);
+  }
+
+  /** Parâmetro de visibilidade das funções do banco (note_occurrences, note_calendar): nulo = todas (admin). */
+  noteVisibleTo(): string | null {
+    return this.isAdmin ? null : this.actor.id;
   }
 
   writableCaixaIds(): string[] | 'all' {

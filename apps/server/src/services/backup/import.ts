@@ -221,6 +221,8 @@ const FLOW_PURPOSES = new Set(['document_reading', 'classify_lines', 'contract_r
  *   instância de origem).
  * - ai_conversations: um arquivo anterior à coluna `purpose` marcava as
  *   conversas dos fluxos em screen_context.purpose; a finalidade vem de lá.
+ * - notes: a entidade (object_id) vai também em entity_id, a coluna da FK,
+ *   para ser traduzida pela chave natural (spec 035).
  */
 function normalizeRow(table: string, data: BackupRow, state: { flowAgentTaken: boolean }): BackupRow {
   // A requisição ao provedor nunca vem no arquivo (spec 023): o uso entra sem o vínculo, como sem a execução.
@@ -228,6 +230,11 @@ function normalizeRow(table: string, data: BackupRow, state: { flowAgentTaken: b
   // O webhook do Telegram é da instância de origem (spec 029): o destino entra com a entrada desligada (religar gera
   // um segredo novo e chama setWebhook com a URL desta instância).
   if (table === 'message_destinations' && data.inbound_enabled === true) return { ...data, inbound_enabled: false };
+  // Anotações (spec 035): o objeto é a entidade pela coluna gerada entity_id (fora do arquivo). Ela volta aqui só para a
+  // tradução da FK (entidade casada pelo documento = o id deste banco); a gravação leva o object_id traduzido.
+  if (table === 'notes' && data.object_type === 'entity' && typeof data.object_id === 'string') {
+    return { ...data, entity_id: data.object_id };
+  }
   if (table === 'ai_agents' && data.use_for_flows === true && state.flowAgentTaken) {
     return { ...data, use_for_flows: false };
   }
@@ -709,6 +716,8 @@ export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, ki
         if (isSoft(fk)) for (const column of fk.nullableColumns) data[column] = null;
         else return { data, error: unresolved };
       }
+      // A nota grava o object_id; a entity_id (gerada) só serviu para traduzir a entidade.
+      if (node.table === 'notes' && typeof data.entity_id === 'string') data.object_id = data.entity_id;
       return { data };
     };
 

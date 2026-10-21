@@ -26,6 +26,7 @@ export const notificationsStrings = {
     contract_charge_missing: 'Contrato: cobrança não feita',
     ai_budget_alert: 'Orçamento de IA',
     ai_awaiting_approval: 'Aprovação do agente',
+    note_reminder: 'Lembrete',
     system: 'Sistema',
   } as Record<string, string>,
   // Títulos e corpos criados pelo worker.

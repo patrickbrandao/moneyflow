@@ -1,5 +1,6 @@
 import { formatDateTime, type NotificationDto, type NotificationKind, type NotificationList, t } from '@moneyflow/shared';
 import {
+  AlarmClock,
   AlertTriangle,
   Bell,
   Bot,
@@ -39,6 +40,7 @@ const ICONS: Record<NotificationKind, ReactNode> = {
   contract_readjustment: <CalendarClock className="ic info" />,
   ai_budget_alert: <Gauge className="ic" />,
   ai_awaiting_approval: <BotMessageSquare className="ic" />,
+  note_reminder: <AlarmClock className="ic info" />,
 };
 
 /**

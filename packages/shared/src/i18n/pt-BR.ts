@@ -11,6 +11,7 @@ import { entityTagsStrings } from './areas/entity-tags';
 import { entryStrings } from './areas/entry';
 import { flowStrings } from './areas/flow';
 import { messagesStrings } from './areas/messages';
+import { notesStrings } from './areas/notes';
 import { notificationsStrings } from './areas/notifications';
 import { reportsStrings } from './areas/reports';
 import { statementsStrings } from './areas/statements';
@@ -534,6 +535,8 @@ export const ptBR = {
   contracts: contractsStrings,
   // Tags e favoritas de entidade (F6, spec 003).
   entityTags: entityTagsStrings,
+  // Anotações e lembretes (F21, spec 035).
+  notes: notesStrings,
 } as const;
 
 export type Strings = typeof ptBR;

@@ -1,6 +1,7 @@
 import { barcodeToDigitableLine } from './boleto';
 import { addDays, diffDays, formatDate, isoWeekday, TIME_ZONE } from './dates';
 import { messagesStrings } from './i18n/areas/messages';
+import { notesStrings } from './i18n/areas/notes';
 import { formatBRL } from './money';
 
 /*
@@ -281,6 +282,24 @@ export function agentMessage(
     escapeHtml(text),
     linkLine(url) && '',
     linkLine(url),
+  ]);
+}
+
+/** Disparo de lembrete (spec 035): o título, a entidade e o horário previsto, com o link para a anotação. */
+export function noteReminderMessage(input: {
+  title: string;
+  entity: string | null;
+  when: string;
+  body?: string | null;
+  url?: string | null;
+}): MessagePayload {
+  return payload([
+    b(notesStrings.firing.notificationTitle(input.title)),
+    escapeHtml(notesStrings.firing.notificationBody(input.when, input.entity)),
+    input.body ? '' : null,
+    input.body ? escapeHtml(input.body.length > 1000 ? `${input.body.slice(0, 1000)}…` : input.body) : null,
+    linkLine(input.url) && '',
+    linkLine(input.url),
   ]);
 }
 

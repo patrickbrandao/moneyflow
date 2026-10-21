@@ -12,6 +12,7 @@ export { ptBR, ptBR as t, type Strings } from './i18n/pt-BR';
 export * from './links';
 export * from './messages';
 export * from './money';
+export * from './notes';
 export * from './parsers';
 export * from './period';
 export * from './pix';

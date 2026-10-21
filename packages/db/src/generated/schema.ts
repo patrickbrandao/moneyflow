@@ -21,6 +21,7 @@ import {
   numeric,
   doublePrecision,
   vector,
+  time,
   primaryKey,
   pgView,
 } from 'drizzle-orm/pg-core';
@@ -1876,6 +1877,58 @@ export const aiUsage = pgTable(
   ],
 );
 
+export const notifications = pgTable(
+  'notifications',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    userId: uuid('user_id').notNull(),
+    kind: text().notNull(),
+    title: text().notNull(),
+    body: text(),
+    link: text(),
+    caixaId: uuid('caixa_id'),
+    data: jsonb().default({}).notNull(),
+    dedupKey: text('dedup_key'),
+    readAt: timestamp('read_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('notifications_caixa_id_idx').using('btree', table.caixaId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('notifications_dedup_key').using(
+      'btree',
+      table.userId.asc().nullsLast().op('uuid_ops'),
+      table.dedupKey.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('notifications_unread_idx')
+      .using('btree', table.userId.asc().nullsLast().op('uuid_ops'), table.createdAt.desc().nullsFirst().op('timestamptz_ops'))
+      .where(sql`(read_at IS NULL)`),
+    index('notifications_user_id_created_at_idx').using(
+      'btree',
+      table.userId.asc().nullsLast().op('timestamptz_ops'),
+      table.createdAt.desc().nullsFirst().op('uuid_ops'),
+    ),
+    foreignKey({
+      columns: [table.caixaId],
+      foreignColumns: [caixas.id],
+      name: 'notifications_caixa_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'notifications_user_id_fkey',
+    }).onDelete('cascade'),
+    check('notifications_data_check', sql`jsonb_typeof(data) = 'object'::text`),
+    check('notifications_dedup_key_check', sql`(btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300)`),
+    check(
+      'notifications_kind_check',
+      sql`kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'contract_charge_missing'::text, 'note_reminder'::text])`,
+    ),
+    check('notifications_link_check', sql`(link ~ '^/[^/]'::text) OR (link = '/'::text)`),
+    check('notifications_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
+  ],
+);
+
 export const messageOutbox = pgTable(
   'message_outbox',
   {
@@ -1946,7 +1999,7 @@ export const messageOutbox = pgTable(
     check('message_outbox_dedup_key_check', sql`(btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300)`),
     check(
       'message_outbox_event_kind_check',
-      sql`event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'test'::text])`,
+      sql`event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'test'::text, 'note_reminder'::text])`,
     ),
     check('message_outbox_payload_check', sql`jsonb_typeof(payload) = 'object'::text`),
     check(
@@ -1957,58 +2010,6 @@ export const messageOutbox = pgTable(
       'message_outbox_status_fields_check',
       sql`((status = 'sending'::text) = (locked_at IS NOT NULL)) AND ((status = 'sent'::text) = (sent_at IS NOT NULL)) AND ((status <> ALL (ARRAY['failed'::text, 'canceled'::text])) OR (last_error IS NOT NULL))`,
     ),
-  ],
-);
-
-export const notifications = pgTable(
-  'notifications',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    userId: uuid('user_id').notNull(),
-    kind: text().notNull(),
-    title: text().notNull(),
-    body: text(),
-    link: text(),
-    caixaId: uuid('caixa_id'),
-    data: jsonb().default({}).notNull(),
-    dedupKey: text('dedup_key'),
-    readAt: timestamp('read_at', { withTimezone: true, mode: 'string' }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('notifications_caixa_id_idx').using('btree', table.caixaId.asc().nullsLast().op('uuid_ops')),
-    uniqueIndex('notifications_dedup_key').using(
-      'btree',
-      table.userId.asc().nullsLast().op('uuid_ops'),
-      table.dedupKey.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('notifications_unread_idx')
-      .using('btree', table.userId.asc().nullsLast().op('uuid_ops'), table.createdAt.desc().nullsFirst().op('timestamptz_ops'))
-      .where(sql`(read_at IS NULL)`),
-    index('notifications_user_id_created_at_idx').using(
-      'btree',
-      table.userId.asc().nullsLast().op('timestamptz_ops'),
-      table.createdAt.desc().nullsFirst().op('uuid_ops'),
-    ),
-    foreignKey({
-      columns: [table.caixaId],
-      foreignColumns: [caixas.id],
-      name: 'notifications_caixa_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.userId],
-      foreignColumns: [users.id],
-      name: 'notifications_user_id_fkey',
-    }).onDelete('cascade'),
-    check('notifications_data_check', sql`jsonb_typeof(data) = 'object'::text`),
-    check('notifications_dedup_key_check', sql`(btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300)`),
-    check(
-      'notifications_kind_check',
-      sql`kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'contract_charge_missing'::text])`,
-    ),
-    check('notifications_link_check', sql`(link ~ '^/[^/]'::text) OR (link = '/'::text)`),
-    check('notifications_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
   ],
 );
 
@@ -3866,6 +3867,60 @@ export const titles = pgTable(
   ],
 );
 
+export const notes = pgTable(
+  'notes',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    authorId: uuid('author_id').notNull(),
+    kind: text().notNull(),
+    scope: text().default('private').notNull(),
+    title: text().notNull(),
+    body: text(),
+    noteDate: date('note_date').default(sql`((now() AT TIME ZONE 'America/Sao_Paulo'))::date`).notNull(),
+    objectType: text('object_type').notNull(),
+    objectId: uuid('object_id').notNull(),
+    entityId: uuid('entity_id').generatedAlwaysAs(sql`
+CASE
+    WHEN (object_type = 'entity'::text) THEN object_id
+    ELSE NULL::uuid
+END`),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('notes_author_id_idx').using('btree', table.authorId.asc().nullsLast().op('uuid_ops')),
+    index('notes_body_trgm_idx').using('gin', table.body.asc().nullsLast().op('gin_trgm_ops')),
+    index('notes_entity_id_idx').using('btree', table.entityId.asc().nullsLast().op('uuid_ops')),
+    index('notes_note_date_idx').using('btree', table.noteDate.asc().nullsLast().op('date_ops')).where(sql`(archived_at IS NULL)`),
+    index('notes_object_idx')
+      .using(
+        'btree',
+        table.objectType.asc().nullsLast().op('text_ops'),
+        table.objectId.asc().nullsLast().op('uuid_ops'),
+        table.kind.asc().nullsLast().op('uuid_ops'),
+      )
+      .where(sql`(archived_at IS NULL)`),
+    index('notes_title_trgm_idx').using('gin', table.title.asc().nullsLast().op('gin_trgm_ops')),
+    foreignKey({
+      columns: [table.authorId],
+      foreignColumns: [users.id],
+      name: 'notes_author_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.entityId],
+      foreignColumns: [entities.id],
+      name: 'notes_entity_id_fkey',
+    }),
+    check('notes_body_check', sql`length(body) <= 100000`),
+    check('notes_kind_check', sql`kind = ANY (ARRAY['info'::text, 'good'::text, 'bad'::text, 'severe'::text, 'reminder'::text])`),
+    check('notes_object_check', sql`(object_type = 'entity'::text) = (entity_id IS NOT NULL)`),
+    check('notes_object_type_check', sql`object_type = 'entity'::text`),
+    check('notes_scope_check', sql`scope = ANY (ARRAY['private'::text, 'global'::text])`),
+    check('notes_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 120)`),
+  ],
+);
+
 export const contracts = pgTable(
   'contracts',
   {
@@ -3951,6 +4006,110 @@ export const contracts = pgTable(
     check('contracts_terminated_on_check', sql`(terminated_on IS NULL) OR (terminated_on = ends_on)`),
     check('contracts_termination_penalty_cents_check', sql`termination_penalty_cents > 0`),
     check('contracts_termination_penalty_text_check', sql`length(termination_penalty_text) <= 2000`),
+  ],
+);
+
+export const noteReminders = pgTable(
+  'note_reminders',
+  {
+    noteId: uuid('note_id').primaryKey().notNull(),
+    timeOfDay: time('time_of_day').default('09:00:00').notNull(),
+    repeat: text().default('once').notNull(),
+    everyNDays: smallint('every_n_days'),
+    monthDay: smallint('month_day'),
+    startsOn: date('starts_on').default(sql`((now() AT TIME ZONE 'America/Sao_Paulo'))::date`).notNull(),
+    endsOn: date('ends_on'),
+    sound: text(),
+    ringSeconds: smallint('ring_seconds'),
+    sendTelegram: boolean('send_telegram').default(false).notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
+    nextFireAt: timestamp('next_fire_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('note_reminders_due_idx').using('btree', table.nextFireAt.asc().nullsLast().op('timestamptz_ops')).where(sql`is_active`),
+    foreignKey({
+      columns: [table.noteId],
+      foreignColumns: [notes.id],
+      name: 'note_reminders_note_id_fkey',
+    }).onDelete('cascade'),
+    check('note_reminders_ends_on_check', sql`(ends_on IS NULL) OR ((repeat <> 'once'::text) AND (ends_on >= starts_on))`),
+    check(
+      'note_reminders_every_n_days_check',
+      sql`((repeat = 'every_n_days'::text) = (every_n_days IS NOT NULL)) AND ((every_n_days >= 2) AND (every_n_days <= 365))`,
+    ),
+    check(
+      'note_reminders_month_day_check',
+      sql`((repeat = 'monthly_day'::text) = (month_day IS NOT NULL)) AND ((month_day >= 1) AND (month_day <= 31))`,
+    ),
+    check('note_reminders_next_fire_check', sql`is_active OR (next_fire_at IS NULL)`),
+    check('note_reminders_repeat_check', sql`repeat = ANY (ARRAY['once'::text, 'daily'::text, 'every_n_days'::text, 'monthly_day'::text])`),
+    check('note_reminders_ring_seconds_check', sql`(ring_seconds >= 5) AND (ring_seconds <= 600)`),
+    check('note_reminders_sound_check', sql`sound ~ '^[a-z0-9][a-z0-9_-]{0,62}$'::text`),
+    check('note_reminders_time_of_day_check', sql`EXTRACT(second FROM time_of_day) = (0)::numeric`),
+  ],
+);
+
+export const noteReminderFirings = pgTable(
+  'note_reminder_firings',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    noteId: uuid('note_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    scheduledFor: timestamp('scheduled_for', { withTimezone: true, mode: 'string' }).notNull(),
+    firedAt: timestamp('fired_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    lastFiredAt: timestamp('last_fired_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    readAt: timestamp('read_at', { withTimezone: true, mode: 'string' }),
+    snoozedUntil: timestamp('snoozed_until', { withTimezone: true, mode: 'string' }),
+    snoozeCount: integer('snooze_count').default(0).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('note_reminder_firings_snoozed_idx')
+      .using('btree', table.snoozedUntil.asc().nullsLast().op('timestamptz_ops'))
+      .where(sql`(snoozed_until IS NOT NULL)`),
+    index('note_reminder_firings_unread_idx').using('btree', table.userId.asc().nullsLast().op('uuid_ops')).where(sql`(read_at IS NULL)`),
+    index('note_reminder_firings_user_idx').using(
+      'btree',
+      table.userId.asc().nullsLast().op('timestamptz_ops'),
+      table.lastFiredAt.desc().nullsFirst().op('uuid_ops'),
+    ),
+    foreignKey({
+      columns: [table.noteId],
+      foreignColumns: [noteReminders.noteId],
+      name: 'note_reminder_firings_note_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'note_reminder_firings_user_id_fkey',
+    }).onDelete('cascade'),
+    unique('note_reminder_firings_note_scheduled_key').on(table.noteId, table.scheduledFor),
+    check('note_reminder_firings_last_fired_check', sql`last_fired_at >= fired_at`),
+    check('note_reminder_firings_snooze_check', sql`(snoozed_until IS NULL) OR (read_at IS NULL)`),
+    check('note_reminder_firings_snooze_count_check', sql`(snooze_count >= 0) AND (snooze_count <= 10000)`),
+  ],
+);
+
+export const userReminderSettings = pgTable(
+  'user_reminder_settings',
+  {
+    userId: uuid('user_id').primaryKey().notNull(),
+    sound: text(),
+    ringSeconds: smallint('ring_seconds').default(30).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'user_reminder_settings_user_id_fkey',
+    }).onDelete('cascade'),
+    check('user_reminder_settings_ring_seconds_check', sql`(ring_seconds >= 5) AND (ring_seconds <= 600)`),
+    check('user_reminder_settings_sound_check', sql`sound ~ '^[a-z0-9][a-z0-9_-]{0,62}$'::text`),
   ],
 );
 

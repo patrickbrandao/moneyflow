@@ -21,6 +21,12 @@ for (const type of ['citext', 'bytea', 'tsvector']) {
 }
 // Default de texto vazio sai como `.default(')` (bug do drizzle-kit com `DEFAULT ''`).
 src = src.replace(/\.default\('\)/g, ".default('')");
+// Default "hoje em São Paulo" sai cortado (`((now() AT TIME ZONE 'America/Sao_Paulo'`): o drizzle-kit
+// para no primeiro `)` do cast. Recompõe a expressão do banco.
+src = src.replace(
+  /\.default\(sql`\(\(now\(\) AT TIME ZONE 'America\/Sao_Paulo'`\)/g,
+  ".default(sql`((now() AT TIME ZONE 'America/Sao_Paulo'))::date`)",
+);
 // FK em ciclo com uma tabela declarada mais adiante (ex.: classification_rules ⇄
 // statement_lines, ou ai_runs → ai_conversations → ai_messages → ai_runs) faz o
 // TypeScript desistir da inferência (TS7022). As FKs do schema Drizzle não são

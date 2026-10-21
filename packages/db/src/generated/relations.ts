@@ -55,8 +55,8 @@ import {
   aiUsage,
   aiModelPrices,
   aiRequests,
-  messageOutbox,
   notifications,
+  messageOutbox,
   aiScheduledTasks,
   aiScheduledTaskRuns,
   statementImports,
@@ -76,6 +76,10 @@ import {
   contractRenewalTasks,
   recurrenceRules,
   cardRecurringCharges,
+  notes,
+  noteReminders,
+  noteReminderFirings,
+  userReminderSettings,
   telegramUpdatesSeen,
   entityTagLinks,
   entityTags,
@@ -108,8 +112,8 @@ export const usersRelations = relations(users, ({ many }) => ({
   mcpServers: many(mcpServers),
   aiBudgets: many(aiBudgets),
   aiUsages: many(aiUsage),
-  messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
+  messageOutboxes: many(messageOutbox),
   aiProviders: many(aiProviders),
   aiScheduledTasks_createdByUserId: many(aiScheduledTasks, {
     relationName: 'aiScheduledTasks_createdByUserId_users_id',
@@ -136,7 +140,10 @@ export const usersRelations = relations(users, ({ many }) => ({
   contractAmendments: many(contractAmendments),
   contractRenewalTasks: many(contractRenewalTasks),
   aiRequests: many(aiRequests),
+  notes: many(notes),
   contracts: many(contracts),
+  noteReminderFirings: many(noteReminderFirings),
+  userReminderSettings: many(userReminderSettings),
 }));
 
 export const entityContactsRelations = relations(entityContacts, ({ one }) => ({
@@ -171,6 +178,7 @@ export const entitiesRelations = relations(entities, ({ many }) => ({
   cardRecurringCharges: many(cardRecurringCharges),
   cardPurchases: many(cardPurchases),
   titles: many(titles),
+  notes: many(notes),
   contracts: many(contracts),
   entityTagLinks: many(entityTagLinks),
 }));
@@ -242,8 +250,8 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
   periodClosings: many(periodClosings),
   messageSubscriptionCaixas: many(messageSubscriptionCaixas),
   aiEmbeddings: many(aiEmbeddings),
-  messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
+  messageOutboxes: many(messageOutbox),
   financialAccounts: many(financialAccounts),
   messageDestinations: many(messageDestinations),
   statementImports: many(statementImports),
@@ -1089,6 +1097,17 @@ export const aiRequestsRelations = relations(aiRequests, ({ one, many }) => ({
   aiRequestAttempts: many(aiRequestAttempts),
 }));
 
+export const notificationsRelations = relations(notifications, ({ one }) => ({
+  caixa: one(caixas, {
+    fields: [notifications.caixaId],
+    references: [caixas.id],
+  }),
+  user: one(users, {
+    fields: [notifications.userId],
+    references: [users.id],
+  }),
+}));
+
 export const messageOutboxRelations = relations(messageOutbox, ({ one }) => ({
   caixa: one(caixas, {
     fields: [messageOutbox.caixaId],
@@ -1104,17 +1123,6 @@ export const messageOutboxRelations = relations(messageOutbox, ({ one }) => ({
   }),
   user: one(users, {
     fields: [messageOutbox.userId],
-    references: [users.id],
-  }),
-}));
-
-export const notificationsRelations = relations(notifications, ({ one }) => ({
-  caixa: one(caixas, {
-    fields: [notifications.caixaId],
-    references: [caixas.id],
-  }),
-  user: one(users, {
-    fields: [notifications.userId],
     references: [users.id],
   }),
 }));
@@ -1496,6 +1504,44 @@ export const cardRecurringChargesRelations = relations(cardRecurringCharges, ({ 
     references: [recurrenceRules.id],
   }),
   cardRecurringChargeAmounts: many(cardRecurringChargeAmounts),
+}));
+
+export const notesRelations = relations(notes, ({ one, many }) => ({
+  user: one(users, {
+    fields: [notes.authorId],
+    references: [users.id],
+  }),
+  entity: one(entities, {
+    fields: [notes.entityId],
+    references: [entities.id],
+  }),
+  noteReminders: many(noteReminders),
+}));
+
+export const noteRemindersRelations = relations(noteReminders, ({ one, many }) => ({
+  note: one(notes, {
+    fields: [noteReminders.noteId],
+    references: [notes.id],
+  }),
+  noteReminderFirings: many(noteReminderFirings),
+}));
+
+export const noteReminderFiringsRelations = relations(noteReminderFirings, ({ one }) => ({
+  noteReminder: one(noteReminders, {
+    fields: [noteReminderFirings.noteId],
+    references: [noteReminders.noteId],
+  }),
+  user: one(users, {
+    fields: [noteReminderFirings.userId],
+    references: [users.id],
+  }),
+}));
+
+export const userReminderSettingsRelations = relations(userReminderSettings, ({ one }) => ({
+  user: one(users, {
+    fields: [userReminderSettings.userId],
+    references: [users.id],
+  }),
 }));
 
 export const telegramUpdatesSeenRelations = relations(telegramUpdatesSeen, ({ one }) => ({

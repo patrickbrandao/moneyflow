@@ -1,5 +1,7 @@
 /* Respostas da API (DTOs). Datas de negócio em 'YYYY-MM-DD'; instantes em ISO; dinheiro em centavos. */
 
+import type { NoteBadge } from './notes';
+
 export type GlobalRole = 'admin' | 'user';
 export type CaixaRole = 'editor' | 'viewer';
 /** Papel efetivo do usuário numa caixa (admin global vê e escreve em todas). */
@@ -65,6 +67,8 @@ export type EntitySummary = {
   isFavorite: boolean;
   /** Tags (as ativas primeiro, por nome). */
   tags: EntityTagRef[];
+  /** Selo das anotações visíveis ao usuário (spec 035): o tipo mais grave e as contagens; nulo sem anotação. */
+  noteBadge: NoteBadge | null;
 };
 
 export type EntityContact = { id: string; kind: 'phone' | 'email' | 'other'; value: string; label: string | null; isPrimary: boolean };
@@ -1265,6 +1269,7 @@ export type NotificationKind =
   | 'agent_message'
   | 'ai_budget_alert'
   | 'ai_awaiting_approval'
+  | 'note_reminder'
   | 'mirror_pending'
   | 'mirror_disputed'
   | 'invoice_closed'

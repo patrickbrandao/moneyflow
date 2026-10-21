@@ -35,6 +35,7 @@ import type { Config } from '../config';
 import { type BudgetAlert, budgetAlerts } from './ai-budgets';
 import { contractMessages, contractNotifications } from './contract-worker';
 import { type ClaimedMessage, deliver } from './messages';
+import { noteRemindersTick } from './note-worker';
 import { createNotifications, type NewNotification } from './notifications';
 import { uuidArray } from './reports';
 
@@ -838,6 +839,8 @@ export async function emitAgentEvent(
 export async function messageTick(db: Database, config: Config, clock: SpClock = spClock()) {
   const produced = await produceMessages(db, config, clock);
   const notifications = await produceNotifications(db, config, clock);
+  // Lembretes das anotações (spec 035): sino e outbox antes do consumo, para o Telegram sair nesta passada.
+  const reminders = await noteRemindersTick(db, config);
   const consumed = await consumeOutbox(db, config);
-  return { ...produced, ...notifications, ...consumed };
+  return { ...produced, ...notifications, ...reminders, ...consumed };
 }

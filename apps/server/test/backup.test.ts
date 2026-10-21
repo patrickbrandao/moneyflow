@@ -948,6 +948,88 @@ describe('backup: recursos num sistema novo', () => {
     await client(b, adminB.cookie).get(`/api/entities/${source.id}`, 404);
   });
 
+  it('anotações (spec 035): notas, lembretes e preferências vão e voltam; a entidade casa pelo documento; disparos não vão', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const author = await userSession(h);
+    const a = client(h, adminA.cookie);
+    const me = client(h, author.cookie);
+    const cnpj = alphaCnpj();
+    const source = await a.post('/api/entities', { kind: 'company', name: `Notas no A ${uid()}`, document: cnpj });
+    const target = await client(b, adminB.cookie).post('/api/entities', { kind: 'company', name: `Notas no B ${uid()}`, document: cnpj });
+    const plain = await me.post('/api/notes', {
+      kind: 'severe',
+      title: 'Grave',
+      body: '# Corpo',
+      objectType: 'entity',
+      objectId: source.id,
+      scope: 'global',
+    });
+    const reminder = await me.post('/api/notes', {
+      kind: 'reminder',
+      title: 'Lembrar',
+      objectType: 'entity',
+      objectId: source.id,
+      noteDate: '2027-03-10',
+      reminder: { repeat: 'monthly_day', monthDay: 10, timeOfDay: '07:30', sound: 'beep', ringSeconds: 15, sendTelegram: true },
+    });
+    await me.put('/api/account/reminder-settings', { sound: 'chime', ringSeconds: 20 });
+    // Um disparo (log operacional): fica fora do arquivo.
+    await h.db.execute(sql`UPDATE note_reminders SET next_fire_at = now() - interval '1 minute' WHERE note_id = ${reminder.id}`);
+    await h.db.execute(sql`SELECT * FROM note_reminder_claim(1000)`);
+
+    const full = await h.app.inject({ method: 'GET', url: '/api/backup/full', headers: { cookie: adminA.cookie } });
+    expect(full.statusCode, full.body.slice(0, 300)).toBe(200);
+    const json = JSON.parse(strFromU8(unzipSync(new Uint8Array(full.rawPayload))['moneyflow.json']!));
+    expect(json.tables.note_reminder_firings).toBeUndefined();
+    const notes = json.tables.notes.filter((r: any) => [plain.id, reminder.id].includes(r.id));
+    expect(notes).toHaveLength(2);
+    expect(notes[0].entity_id).toBeUndefined();
+    const reminders = json.tables.note_reminders.filter((r: any) => r.note_id === reminder.id);
+    const settings = json.tables.user_reminder_settings.filter((r: any) => r.user_id === author.id);
+    const userRow = json.tables.users.find((r: any) => r.id === author.id);
+    const entityRow = json.tables.entities.find((r: any) => r.id === source.id);
+    const file = {
+      ...json,
+      tables: { users: [userRow], entities: [entityRow], notes, note_reminders: reminders, user_reminder_settings: settings },
+      references: {},
+    };
+
+    const report = await importFile(b, adminB.cookie, 'full', file);
+    expect(failures(report)).toEqual([]);
+    expect(sum(report, 'notes').imported).toBe(2);
+    expect(sum(report, 'note_reminders').imported).toBe(1);
+    expect(sum(report, 'user_reminder_settings').imported).toBe(1);
+    // A entidade do arquivo é a do B (mesmo documento): as notas apontam para ela.
+    const authorB = await login(b, author.username, author.password);
+    const meB = client(b, authorB);
+    const listed = await meB.get(`/api/entities/${target.id}/notes?order=asc`);
+    expect(listed.items.map((n: any) => n.id).sort()).toEqual([plain.id, reminder.id].sort());
+    expect(await meB.get(`/api/notes/${plain.id}`)).toMatchObject({
+      body: '# Corpo',
+      scope: 'global',
+      authorId: author.id,
+      object: { id: target.id },
+    });
+    expect((await meB.get(`/api/notes/${reminder.id}`)).reminder).toMatchObject({
+      repeat: 'monthly_day',
+      monthDay: 10,
+      timeOfDay: '07:30',
+      startsOn: '2027-03-10',
+      sound: 'beep',
+      ringSeconds: 15,
+      sendTelegram: true,
+      description: 'todo dia 10 às 07:30',
+    });
+    expect(await meB.get('/api/account/reminder-settings')).toMatchObject({ sound: 'chime', ringSeconds: 20 });
+
+    const again = await importFile(b, adminB.cookie, 'full', file);
+    expect(failures(again)).toEqual([]);
+    expect(sum(again, 'notes').imported).toBe(0);
+    expect(sum(again, 'note_reminders').imported).toBe(0);
+    expect(sum(again, 'user_reminder_settings').imported).toBe(0);
+  });
+
   it('entidades levam favorita, tags (arquivada inclusive, arquivada depois das ligações) e casam a tag pelo nome', async () => {
     if (skip) return;
     const adminA = await userSession(h, 'admin');

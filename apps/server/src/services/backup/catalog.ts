@@ -53,6 +53,8 @@ export const EXCLUDED_TABLES = new Set([
   'telegram_updates_seen',
   // Receitas de conciliação (spec 030): as execuções são a fila e o histórico (operacionais, como ai_runs).
   'ai_reconcile_recipe_runs',
+  // Anotações (spec 035): o log dos disparos dos lembretes é operacional (como as notificações).
+  'note_reminder_firings',
 ]);
 
 /**
@@ -80,7 +82,7 @@ export const RESOURCE_TABLES: Record<BackupResource, string[]> = {
   ],
   caixas: ['caixas', 'financial_accounts', 'caixa_members', 'caixa_hidden_categories'],
   'ai-providers': ['ai_providers', 'ai_model_prices'],
-  users: ['users', 'caixa_members', 'user_api_tokens', 'user_ai_settings'],
+  users: ['users', 'caixa_members', 'user_api_tokens', 'user_ai_settings', 'user_reminder_settings'],
 };
 
 /**
@@ -147,6 +149,7 @@ export const OWNED_BY: Record<string, string[]> = {
   caixa_hidden_categories: ['caixa_id'],
   user_api_tokens: ['user_id'],
   user_ai_settings: ['user_id'],
+  user_reminder_settings: ['user_id'],
   canvas_node_positions: ['user_id'],
   // Receita já cadastrada fica com as contas dela (spec 030).
   ai_reconcile_recipe_targets: ['recipe_id'],
@@ -183,6 +186,10 @@ export const DEFERRED_CLUSTER = new Set([
   // Receitas de conciliação (spec 030): "rodar ao importar" exige um alvo no COMMIT; a receita e os alvos entram juntos.
   'ai_reconcile_recipes',
   'ai_reconcile_recipe_targets',
+  // Anotações (spec 035): o lembrete é de uma nota reminder com a data no início (no COMMIT); a nota e o lembrete entram
+  // juntos.
+  'notes',
+  'note_reminders',
 ]);
 
 /**
@@ -203,6 +210,9 @@ export const COMPOSITE_KEYS: Record<string, string[]> = {
   // Cobrança esperada no cartão (spec 034): uma por série; os degraus do valor por série e ocorrência.
   card_recurring_charges: ['recurrence_rule_id'],
   card_recurring_charge_amounts: ['recurrence_rule_id', 'from_occurrence'],
+  // Anotações (spec 035): o lembrete pela nota (1:1) e as preferências de lembrete pelo usuário.
+  note_reminders: ['note_id'],
+  user_reminder_settings: ['user_id'],
 };
 
 /** Colunas que identificam a linha (id ou a chave composta). */

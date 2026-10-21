@@ -121,6 +121,7 @@ export const agentsStrings = {
     titles: 'Títulos e baixas',
     cards: 'Cartão de crédito',
     contracts: 'Contratos',
+    notes: 'Anotações',
     reconciliation: 'Conciliação',
     imports: 'Importação',
     categories: 'Categorias e regras',

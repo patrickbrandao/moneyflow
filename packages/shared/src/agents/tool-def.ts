@@ -20,6 +20,7 @@ export const AGENT_TOOL_CATEGORIES = [
   'titles',
   'cards',
   'contracts',
+  'notes',
   'reconciliation',
   'imports',
   'categories',

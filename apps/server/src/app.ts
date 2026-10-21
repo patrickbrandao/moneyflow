@@ -21,6 +21,7 @@ import { cardRoutes } from './routes/cards';
 import { contractRoutes } from './routes/contracts';
 import { entityRoutes } from './routes/entities';
 import { mcpRoutes } from './routes/mcp';
+import { noteRoutes } from './routes/notes';
 import { operationRoutes } from './routes/operation';
 import { reconcileRecipeRoutes } from './routes/reconcile-recipes';
 import { statementRoutes } from './routes/statements';
@@ -138,6 +139,7 @@ export async function buildApp({
   await app.register(contractRoutes);
   await app.register(telegramRoutes);
   await app.register(reconcileRecipeRoutes);
+  await app.register(noteRoutes);
 
   // Em produção a API serve o SPA compilado (imagem única).
   const webDist = config.webDist ? resolve(config.webDist) : null;

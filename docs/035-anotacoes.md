@@ -48,13 +48,14 @@ Anotações funcionam como notas, post-its e lembretes presos a um objeto do sis
 - **Desligar sem arquivar**: o interruptor "Ativo" pausa os disparos e mantém a nota.
 
 ## Disparo no servidor
-- **Quem dispara**: o worker, num laço com advisory lock, como as tarefas agendadas ([029](029-fluxos-autonomos.md)).
+- **Quem dispara**: o worker, no laço de mensagens (a cada `MESSAGE_INTERVAL_MS`, antes do consumo da outbox), pela reserva `note_reminder_claim` (`FOR UPDATE SKIP LOCKED`: vários workers não repetem), como as tarefas agendadas ([029](029-fluxos-autonomos.md)).
   - O banco guarda o próximo disparo (`next_fire_at`), recalculado a cada disparo e a cada edição.
   - O worker dispara os lembretes vencidos (`next_fire_at <= agora`) e grava um **disparo** com dedup por (lembrete, horário previsto).
 - **O disparo**:
   - entra no **log de lembretes** do autor, como não lido;
-  - cria a notificação no **sino** (`note_reminder`, `ON CONFLICT (user_id, dedup_key) DO NOTHING`), com link para a anotação;
-  - enfileira o Telegram, se ligado.
+  - cria a notificação no **sino** (`note_reminder`, dedup `note_reminder:<disparo>:<adiamentos>`, `ON CONFLICT (user_id, dedup_key) DO NOTHING`), com link para `/notes?note=<id>`;
+  - enfileira o Telegram, se ligado, em cada destino Telegram pessoal ativo do autor (mesma dedup, `ON CONFLICT (destination_id, dedup_key) DO NOTHING`); sem destino, só o sino.
+  - Tudo na mesma transação da reserva.
 - **Disparos perdidos**: com o worker parado, cada lembrete dispara **uma vez** ao voltar (o último horário previsto), sem enfileirar as ocorrências atrasadas uma por uma. O log mostra o horário previsto e o real.
 - **Com o navegador fechado**: o disparo fica não lido. No próximo acesso, o ícone acende com o contador, e o som só toca para disparos dos últimos 10 minutos.
 - **Adiar**: grava `snoozed_until` no disparo e o worker o dispara de novo nessa hora (mesmo registro, com o contador de adiamentos). O próximo disparo da recorrência não muda.
@@ -67,7 +68,7 @@ Anotações funcionam como notas, post-its e lembretes presos a um objeto do sis
   - o som do lembrete toca em loop pelos segundos configurados e para sozinho;
   - o popover abre com o disparo e as ações **Dispensar** (para o som e marca como lido) e **Adiar 5 / 10 / 30 min** (para o som e reagenda);
   - parar o som sem agir deixa o disparo não lido.
-- **Chegada do disparo**: o front recebe os disparos pela sondagem que o sino já faz, ou por SSE se houver, sem laço novo por aba.
+- **Chegada do disparo**: não há SSE de notificações; o front sonda `GET /api/note-reminders/firings` (a aba líder, junto da sondagem do sino) e toca os disparos com `shouldRing`.
 - **Várias abas**: uma aba toca (coordenação por `BroadcastChannel`, com a eleição da aba líder); todas mostram o ícone. Dispensar ou adiar numa vale para todas.
 - **Autoplay**: o navegador bloqueia som sem interação prévia. Se o `play()` for recusado, o ícone pisca com o aviso "Clique para ativar o som do alarme" e o próximo clique libera o áudio.
 
@@ -103,11 +104,13 @@ Anotações funcionam como notas, post-its e lembretes presos a um objeto do sis
 - O agente cita as notas de uma entidade ao falar dela consultando as tools (`list_notes` com a entidade); nada é injetado no prompt.
 
 ## API
-- `GET/POST /api/notes`, `GET/PATCH /api/notes/:id`, `POST /api/notes/:id/archive` (e desarquivar).
-- `GET /api/notes/calendar?from&to` — bolinhas por dia e tipo, com as recorrências expandidas.
-- `GET /api/note-reminders/firings` (não lidos e recentes), `POST /api/note-reminders/firings/:id/dismiss`, `POST /api/note-reminders/firings/:id/snooze`, `POST /api/note-reminders/firings/read-all`.
-- `GET/PUT /api/me/reminder-settings` — som e segundos padrão.
-- `GET /api/entities/:id/notes` e o selo na listagem de entidades.
+Entradas, DTOs e textos em `packages/shared/src/notes.ts` e `t.notes`; serviço `apps/server/src/services/notes.ts`.
+- `GET /api/notes` — a tabela: `from`/`to` (juntos; com período, uma linha por ocorrência, o lembrete em cada dia em que ocorre; sem período, uma linha por anotação na data dela), `kinds` (separados por vírgula), `entityId`, `scope` (`all`, `mine` = as minhas, `global` = as globais), `authorId` (só admin), `q` (título e corpo), `archived` (só as arquivadas), `order` (`desc` padrão), `cursor` e `limit` (até 500). Devolve `{ items, nextCursor }`; cada item é a anotação sem o corpo, com `occursOn` e `bodyExcerpt`.
+- `POST /api/notes`, `GET/PATCH /api/notes/:id`, `POST /api/notes/:id/archive` e `POST /api/notes/:id/unarchive`. O lembrete vai no campo `reminder` da nota; na edição, só os campos que mudam. Trocar o tipo para lembrete cria o lembrete (com os padrões); trocar para outro tipo o remove.
+- `GET /api/notes/calendar?from&to&entityId&kinds` — `[{ day, counts: { tipo: n } }]`, pelo `note_calendar`, com as recorrências expandidas.
+- `GET /api/note-reminders/firings?unread&limit` — o log do próprio usuário (não lidos primeiro, depois os recentes): `{ unread, serverTime, items }`, cada disparo com o som e os segundos efetivos e `shouldRing` (não lido, não adiado, nota não arquivada e o último toque nos últimos 10 minutos: o que o front toca). `POST .../firings/:id/dismiss` (lido, sem adiamento), `POST .../firings/:id/snooze` `{ minutes }` (1 a 1440; a tela usa 5, 10 e 30) e `POST .../firings/read-all` `{ firingIds? }` (sem a lista, todos os não lidos). Dispensar e marcar como lido também marcam lidas as notificações do sino daquele disparo.
+- `GET/PUT /api/account/reminder-settings` — som e segundos padrão (Minha conta, no padrão das outras rotas de `/api/account`), mais `effectiveSound` e `hasPersonalTelegram` (habilita o "Enviar também no Telegram").
+- `GET /api/entities/:id/notes` (a mesma listagem presa à entidade) e o selo `noteBadge` (`{ kind, counts, total }`, ou nulo) em cada entidade da listagem e do detalhe.
 
 ## Banco
 Pelo dba ([016](016-banco-de-dados.md)):
@@ -118,7 +121,7 @@ Pelo dba ([016](016-banco-de-dados.md)):
 - O lembrete só existe numa nota do tipo `reminder`; o disparo só para o autor.
 
 ## Backup
-As três tabelas e as preferências entram no catálogo do backup ([019](019-backup-e-restauracao.md)), com o vínculo pela chave natural da entidade.
+As notas, os lembretes e as preferências entram no catálogo do backup ([019](019-backup-e-restauracao.md)); os disparos (log operacional, como as notificações) ficam fora. A nota leva o vínculo pela chave natural da entidade: na importação, o `object_id` passa pela tradução da FK da coluna gerada `entity_id` (a entidade casada pelo documento aponta para o id deste banco). O lembrete é identificado pela nota (`note_id`) e as preferências pelo usuário (também no recurso Usuários); nota e lembrete entram juntos, no grupo com checagens no COMMIT.
 
 ## Testes
 - **Integração**:

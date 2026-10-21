@@ -20,6 +20,7 @@ import {
 import { RECIPE_TOOLS } from './recipes';
 import { type AgentToolDef, type AgentToolMode, date, define, limit, optionalDate } from './tool-def';
 import { ADMIN_TOOLS } from './tools-admin';
+import { NOTE_TOOLS } from './tools-notes';
 import { OPERATION_TOOLS } from './tools-operation';
 import { SUPERSEDE_TOOLS } from './tools-supersede';
 
@@ -597,6 +598,8 @@ export const AGENT_TOOLS = [
   ...RECIPE_TOOLS,
   /* ---------------- lote provisório e consolidado (spec 031) ---------------- */
   ...SUPERSEDE_TOOLS,
+  /* ---------------- anotações e lembretes (spec 035) ---------------- */
+  ...NOTE_TOOLS,
 ] as const satisfies readonly AgentToolDef[];
 
 export type AgentToolName = (typeof AGENT_TOOLS)[number]['name'];
