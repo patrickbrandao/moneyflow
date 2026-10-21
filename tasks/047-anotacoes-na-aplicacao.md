@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-10-21
-commit: daa692a (parte servidor); parte web e e2e no commit seguinte, feito pela sessão principal
+commit: daa692a, dda1d02
 ---
 
 # Anotações e lembretes na aplicação (F21)
