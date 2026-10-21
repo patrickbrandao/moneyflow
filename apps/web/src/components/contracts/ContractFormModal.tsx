@@ -1,21 +1,20 @@
 import {
+  addMonths,
   type CaixaSummary,
-  CONTRACT_PERIODICITIES,
   type ContractCreateInput,
   type ContractDetail,
-  type ContractPeriodicity,
   type ContractReadingDto,
   type ContractUpdateInput,
   cycleEnd,
+  dayOfMonth,
+  daysInMonth,
   type EntityDetail,
-  formatAccounting,
-  formatDate,
-  installmentsCount,
+  periodicityCalendar,
   READJUSTMENT_INDEXES,
   type ReadjustmentIndex,
-  splitTotal,
   t,
   todayIso,
+  toIso,
 } from '@moneyflow/shared';
 import { FileUp, Sparkles } from 'lucide-react';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
@@ -25,22 +24,32 @@ import { useUser } from '../../lib/auth';
 import { useAction, useApi } from '../../lib/hooks';
 import { upload } from '../../lib/upload';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
-import { Button, Field, Modal, useConfirm } from '../ui';
-import { PlannedAccountSelect, usePaymentAccounts } from './PlannedAccount';
+import { Button, Field, Modal } from '../ui';
+import { newObligationDraft, type ObligationDraft, ObligationsEditor, obligationInputOf, obligationProblem } from './ObligationFormModal';
 
 type Direction = 'receivable' | 'payable';
 const kindOf = (direction: Direction) => (direction === 'payable' ? 'expense' : 'income');
 const F = t.contracts.fields;
-const P = t.contracts.payment;
 
-/** Percentual do formulário: vazio = sem (null). */
-const percentOf = (text: string) => (text.trim() === '' ? null : Number(text.replace(',', '.')));
+/** Primeiro vencimento pelo dia lido do PDF: no mês do início, ou no seguinte se o dia já passou. */
+function firstDueFrom(startsOn: string, dueDay: number): string {
+  const year = Number(startsOn.slice(0, 4));
+  const month = Number(startsOn.slice(5, 7));
+  const inMonth = toIso(year, month, Math.min(dueDay, daysInMonth(year, month)));
+  if (dueDay >= dayOfMonth(startsOn)) return inMonth;
+  const next = addMonths(toIso(year, month, 1), 1);
+  const ny = Number(next.slice(0, 4));
+  const nm = Number(next.slice(5, 7));
+  return toIso(ny, nm, Math.min(dueDay, daysInMonth(ny, nm)));
+}
 
 /**
- * Cadastro e edição do contrato (spec 020). Rascunho: tudo editável. Vigente:
- * só nome, número, anotações e a configuração de renovação, avisos e reajuste
- * (valor, vencimento e categoria mudam por aditivo; prazo e periodicidade, na
- * renovação). "Ler PDF com IA" pré-preenche o formulário para revisão.
+ * Cadastro e edição do contrato (spec 034): o documento e o vínculo — caixa,
+ * contraparte, direção, categoria padrão, vigência (fim opcional) e a
+ * configuração de avisos e reajuste — e, no cadastro, as obrigações (séries
+ * numa conta ou cobranças no cartão). Editar muda só os dados do contrato; a
+ * vigência muda no rascunho (vigente: por renovar ou rescindir). "Ler PDF com
+ * IA" pré-preenche o formulário com uma obrigação sugerida.
  */
 export function ContractFormModal({
   contract,
@@ -56,7 +65,6 @@ export function ContractFormModal({
   const user = useUser();
   const editing = Boolean(contract);
   const draft = !contract || contract.status === 'draft';
-  const cycle = contract?.cycles.find((c) => c.seq === 1) ?? null;
   const caixas = useApi<CaixaSummary[]>('/api/caixas');
   const writable = (caixas.data ?? []).filter((c) => c.kind === 'general' && !c.archivedAt && canWriteCaixa(user, c.id));
 
@@ -67,32 +75,16 @@ export function ContractFormModal({
   const [name, setName] = useState(contract?.name ?? '');
   const [contractNumber, setContractNumber] = useState(contract?.contractNumber ?? '');
   const [notes, setNotes] = useState(contract?.notes ?? '');
-  const [startsOn, setStartsOn] = useState(cycle?.startsOn ?? todayIso().slice(0, 8).concat('01'));
-  const [durationMonths, setDurationMonths] = useState(cycle?.durationMonths ?? 12);
-  const [periodicity, setPeriodicity] = useState<ContractPeriodicity>(cycle?.periodicity ?? 'monthly');
-  const [valueMode, setValueMode] = useState<'total' | 'installment'>('total');
-  const [amount, setAmount] = useState<number | null>(cycle?.totalCents ?? null);
-  const [dueDay, setDueDay] = useState(cycle?.dueDay ?? 10);
-  const [dueMonthOffset, setDueMonthOffset] = useState(cycle?.dueMonthOffset ?? 0);
+  const [startsOn, setStartsOn] = useState(contract?.startsOn ?? todayIso().slice(0, 8).concat('01'));
+  const [endsOn, setEndsOn] = useState(contract ? (contract.endsOn ?? '') : '');
+  const [indeterminate, setIndeterminate] = useState(contract ? contract.endsOn === null : false);
   const [autoRenew, setAutoRenew] = useState(contract?.autoRenew ?? false);
   const [noticeDays, setNoticeDays] = useState(contract?.noticeDays ?? 30);
-  const [renewalLeadDays, setRenewalLeadDays] = useState(contract?.renewalLeadDays ?? 60);
-  const [reminderEveryDays, setReminderEveryDays] = useState(contract?.reminderEveryDays ?? 7);
   const [readjustmentIndex, setReadjustmentIndex] = useState<ReadjustmentIndex>(contract?.readjustmentIndex ?? 'none');
   const [readjustmentBaseDate, setReadjustmentBaseDate] = useState(contract?.readjustmentBaseDate ?? '');
   const [penaltyText, setPenaltyText] = useState(contract?.terminationPenaltyText ?? '');
   const [penaltyCents, setPenaltyCents] = useState<number | null>(contract?.terminationPenaltyCents ?? null);
-  // Conta das parcelas, encargos e conciliação (spec 033).
-  const accounts = usePaymentAccounts();
-  const confirm = useConfirm();
-  const [paymentAccountId, setPaymentAccountId] = useState<string | null>(contract?.paymentAccountId ?? null);
-  const [transitAccountId, setTransitAccountId] = useState<string | null>(contract?.transitAccountId ?? null);
-  const [lateFee, setLateFee] = useState(contract?.lateFeePercent?.toString() ?? '');
-  const [interest, setInterest] = useState(contract?.interestMonthPercent?.toString() ?? '');
-  const [discount, setDiscount] = useState(contract?.earlyDiscountPercent?.toString() ?? '');
-  const [toleranceCents, setToleranceCents] = useState<number | null>(contract?.toleranceCents ?? 0);
-  const [matchWindowDays, setMatchWindowDays] = useState(contract?.matchWindowDays ?? 15);
-  const [autoSettle, setAutoSettle] = useState(contract?.autoSettle ?? false);
+  const [obligations, setObligations] = useState<ObligationDraft[]>(() => (editing ? [] : [newObligationDraft()]));
 
   const [held, setHeld] = useState<EntityDetail['caixas'] | null>(null);
   const [mirrorCaixaId, setMirrorCaixaId] = useState<string | null>(contract?.counterpartyCaixaId ?? null);
@@ -128,10 +120,6 @@ export function ContractFormModal({
     };
   }, [entityId, caixaId, draft]);
 
-  const count = installmentsCount(durationMonths, periodicity);
-  const totalCents = amount && count ? (valueMode === 'total' ? amount : amount * count) : null;
-  const split = totalCents && count ? splitTotal(totalCents, count) : null;
-
   async function readPdf(file: File) {
     setReading('busy');
     setError(null);
@@ -141,22 +129,34 @@ export function ContractFormModal({
       if (data.direction) setDirection(data.direction);
       if (data.name) setName(data.name);
       if (data.contractNumber) setContractNumber(data.contractNumber);
+      const start = data.startsOn ?? startsOn;
       if (data.startsOn) setStartsOn(data.startsOn);
-      if (data.durationMonths) setDurationMonths(data.durationMonths);
-      if (data.periodicity) setPeriodicity(data.periodicity);
-      if (data.totalCents) {
-        setValueMode('total');
-        setAmount(data.totalCents);
-      } else if (data.installmentCents) {
-        setValueMode('installment');
-        setAmount(data.installmentCents);
+      if (data.durationMonths) {
+        setEndsOn(cycleEnd(start, data.durationMonths));
+        setIndeterminate(false);
       }
-      if (data.dueDay) setDueDay(data.dueDay);
       if (data.autoRenew !== null) setAutoRenew(data.autoRenew);
       if (data.noticeDays !== null) setNoticeDays(data.noticeDays);
       if (data.readjustmentIndex) setReadjustmentIndex(data.readjustmentIndex);
       if (data.readjustmentBaseDate) setReadjustmentBaseDate(data.readjustmentBaseDate);
       if (data.terminationPenaltyText) setPenaltyText(data.terminationPenaltyText);
+      // Uma obrigação sugerida (parcela única não vira série).
+      const calendar = data.periodicity ? periodicityCalendar(data.periodicity) : { frequency: 'monthly' as const, intervalCount: 1 };
+      if (calendar) {
+        const perYear = calendar.frequency === 'yearly' ? 1 / calendar.intervalCount : 12 / calendar.intervalCount;
+        const count = data.durationMonths ? Math.max(1, Math.round((data.durationMonths * perYear) / 12)) : null;
+        const amount = data.installmentCents ?? (data.totalCents && count ? Math.round(data.totalCents / count) : null);
+        setObligations([
+          newObligationDraft({
+            description: data.name ?? name,
+            amountCents: amount,
+            frequency: calendar.frequency,
+            intervalCount: calendar.intervalCount,
+            firstDueDate: data.dueDay ? firstDueFrom(start, data.dueDay) : start,
+            kind: 'account',
+          }),
+        ]);
+      } else setObligations([]);
       if (!data.entityId && data.entityName)
         setError(t.contracts.readingEntityMissing(`${data.entityName}${data.document ? ` (${data.document})` : ''}`));
       setReading('done');
@@ -168,12 +168,19 @@ export function ContractFormModal({
     }
   }
 
-  async function submit(event: FormEvent, activate = false) {
+  async function submit(event: FormEvent, activate: boolean) {
     event.preventDefault();
     if (!entity) return setError(t.contracts.chooseEntity);
     if (!categoryId) return setError(t.contracts.chooseCategory);
     if (!caixaId) return setError(t.contracts.chooseCaixa);
-    if (draft && (!totalCents || !count)) return setError(count ? t.errors.invalidAmount : t.contracts.durationNotMultiple);
+    const end = indeterminate ? null : endsOn || null;
+    if (draft && end && end < startsOn) return setError(t.contracts.errors.endsBeforeStart);
+    if (!editing && activate) {
+      for (const o of obligations) {
+        const problem = obligationProblem(o, direction);
+        if (problem) return setError(problem);
+      }
+    }
     setError(null);
     const settings = {
       name,
@@ -181,42 +188,16 @@ export function ContractFormModal({
       notes,
       autoRenew,
       noticeDays,
-      renewalLeadDays,
-      reminderEveryDays,
       readjustmentIndex,
       readjustmentBaseDate: readjustmentBaseDate || null,
       terminationPenaltyText: penaltyText,
       terminationPenaltyCents: penaltyCents,
-      paymentAccountId,
-      transitAccountId,
-      lateFeePercent: percentOf(lateFee),
-      interestMonthPercent: percentOf(interest),
-      earlyDiscountPercent: percentOf(discount),
-      toleranceCents: toleranceCents ?? 0,
-      matchWindowDays,
-      autoSettle,
     };
-    const selected = accounts.data?.find((a) => a.id === paymentAccountId);
-    if (selected && selected.caixaId !== caixaId && !transitAccountId) return setError(P.plannedTransitNeeded);
-    const terms = { startsOn, durationMonths, periodicity, totalCents: totalCents!, dueDay, dueMonthOffset };
+    const mirror = held && held.length > 0 ? mirrorCaixaId : null;
     if (contract) {
-      // Trocou a conta das parcelas: pergunta se as parcelas em aberto que seguem o contrato mudam junto.
-      const accountChanged = paymentAccountId !== contract.paymentAccountId || transitAccountId !== contract.transitAccountId;
-      const applyAccountToInstallments =
-        accountChanged && contract.followingOpenInstallments > 0
-          ? await confirm({
-              title: P.applyTitle,
-              description: P.applyBody(contract.followingOpenInstallments),
-              confirmLabel: P.applyYes,
-              cancelLabel: P.applyNo,
-            })
-          : false;
-      const body: ContractUpdateInput = {
-        ...(draft
-          ? { ...settings, ...terms, entityId: entity.id, categoryId, mirrorCaixaId: held && held.length > 0 ? mirrorCaixaId : null }
-          : settings),
-        ...(applyAccountToInstallments ? { applyAccountToInstallments } : {}),
-      };
+      const body: ContractUpdateInput = draft
+        ? { ...settings, entityId: entity.id, categoryId, mirrorCaixaId: mirror, startsOn, endsOn: end }
+        : settings;
       const saved = await run(() => api.patch<ContractDetail>(`/api/contracts/${contract.id}`, body), t.contracts.saved);
       if (saved) onSaved(saved);
       return;
@@ -227,20 +208,19 @@ export function ContractFormModal({
       entityId: entity.id,
       categoryId,
       ...settings,
-      ...terms,
-      mirrorCaixaId: held && held.length > 0 ? mirrorCaixaId : null,
+      startsOn,
+      endsOn: end,
+      mirrorCaixaId: mirror,
+      obligations: activate ? obligations.map(obligationInputOf) : [],
       activate,
     };
-    const saved = await run(
-      () => api.post<ContractDetail>('/api/contracts', body),
-      (c) => (activate ? t.contracts.activated(c.cycles[0]?.installments.length ?? 0) : t.contracts.created),
-    );
+    const saved = await run(() => api.post<ContractDetail>('/api/contracts', body), activate ? t.contracts.activated : t.contracts.created);
     if (saved) onSaved(saved);
   }
 
   return (
     <Modal open title={editing ? t.contracts.editContract : t.contracts.newContract} onClose={onClose} wide>
-      <form onSubmit={(e) => void submit(e)}>
+      <form onSubmit={(e) => void submit(e, !editing)} data-testid="contract-form">
         <div className="modal-body">
           {!editing && (
             <div className="well mb-4 flex items-center justify-between gap-3">
@@ -250,6 +230,7 @@ export function ContractFormModal({
                 type="file"
                 accept="application/pdf,.pdf"
                 hidden
+                data-testid="contract-pdf-input"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   e.target.value = '';
@@ -284,6 +265,10 @@ export function ContractFormModal({
                         onClick={() => {
                           setDirection(d);
                           setCategoryId(null);
+                          // Cobrança no cartão só em contrato que eu pago; categorias mudam de tipo.
+                          setObligations((items) =>
+                            items.map((o) => ({ ...o, categoryId: null, kind: d === 'payable' ? o.kind : 'account' })),
+                          );
                         }}
                       >
                         {t.contracts.directions[d]}
@@ -353,7 +338,7 @@ export function ContractFormModal({
               )}
             </Field>
 
-            <fieldset className="span-all form-grid cols-2" disabled={!draft}>
+            <fieldset className="span-all form-grid cols-2" disabled={!draft} aria-label={F.term}>
               <Field label={F.startsOn}>
                 <input
                   className="field"
@@ -364,86 +349,32 @@ export function ContractFormModal({
                   aria-label={F.startsOn}
                 />
               </Field>
-              <Field
-                label={F.durationMonths}
-                hint={count && startsOn ? `${F.endsOn}: ${formatDate(cycleEnd(startsOn, durationMonths))}` : undefined}
-              >
+              <Field label={F.endsOn} hint={F.endsOnHint}>
                 <input
                   className="field"
-                  type="number"
-                  min={1}
-                  max={120}
-                  value={durationMonths}
-                  onChange={(e) => setDurationMonths(Number(e.target.value))}
-                  aria-label={F.durationMonths}
+                  type="date"
+                  value={indeterminate ? '' : endsOn}
+                  disabled={indeterminate}
+                  min={startsOn}
+                  onChange={(e) => setEndsOn(e.target.value)}
+                  aria-label={F.endsOn}
                 />
               </Field>
-              <Field label={F.periodicity}>
-                <select
-                  className="field"
-                  value={periodicity}
-                  onChange={(e) => setPeriodicity(e.target.value as ContractPeriodicity)}
-                  aria-label={F.periodicity}
-                >
-                  {CONTRACT_PERIODICITIES.map((p) => (
-                    <option key={p} value={p}>
-                      {t.contracts.periodicities[p]}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field
-                label={valueMode === 'total' ? F.totalCents : F.installmentCents}
-                hint={
-                  !count
-                    ? t.contracts.durationNotMultiple
-                    : split
-                      ? `${t.contracts.installmentsSummary(count, t.contracts.periodicities[periodicity]!)} · ${t.contracts.splitPreview(formatAccounting(split[0]!), formatAccounting(split[1] ?? split[0]!), count)}`
-                      : undefined
-                }
-              >
-                <div className="flex items-center gap-2">
-                  <MoneyInput value={amount} onChange={setAmount} ariaLabel={F.totalCents} />
-                  <select
-                    className="field field-auto"
-                    value={valueMode}
-                    onChange={(e) => setValueMode(e.target.value as 'total' | 'installment')}
-                    aria-label={t.contracts.valueModeLabel}
-                  >
-                    <option value="total">{t.contracts.valueModes.total}</option>
-                    <option value="installment">{t.contracts.valueModes.installment}</option>
-                  </select>
-                </div>
-              </Field>
-              <Field label={F.dueDay}>
+              <label className="check span-all">
                 <input
-                  className="field"
-                  type="number"
-                  min={1}
-                  max={31}
-                  value={dueDay}
-                  onChange={(e) => setDueDay(Number(e.target.value))}
-                  aria-label={F.dueDay}
-                />
-              </Field>
-              <Field label={F.dueMonthOffset}>
-                <select
-                  className="field"
-                  value={dueMonthOffset}
-                  onChange={(e) => setDueMonthOffset(Number(e.target.value))}
-                  aria-label={F.dueMonthOffset}
-                >
-                  {t.contracts.offsets.map((label, i) => (
-                    <option key={label} value={i}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              </Field>
+                  type="checkbox"
+                  checked={indeterminate}
+                  onChange={(e) => setIndeterminate(e.target.checked)}
+                  aria-label={F.indeterminate}
+                />{' '}
+                {F.indeterminate}
+              </label>
             </fieldset>
 
             <label className="check span-all">
-              <input type="checkbox" checked={autoRenew} onChange={(e) => setAutoRenew(e.target.checked)} /> {F.autoRenew}
+              <input type="checkbox" checked={autoRenew} onChange={(e) => setAutoRenew(e.target.checked)} aria-label={F.autoRenew} />{' '}
+              {F.autoRenew}
+              <span className="hint !mt-0 block">{F.autoRenewHint}</span>
             </label>
             <Field label={F.noticeDays} hint={F.noticeDaysHint}>
               <input
@@ -454,28 +385,6 @@ export function ContractFormModal({
                 value={noticeDays}
                 onChange={(e) => setNoticeDays(Number(e.target.value))}
                 aria-label={F.noticeDays}
-              />
-            </Field>
-            <Field label={F.renewalLeadDays}>
-              <input
-                className="field"
-                type="number"
-                min={1}
-                max={365}
-                value={renewalLeadDays}
-                onChange={(e) => setRenewalLeadDays(Number(e.target.value))}
-                aria-label={F.renewalLeadDays}
-              />
-            </Field>
-            <Field label={F.reminderEveryDays}>
-              <input
-                className="field"
-                type="number"
-                min={1}
-                max={30}
-                value={reminderEveryDays}
-                onChange={(e) => setReminderEveryDays(Number(e.target.value))}
-                aria-label={F.reminderEveryDays}
               />
             </Field>
             <Field label={F.readjustmentIndex}>
@@ -519,76 +428,15 @@ export function ContractFormModal({
               <textarea className="field" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} aria-label={F.notes} />
             </Field>
 
-            <fieldset className="span-all form-grid cols-2" aria-label={P.section}>
-              <legend className="span-all text-sm font-semibold">{P.section}</legend>
-              <p className="hint span-all !mt-0">{P.sectionHint}</p>
-              {caixaId && (
-                <PlannedAccountSelect
-                  caixaId={caixaId}
-                  accounts={accounts.data ?? []}
-                  accountId={paymentAccountId}
-                  transitId={transitAccountId}
-                  onChange={(a, tr) => {
-                    setPaymentAccountId(a);
-                    setTransitAccountId(tr);
-                  }}
-                />
-              )}
-              <Field label={P.lateFee}>
-                <input
-                  className="field"
-                  type="number"
-                  min={0}
-                  max={20}
-                  step="0.01"
-                  value={lateFee}
-                  onChange={(e) => setLateFee(e.target.value)}
-                  aria-label={P.lateFee}
-                />
-              </Field>
-              <Field label={P.interest}>
-                <input
-                  className="field"
-                  type="number"
-                  min={0}
-                  max={10}
-                  step="0.01"
-                  value={interest}
-                  onChange={(e) => setInterest(e.target.value)}
-                  aria-label={P.interest}
-                />
-              </Field>
-              <Field label={P.discount}>
-                <input
-                  className="field"
-                  type="number"
-                  min={0}
-                  max={50}
-                  step="0.01"
-                  value={discount}
-                  onChange={(e) => setDiscount(e.target.value)}
-                  aria-label={P.discount}
-                />
-              </Field>
-              <Field label={P.tolerance} hint={P.toleranceHint}>
-                <MoneyInput value={toleranceCents} onChange={setToleranceCents} ariaLabel={P.tolerance} />
-              </Field>
-              <Field label={P.window} hint={P.windowHint}>
-                <input
-                  className="field"
-                  type="number"
-                  min={0}
-                  max={45}
-                  value={matchWindowDays}
-                  onChange={(e) => setMatchWindowDays(Number(e.target.value))}
-                  aria-label={P.window}
-                />
-              </Field>
-              <label className="check span-all">
-                <input type="checkbox" checked={autoSettle} onChange={(e) => setAutoSettle(e.target.checked)} /> {P.autoSettle}
-                <span className="hint !mt-0 block">{P.autoSettleHint}</span>
-              </label>
-            </fieldset>
+            {!editing && caixaId && (
+              <ObligationsEditor
+                items={obligations}
+                onChange={setObligations}
+                direction={direction}
+                caixaId={caixaId}
+                counterpartyId={entity?.id ?? null}
+              />
+            )}
           </div>
           <FormError>{error}</FormError>
         </div>
@@ -602,11 +450,18 @@ export function ContractFormModal({
             </Button>
           ) : (
             <>
-              <Button type="submit" variant="ghost" disabled={busy}>
-                {t.contracts.actions.saveDraft}
-              </Button>
-              <Button disabled={busy} onClick={(e) => void submit(e as unknown as FormEvent, true)}>
-                {busy ? t.common.saving : t.contracts.actions.saveAndActivate}
+              {obligations.length === 0 && (
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={(e) => void submit(e as unknown as FormEvent, false)}
+                  data-testid="contract-save-draft"
+                >
+                  {t.contracts.actions.saveDraft}
+                </Button>
+              )}
+              <Button type="submit" disabled={busy} data-testid="contract-create">
+                {busy ? t.common.saving : t.contracts.actions.create}
               </Button>
             </>
           )}

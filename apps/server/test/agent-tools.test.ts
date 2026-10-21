@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { nfeAccessKeyDv } from '@moneyflow/shared';
+import { nfeAccessKeyDv, t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
@@ -235,20 +235,24 @@ describe('registro e oferta (spec 027)', () => {
 });
 
 describe('contratos', () => {
-  it('criar (rascunho), editar, ativar, aditivo, markdown, documentos, renovação e rescisão', async () => {
+  it('criar com obrigação, editar, obrigação nova, ligar série, aditivo, série, markdown, renovação e rescisão', async () => {
+    const obligation = {
+      description: 'Mensalidade',
+      amountCents: 20_000,
+      firstDueDate: '2026-11-10',
+      accountId: s.accountA.id,
+      lateFeePercent: 2,
+    };
     const base = {
       caixaId: s.caixaA.id,
       entityId: s.supplier.id,
       direction: 'receivable',
       categoryId: s.income.id,
       name: `Suporte ${uid()}`,
-      startsOn: '2031-01-01',
-      durationMonths: 12,
-      periodicity: 'monthly',
-      totalCents: 120_000,
-      dueDay: 10,
-      dueMonthOffset: 0,
+      startsOn: '2026-11-01',
+      endsOn: '2027-04-30',
       mirrorCaixaId: null,
+      obligations: [obligation],
     };
     // Viewer não cria contrato na caixa que só lê.
     expect((await call(viewerSession, 'create_contract', base)).error).toBe('Você só tem leitura nesta caixa.');
@@ -256,40 +260,70 @@ describe('contratos', () => {
     const created = await approved(adminSession, 'create_contract', base);
     expect(created.preview).toMatchObject({ title: 'Criar contrato', action: 'create' });
     expect(rowsOf(created.preview)).toMatchObject({
-      Parcelas: '12 (mensal)',
-      'Valor total do ciclo': 'R$ 1.200,00',
+      'Fim da vigência': '30/04/2027',
+      'Obrigação: Mensalidade': `R$ 200,00 a cada 1 mês(es) desde 10/11/2026 · conta Banco A (${s.caixaA.name})`,
       Espelho: 'Sem espelho',
     });
-    expect(created.preview.warnings[0]).toContain('rascunho');
     const contractId = created.value.id;
-    expect(created.value).toMatchObject({ status: 'draft' });
+    expect(created.value).toMatchObject({ status: 'active', obligationCount: 1 });
     expect(await auditActor('contracts', contractId)).toEqual({ actor_kind: 'agent', agent_run_id: created.runId });
+    const ruleId = created.value.obligations[0].id;
 
     const listed = await call(adminSession, 'list_contracts', { caixaId: s.caixaA.id, q: base.name });
     expect(listed.value.map((c: any) => c.id)).toEqual([contractId]);
     expect((await call(viewerSession, 'get_contract', { contractId })).value).toMatchObject({ id: contractId, canWrite: false });
 
-    const edited = await approved(adminSession, 'update_contract', { contractId, changes: { totalCents: 240_000, noticeDays: 45 } });
-    expect(rowsOf(edited.preview)).toMatchObject({ 'Valor total do ciclo': 'R$ 1.200,00 → R$ 2.400,00', 'Aviso prévio (dias)': '30 → 45' });
+    const edited = await approved(adminSession, 'update_contract', { contractId, changes: { noticeDays: 45 } });
+    expect(rowsOf(edited.preview)).toMatchObject({ 'Aviso prévio (dias)': '30 → 45' });
     expect((await call(viewerSession, 'update_contract', { contractId, changes: { noticeDays: 10 } })).error).toBe(
       'Você só tem leitura nesta caixa.',
     );
-
-    const activated = await approved(adminSession, 'activate_contract', { contractId });
-    expect(rowsOf(activated.preview)).toMatchObject({ Situação: 'Rascunho → Vigente', 'Parcela 1/12': 'R$ 200,00 · venc. 10/01/2031' });
-    expect(activated.value.status).toBe('active');
-    expect(activated.value.cycles[0].installments).toHaveLength(12);
-    // Vigente: valores só por aditivo (a prévia já recusa).
-    expect((await call(adminSession, 'update_contract', { contractId, changes: { totalCents: 1000 } })).error).toBe(
-      'Contrato vigente: prazo, valor, vencimento, periodicidade e categoria mudam por aditivo ou na renovação.',
+    // Vigente: a vigência só por renovar/rescindir (a prévia já recusa).
+    expect((await call(adminSession, 'update_contract', { contractId, changes: { endsOn: '2027-12-31' } })).error).toBe(
+      t.contracts.lockedActive,
     );
+
+    const added = await approved(adminSession, 'add_contract_obligation', {
+      contractId,
+      obligation: {
+        description: 'Taxa anual',
+        amountCents: 50_000,
+        frequency: 'yearly',
+        firstDueDate: '2027-01-15',
+        accountId: s.accountA.id,
+      },
+    });
+    expect(rowsOf(added.preview)['Obrigação: Taxa anual']).toContain('a cada 1 ano(s)');
+    expect(added.value.obligations).toHaveLength(2);
+
+    // Série solta da mesma contraparte: get_series e ligar ao contrato.
+    const loose = await admin.post('/api/titles', {
+      caixaId: s.caixaA.id,
+      direction: 'receivable',
+      entityId: s.supplier.id,
+      categoryId: s.income.id,
+      description: 'Extra mensal',
+      competenceDate: '2026-11-01',
+      dueDate: '2026-11-20',
+      amountCents: 1_000,
+      mirrorCaixaId: null,
+      series: { kind: 'recurrence', frequency: 'monthly', intervalCount: 1, endsOn: '2027-01-31' },
+    });
+    expect((await call(viewerSession, 'get_series', { ruleId: loose.rule.id })).value).toMatchObject({ contractId: null, canWrite: false });
+    const linked = await approved(adminSession, 'link_series_to_contract', { contractId, ruleId: loose.rule.id });
+    expect(rowsOf(linked.preview)['Contrato da série']).toBe(`— → ${base.name}`);
+    expect(linked.value.obligations).toHaveLength(3);
 
     const amended = await approved(adminSession, 'add_contract_amendment', {
       contractId,
-      amendment: { effectiveOn: '2031-07-01', installmentCents: 25_000 },
+      amendment: { effectiveOn: '2027-02-01', ruleIds: [ruleId], amountCents: 25_000 },
     });
-    expect(rowsOf(amended.preview)['Parcela 7']).toBe('R$ 200,00 · venc. 10/07/2031 → R$ 250,00 · venc. 10/07/2031');
-    expect(amended.value.contract.cycles[0].installments[6].amountCents).toBe(25_000);
+    expect(rowsOf(amended.preview)['Ocorrência 4']).toBe('R$ 200,00 · venc. 10/02/2027 → R$ 250,00 · venc. 10/02/2027');
+    expect(amended.value.contract.amendments[0]).toMatchObject({ ruleIds: [ruleId], affectedCount: 3 });
+
+    const series = await approved(adminSession, 'update_series', { ruleId, changes: { toleranceCents: 500, matchWindowDays: 20 } });
+    expect(rowsOf(series.preview)).toMatchObject({ 'Janela da conciliação (dias)': '15 → 20', Tolerância: 'R$ 0,00 → R$ 5,00' });
+    expect(series.value.terms).toMatchObject({ toleranceCents: 500, matchWindowDays: 20 });
 
     // Markdown: documento novo (versão 1 do agente) e nova versão com o diff.
     const doc = await approved(adminSession, 'save_contract_markdown', {
@@ -308,28 +342,14 @@ describe('contratos', () => {
     const read = await call(viewerSession, 'get_contract_document', { documentId });
     expect(read.value.version).toMatchObject({ version: 2, content: '# Contrato\n\nCláusula 1.\nCláusula 2.' });
     expect(read.value.versions.map((v: any) => v.authorKind)).toEqual(['agent', 'agent']);
-    expect((await call(adminSession, 'save_contract_markdown', { documentId, content: read.value.version.content })).error).toBe(
-      'Nada mudou desde a versão atual.',
-    );
 
-    // Renovação: recusar sem tarefa aberta falha na prévia; aprovar gera o próximo ciclo.
-    expect((await call(adminSession, 'decide_contract_renewal', { contractId, decision: 'decline' })).error).toBe(
-      'Não há tarefa de renovação aberta.',
-    );
-    const renewed = await approved(adminSession, 'decide_contract_renewal', {
-      contractId,
-      decision: 'approve',
-      renewal: { durationMonths: 12, periodicity: 'quarterly', totalCents: 400_000, dueDay: 5, dueMonthOffset: 0 },
-    });
-    expect(rowsOf(renewed.preview)).toMatchObject({
-      'Novo ciclo': '01/01/2032 a 31/12/2032',
-      'Parcela 1/4': 'R$ 1.000,00 · venc. 05/01/2032',
-    });
+    const renewed = await approved(adminSession, 'renew_contract', { contractId, renewal: { endsOn: '2027-10-31' } });
+    expect(rowsOf(renewed.preview)).toMatchObject({ Vigência: '01/11/2026 a 30/04/2027 → 01/05/2027 a 31/10/2027' });
     expect(renewed.value.contract.cycles).toHaveLength(2);
 
     const terminated = await approved(adminSession, 'terminate_contract', {
       contractId,
-      termination: { terminatedOn: '2031-09-15', notes: 'acordo' },
+      termination: { terminatedOn: '2027-03-15', notes: 'acordo' },
     });
     expect(terminated.preview).toMatchObject({ title: 'Rescindir contrato', action: 'delete' });
     expect(rowsOf(terminated.preview).Situação).toBe('Vigente → Rescindido');
@@ -338,9 +358,11 @@ describe('contratos', () => {
     // Viewer: nenhuma escrita no contrato da caixa que só lê (a prévia já recusa, sem pedir aprovação).
     const denied: [string, Record<string, unknown>][] = [
       ['activate_contract', { contractId }],
-      ['add_contract_amendment', { contractId, amendment: { effectiveOn: '2031-08-01', installmentCents: 100 } }],
-      ['terminate_contract', { contractId, termination: { terminatedOn: '2031-08-01' } }],
-      ['decide_contract_renewal', { contractId, decision: 'decline' }],
+      ['add_contract_obligation', { contractId, obligation }],
+      ['add_contract_amendment', { contractId, amendment: { effectiveOn: '2027-01-01', ruleIds: [ruleId], amountCents: 100 } }],
+      ['terminate_contract', { contractId, termination: { terminatedOn: '2027-01-01' } }],
+      ['renew_contract', { contractId, renewal: { endsOn: null } }],
+      ['update_series', { ruleId, changes: { autoSettle: true } }],
       ['save_contract_markdown', { documentId, content: 'outro' }],
       ['save_contract_markdown', { contractId, title: 'Outro', content: 'x' }],
       ['convert_contract_pdf', { documentId }],
@@ -360,11 +382,7 @@ describe('contratos', () => {
       categoryId: s.expense.id,
       name: `Aluguel ${uid()}`,
       startsOn: '2031-02-01',
-      durationMonths: 12,
-      periodicity: 'monthly',
-      totalCents: 600_000,
-      dueDay: 5,
-      dueMonthOffset: 0,
+      endsOn: '2032-01-31',
       mirrorCaixaId: null,
     });
     const pdf = { name: 'contrato-aluguel.pdf', mime: 'application/pdf', data: minimalPdf(['Contrato de aluguel', 'Cláusula 1']) };

@@ -35,6 +35,7 @@ import {
   uuidArray,
 } from './catalog';
 import { schemaVersion } from './export';
+import { legacyContracts } from './legacy-contracts';
 
 /*
  * Importação com merge (spec 019). Regras:
@@ -305,7 +306,9 @@ function rowKey(table: string, data: BackupRow, uuidColumns: Set<string>): strin
   const composite = COMPOSITE_KEYS[table];
   if (!composite) return typeof data.id === 'string' ? data.id.toLowerCase() : '';
   const valid = composite.every((column) => {
-    const v = data[column];
+    const raw = data[column];
+    // Parte numérica da chave (card_recurring_charge_amounts.from_occurrence) vira texto.
+    const v = typeof raw === 'number' && Number.isInteger(raw) ? String(raw) : raw;
     return typeof v === 'string' && v !== '' && !v.includes('|') && (!uuidColumns.has(column) || UUID.test(v));
   });
   return valid
@@ -530,7 +533,9 @@ function describe(error: unknown): string {
 export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, kind: BackupKind, dryRun: boolean): Promise<ImportReport> {
   ctx.access.assertAdmin();
   const started = Date.now();
-  const file = legacyCapabilities(kind === 'full' ? await legacyClassificationRules(ctx, await legacyAgentKits(ctx, uploaded)) : uploaded);
+  const file = legacyCapabilities(
+    kind === 'full' ? legacyContracts(await legacyClassificationRules(ctx, await legacyAgentKits(ctx, uploaded))) : uploaded,
+  );
   const catalog = await loadCatalog(ctx.db);
   const ranks = tableRanks(catalog);
 

@@ -17,21 +17,23 @@ import {
   classificationRuleInput,
   classificationRuleUpdateInput,
   contractAmendmentInput,
-  contractCreateFields,
+  contractCreateInput,
   contractRenewalInput,
   contractTerminationInput,
   contractUpdateInput,
   contractVersionCreateInput,
   copyRulesInput,
   csvMappingInput,
-  durationFitsPeriod,
   id,
   invoiceCloseInput,
   isoDate,
   nonNegativeCents,
+  obligationInput,
   optionalText,
   positiveCents,
   SCOPES,
+  seriesCreateInput,
+  seriesUpdateInput,
 } from '../schemas';
 import { attachmentId, date, define, limit } from './tool-def';
 
@@ -44,9 +46,6 @@ import { attachmentId, date, define, limit } from './tool-def';
  */
 
 const CONTRACT_DIRECTIONS = ['receivable', 'payable'] as const;
-
-/** Cadastro do contrato pelo agente: sempre rascunho (ativar é activate_contract). */
-const contractCreateTool = contractCreateFields.omit({ activate: true }).superRefine(durationFitsPeriod);
 
 /** Mapeamento CSV informado pelo agente: o da API, sem o alvo (vem da importação). */
 const csvMappingTool = csvMappingInput
@@ -61,20 +60,20 @@ const chargeLine = z.object({
 });
 
 export const OPERATION_TOOLS = [
-  /* ---------------- Contratos (spec 020) ---------------- */
+  /* ---------------- Contratos (specs 020 e 034) ---------------- */
   define({
     name: 'list_contracts',
     category: 'contracts',
     title: 'Listar contratos',
     description:
-      'Contratos a receber e a pagar das caixas que o usuário vê, com o ciclo atual, a próxima parcela e a tarefa de renovação aberta. Filtros: caixa, entidade, direção, status (current = vigente ou com renovação pendente), término ou renovação nos próximos N dias e texto.',
+      'Contratos a receber e a pagar das caixas que o usuário vê, com a vigência, o número de obrigações e a próxima ocorrência. Filtros: caixa, entidade, direção, status (current = vigente), fim da vigência nos próximos N dias e texto.',
     kind: 'read',
     input: z.object({
       caixaId: id.optional(),
       entityId: id.optional(),
       direction: z.enum(CONTRACT_DIRECTIONS).optional().describe('receivable = eu recebo; payable = eu pago.'),
       status: z.enum(CONTRACT_LIST_STATUSES).optional(),
-      withinDays: z.number().int().min(0).max(3650).optional().describe('Termina ou tem renovação nos próximos N dias.'),
+      withinDays: z.number().int().min(0).max(3650).optional().describe('A vigência termina nos próximos N dias.'),
       q: z.string().trim().max(200).optional(),
       archived: z.boolean().default(false).describe('true = só os arquivados.'),
       limit: limit(500, 100),
@@ -85,7 +84,7 @@ export const OPERATION_TOOLS = [
     category: 'contracts',
     title: 'Ver contrato',
     description:
-      'Detalhe de um contrato: condições, ciclos com as parcelas (títulos), títulos extras (multa), documentos (PDF e markdown), aditivos e tarefas de renovação.',
+      'Detalhe de um contrato: condições, vigência e vigências anteriores, obrigações (séries com a conta ou o cartão, a próxima ocorrência, o valor e os ajustes de reconhecimento), títulos avulsos (multa), documentos (PDF e markdown), aditivos e o histórico.',
     kind: 'read',
     input: z.object({ contractId: id }),
   }),
@@ -94,16 +93,16 @@ export const OPERATION_TOOLS = [
     category: 'contracts',
     title: 'Criar contrato',
     description:
-      'Cadastra um contrato em RASCUNHO (nenhuma parcela é gerada; use activate_contract). Ciclo: início, duração em meses (múltiplo da periodicidade), valor total do ciclo, periodicidade, dia de vencimento e deslocamento em meses. Espelho: omitido = caixa principal da entidade; null = sem espelho.',
+      'Cadastra um contrato: caixa, contraparte, direção, categoria padrão, vigência (startsOn, endsOn null = indeterminado) e as obrigações — cada uma uma série numa conta (kind account: accountId de corrente, poupança ou cofre; as ocorrências viram títulos na caixa da conta) ou uma cobrança esperada no cartão (kind card: cardCaixaId e payerCaixaId; só contrato payable), com descrição, valor, calendário (frequency, intervalCount, firstDueDate) e os ajustes de reconhecimento (janela, multa %, juros % ao mês, desconto %, tolerância, autoSettle) lidos das cláusulas do documento. Com obrigações o contrato nasce vigente; sem elas, activate false deixa em rascunho. Espelho: omitido = caixa principal da entidade; null = sem espelho.',
     kind: 'write',
-    input: contractCreateTool,
+    input: contractCreateInput,
   }),
   define({
     name: 'update_contract',
     category: 'contracts',
     title: 'Editar contrato',
     description:
-      'Altera um contrato. No rascunho muda tudo; vigente, só a configuração livre (nome, número, observações, renovação automática, aviso prévio, reajuste, multa, a conta das parcelas com a de passagem, encargos, tolerância, janela e baixar sem confirmação) — valores e datas mudam por add_contract_amendment. Trocando a conta das parcelas, applyAccountToInstallments true leva a nova conta às parcelas em aberto que seguem o contrato.',
+      'Altera um contrato. No rascunho muda tudo (inclusive a vigência); vigente, só a configuração livre (nome, número, observações, renovação automática, aviso prévio, reajuste, multa) — a vigência muda por renew_contract ou terminate_contract, e os valores das obrigações por add_contract_amendment ou update_series.',
     kind: 'write',
     input: z.object({ contractId: id, changes: contractUpdateInput }),
   }),
@@ -111,16 +110,34 @@ export const OPERATION_TOOLS = [
     name: 'activate_contract',
     category: 'contracts',
     title: 'Ativar contrato',
-    description: 'Ativa um contrato em rascunho: gera os títulos das parcelas do ciclo (com o espelho, se houver).',
+    description: 'Ativa um contrato em rascunho (vigente). Depois, acrescente as obrigações com add_contract_obligation.',
     kind: 'write',
     input: z.object({ contractId: id }),
+  }),
+  define({
+    name: 'add_contract_obligation',
+    category: 'contracts',
+    title: 'Acrescentar obrigação',
+    description:
+      'Acrescenta uma obrigação a um contrato vigente: uma série numa conta (as ocorrências viram títulos na caixa da conta, materializados até 12 meses à frente) ou uma cobrança esperada no cartão. O fim omitido é o da vigência.',
+    kind: 'write',
+    input: z.object({ contractId: id, obligation: obligationInput }),
+  }),
+  define({
+    name: 'link_series_to_contract',
+    category: 'contracts',
+    title: 'Ligar série ao contrato',
+    description:
+      'Liga uma série recorrente existente (ruleId; get_title mostra a série de um título) a um contrato vigente: a série e as ocorrências dela passam a ser obrigação do contrato. A série precisa ter a direção e a contraparte do contrato.',
+    kind: 'write',
+    input: z.object({ contractId: id, ruleId: id }),
   }),
   define({
     name: 'add_contract_amendment',
     category: 'contracts',
     title: 'Registrar aditivo',
     description:
-      'Aditivo a partir da data de efeito: novo valor da parcela (installmentCents) OU novo total restante (remainingTotalCents), dia de vencimento, deslocamento ou categoria. Recalcula as parcelas em aberto a partir da data (as pagas e as de mês fechado ficam).',
+      'Aditivo a partir da data de efeito nas obrigações escolhidas (ruleIds): novo valor (amountCents) OU reajuste em % (readjustmentPercent), novo dia (anchorDay), categoria ou conta. Roda "esta e as próximas" a partir da primeira ocorrência em aberto na data (as com baixa e as de mês fechado ficam); na cobrança no cartão, muda o valor esperado dali em diante.',
     kind: 'write',
     input: z.object({ contractId: id, amendment: contractAmendmentInput }),
   }),
@@ -129,29 +146,46 @@ export const OPERATION_TOOLS = [
     category: 'contracts',
     title: 'Rescindir contrato',
     description:
-      'Rescinde o contrato na data: cancela as parcelas em aberto depois dela, ajusta (opcional) a parcela que cobre a data e lança (opcional) o título da multa.',
+      'Rescinde o contrato na data: encerra as obrigações (as ocorrências em aberto com competência depois dela são canceladas, sem apagar), ajusta (opcional, lastAmounts) o valor da última ocorrência de cada obrigação — o proporcional vem na prévia — e lança (opcional) o título avulso da multa.',
     kind: 'write',
     destructive: true,
     input: z.object({ contractId: id, termination: contractTerminationInput }),
   }),
   define({
-    name: 'decide_contract_renewal',
+    name: 'renew_contract',
     category: 'contracts',
-    title: 'Decidir renovação',
+    title: 'Renovar contrato',
     description:
-      'Aprova (decision approve, com o próximo ciclo em renewal: duração, periodicidade, valor total, reajuste, vencimento) ou recusa (decline, com notes) a renovação do contrato. Aprovar gera as parcelas do novo ciclo.',
+      'Renova o contrato: estende a vigência até endsOn (null = sem fim) e o fim das obrigações junto (o "estender série"), registrando a nova vigência. Para mudar o valor, registre um aditivo.',
     kind: 'write',
-    input: z
-      .object({
-        contractId: id,
-        decision: z.enum(['approve', 'decline']),
-        renewal: contractRenewalInput.optional().describe('Próximo ciclo (obrigatório para aprovar).'),
-        notes: optionalText(2000),
-      })
-      .refine((v) => v.decision === 'decline' || v.renewal !== undefined, {
-        path: ['renewal'],
-        message: 'Informe o próximo ciclo (renewal) para aprovar.',
-      }),
+    input: z.object({ contractId: id, renewal: contractRenewalInput }),
+  }),
+  define({
+    name: 'get_series',
+    category: 'titles',
+    title: 'Ver série recorrente',
+    description:
+      'Uma série recorrente (ruleId): numa conta (títulos com a conta prevista) ou no cartão (cobrança esperada), o calendário, o contrato, o valor, a conta, a próxima ocorrência e os ajustes de reconhecimento do pagamento.',
+    kind: 'read',
+    input: z.object({ ruleId: id }),
+  }),
+  define({
+    name: 'create_series',
+    category: 'titles',
+    title: 'Criar série recorrente',
+    description:
+      'Cria uma série recorrente numa conta (accountId; títulos materializados até 12 meses à frente) ou uma cobrança esperada no cartão (cardCaixaId), ligada a um contrato (contractId) ou solta (entityId e categoryId; na conta, direction).',
+    kind: 'write',
+    input: seriesCreateInput,
+  }),
+  define({
+    name: 'update_series',
+    category: 'titles',
+    title: 'Editar série recorrente',
+    description:
+      'Altera uma série: os ajustes de reconhecimento (janela, multa %, juros % ao mês, desconto %, tolerância até 10% do valor, autoSettle) valem na hora; descrição, valor, dia (anchorDay), categoria, conta (ou a pagadora, no cartão) mudam "esta e as próximas" a partir de effectiveOn (padrão hoje: as ocorrências em aberto sem baixa). contractId liga a série a um contrato (null desliga).',
+    kind: 'write',
+    input: z.object({ ruleId: id, changes: seriesUpdateInput }),
   }),
   define({
     name: 'get_contract_document',

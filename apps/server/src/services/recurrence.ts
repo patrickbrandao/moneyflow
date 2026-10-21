@@ -7,6 +7,7 @@ import {
   occurrenceDueDate,
   pendingOccurrences,
   type RecurrenceRule,
+  stripInstallmentSuffix,
   todayIso,
 } from '@moneyflow/shared';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
@@ -16,7 +17,10 @@ import { insertTitlePair, type MirrorPlan } from './title-pair';
  * Materialização das séries (spec 005): o modelo de cada novo título é a
  * ocorrência mais recente da série (lado original, sem mirror_status); o
  * espelho, se houver, segue o modelo do espelho dessa ocorrência. Cria até
- * 12 meses à frente. Usado na criação do título e pelo worker.
+ * 12 meses à frente. Usado na criação do título e pelo worker. A ocorrência
+ * nova leva também a conta prevista e o contrato do modelo (spec 034), sem o
+ * " · n/N" das parcelas de antes da F20. A cobrança esperada no cartão não tem
+ * títulos e fica de fora.
  */
 
 export const materializeHorizon = (today = todayIso()) => addMonths(today, MATERIALIZE_MONTHS);
@@ -55,7 +59,7 @@ export async function materializeRule(tx: Executor, ruleId: string, horizon = ma
           caixaId: mirrorTemplate.caixaId,
           entityId: mirrorTemplate.entityId,
           categoryId: mirrorTemplate.categoryId,
-          description: mirrorTemplate.description,
+          description: describe(mirrorTemplate),
           status: mirrorTemplate.mirrorStatus === 'accepted' ? 'accepted' : 'pending',
         }
       : null;
@@ -66,7 +70,7 @@ export async function materializeRule(tx: Executor, ruleId: string, horizon = ma
         direction: template.direction as 'payable' | 'receivable',
         entityId: template.entityId,
         categoryId: template.categoryId,
-        description: template.description,
+        description: describe(template),
         competenceDate: occurrenceCompetenceDate(rule, { occurrence: template.occurrence, competenceDate: template.competenceDate }, n),
         dueDate: occurrenceDueDate(rule, n),
         amountCents: template.amountCents,
@@ -74,12 +78,18 @@ export async function materializeRule(tx: Executor, ruleId: string, horizon = ma
         origin: 'recurrence',
         recurrenceRuleId: ruleId,
         occurrence: n,
+        contractId: template.contractId,
+        plannedAccountId: template.plannedAccountId,
       },
       mirror,
     );
   }
   return pending.length;
 }
+
+/** Descrição da ocorrência nova: a do modelo, sem o " · n/N" das parcelas de contrato antigas. */
+const describe = (template: { description: string; contractCycleId: string | null }) =>
+  template.contractCycleId ? stripInstallmentSuffix(template.description) : template.description;
 
 /**
  * Passada do worker por todas as séries. Cada série roda na própria transação

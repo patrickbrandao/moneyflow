@@ -6,6 +6,8 @@ import {
   exportFileName,
   formatDate,
   formatMonth,
+  purchaseLink,
+  type TitleStatus,
   t,
   titleLink,
   todayIso,
@@ -15,41 +17,40 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApi } from '../../lib/hooks';
 import { MonthColumns } from '../caixa/account-charts';
-import { LoadError, Money } from '../domain';
+import { LoadError, Money, TitleStatusBadge } from '../domain';
 import { ExportMenu } from '../ExportMenu';
-import { EmptyRow, Panel, Skel } from '../ui';
-import { PlannedAccountButton, PlannedAccountLabel } from './PlannedAccount';
+import { Badge, EmptyRow, Panel, Skel } from '../ui';
 import { DelayBars } from './payment-charts';
 
 const C = t.contracts;
 const P = C.payments;
 
 /**
- * Pagamentos do contrato (spec 033): valores por mês (previsto × pago, com
- * encargos e desconto), o atraso ou adiantamento de cada parcela, o resumo e a
- * tabela com a conta prevista (trocável) e a origem da baixa. Filtro do ciclo:
- * o atual, um anterior ou todos.
+ * Pagamentos do contrato (specs 033 e 034), somando as obrigações: valores por
+ * mês (previsto × pago, com encargos e desconto), o atraso ou adiantamento de
+ * cada ocorrência, o resumo (com as não cobradas no cartão) e a tabela com a
+ * obrigação, a conta e a origem da baixa; no cartão, a data da compra e a
+ * situação cobrada / não cobrada / esperada. Filtro: uma vigência ou todas.
  */
-export function PaymentsSection({ contract, onChanged }: { contract: ContractDetail; onChanged: () => void }) {
+export function PaymentsSection({ contract }: { contract: ContractDetail }) {
   const navigate = useNavigate();
   const [cycleId, setCycleId] = useState<string>(contract.cycles[0]?.id ?? '');
   const payments = useApi<ContractPaymentsDto>(`/api/contracts/${contract.id}/payments${cycleId ? `?cycleId=${cycleId}` : ''}`);
   const data = payments.data;
   const paidLabel = contract.direction === 'receivable' ? P.paidReceivable : P.paidPayable;
 
-  const reload = () => {
-    void payments.reload();
-    onChanged();
+  const open = (row: ContractPaymentRow) => {
+    if (row.titleId) navigate(titleLink({ id: row.titleId, caixaId: row.caixaId, direction: contract.direction }));
+    else if (row.cardPurchaseId) navigate(purchaseLink(row.caixaId, row.cardPurchaseId));
   };
 
   return (
     <div className="grid gap-4" data-testid="contract-payments">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <select className="field field-auto" value={cycleId} onChange={(e) => setCycleId(e.target.value)} aria-label={P.cycle}>
-          {contract.cycles.map((cycle, i) => (
+          {contract.cycles.map((cycle) => (
             <option key={cycle.id} value={cycle.id}>
-              {i === 0 ? `${P.currentCycle} · ` : ''}
-              {C.cycleLabel(cycle.seq)} · {C.cycleRange(formatDate(cycle.startsOn), formatDate(cycle.endsOn))}
+              {C.cycleLabel(cycle.seq)} · {C.termRange(formatDate(cycle.startsOn), cycle.endsOn ? formatDate(cycle.endsOn) : null)}
             </option>
           ))}
           <option value="">{P.allCycles}</option>
@@ -82,20 +83,21 @@ export function PaymentsSection({ contract, onChanged }: { contract: ContractDet
               testId="contract-payments-delay"
               bars={data.rows
                 .filter((r) => r.days !== null)
-                .map((r) => ({
-                  key: r.titleId,
-                  label: `${r.installment}`,
+                .map((r, i) => ({
+                  key: rowKey(r, i),
+                  label: formatMonth(r.competenceDate).slice(0, 3),
                   days: r.days!,
                   overdue: r.overdue,
-                  tip: `${r.installment}/${r.installmentsCount} · ${formatMonth(r.competenceDate)} · ${formatDate(r.dueDate)}`,
+                  tip: `${r.description}${r.occurrence ? ` #${r.occurrence}` : ''} · ${formatMonth(r.competenceDate)} · ${formatDate(r.dueDate)}`,
                 }))}
             />
           </Panel>
           <div className="table-wrap">
-            <table className="data" aria-label={P.tab}>
+            <table className="data" aria-label={P.tab} data-testid="payments-table">
               <thead>
                 <tr>
-                  <th>{P.columns.installment}</th>
+                  <th>{P.columns.obligation}</th>
+                  <th>{P.columns.occurrence}</th>
                   <th>{P.columns.month}</th>
                   <th>{P.columns.due}</th>
                   <th className="num">{P.columns.amount}</th>
@@ -103,22 +105,25 @@ export function PaymentsSection({ contract, onChanged }: { contract: ContractDet
                   <th>{P.columns.paidOn}</th>
                   <th className="num">{P.columns.days}</th>
                   <th>{P.columns.account}</th>
-                  <th>{P.columns.planned}</th>
+                  <th>{C.columns.status}</th>
                   <th>{P.columns.origin}</th>
                 </tr>
               </thead>
               <tbody>
-                {data.rows.length === 0 && <EmptyRow colSpan={10}>{P.empty}</EmptyRow>}
-                {data.rows.map((row) => (
+                {data.rows.length === 0 && <EmptyRow colSpan={11}>{P.empty}</EmptyRow>}
+                {data.rows.map((row, i) => (
                   <tr
-                    key={row.titleId}
-                    className="cursor-pointer"
+                    key={rowKey(row, i)}
+                    className={row.titleId || row.cardPurchaseId ? 'cursor-pointer' : undefined}
                     data-testid="payment-row"
-                    onClick={() => navigate(titleLink({ id: row.titleId, caixaId: contract.caixaId, direction: contract.direction }))}
+                    data-kind={row.kind}
+                    onClick={() => open(row)}
                   >
-                    <td className="mono">
-                      {row.installment}/{row.installmentsCount}
+                    <td>
+                      <span className="row-title">{row.description}</span>
+                      {row.kind === 'card_charge' && <span className="row-sub">{C.obligation.kinds.card}</span>}
                     </td>
+                    <td className="mono">{row.occurrence ? `#${row.occurrence}` : '—'}</td>
                     <td className="mono">{formatMonth(row.competenceDate)}</td>
                     <td className="mono">{formatDate(row.dueDate)}</td>
                     <td className="num">
@@ -127,18 +132,15 @@ export function PaymentsSection({ contract, onChanged }: { contract: ContractDet
                     <td className="num">
                       <Money cents={row.cashCents} muted={row.cashCents === 0} />
                     </td>
-                    <td className="mono">{row.lastSettledOn ? formatDate(row.lastSettledOn) : '—'}</td>
+                    <td className="mono">
+                      {row.paidOn ? formatDate(row.paidOn) : row.lastSettledOn ? formatDate(row.lastSettledOn) : '—'}
+                    </td>
                     <td className={`num mono whitespace-nowrap${row.overdue ? ' text-danger' : ''}`} data-testid="payment-days">
                       {P.days(row.days)}
                     </td>
-                    <td>{row.accountName ?? '—'}</td>
-                    <td>
-                      <span className="inline-flex items-center gap-1">
-                        <PlannedAccountLabel planned={row} />
-                        {contract.canWrite && (row.status === 'open' || row.status === 'partial') && (
-                          <PlannedAccountButton title={{ ...row, caixaId: contract.caixaId }} onSaved={reload} />
-                        )}
-                      </span>
+                    <td>{row.accountName ?? row.plannedAccountName ?? '—'}</td>
+                    <td data-testid="payment-status">
+                      <PaymentStatus row={row} direction={contract.direction} />
                     </td>
                     <td>{row.lastOrigin ? P.origins[row.lastOrigin] : '—'}</td>
                   </tr>
@@ -152,6 +154,18 @@ export function PaymentsSection({ contract, onChanged }: { contract: ContractDet
   );
 }
 
+const rowKey = (r: ContractPaymentRow, i: number) => r.titleId ?? r.cardPurchaseId ?? `${r.ruleId ?? 'x'}-${r.occurrence ?? i}`;
+
+/** Situação da ocorrência: a do título, ou no cartão cobrada / não cobrada / esperada. */
+function PaymentStatus({ row, direction }: { row: ContractPaymentRow; direction: 'receivable' | 'payable' }) {
+  if (row.kind === 'card_charge') {
+    const status = row.notCharged ? 'not_charged' : (row.status as string);
+    const tone = status === 'charged' ? 'ok' : status === 'not_charged' ? 'danger' : 'outline';
+    return <Badge tone={tone}>{P.cardStatuses[status] ?? status}</Badge>;
+  }
+  return <TitleStatusBadge title={{ status: row.status as TitleStatus, overdue: row.overdue, direction }} />;
+}
+
 function Summary({ data }: { data: ContractPaymentsDto }) {
   const s = data.summary;
   const tiles: { label: string; value: React.ReactNode }[] = [
@@ -162,6 +176,7 @@ function Summary({ data }: { data: ContractPaymentsDto }) {
     { label: P.totalDiscount, value: <Money cents={s.discountCents} muted={s.discountCents === 0} /> },
     { label: P.openCount, value: String(s.open) },
     { label: P.overdueCount, value: String(s.overdue) },
+    ...(s.notCharged > 0 ? [{ label: P.notChargedCount, value: String(s.notCharged) }] : []),
   ];
   return (
     <div className="stat-tiles" aria-label={P.tab} data-testid="contract-payments-summary">
@@ -182,7 +197,8 @@ function paymentsTable(contract: ContractDetail, data: ContractPaymentsDto, paid
     title: `${contract.name} · ${P.tab}`,
     subtitle: [contract.entityName],
     columns: [
-      { key: 'installment', label: H.installment },
+      { key: 'obligation', label: H.obligation },
+      { key: 'occurrence', label: H.occurrence },
       { key: 'month', label: H.month },
       { key: 'due', label: H.due, type: 'date' },
       { key: 'amount', label: H.amount, type: 'money' },
@@ -193,20 +209,23 @@ function paymentsTable(contract: ContractDetail, data: ContractPaymentsDto, paid
       { key: 'days', label: H.days },
       { key: 'account', label: H.account },
       { key: 'planned', label: H.planned },
+      { key: 'status', label: C.columns.status },
       { key: 'origin', label: H.origin },
     ],
     rows: data.rows.map((r: ContractPaymentRow) => ({
-      installment: `${r.installment}/${r.installmentsCount}`,
+      obligation: r.description,
+      occurrence: r.occurrence,
       month: formatMonth(r.competenceDate),
       due: r.dueDate,
       amount: r.amountCents,
       paid: r.cashCents,
       charges: r.fineCents + r.interestCents,
       discount: r.discountCents,
-      paidOn: r.lastSettledOn,
+      paidOn: r.paidOn ?? r.lastSettledOn,
       days: r.days,
       account: r.accountName,
       planned: r.plannedAccountName,
+      status: r.kind === 'card_charge' ? P.cardStatuses[r.notCharged ? 'not_charged' : r.status] : t.title.statuses[r.status],
       origin: r.lastOrigin ? P.origins[r.lastOrigin] : null,
     })),
   };

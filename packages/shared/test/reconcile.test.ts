@@ -1,15 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
-  type ContractInstallmentRow,
-  type ContractTerms,
-  contractMatch,
+  type CardChargeOccurrence,
+  cardChargeMatch,
   descriptionSimilarity,
-  inContractWindow,
+  inSeriesWindow,
   type MatchCandidate,
   normalizeDescription,
   normalizeDescriptionForDedup,
   pickMatch,
+  type SeriesOccurrenceRow,
+  type SeriesTerms,
   scoreCandidate,
+  seriesMatch,
   splitSettlement,
 } from '../src/reconcile';
 
@@ -99,33 +101,38 @@ describe('pickMatch', () => {
   });
 });
 
-/* ---------------- parcelas de contrato (spec 033) ---------------- */
+/* ---------------- reconhecimento pela série (specs 033 e 034) ---------------- */
 
-const terms = (over: Partial<ContractTerms> = {}): ContractTerms => ({
+const terms = (over: Partial<SeriesTerms> = {}): SeriesTerms => ({
   lateFeePercent: 2,
   interestMonthPercent: 1,
   earlyDiscountPercent: 5,
   toleranceCents: 0,
   matchWindowDays: 15,
-  ...over,
-});
-// Aluguel de R$ 2.000,00 com vencimento no dia 10.
-const rent = (dueDate: string, over: Partial<ContractInstallmentRow> = {}): ContractInstallmentRow => ({
-  titleId: `t-${dueDate}`,
-  contractId: 'c1',
-  contractName: 'Aluguel Centro',
-  installment: Number(dueDate.slice(5, 7)),
-  installmentsCount: 12,
-  description: `Aluguel Centro ${dueDate.slice(5, 7)}/12`,
-  entityName: 'Imobiliária Alfa',
-  dueDate,
-  amountCents: 200000,
-  openCents: 200000,
-  plannedAccountId: 'acc',
   autoSettle: false,
-  terms: terms(),
   ...over,
 });
+// Aluguel de R$ 2.000,00 com vencimento no dia 10 (uma série, obrigação de um contrato).
+const rent = (dueDate: string, over: Partial<SeriesOccurrenceRow> & { autoSettle?: boolean } = {}): SeriesOccurrenceRow => {
+  const { autoSettle, ...rest } = over;
+  const row: SeriesOccurrenceRow = {
+    titleId: `t-${dueDate}`,
+    ruleId: 'r1',
+    contractId: 'c1',
+    contractName: 'Aluguel Centro',
+    occurrence: Number(dueDate.slice(5, 7)),
+    occurrencesTotal: null,
+    description: 'Aluguel Centro',
+    entityName: 'Imobiliária Alfa',
+    dueDate,
+    amountCents: 200000,
+    openCents: 200000,
+    plannedAccountId: 'acc',
+    terms: terms(),
+    ...rest,
+  };
+  return autoSettle === undefined ? row : { ...row, terms: { ...row.terms, autoSettle } };
+};
 const pay = (postedOn: string, amountCents: number, description = 'PIX ENVIADO IMOBILIARIA ALFA') => ({
   postedOn,
   amountCents,
@@ -175,27 +182,36 @@ describe('splitSettlement', () => {
   });
 });
 
-describe('inContractWindow', () => {
+describe('inSeriesWindow', () => {
   it('mesmo mês do vencimento ou a janela, o que for mais largo', () => {
-    expect(inContractWindow('2026-03-31', '2026-03-01', 0)).toBe(true);
-    expect(inContractWindow('2026-04-14', '2026-03-31', 15)).toBe(true);
-    expect(inContractWindow('2026-04-16', '2026-03-31', 15)).toBe(false);
-    expect(inContractWindow('2026-02-28', '2026-03-01', 0)).toBe(false);
+    expect(inSeriesWindow('2026-03-31', '2026-03-01', 0)).toBe(true);
+    expect(inSeriesWindow('2026-04-14', '2026-03-31', 15)).toBe(true);
+    expect(inSeriesWindow('2026-04-16', '2026-03-31', 15)).toBe(false);
+    expect(inSeriesWindow('2026-02-28', '2026-03-01', 0)).toBe(false);
   });
 });
 
-describe('contractMatch e o desempate', () => {
-  const candidatesFor = (line: ReturnType<typeof pay>, rows: ContractInstallmentRow[]) =>
-    rows.map((r) => contractMatch(line, r)).filter((c): c is MatchCandidate => c !== null);
+describe('seriesMatch e o desempate', () => {
+  const candidatesFor = (line: ReturnType<typeof pay>, rows: SeriesOccurrenceRow[]) =>
+    rows.map((r) => seriesMatch(line, r)).filter((c): c is MatchCandidate => c !== null);
 
   it('fora da janela não é candidato', () => {
-    expect(contractMatch(pay('2026-05-01', -200000), rent('2026-03-10'))).toBeNull();
+    expect(seriesMatch(pay('2026-05-01', -200000), rent('2026-03-10'))).toBeNull();
+  });
+  it('série sem ajustes casa no mesmo mês ou na janela só com o valor exato', () => {
+    const plain = terms({ lateFeePercent: null, interestMonthPercent: null, earlyDiscountPercent: null });
+    const light = (over: Partial<SeriesOccurrenceRow> = {}) =>
+      rent('2026-03-05', { contractId: null, contractName: null, terms: plain, ...over });
+    expect(seriesMatch(pay('2026-03-28', -200000), light())?.series?.split.kind).toBe('exact');
+    expect(seriesMatch(pay('2026-03-28', -201000), light())).toBeNull();
+    expect(seriesMatch(pay('2026-03-28', -150000), light())?.series?.split.kind).toBe('partial');
+    expect(seriesMatch(pay('2026-04-25', -200000), light())).toBeNull();
   });
   it('aluguel pago 10 dias atrasado com multa e juros é sugerido com a repartição', () => {
     const line = pay('2026-03-20', -204667);
     const pick = pickMatch(line, candidatesFor(line, [rent('2026-03-10')]));
     expect(pick?.status).toBe('suggested');
-    expect(pick?.candidate.contract?.split).toMatchObject({ kind: 'charges', fineCents: 4000, interestCents: 667, days: 10 });
+    expect(pick?.candidate.series?.split).toMatchObject({ kind: 'charges', fineCents: 4000, interestCents: 667, days: 10 });
   });
   it('dois meses iguais: o do mesmo mês da linha primeiro', () => {
     const line = pay('2026-04-08', -200000);
@@ -215,12 +231,12 @@ describe('contractMatch e o desempate', () => {
   });
   it('parcial só quando nenhuma outra parcela do contrato casa', () => {
     const line = pay('2026-04-08', -100000);
-    expect(pickMatch(line, candidatesFor(line, [rent('2026-04-10')]))?.candidate.contract?.split.kind).toBe('partial');
+    expect(pickMatch(line, candidatesFor(line, [rent('2026-04-10')]))?.candidate.series?.split.kind).toBe('partial');
     const exactOther = rent('2026-03-28', { openCents: 100000 });
     expect(pickMatch(line, candidatesFor(line, [rent('2026-04-10'), exactOther]))?.candidate.id).toBe('t-2026-03-28');
   });
   it('baixa sem confirmação: único candidato, na conta prevista, sem parcial nem só tolerância', () => {
-    const auto = (over: Partial<ContractInstallmentRow>, amount = -200000) => {
+    const auto = (over: Partial<SeriesOccurrenceRow> & { autoSettle?: boolean }, amount = -200000) => {
       const line = pay('2026-04-10', amount);
       return pickMatch(line, candidatesFor(line, [rent('2026-04-10', { autoSettle: true, ...over })]))?.autoSettle ?? false;
     };
@@ -241,13 +257,52 @@ describe('contractMatch e o desempate', () => {
     const line = pay('2026-04-10', -200000);
     const generic: MatchCandidate = { kind: 'title', id: 't-2026-04-10', date: '2026-04-10', amountCents: -200000, description: 'x' };
     const pick = pickMatch(line, [generic, ...candidatesFor(line, [rent('2026-04-10', { autoSettle: true })])]);
-    expect(pick?.candidate.contract).toBeDefined();
+    expect(pick?.candidate.series).toBeDefined();
     expect(pick?.autoSettle).toBe(true);
   });
-  it('entre contratos, a conta prevista igual à da linha ganha', () => {
+  it('entre séries, a conta prevista igual à da linha ganha', () => {
     const line = pay('2026-04-10', -200000, 'PIX ENVIADO');
-    const a = rent('2026-04-10', { contractId: 'a', titleId: 'a', plannedAccountId: 'outra' });
-    const b = rent('2026-04-10', { contractId: 'b', titleId: 'b' });
+    const a = rent('2026-04-10', { ruleId: 'a', titleId: 'a', plannedAccountId: 'outra' });
+    const b = rent('2026-04-10', { ruleId: 'b', titleId: 'b' });
     expect(pickMatch(line, candidatesFor(line, [a, b]))?.candidate.id).toBe('b');
+  });
+});
+
+describe('cobrança esperada no cartão (spec 034)', () => {
+  const charge = (over: Partial<CardChargeOccurrence> = {}): CardChargeOccurrence => ({
+    ruleId: 'cc',
+    occurrence: 3,
+    dueDate: '2026-03-15',
+    amountCents: 5990,
+    description: 'Streaming',
+    entityName: 'Streamflix',
+    contractId: 'k',
+    contractName: 'Assinatura',
+    terms: terms({ toleranceCents: 100 }),
+    ...over,
+  });
+  const cardLine = (postedOn: string, amountCents: number) => ({ postedOn, amountCents, description: 'STREAMFLIX*ASSINATURA' });
+
+  it('valor exato ou na tolerância, no mês ou na janela; sem encargos e nunca parcial', () => {
+    expect(cardChargeMatch(cardLine('2026-03-16', -5990), charge())).toMatchObject({
+      kind: 'card_charge',
+      id: 'cc:3',
+      series: { occurrence: 3, split: { kind: 'exact', amountCents: 5990 } },
+    });
+    expect(cardChargeMatch(cardLine('2026-03-30', -6050), charge())?.series?.split).toMatchObject({ kind: 'tolerance', amountCents: 6050 });
+    // A multa da série não vale no cartão.
+    expect(cardChargeMatch(cardLine('2026-03-30', -6200), charge())).toBeNull();
+    expect(cardChargeMatch(cardLine('2026-03-16', -3000), charge())).toBeNull();
+    expect(cardChargeMatch(cardLine('2026-05-02', -5990), charge())).toBeNull();
+    // Estorno (crédito na fatura) não é cobrança.
+    expect(cardChargeMatch(cardLine('2026-03-16', 5990), charge())).toBeNull();
+  });
+  it('baixa sem confirmação só com o valor exato e a série ligada', () => {
+    const line = cardLine('2026-03-16', -5990);
+    const auto = (occ: CardChargeOccurrence, l = line) => pickMatch(l, [cardChargeMatch(l, occ)!])?.autoSettle ?? false;
+    expect(auto(charge({ terms: terms({ toleranceCents: 100, autoSettle: true }) }))).toBe(true);
+    expect(auto(charge())).toBe(false);
+    expect(auto(charge({ terms: terms({ toleranceCents: 100, autoSettle: true }) }), cardLine('2026-03-16', -6050))).toBe(false);
+    expect(pickMatch(line, [cardChargeMatch(line, charge())!])?.status).toBe('suggested');
   });
 });

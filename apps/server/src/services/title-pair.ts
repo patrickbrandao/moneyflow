@@ -18,7 +18,7 @@ export type TitleFields = {
   dueDate: string;
   amountCents: number;
   notes: string | null;
-  origin: 'manual' | 'recurrence' | 'card_invoice' | 'contract';
+  origin: 'manual' | 'recurrence' | 'card_invoice';
   recurrenceRuleId: string | null;
   occurrence: number | null;
   /** Entrada do título (spec 010): só no lado original, menos a NF-e, que vale para o par. */
@@ -27,13 +27,10 @@ export type TitleFields = {
   nfeDocumentId?: string | null;
   /** origin = card_invoice: a fatura, nos dois lados (spec 007). */
   cardInvoiceId?: string | null;
-  /** origin = contract (spec 020): contrato, ciclo e parcela n, nos dois lados (sem ciclo = título extra, como a multa). */
+  /** Contrato (spec 034): o da série (obrigação) ou o do avulso (multa), nos dois lados. */
   contractId?: string | null;
-  contractCycleId?: string | null;
-  contractInstallment?: number | null;
-  /** Conta prevista (spec 033), só no lado original (o espelho tem a dele). */
+  /** Conta prevista (specs 033 e 034), da caixa do título; só no lado original (o espelho tem a dele). */
   plannedAccountId?: string | null;
-  plannedTransitAccountId?: string | null;
 };
 
 export type MirrorPlan = {
@@ -82,8 +79,6 @@ export async function insertTitlePair(
       nfeDocumentId: fields.nfeDocumentId ?? null,
       cardInvoiceId: fields.cardInvoiceId ?? null,
       contractId: fields.contractId ?? null,
-      contractCycleId: fields.contractCycleId ?? null,
-      contractInstallment: fields.contractInstallment ?? null,
       counterpartyCaixaId: fields.caixaId,
       mirrorTitleId: id!,
       mirrorStatus: mirror.status,

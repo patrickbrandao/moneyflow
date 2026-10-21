@@ -141,7 +141,12 @@ export const statementsStrings = {
   filterAll: 'Todas',
   pair: 'Par no app',
   noPair: 'sem par',
-  targetKinds: { movement: 'Movimento', title: 'Título', card_item: 'Item de fatura' } as Record<string, string>,
+  targetKinds: {
+    movement: 'Movimento',
+    title: 'Título',
+    card_item: 'Item de fatura',
+    card_charge: 'Cobrança esperada (lança a compra)',
+  } as Record<string, string>,
   classification: 'Classificação',
   bySource: { rule: 'sugerido pela regra', agent: 'sugerido pelo agente', user: 'definido por você' } as Record<string, string>,
   selected: (n: number) => `${n} selecionada(s)`,
@@ -347,10 +352,10 @@ export const statementsStrings = {
     supersedesNote: (files: string) => `Substituiu o provisório ${files}.`,
     viewLine: 'Ver a linha no consolidado',
   },
-  /* Parcela de contrato na conciliação (spec 033). */
+  /* Ocorrência de série na conciliação (specs 033 e 034). */
   contractSplit: {
-    installment: (contract: string, n: number | null, total: number | null, month: string) =>
-      `${contract}${n && total ? ` · ${n}/${total}` : ''} · ${month}`,
+    installment: (label: string, n: number | null, total: number | null, month: string) =>
+      `${label}${n && total ? ` · ${n}/${total}` : ''} · ${month}`,
     principal: 'Principal',
     fine: 'Multa',
     interest: 'Juros',
@@ -363,9 +368,8 @@ export const statementsStrings = {
       partial: 'baixa parcial',
     } as Record<string, string>,
     days: (n: number) => (n === 0 ? 'no vencimento' : n > 0 ? `${n} dia(s) de atraso` : `${-n} dia(s) adiantado`),
-    otherCaixa: 'Conta de outra caixa: baixa na conta de passagem, com a transferência.',
     autoSettled: 'Baixada sem confirmação',
   },
-  autoSettledTitle: (n: number) => `${n} parcela(s) de contrato baixada(s) sem confirmação`,
+  autoSettledTitle: (n: number) => `${n} ocorrência(s) de série baixada(s) sem confirmação`,
   autoSettledBody: (account: string) => `Na importação do extrato de ${account}. Confira na conciliação; desfazer estorna a baixa.`,
 } as const;

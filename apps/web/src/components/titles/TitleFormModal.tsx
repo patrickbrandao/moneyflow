@@ -11,10 +11,12 @@ import {
 import { type FormEvent, useCallback, useRef, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAction } from '../../lib/hooks';
+import { PlannedAccountSelect, useCaixaAccounts } from '../contracts/PlannedAccount';
 import { type EntryPatch, EntrySources } from '../entry/EntrySources';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
 import { Button, Field, Modal } from '../ui';
 import { MirrorFields, mirrorPayload, useMirrorChoice } from './MirrorFields';
+import { SeriesTermsFields, termsDraft, termsFromDraft } from './SeriesTermsFields';
 
 type Direction = 'payable' | 'receivable';
 type SeriesKind = 'none' | 'installments' | 'recurrence';
@@ -59,6 +61,12 @@ export function TitleFormModal({
   const [frequency, setFrequency] = useState<Frequency>('monthly');
   const [intervalCount, setIntervalCount] = useState(1);
   const [endsOn, setEndsOn] = useState('');
+  // Conta prevista (spec 034): conta da caixa do título, cofre inclusive; na série, vai para cada ocorrência.
+  const accounts = useCaixaAccounts(caixaId);
+  const [plannedAccountId, setPlannedAccountId] = useState<string | null>(title?.plannedAccountId ?? null);
+  const plannedEditable = !title || title.status === 'open' || title.status === 'partial';
+  // Ajustes de reconhecimento do pagamento da série (só na criação; depois, em "Editar série").
+  const [terms, setTerms] = useState(termsDraft());
 
   const mirror = useMirrorChoice(entity?.id ?? null, caixaId, !editing);
   const [error, setError] = useState<string | null>(null);
@@ -118,6 +126,7 @@ export function TitleFormModal({
         notes,
         scope,
         ...(title.mirrorTitleId ? {} : { entityId: entity.id }),
+        ...(plannedEditable && plannedAccountId !== title.plannedAccountId ? { plannedAccountId } : {}),
       };
       const saved = await run(() => api.patch<TitleDetail>(`/api/titles/${title.id}`, body), 'Título atualizado.');
       if (saved) onSaved(saved);
@@ -139,6 +148,8 @@ export function TitleFormModal({
       notes,
       ...mirrorPayload(mirror),
       series,
+      plannedAccountId,
+      seriesTerms: series ? termsFromDraft(terms) : null,
       boletoBarcode,
       pixPayload,
       nfeDocumentId,
@@ -277,6 +288,17 @@ export function TitleFormModal({
                 )}
               </div>
             )}
+
+            {!invoiceLocked && plannedEditable && (
+              <PlannedAccountSelect
+                caixaId={caixaId}
+                accounts={accounts.data ?? []}
+                accountId={plannedAccountId}
+                onChange={setPlannedAccountId}
+                className="span-all"
+              />
+            )}
+            {!editing && seriesKind !== 'none' && <SeriesTermsFields value={terms} onChange={setTerms} />}
 
             {editing && title?.recurrenceRuleId && (
               <Field label="Aplicar a" className="span-all">

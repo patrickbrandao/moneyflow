@@ -3,45 +3,42 @@ import {
   type AmendmentPreview,
   addDays,
   addMonths,
-  amendInstallments,
-  type ContractCycleBrief,
+  type CardChargeStatus,
   type ContractCycleDto,
   type ContractDetail,
-  type ContractInstallmentDto,
   type ContractPaymentRow,
   type ContractPaymentsDto,
   type ContractPaymentsSummary,
   type ContractPeriodicity,
   type ContractRow,
   type ContractStatus,
-  type ContractTotals,
+  type ContractTitleDto,
   type contractAmendmentInput,
   type contractCreateInput,
-  type contractDeclineInput,
   type contractListQuery,
   type contractRenewalInput,
   type contractTerminationInput,
   type contractUpdateInput,
   cycleEnd,
-  cycleSchedule,
   type DeleteResult,
-  formatBRL,
-  formatMonth,
-  installmentDescription,
-  installmentsCount,
+  diffDays,
   noticeDeadline,
+  type ObligationNext,
+  type obligationInput,
+  occurrencePeriodEnd,
   type PaymentOrigin,
   proratedAmount,
   type ReadjustmentIndex,
   type RecurringPanelDto,
   type RenewalPreview,
   readjustmentDateIn,
-  renewalOpensOn,
+  type SeriesChangeRow,
+  type SeriesChangeSkipped,
   type TerminationPreview,
   type TitleStatus,
   t,
+  termMonths,
   todayIso,
-  toleranceCap,
 } from '@moneyflow/shared';
 import { type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
@@ -49,21 +46,32 @@ import type { ServiceContext } from '../context';
 import { notFound, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
 import { listContractDocuments } from './contract-documents';
-import { PLANNED_JOINS, PLANNED_SELECT, plannedOf } from './planned-account';
+import { assertPlannedAccount } from './planned-account';
+import { MATERIALIZE_LOCK } from './recurrence';
 import { uuidArray } from './reports';
+import {
+  closedMonths,
+  insertObligation,
+  loadRule,
+  patchOccurrence,
+  planSeriesChange,
+  type SeriesOwner,
+  seriesWhere,
+  setSeriesContract,
+} from './series';
 import { insertTitlePair, type MirrorPlan, opposite } from './title-pair';
-import { defaultMirrorCategory } from './titles';
+import { applySeriesEnd, defaultMirrorCategory, seriesEndPlanOf } from './titles';
 import { deleteOrArchive, withTx } from './tx';
 import { camel, iso } from './util';
 
 /*
- * Contratos (spec 020). O contrato vive numa caixa (a permissão é a dela) e
- * gera, ao ativar ou renovar, todas as parcelas do ciclo como títulos normais
- * (origin = contract, ciclo e parcela n/N), espelhados como qualquer título.
- * Vigente, valor, vencimento e categoria só mudam por aditivo; prazo e
- * periodicidade, na renovação. Toda escrita passa por withTx (auditoria).
- * Quem lê a caixa da contraparte vê o contrato pela parcela espelhada
- * (somente leitura).
+ * Contratos (specs 020 e 034). O contrato é o documento e o vínculo: caixa,
+ * contraparte, direção, vigência, documentos, avisos e as obrigações — séries
+ * recorrentes comuns (recurrence_rules.contract_id), cada uma na conta (ou no
+ * cartão) onde o dinheiro de fato se move. O pagamento é sempre um fato: a
+ * movimentação na conta ou a compra na fatura. Aditivo, renovação e rescisão
+ * são operações das séries. Toda escrita passa por withTx (auditoria). Quem lê
+ * a caixa da contraparte vê o contrato pelo título espelhado (somente leitura).
  */
 
 type Direction = 'payable' | 'receivable';
@@ -79,10 +87,10 @@ export type ContractRecord = {
   categoryId: string;
   counterpartyCaixaId: string | null;
   status: ContractStatus;
+  startsOn: string;
+  endsOn: string | null;
   autoRenew: boolean;
   noticeDays: number;
-  renewalLeadDays: number;
-  reminderEveryDays: number;
   readjustmentIndex: ReadjustmentIndex;
   readjustmentBaseDate: string | null;
   terminationPenaltyText: string | null;
@@ -92,47 +100,20 @@ export type ContractRecord = {
   notes: string | null;
   archivedAt: string | null;
   createdAt: string;
-  /** Spec 033: conta das parcelas, passagem, encargos e conciliação. */
-  paymentAccountId: string | null;
-  transitAccountId: string | null;
-  lateFeePercent: number | null;
-  interestMonthPercent: number | null;
-  earlyDiscountPercent: number | null;
-  toleranceCents: number;
-  matchWindowDays: number;
-  autoSettle: boolean;
 };
 
-export type CycleRecord = ContractCycleBrief & { contractId: string };
-
 const CONTRACT_COLUMNS = sql`c.id, c.caixa_id, c.entity_id, c.direction, c.name, c.contract_number, c.category_id, c.counterparty_caixa_id,
-  c.status, c.auto_renew, c.notice_days, c.renewal_lead_days, c.reminder_every_days, c.readjustment_index, c.readjustment_base_date,
-  c.termination_penalty_text, c.termination_penalty_cents, c.terminated_on, c.termination_notes, c.notes, c.archived_at, c.created_at,
-  c.payment_account_id, c.transit_account_id, c.late_fee_percent, c.interest_month_percent, c.early_discount_percent, c.tolerance_cents,
-  c.match_window_days, c.auto_settle`;
-
-const numOrNull = (v: unknown) => (v === null || v === undefined ? null : Number(v));
-
-const CYCLE_COLUMNS = sql`y.id, y.contract_id, y.seq, y.starts_on, y.ends_on, y.duration_months, y.periodicity, y.installments_count,
-  y.total_cents, y.due_day, y.due_month_offset, y.readjustment_percent`;
+  c.status, c.starts_on, c.ends_on, c.auto_renew, c.notice_days, c.readjustment_index, c.readjustment_base_date,
+  c.termination_penalty_text, c.termination_penalty_cents, c.terminated_on, c.termination_notes, c.notes, c.archived_at, c.created_at`;
 
 function toContract(row: Record<string, unknown>): ContractRecord {
   const r = camel<ContractRecord>(row);
   return {
     ...r,
+    terminationPenaltyCents: r.terminationPenaltyCents === null ? null : Number(r.terminationPenaltyCents),
     archivedAt: iso(r.archivedAt),
     createdAt: iso(r.createdAt)!,
-    lateFeePercent: numOrNull(r.lateFeePercent),
-    interestMonthPercent: numOrNull(r.interestMonthPercent),
-    earlyDiscountPercent: numOrNull(r.earlyDiscountPercent),
-    toleranceCents: Number(r.toleranceCents),
-    matchWindowDays: Number(r.matchWindowDays),
   };
-}
-
-function toCycle(row: Record<string, unknown>): CycleRecord {
-  const r = camel<CycleRecord>(row);
-  return { ...r, readjustmentPercent: r.readjustmentPercent === null ? null : Number(r.readjustmentPercent) };
 }
 
 export async function loadContract(db: Executor, id: string, lock = false): Promise<ContractRecord> {
@@ -142,27 +123,13 @@ export async function loadContract(db: Executor, id: string, lock = false): Prom
   return toContract(row);
 }
 
-export async function loadCycles(db: Executor, contractId: string): Promise<CycleRecord[]> {
-  const result = await db.execute(sql`SELECT ${CYCLE_COLUMNS} FROM contract_cycles y WHERE y.contract_id = ${contractId} ORDER BY y.seq`);
-  return result.rows.map(toCycle);
-}
-
-const termsOf = (cycle: Pick<CycleRecord, 'startsOn' | 'durationMonths' | 'periodicity' | 'totalCents' | 'dueDay' | 'dueMonthOffset'>) => ({
-  startsOn: cycle.startsOn,
-  durationMonths: cycle.durationMonths,
-  periodicity: cycle.periodicity,
-  totalCents: cycle.totalCents,
-  dueDay: cycle.dueDay,
-  dueMonthOffset: cycle.dueMonthOffset,
-});
-
 const monthStart = (date: string) => `${date.slice(0, 7)}-01`;
 
 /* ---------------- acesso ---------------- */
 
 /**
  * Leitura: quem lê a caixa do contrato, ou quem lê a caixa da contraparte
- * onde há parcela espelhada (somente leitura).
+ * onde há título espelhado (somente leitura).
  */
 export async function contractReadMode(ctx: ServiceContext, contract: ContractRecord): Promise<'owner' | 'mirror'> {
   if (ctx.access.canRead(contract.caixaId)) return 'owner';
@@ -175,38 +142,48 @@ export async function contractReadMode(ctx: ServiceContext, contract: ContractRe
   throw notFound();
 }
 
+/** O contrato como dono de uma obrigação nova ou ligada: vigente (ou encerrado), com escrita na caixa dele. */
+export async function contractOwner(ctx: ServiceContext, tx: Executor, contractId: string): Promise<SeriesOwner> {
+  const contract = await loadContract(tx, contractId, true);
+  ctx.access.assertWrite(contract.caixaId);
+  if (contract.status === 'draft') throw unprocessable(E.obligationDraft, 'contracts_draft_titles_check');
+  if (contract.status === 'terminated') throw unprocessable(E.obligationEnded, 'contract_terminated');
+  return {
+    contractId: contract.id,
+    direction: contract.direction,
+    entityId: contract.entityId,
+    categoryId: contract.categoryId,
+    mirrorCaixaId: contract.counterpartyCaixaId,
+    endsOn: contract.endsOn,
+  };
+}
+
 /* ---------------- leitura ---------------- */
 
-const listSelect = (today: string) => sql`
+const listSelect = sql`
   c.id, c.caixa_id, k.name AS caixa_name, c.entity_id, e.name AS entity_name, c.direction, c.name, c.contract_number,
   c.category_id, cat.name AS category_name, coalesce(cat.color_slot, pc.color_slot) AS category_color_slot, c.status, c.auto_renew,
-  c.terminated_on, c.archived_at,
-  cur.id AS cur_id, cur.seq AS cur_seq, cur.starts_on AS cur_starts_on, cur.ends_on AS cur_ends_on, cur.duration_months AS cur_duration_months,
-  cur.periodicity AS cur_periodicity, cur.installments_count AS cur_installments_count, cur.total_cents AS cur_total_cents,
-  cur.due_day AS cur_due_day, cur.due_month_offset AS cur_due_month_offset, cur.readjustment_percent AS cur_readjustment_percent,
-  nx.id AS next_title_id, nx.due_date AS next_due_date, nx.open_cents AS next_open_cents, nx.contract_installment AS next_installment,
-  nx.installments_count AS next_total,
-  task.id AS task_id, task.due_on AS task_due_on, (task.due_on < ${today}::date) AS task_overdue`;
+  c.starts_on, c.ends_on, c.terminated_on, c.archived_at,
+  (SELECT count(*)::int FROM recurrence_rules r WHERE r.contract_id = c.id) AS obligation_count,
+  nx.id AS next_title_id, nx.due_date AS next_due_date, nx.open_cents AS next_open_cents, nx.recurrence_rule_id AS next_rule_id,
+  nx.occurrence AS next_occurrence, nx.description AS next_description,
+  (SELECT count(*)::int FROM titles w
+    WHERE w.contract_id = c.id AND w.recurrence_rule_id IS NOT NULL AND w.mirror_status IS NULL AND w.archived_at IS NULL
+      AND w.status IN ('open', 'partial') AND w.planned_account_id IS NULL) AS without_account`;
 
-const listFrom = (today: string) => sql`
+const listFrom = sql`
   FROM contracts c
   JOIN caixas k ON k.id = c.caixa_id
   JOIN entities e ON e.id = c.entity_id
   JOIN categories cat ON cat.id = c.category_id
   LEFT JOIN categories pc ON pc.id = cat.parent_id
   LEFT JOIN LATERAL (
-    SELECT y.* FROM contract_cycles y WHERE y.contract_id = c.id
-     ORDER BY CASE WHEN y.starts_on <= ${today}::date THEN y.seq ELSE -y.seq END DESC LIMIT 1) cur ON true
-  LEFT JOIN LATERAL (
-    SELECT y.ends_on FROM contract_cycles y WHERE y.contract_id = c.id ORDER BY y.seq DESC LIMIT 1) last ON true
-  LEFT JOIN LATERAL (
-    SELECT x.id, x.due_date, b.open_cents, x.contract_installment, yc.installments_count
-      FROM titles x JOIN title_balances b ON b.title_id = x.id JOIN contract_cycles yc ON yc.id = x.contract_cycle_id
-     WHERE x.contract_id = c.id AND x.caixa_id = c.caixa_id AND x.archived_at IS NULL AND b.open_cents > 0
-     ORDER BY x.due_date, x.contract_installment LIMIT 1) nx ON true
-  LEFT JOIN contract_renewal_tasks task ON task.contract_id = c.id AND task.status = 'open'`;
+    SELECT x.id, x.due_date, b.open_cents, x.recurrence_rule_id, x.occurrence, x.description
+      FROM titles x JOIN title_balances b ON b.title_id = x.id
+     WHERE x.contract_id = c.id AND x.mirror_status IS NULL AND x.archived_at IS NULL AND b.open_cents > 0 AND x.status <> 'canceled'
+     ORDER BY x.due_date, x.occurrence LIMIT 1) nx ON true`;
 
-/** Contratos visíveis: da caixa legível, ou com parcela espelhada numa caixa legível. */
+/** Contratos visíveis: da caixa legível, ou com título espelhado numa caixa legível. */
 function visibleFilter(ctx: ServiceContext): SQL {
   return sql`(${readableFilter(ctx.access, sql`c.caixa_id`)} OR (c.counterparty_caixa_id IS NOT NULL
     AND ${readableFilter(ctx.access, sql`c.counterparty_caixa_id`)}
@@ -215,19 +192,14 @@ function visibleFilter(ctx: ServiceContext): SQL {
 
 function toRow(ctx: ServiceContext, raw: Record<string, unknown>): ContractRow {
   const r = camel<Record<string, unknown>>(raw);
-  const cycle: ContractCycleBrief | null = r.curId
+  const next: ObligationNext | null = r.nextTitleId
     ? {
-        id: String(r.curId),
-        seq: Number(r.curSeq),
-        startsOn: String(r.curStartsOn),
-        endsOn: String(r.curEndsOn),
-        durationMonths: Number(r.curDurationMonths),
-        periodicity: r.curPeriodicity as ContractPeriodicity,
-        installmentsCount: Number(r.curInstallmentsCount),
-        totalCents: Number(r.curTotalCents),
-        dueDay: Number(r.curDueDay),
-        dueMonthOffset: Number(r.curDueMonthOffset),
-        readjustmentPercent: r.curReadjustmentPercent === null ? null : Number(r.curReadjustmentPercent),
+        ruleId: String(r.nextRuleId ?? ''),
+        occurrence: Number(r.nextOccurrence ?? 0),
+        dueDate: String(r.nextDueDate),
+        amountCents: Number(r.nextOpenCents),
+        titleId: String(r.nextTitleId),
+        description: String(r.nextDescription),
       }
     : null;
   return {
@@ -244,17 +216,11 @@ function toRow(ctx: ServiceContext, raw: Record<string, unknown>): ContractRow {
     categoryColorSlot: r.categoryColorSlot === null ? null : Number(r.categoryColorSlot),
     status: r.status as ContractStatus,
     autoRenew: Boolean(r.autoRenew),
-    currentCycle: cycle,
-    nextInstallment: r.nextTitleId
-      ? {
-          titleId: String(r.nextTitleId),
-          dueDate: String(r.nextDueDate),
-          amountCents: Number(r.nextOpenCents),
-          installment: Number(r.nextInstallment),
-          total: Number(r.nextTotal),
-        }
-      : null,
-    openTask: r.taskId ? { id: String(r.taskId), dueOn: String(r.taskDueOn), overdue: Boolean(r.taskOverdue) } : null,
+    startsOn: String(r.startsOn),
+    endsOn: (r.endsOn as string | null) ?? null,
+    obligationCount: Number(r.obligationCount),
+    nextOccurrence: next,
+    withoutAccount: Number(r.withoutAccount),
     terminatedOn: (r.terminatedOn as string | null) ?? null,
     archivedAt: iso(r.archivedAt),
     canWrite: ctx.access.canWrite(String(r.caixaId)),
@@ -268,72 +234,55 @@ export async function listContracts(ctx: ServiceContext, query: z.output<typeof 
   if (query.caixaId) where.push(sql`c.caixa_id = ${query.caixaId}`);
   if (query.entityId) where.push(sql`c.entity_id = ${query.entityId}`);
   if (query.direction) where.push(sql`c.direction = ${query.direction}`);
-  if (query.status === 'current') where.push(sql`c.status IN ('active', 'renewal_pending')`);
+  if (query.status === 'current') where.push(sql`c.status = 'active'`);
   else if (query.status) where.push(sql`c.status = ${query.status}`);
   if (query.withinDays !== undefined) {
     const until = addDays(today, query.withinDays);
-    where.push(sql`c.status IN ('active', 'renewal_pending') AND (last.ends_on BETWEEN ${today}::date AND ${until}::date
-      OR (task.id IS NOT NULL AND task.due_on <= ${until}::date))`);
+    where.push(sql`c.status = 'active' AND c.ends_on BETWEEN ${today}::date AND ${until}::date`);
   }
   if (query.q)
     where.push(sql`(c.name ILIKE ${`%${query.q}%`} OR c.contract_number ILIKE ${`%${query.q}%`} OR e.name ILIKE ${`%${query.q}%`})`);
   where.push(query.archived ? sql`c.archived_at IS NOT NULL` : sql`c.archived_at IS NULL`);
   const result = await ctx.db.execute(sql`
-    SELECT ${listSelect(today)} ${listFrom(today)}
+    SELECT ${listSelect} ${listFrom}
      WHERE ${sql.join(where, sql` AND `)}
-     ORDER BY CASE c.status WHEN 'renewal_pending' THEN 0 WHEN 'active' THEN 1 WHEN 'draft' THEN 2 ELSE 3 END, c.name, c.id
+     ORDER BY CASE c.status WHEN 'active' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END, c.name, c.id
      LIMIT ${query.limit}`);
   return result.rows.map((row) => toRow(ctx, row));
 }
 
 async function contractRow(ctx: ServiceContext, id: string): Promise<ContractRow> {
-  const today = todayIso();
-  const result = await ctx.db.execute(sql`SELECT ${listSelect(today)} ${listFrom(today)} WHERE c.id = ${id}`);
+  const result = await ctx.db.execute(sql`SELECT ${listSelect} ${listFrom} WHERE c.id = ${id}`);
   const raw = result.rows[0];
   if (!raw) throw notFound();
   return toRow(ctx, raw);
 }
 
-const INSTALLMENT_SELECT = (today: string) => sql`
-  x.id AS title_id, x.caixa_id, x.direction, x.contract_cycle_id, x.contract_installment AS installment, x.description,
-  x.competence_date, x.due_date, x.amount_cents, b.settled_cents, b.open_cents, x.status,
-  (b.open_cents > 0 AND x.due_date < ${today}::date) AS overdue, (x.archived_at IS NOT NULL) AS archived,
-  ${PLANNED_SELECT}`;
-
-function toInstallment(row: Record<string, unknown>): ContractInstallmentDto & { contractCycleId: string | null } {
-  const r = camel<Record<string, unknown>>(row);
+function toCycle(raw: Record<string, unknown>): ContractCycleDto {
+  const r = camel<Record<string, unknown>>(raw);
   return {
-    titleId: String(r.titleId),
-    caixaId: String(r.caixaId),
-    direction: r.direction as Direction,
-    contractCycleId: (r.contractCycleId as string | null) ?? null,
-    installment: r.installment === null ? null : Number(r.installment),
-    description: String(r.description),
-    competenceDate: String(r.competenceDate),
-    dueDate: String(r.dueDate),
-    amountCents: Number(r.amountCents),
-    settledCents: Number(r.settledCents),
-    openCents: Number(r.openCents),
-    status: r.status as TitleStatus,
-    overdue: Boolean(r.overdue),
-    archived: Boolean(r.archived),
-    ...plannedOf(r),
+    id: String(r.id),
+    seq: Number(r.seq),
+    startsOn: String(r.startsOn),
+    endsOn: (r.endsOn as string | null) ?? null,
+    legacy:
+      r.durationMonths === null
+        ? null
+        : {
+            periodicity: r.periodicity as ContractPeriodicity,
+            durationMonths: Number(r.durationMonths),
+            installmentsCount: Number(r.installmentsCount),
+            totalCents: Number(r.totalCents),
+            dueDay: Number(r.dueDay),
+          },
   };
 }
 
-function totalsOf(rows: ContractInstallmentDto[]): ContractTotals {
-  const totals: ContractTotals = { contractedCents: 0, settledCents: 0, openCents: 0, overdueCents: 0, canceledCents: 0 };
-  for (const row of rows) {
-    if (row.status === 'canceled') {
-      totals.canceledCents += row.amountCents;
-      continue;
-    }
-    totals.contractedCents += row.amountCents;
-    totals.settledCents += row.settledCents;
-    totals.openCents += row.openCents;
-    if (row.overdue) totals.overdueCents += row.openCents;
-  }
-  return totals;
+async function loadCycles(db: Executor, contractId: string): Promise<ContractCycleDto[]> {
+  const result = await db.execute(sql`
+    SELECT y.id, y.seq, y.starts_on, y.ends_on, y.duration_months, y.periodicity, y.installments_count, y.total_cents, y.due_day
+      FROM contract_cycles y WHERE y.contract_id = ${contractId} ORDER BY y.seq`);
+  return result.rows.map(toCycle);
 }
 
 export async function getContract(ctx: ServiceContext, id: string): Promise<ContractDetail> {
@@ -341,89 +290,68 @@ export async function getContract(ctx: ServiceContext, id: string): Promise<Cont
   const mode = await contractReadMode(ctx, contract);
   const today = todayIso();
   const row = await contractRow(ctx, id);
-  const cycles = await loadCycles(ctx.db, id);
   // Lado visto: a caixa do contrato, ou (pelo espelho) a caixa da contraparte.
-  const sideCaixaId = mode === 'owner' ? contract.caixaId : contract.counterpartyCaixaId!;
-  const installments = (
-    await ctx.db.execute(sql`
-      SELECT ${INSTALLMENT_SELECT(today)} FROM titles x JOIN title_balances b ON b.title_id = x.id ${PLANNED_JOINS}
-       WHERE x.contract_id = ${id} AND x.caixa_id = ${sideCaixaId}
-       ORDER BY x.competence_date, x.contract_installment NULLS LAST, x.created_at`)
-  ).rows.map(toInstallment);
-
-  const [counterparty, amendments, tasks, documents, accounts] = await Promise.all([
+  const extraSide = mode === 'owner' ? sql`x.mirror_status IS NULL` : sql`x.caixa_id = ${contract.counterpartyCaixaId}`;
+  const [counterparty, amendments, tasks, documents, extras, cycles, obligations] = await Promise.all([
     contract.counterpartyCaixaId
       ? ctx.db.execute<{ name: string }>(sql`SELECT name FROM caixas WHERE id = ${contract.counterpartyCaixaId}`)
       : Promise.resolve(null),
     ctx.db.execute(sql`
-      SELECT a.id, y.seq AS cycle_seq, a.effective_on, a.document_id, d.title AS document_title, a.changes,
+      SELECT a.id, y.seq AS cycle_seq, a.effective_on, a.document_id, d.title AS document_title, a.changes, a.recurrence_rule_ids,
              coalesce(cardinality(a.affected_title_ids), 0) AS affected_count, coalesce(cardinality(a.skipped_title_ids), 0) AS skipped_count,
              a.notes, a.created_at, u.username AS created_by_name
         FROM contract_amendments a
-        JOIN contract_cycles y ON y.id = a.contract_cycle_id
+        LEFT JOIN contract_cycles y ON y.id = a.contract_cycle_id
         LEFT JOIN contract_documents d ON d.id = a.document_id
         LEFT JOIN users u ON u.id = a.created_by
        WHERE a.contract_id = ${id}
        ORDER BY a.effective_on DESC, a.created_at DESC`),
     ctx.db.execute(sql`
-      SELECT k.id, k.contract_cycle_id AS cycle_id, y.seq AS cycle_seq, k.status, k.opened_on, k.due_on,
-             (k.status = 'open' AND k.due_on < ${today}::date) AS overdue, k.decided_at, u.username AS decided_by_name,
-             k.decision_notes, k.new_cycle_id
+      SELECT k.id, y.seq AS cycle_seq, k.status, k.opened_on, k.due_on, k.decided_at, u.username AS decided_by_name, k.decision_notes
         FROM contract_renewal_tasks k
         JOIN contract_cycles y ON y.id = k.contract_cycle_id
         LEFT JOIN users u ON u.id = k.decided_by
        WHERE k.contract_id = ${id}
        ORDER BY y.seq DESC`),
     listContractDocuments(ctx.db, id),
-    ctx.db.execute<{
-      payment_name: string | null;
-      payment_caixa_id: string | null;
-      payment_caixa_name: string | null;
-      transit_name: string | null;
-      following: number;
-    }>(sql`
-      SELECT pa.name AS payment_name, pa.caixa_id AS payment_caixa_id, pk.name AS payment_caixa_name, ta.name AS transit_name,
-             (SELECT count(*)::int FROM titles x
-               WHERE x.contract_id = c.id AND x.caixa_id = c.caixa_id AND x.contract_cycle_id IS NOT NULL
-                 AND x.status IN ('open', 'partial') AND NOT x.planned_account_custom) AS following
-        FROM contracts c
-        LEFT JOIN financial_accounts pa ON pa.id = c.payment_account_id
-        LEFT JOIN caixas pk ON pk.id = pa.caixa_id
-        LEFT JOIN financial_accounts ta ON ta.id = c.transit_account_id
-       WHERE c.id = ${id}`),
+    ctx.db.execute(sql`
+      SELECT x.id AS title_id, x.caixa_id, x.direction, x.description, x.competence_date, x.due_date, x.amount_cents, b.settled_cents,
+             b.open_cents, x.status, (b.open_cents > 0 AND x.due_date < ${today}::date AND x.status <> 'canceled') AS overdue,
+             (x.archived_at IS NOT NULL) AS archived
+        FROM titles x JOIN title_balances b ON b.title_id = x.id
+       WHERE x.contract_id = ${id} AND x.recurrence_rule_id IS NULL AND ${extraSide}
+       ORDER BY x.due_date, x.created_at`),
+    loadCycles(ctx.db, id),
+    mode === 'owner' ? seriesWhere(ctx, ctx.db, sql`r.contract_id = ${id}`) : Promise.resolve([]),
   ]);
-  const acc = accounts.rows[0];
 
-  // Aditivos que trocaram a categoria: o nome entra junto do id, para a tela.
-  const categoryIds = amendments.rows.flatMap((raw) => {
+  // Aditivos que trocaram a categoria ou a conta: o nome entra junto do id, para a tela.
+  const refIds = amendments.rows.flatMap((raw) => {
     const changes = raw.changes as { before: Record<string, unknown>; after: Record<string, unknown> };
-    return [changes.before.categoryId, changes.after.categoryId].filter((v): v is string => typeof v === 'string');
+    return [changes.before, changes.after].flatMap((side) =>
+      [side.categoryId, side.accountId].filter((v): v is string => typeof v === 'string'),
+    );
   });
-  const categoryNames = new Map(
-    categoryIds.length
+  const names = new Map(
+    refIds.length
       ? (
-          await ctx.db.execute<{ id: string; name: string }>(
-            sql`SELECT id, name FROM categories WHERE id = ANY (${uuidArray(categoryIds)})`,
-          )
+          await ctx.db.execute<{ id: string; name: string }>(sql`
+            SELECT id, name FROM categories WHERE id = ANY (${uuidArray(refIds)})
+            UNION ALL SELECT id, name FROM financial_accounts WHERE id = ANY (${uuidArray(refIds)})`)
         ).rows.map((r) => [r.id, r.name] as const)
       : [],
   );
-  const named = (side: Record<string, unknown>) =>
-    typeof side.categoryId === 'string' ? { ...side, categoryName: categoryNames.get(side.categoryId) ?? null } : side;
+  const named = (side: Record<string, unknown>) => ({
+    ...side,
+    ...(typeof side.categoryId === 'string' ? { categoryName: names.get(side.categoryId) ?? null } : {}),
+    ...(typeof side.accountId === 'string' ? { accountName: names.get(side.accountId) ?? null } : {}),
+  });
 
-  const latest = cycles.at(-1) ?? null;
-  const cycleDtos: ContractCycleDto[] = cycles
-    .map((cycle) => {
-      const rows = installments.filter((i) => i.contractCycleId === cycle.id);
-      const { contractId: _c, ...brief } = cycle;
-      return { ...brief, installments: rows.map(({ contractCycleId: _y, ...i }) => i), totals: totalsOf(rows) };
-    })
-    .reverse();
   const nextReadjustment =
-    contract.readjustmentIndex === 'none' || !cycles[0]
+    contract.readjustmentIndex === 'none'
       ? null
       : ([Number(today.slice(0, 4)), Number(today.slice(0, 4)) + 1]
-          .map((year) => readjustmentDateIn(year, cycles[0]!.startsOn, contract.readjustmentBaseDate))
+          .map((year) => readjustmentDateIn(year, contract.startsOn, contract.readjustmentBaseDate))
           .find((date) => date !== null && date >= today) ?? null);
 
   return {
@@ -432,43 +360,45 @@ export async function getContract(ctx: ServiceContext, id: string): Promise<Cont
     counterpartyCaixaName: counterparty?.rows[0]?.name ?? null,
     notes: contract.notes,
     noticeDays: contract.noticeDays,
-    renewalLeadDays: contract.renewalLeadDays,
-    reminderEveryDays: contract.reminderEveryDays,
     readjustmentIndex: contract.readjustmentIndex,
     readjustmentBaseDate: contract.readjustmentBaseDate,
     terminationPenaltyText: contract.terminationPenaltyText,
     terminationPenaltyCents: contract.terminationPenaltyCents,
     terminationNotes: contract.terminationNotes,
-    paymentAccountId: contract.paymentAccountId,
-    paymentAccountName: acc?.payment_name ?? null,
-    paymentAccountCaixaId: acc?.payment_caixa_id ?? null,
-    paymentAccountCaixaName: acc?.payment_caixa_name ?? null,
-    transitAccountId: contract.transitAccountId,
-    transitAccountName: acc?.transit_name ?? null,
-    lateFeePercent: contract.lateFeePercent,
-    interestMonthPercent: contract.interestMonthPercent,
-    earlyDiscountPercent: contract.earlyDiscountPercent,
-    toleranceCents: contract.toleranceCents,
-    matchWindowDays: contract.matchWindowDays,
-    autoSettle: contract.autoSettle,
-    followingOpenInstallments: Number(acc?.following ?? 0),
     createdAt: contract.createdAt,
-    noticeDeadline:
-      latest && ['active', 'renewal_pending'].includes(contract.status) ? noticeDeadline(latest.endsOn, contract.noticeDays) : null,
+    noticeDeadline: contract.endsOn && contract.status === 'active' ? noticeDeadline(contract.endsOn, contract.noticeDays) : null,
     nextReadjustment,
     viaMirror: mode === 'mirror',
     canWrite: mode === 'owner' && ctx.access.canWrite(contract.caixaId),
-    cycles: cycleDtos,
-    extraTitles: installments.filter((i) => i.contractCycleId === null).map(({ contractCycleId: _y, ...i }) => i),
+    obligations,
+    extraTitles: extras.rows.map((raw) => {
+      const r = camel<Record<string, unknown>>(raw);
+      return {
+        titleId: String(r.titleId),
+        caixaId: String(r.caixaId),
+        direction: r.direction as Direction,
+        description: String(r.description),
+        competenceDate: String(r.competenceDate),
+        dueDate: String(r.dueDate),
+        amountCents: Number(r.amountCents),
+        settledCents: Number(r.settledCents),
+        openCents: Number(r.openCents),
+        status: r.status as TitleStatus,
+        overdue: Boolean(r.overdue),
+        archived: Boolean(r.archived),
+      } satisfies ContractTitleDto;
+    }),
+    cycles: [...cycles].reverse(),
     documents,
     amendments: amendments.rows.map((raw) => {
       const r = camel<Record<string, unknown>>(raw);
       return {
         id: String(r.id),
-        cycleSeq: Number(r.cycleSeq),
+        cycleSeq: r.cycleSeq === null ? null : Number(r.cycleSeq),
         effectiveOn: String(r.effectiveOn),
         documentId: (r.documentId as string | null) ?? null,
         documentTitle: (r.documentTitle as string | null) ?? null,
+        ruleIds: (r.recurrenceRuleIds as string[] | null) ?? [],
         changes: (({ before, after }) => ({ before: named(before), after: named(after) }))(
           r.changes as { before: Record<string, unknown>; after: Record<string, unknown> },
         ),
@@ -483,16 +413,13 @@ export async function getContract(ctx: ServiceContext, id: string): Promise<Cont
       const r = camel<Record<string, unknown>>(raw);
       return {
         id: String(r.id),
-        cycleId: String(r.cycleId),
         cycleSeq: Number(r.cycleSeq),
-        status: r.status as 'open' | 'approved' | 'declined',
+        status: r.status as 'approved' | 'declined' | 'closed',
         openedOn: String(r.openedOn),
         dueOn: String(r.dueOn),
-        overdue: Boolean(r.overdue),
         decidedAt: iso(r.decidedAt),
         decidedByName: (r.decidedByName as string | null) ?? null,
         decisionNotes: (r.decisionNotes as string | null) ?? null,
-        newCycleId: (r.newCycleId as string | null) ?? null,
       };
     }),
   };
@@ -515,36 +442,6 @@ async function assertCategory(tx: Executor, categoryId: string, direction: Direc
   const kind = result.rows[0]?.kind;
   if (!kind) throw notFound();
   if (kind !== (direction === 'payable' ? 'expense' : 'income')) throw unprocessable(E.categoryKind, 'contract_category_kind');
-}
-
-/**
- * Conta das parcelas e a de passagem (spec 033). A conta pode ser de outra
- * caixa em que o usuário escreve; aí a de passagem (da caixa do contrato) é
- * obrigatória; na mesma caixa, a passagem sai. Tipo e caixa da passagem o
- * banco confere (contracts_payment_account_check/contracts_transit_account_check).
- */
-export async function resolvePaymentAccounts(
-  ctx: ServiceContext,
-  tx: Executor,
-  caixaId: string,
-  paymentAccountId: string | null,
-  transitAccountId: string | null,
-): Promise<{ paymentAccountId: string | null; transitAccountId: string | null }> {
-  if (!paymentAccountId) return { paymentAccountId: null, transitAccountId: null };
-  const found = await tx.execute<{ caixa_id: string }>(sql`SELECT caixa_id FROM financial_accounts WHERE id = ${paymentAccountId}`);
-  const account = found.rows[0];
-  if (!account) throw notFound();
-  if (account.caixa_id === caixaId) return { paymentAccountId, transitAccountId: null };
-  ctx.access.assertWrite(account.caixa_id);
-  if (!transitAccountId) throw unprocessable(E.transitAccount, 'contracts_transit_account_check');
-  return { paymentAccountId, transitAccountId };
-}
-
-/** Teto da tolerância (spec 033): 10% da menor parcela do ciclo. */
-function assertTolerance(toleranceCents: number | undefined, totalCents: number, count: number | null) {
-  if (!toleranceCents || !count) return;
-  const cap = toleranceCap(Math.floor(totalCents / count));
-  if (toleranceCents > cap) throw unprocessable(E.toleranceCap(formatBRL(cap)), 'contracts_tolerance_cents_check');
 }
 
 /** Caixa do espelho: omitida = a principal da entidade (se houver); null = sem espelho. */
@@ -570,130 +467,68 @@ async function resolveCounterparty(
   return requested;
 }
 
-/** Plano do espelho das parcelas: a categoria do último espelho deste contrato (o editor de lá pode tê-la trocado). */
-async function mirrorPlan(ctx: ServiceContext, tx: Executor, contract: ContractRecord): Promise<MirrorPlan | null> {
-  if (!contract.counterpartyCaixaId) return null;
-  const holder = await tx.execute<{ holder_entity_id: string }>(sql`SELECT holder_entity_id FROM caixas WHERE id = ${contract.caixaId}`);
-  const previous = await tx.execute<{ category_id: string }>(sql`
-    SELECT category_id FROM titles
-     WHERE contract_id = ${contract.id} AND caixa_id = ${contract.counterpartyCaixaId} AND contract_cycle_id IS NOT NULL
-     ORDER BY created_at DESC LIMIT 1`);
-  const direction = opposite(contract.direction);
-  return {
-    caixaId: contract.counterpartyCaixaId,
-    entityId: holder.rows[0]!.holder_entity_id,
-    categoryId: previous.rows[0]?.category_id ?? (await defaultMirrorCategory(tx, contract.counterpartyCaixaId, direction)),
-    status: ctx.access.canWrite(contract.counterpartyCaixaId) ? 'accepted' : 'pending',
-  };
-}
-
-/** Meses (1º dia) fechados em alguma das caixas, entre as competências pedidas. */
-async function closedMonths(db: Executor, caixaIds: (string | null)[], competences: string[]): Promise<Set<string>> {
-  const ids = caixaIds.filter((id): id is string => Boolean(id));
-  const months = [...new Set(competences.map(monthStart))];
-  if (ids.length === 0 || months.length === 0) return new Set();
-  const result = await db.execute<{ month: string }>(sql`
-    SELECT DISTINCT month FROM period_closings
-     WHERE caixa_id = ANY (${uuidArray(ids)}) AND month = ANY (${`{${months.join(',')}}`}::date[])`);
-  return new Set(result.rows.map((r) => r.month));
-}
-
-/** Gera as parcelas do ciclo (títulos + espelho), numa transação aberta. */
-async function generateInstallments(ctx: ServiceContext, tx: Tx, contract: ContractRecord, cycle: CycleRecord): Promise<number> {
-  const schedule = cycleSchedule(termsOf(cycle));
-  const closed = await closedMonths(
-    tx,
-    [contract.caixaId, contract.counterpartyCaixaId],
-    schedule.map((r) => r.competenceDate),
-  );
-  if (closed.size > 0) throw unprocessable(E.closedMonth(formatMonth([...closed].sort()[0]!)), 'contract_closed_month');
-  const mirror = await mirrorPlan(ctx, tx, contract);
-  for (const row of schedule) {
-    await insertTitlePair(
-      tx,
-      {
-        caixaId: contract.caixaId,
-        direction: contract.direction,
-        entityId: contract.entityId,
-        categoryId: contract.categoryId,
-        description: installmentDescription(contract.name, row.installment, schedule.length),
-        competenceDate: row.competenceDate,
-        dueDate: row.dueDate,
-        amountCents: row.amountCents,
-        notes: null,
-        origin: 'contract',
-        recurrenceRuleId: null,
-        occurrence: null,
-        contractId: contract.id,
-        contractCycleId: cycle.id,
-        contractInstallment: row.installment,
-        plannedAccountId: contract.paymentAccountId,
-        plannedTransitAccountId: contract.transitAccountId,
-      },
-      mirror,
-    );
-  }
-  return schedule.length;
-}
+const ownerOf = (contract: ContractRecord): SeriesOwner => ({
+  contractId: contract.id,
+  direction: contract.direction,
+  entityId: contract.entityId,
+  categoryId: contract.categoryId,
+  mirrorCaixaId: contract.counterpartyCaixaId,
+  endsOn: contract.endsOn,
+});
 
 /* ---------------- ciclo de vida (também usado pelo worker) ---------------- */
 
 /**
- * Atualiza o status pelo calendário: abre a tarefa de renovação na
- * antecedência (renovação automática) e encerra o contrato vigente que
- * passou do fim sem tarefa aberta. Nada é lançado aqui.
+ * Pelo calendário (worker, como ator `system`): o contrato vigente que passou
+ * do fim é renovado pelo mesmo prazo, com as obrigações estendidas (renovação
+ * automática), ou encerrado. Devolve o que aconteceu.
  */
-export async function syncLifecycle(tx: Executor, contractId: string, today = todayIso()): Promise<'opened' | 'ended' | null> {
+export async function syncLifecycle(
+  ctx: ServiceContext,
+  tx: Tx,
+  contractId: string,
+  today = todayIso(),
+): Promise<{ action: 'renewed'; startsOn: string; endsOn: string; seq: number } | { action: 'ended' } | null> {
   const contract = await loadContract(tx, contractId, true);
-  if (contract.status !== 'active' || contract.archivedAt) return null;
-  const latest = (await loadCycles(tx, contractId)).at(-1);
-  if (!latest) return null;
-  const task = await tx.execute<{ id: string; status: string }>(
-    sql`SELECT id, status FROM contract_renewal_tasks WHERE contract_cycle_id = ${latest.id}`,
-  );
-  if (contract.autoRenew && task.rows.length === 0 && today >= renewalOpensOn(latest.endsOn, contract.renewalLeadDays)) {
-    await tx.execute(sql`
-      INSERT INTO contract_renewal_tasks (contract_id, contract_cycle_id, status, opened_on, due_on)
-      VALUES (${contractId}, ${latest.id}, 'open', ${today}::date, ${latest.endsOn}::date)`);
-    await tx.execute(sql`UPDATE contracts SET status = 'renewal_pending' WHERE id = ${contractId}`);
-    return 'opened';
-  }
-  if (today > latest.endsOn) {
+  if (contract.status !== 'active' || contract.archivedAt || !contract.endsOn || today <= contract.endsOn) return null;
+  if (!contract.autoRenew) {
     await tx.execute(sql`UPDATE contracts SET status = 'ended' WHERE id = ${contractId}`);
-    return 'ended';
+    return { action: 'ended' };
   }
-  return null;
+  // Renova quantas vezes for preciso para cobrir hoje (o worker pode ter ficado parado).
+  const cycles = await loadCycles(tx, contractId);
+  const last = cycles.at(-1);
+  const months = termMonths(last?.startsOn ?? contract.startsOn, contract.endsOn);
+  let endsOn = contract.endsOn;
+  while (endsOn < today) endsOn = cycleEnd(addDays(endsOn, 1), months);
+  const renewed = await renewInTx(ctx, tx, contract, endsOn);
+  return { action: 'renewed', startsOn: addDays(contract.endsOn, 1), endsOn, seq: renewed.seq };
 }
 
 /* ---------------- escrita ---------------- */
 
 export async function createContract(ctx: ServiceContext, input: z.output<typeof contractCreateInput>): Promise<ContractDetail> {
   ctx.access.assertWrite(input.caixaId);
+  const activate = input.activate ?? input.obligations.length > 0;
   const id = await withTx(ctx, async (tx) => {
     await assertCaixaAndEntity(tx, input.caixaId, input.entityId);
     await assertCategory(tx, input.categoryId, input.direction);
     const counterparty = await resolveCounterparty(tx, input.caixaId, input.entityId, input.mirrorCaixaId);
-    const accounts = await resolvePaymentAccounts(ctx, tx, input.caixaId, input.paymentAccountId, input.transitAccountId);
-    assertTolerance(input.toleranceCents, input.totalCents, installmentsCount(input.durationMonths, input.periodicity));
     const inserted = await tx.execute<{ id: string }>(sql`
       INSERT INTO contracts (caixa_id, entity_id, direction, name, contract_number, category_id, counterparty_caixa_id, auto_renew,
-                             notice_days, renewal_lead_days, reminder_every_days, readjustment_index, readjustment_base_date,
-                             termination_penalty_text, termination_penalty_cents, notes, created_by,
-                             payment_account_id, transit_account_id, late_fee_percent, interest_month_percent, early_discount_percent,
-                             tolerance_cents, match_window_days, auto_settle)
+                             notice_days, readjustment_index, readjustment_base_date, termination_penalty_text,
+                             termination_penalty_cents, notes, created_by, starts_on, ends_on, status)
       VALUES (${input.caixaId}, ${input.entityId}, ${input.direction}, ${input.name}, ${input.contractNumber}, ${input.categoryId},
-              ${counterparty}, ${input.autoRenew}, ${input.noticeDays}, ${input.renewalLeadDays}, ${input.reminderEveryDays},
-              ${input.readjustmentIndex}, ${input.readjustmentBaseDate}, ${input.terminationPenaltyText}, ${input.terminationPenaltyCents},
-              ${input.notes}, ${ctx.access.actor.id},
-              ${accounts.paymentAccountId}, ${accounts.transitAccountId}, ${input.lateFeePercent}, ${input.interestMonthPercent},
-              ${input.earlyDiscountPercent}, ${input.toleranceCents}, ${input.matchWindowDays}, ${input.autoSettle})
+              ${counterparty}, ${input.autoRenew}, ${input.noticeDays}, ${input.readjustmentIndex}, ${input.readjustmentBaseDate},
+              ${input.terminationPenaltyText}, ${input.terminationPenaltyCents}, ${input.notes}, ${ctx.access.actor.id},
+              ${input.startsOn}::date, ${input.endsOn}::date, ${activate ? 'active' : 'draft'})
       RETURNING id`);
     const contractId = inserted.rows[0]!.id;
     await tx.execute(sql`
-      INSERT INTO contract_cycles (contract_id, seq, starts_on, duration_months, periodicity, total_cents, due_day, due_month_offset)
-      VALUES (${contractId}, 1, ${input.startsOn}::date, ${input.durationMonths}, ${input.periodicity}, ${input.totalCents},
-              ${input.dueDay}, ${input.dueMonthOffset})`);
-    if (input.activate) await activateInTx(ctx, tx, contractId);
+      INSERT INTO contract_cycles (contract_id, seq, starts_on, ends_on)
+      VALUES (${contractId}, 1, ${input.startsOn}::date, ${input.endsOn}::date)`);
+    const contract = await loadContract(tx, contractId);
+    for (const obligation of input.obligations) await insertObligation(ctx, tx, obligation, ownerOf(contract));
     return contractId;
   });
   return getContract(ctx, id);
@@ -705,40 +540,22 @@ const FREE_FIELDS = [
   'notes',
   'autoRenew',
   'noticeDays',
-  'renewalLeadDays',
-  'reminderEveryDays',
   'readjustmentIndex',
   'readjustmentBaseDate',
   'terminationPenaltyText',
   'terminationPenaltyCents',
-  'lateFeePercent',
-  'interestMonthPercent',
-  'earlyDiscountPercent',
-  'toleranceCents',
-  'matchWindowDays',
-  'autoSettle',
 ] as const;
 
-const COLUMN: Record<(typeof FREE_FIELDS)[number] | 'entityId' | 'categoryId', string> = {
+const COLUMN: Record<(typeof FREE_FIELDS)[number], string> = {
   name: 'name',
   contractNumber: 'contract_number',
   notes: 'notes',
   autoRenew: 'auto_renew',
   noticeDays: 'notice_days',
-  renewalLeadDays: 'renewal_lead_days',
-  reminderEveryDays: 'reminder_every_days',
   readjustmentIndex: 'readjustment_index',
   readjustmentBaseDate: 'readjustment_base_date',
   terminationPenaltyText: 'termination_penalty_text',
   terminationPenaltyCents: 'termination_penalty_cents',
-  lateFeePercent: 'late_fee_percent',
-  interestMonthPercent: 'interest_month_percent',
-  earlyDiscountPercent: 'early_discount_percent',
-  toleranceCents: 'tolerance_cents',
-  matchWindowDays: 'match_window_days',
-  autoSettle: 'auto_settle',
-  entityId: 'entity_id',
-  categoryId: 'category_id',
 };
 
 export async function updateContract(
@@ -750,11 +567,9 @@ export async function updateContract(
     const contract = await loadContract(tx, id, true);
     ctx.access.assertWrite(contract.caixaId);
     const draft = contract.status === 'draft';
-    const [cycle] = await loadCycles(tx, id);
-    const termKeys = ['startsOn', 'durationMonths', 'periodicity', 'totalCents', 'dueDay', 'dueMonthOffset'] as const;
-    const changedTerms = termKeys.filter((key) => input[key] !== undefined && input[key] !== cycle?.[key]);
     const lockedChange =
-      changedTerms.length > 0 ||
+      (input.startsOn !== undefined && input.startsOn !== contract.startsOn) ||
+      (input.endsOn !== undefined && input.endsOn !== contract.endsOn) ||
       (input.entityId !== undefined && input.entityId !== contract.entityId) ||
       (input.categoryId !== undefined && input.categoryId !== contract.categoryId) ||
       (input.mirrorCaixaId !== undefined && input.mirrorCaixaId !== contract.counterpartyCaixaId);
@@ -763,28 +578,6 @@ export async function updateContract(
     const sets: SQL[] = [];
     for (const key of FREE_FIELDS) {
       if (input[key] !== undefined) sets.push(sql`${sql.identifier(COLUMN[key])} = ${input[key]}`);
-    }
-    // Conta das parcelas (spec 033): a troca vale para as parcelas em aberto que seguem o contrato, se pedido.
-    let accounts: { paymentAccountId: string | null; transitAccountId: string | null } | null = null;
-    if (input.paymentAccountId !== undefined || input.transitAccountId !== undefined) {
-      accounts = await resolvePaymentAccounts(
-        ctx,
-        tx,
-        contract.caixaId,
-        input.paymentAccountId !== undefined ? input.paymentAccountId : contract.paymentAccountId,
-        input.transitAccountId !== undefined ? input.transitAccountId : contract.transitAccountId,
-      );
-      sets.push(sql`payment_account_id = ${accounts.paymentAccountId}, transit_account_id = ${accounts.transitAccountId}`);
-    }
-    if (input.toleranceCents !== undefined) {
-      const latest = (await loadCycles(tx, id)).at(-1);
-      if (latest) {
-        const total = draft ? (input.totalCents ?? latest.totalCents) : latest.totalCents;
-        const count = draft
-          ? installmentsCount(input.durationMonths ?? latest.durationMonths, input.periodicity ?? latest.periodicity)
-          : latest.installmentsCount;
-        assertTolerance(input.toleranceCents, total, count);
-      }
     }
     if (draft) {
       const entityId = input.entityId ?? contract.entityId;
@@ -800,62 +593,31 @@ export async function updateContract(
         const requested = input.mirrorCaixaId !== undefined ? input.mirrorCaixaId : undefined;
         sets.push(sql`counterparty_caixa_id = ${await resolveCounterparty(tx, contract.caixaId, entityId, requested)}`);
       }
+      const startsOn = input.startsOn ?? contract.startsOn;
+      const endsOn = input.endsOn !== undefined ? input.endsOn : contract.endsOn;
+      if (endsOn && endsOn < startsOn) throw unprocessable(E.endsBeforeStart, 'contracts_ends_on_check');
+      if (input.startsOn !== undefined || input.endsOn !== undefined) {
+        sets.push(sql`starts_on = ${startsOn}::date, ends_on = ${endsOn}::date`);
+        await tx.execute(sql`UPDATE contract_cycles SET starts_on = ${startsOn}::date, ends_on = ${endsOn}::date
+          WHERE contract_id = ${id} AND seq = 1 AND duration_months IS NULL`);
+      }
     }
     if (sets.length > 0) await tx.execute(sql`UPDATE contracts SET ${sql.join(sets, sql`, `)} WHERE id = ${id}`);
-    if (accounts && input.applyAccountToInstallments) await applyPlannedAccount(tx, { ...contract, ...accounts });
-    if (draft && cycle && changedTerms.length > 0) {
-      const next = { ...termsOf(cycle), ...Object.fromEntries(changedTerms.map((key) => [key, input[key]])) };
-      await tx.execute(sql`
-        UPDATE contract_cycles SET starts_on = ${next.startsOn}::date, duration_months = ${next.durationMonths},
-               periodicity = ${next.periodicity}, total_cents = ${next.totalCents}, due_day = ${next.dueDay},
-               due_month_offset = ${next.dueMonthOffset}
-         WHERE id = ${cycle.id}`);
-    }
-    if (!draft) await syncLifecycle(tx, id);
   });
   return getContract(ctx, id);
 }
 
-/**
- * A conta do contrato nas parcelas que o seguem (spec 033): em aberto ou
- * parciais, do lado do contrato, sem conta própria. `ids` restringe às parcelas
- * recalculadas (aditivo). Devolve quantas mudaram.
- */
-async function applyPlannedAccount(
-  tx: Executor,
-  contract: Pick<ContractRecord, 'id' | 'caixaId' | 'paymentAccountId' | 'transitAccountId'>,
-  ids?: string[],
-): Promise<number> {
-  if (ids && ids.length === 0) return 0;
-  const result = await tx.execute(sql`
-    UPDATE titles SET planned_account_id = ${contract.paymentAccountId}, planned_transit_account_id = ${contract.transitAccountId}
-     WHERE contract_id = ${contract.id} AND caixa_id = ${contract.caixaId} AND contract_cycle_id IS NOT NULL
-       AND status IN ('open', 'partial') AND NOT planned_account_custom
-       AND (planned_account_id IS DISTINCT FROM ${contract.paymentAccountId}::uuid
-            OR planned_transit_account_id IS DISTINCT FROM ${contract.transitAccountId}::uuid)
-       ${ids ? sql`AND id = ANY (${uuidArray(ids)})` : sql``}`);
-  return result.rowCount ?? 0;
-}
-
-async function activateInTx(ctx: ServiceContext, tx: Tx, id: string): Promise<number> {
-  const contract = await loadContract(tx, id, true);
-  ctx.access.assertWrite(contract.caixaId);
-  if (contract.status !== 'draft') throw unprocessable(E.alreadyActive, 'contract_not_draft');
-  const [cycle] = await loadCycles(tx, id);
-  if (!cycle) throw notFound();
-  // O status muda antes das parcelas: o banco não aceita parcela de contrato em rascunho.
-  await tx.execute(sql`UPDATE contracts SET status = 'active' WHERE id = ${id}`);
-  const count = await generateInstallments(ctx, tx, { ...contract, status: 'active' }, cycle);
-  await syncLifecycle(tx, id);
-  return count;
-}
-
 export async function activateContract(ctx: ServiceContext, id: string): Promise<ContractDetail> {
-  await withTx(ctx, (tx) => activateInTx(ctx, tx, id));
+  await withTx(ctx, async (tx) => {
+    const contract = await loadContract(tx, id, true);
+    ctx.access.assertWrite(contract.caixaId);
+    if (contract.status !== 'draft') throw unprocessable(E.alreadyActive, 'contract_not_draft');
+    await tx.execute(sql`UPDATE contracts SET status = 'active' WHERE id = ${id}`);
+  });
   return getContract(ctx, id);
 }
 
-/** Rascunho sem vínculos é excluído; o resto é arquivado (as parcelas continuam como títulos). */
+/** Rascunho sem vínculos é excluído; o resto é arquivado (as ocorrências continuam como títulos). */
 export async function deleteContract(ctx: ServiceContext, id: string): Promise<DeleteResult> {
   const contract = await loadContract(ctx.db, id);
   ctx.access.assertWrite(contract.caixaId);
@@ -876,157 +638,84 @@ export async function restoreContract(ctx: ServiceContext, id: string): Promise<
   return getContract(ctx, id);
 }
 
-/* ---------------- parcelas do lado original ---------------- */
+/* ---------------- obrigações ---------------- */
 
-type InstallmentState = {
-  id: string;
-  mirrorTitleId: string | null;
-  mirrorCaixaId: string | null;
-  mirrorStatus: string | null;
-  cycleId: string | null;
-  installment: number | null;
-  competenceDate: string;
-  dueDate: string;
-  amountCents: number;
-  settledCents: number;
-  status: TitleStatus;
-};
-
-async function originalInstallments(tx: Executor, contract: ContractRecord, lock = false): Promise<InstallmentState[]> {
-  const result = await tx.execute(sql`
-    SELECT x.id, x.mirror_title_id, m.caixa_id AS mirror_caixa_id, m.mirror_status, x.contract_cycle_id AS cycle_id,
-           x.contract_installment AS installment, x.competence_date, x.due_date, x.amount_cents, b.settled_cents, x.status
-      FROM titles x
-      JOIN title_balances b ON b.title_id = x.id
-      LEFT JOIN titles m ON m.id = x.mirror_title_id
-     WHERE x.contract_id = ${contract.id} AND x.caixa_id = ${contract.caixaId} AND x.contract_cycle_id IS NOT NULL
-     ORDER BY x.competence_date, x.contract_installment
-     ${lock ? sql`FOR UPDATE OF x` : sql``}`);
-  return result.rows.map((raw) => {
-    const r = camel<InstallmentState>(raw);
-    return { ...r, amountCents: Number(r.amountCents), settledCents: Number(r.settledCents) };
-  });
+export async function addObligation(ctx: ServiceContext, id: string, input: z.output<typeof obligationInput>): Promise<ContractDetail> {
+  await withTx(ctx, async (tx) => insertObligation(ctx, tx, input, await contractOwner(ctx, tx, id)));
+  return getContract(ctx, id);
 }
 
-/** Grava valor/vencimento/categoria no título e mantém o par (o espelho volta a aguardar aceite sem permissão lá). */
-async function patchInstallment(
-  ctx: ServiceContext,
-  tx: Tx,
-  row: InstallmentState,
-  patch: { amountCents?: number; dueDate?: string; categoryId?: string; status?: 'canceled' },
-) {
-  const sets: SQL[] = [];
-  if (patch.amountCents !== undefined) sets.push(sql`amount_cents = ${patch.amountCents}`);
-  if (patch.dueDate !== undefined) sets.push(sql`due_date = ${patch.dueDate}::date`);
-  if (patch.categoryId !== undefined) sets.push(sql`category_id = ${patch.categoryId}`);
-  if (patch.status !== undefined) sets.push(sql`status = ${patch.status}`);
-  if (sets.length === 0) return;
-  await tx.execute(sql`UPDATE titles SET ${sql.join(sets, sql`, `)} WHERE id = ${row.id}`);
-  if (!row.mirrorTitleId) return;
-  const mirrorSets: SQL[] = [];
-  if (patch.amountCents !== undefined) mirrorSets.push(sql`amount_cents = ${patch.amountCents}`);
-  if (patch.dueDate !== undefined) mirrorSets.push(sql`due_date = ${patch.dueDate}::date`);
-  if (patch.status !== undefined) mirrorSets.push(sql`status = ${patch.status}`);
-  const valueChanged = patch.amountCents !== undefined || patch.dueDate !== undefined;
-  if (valueChanged && row.mirrorStatus !== null && row.mirrorCaixaId && !ctx.access.canWrite(row.mirrorCaixaId))
-    mirrorSets.push(sql`mirror_status = 'pending'`);
-  if (mirrorSets.length > 0) await tx.execute(sql`UPDATE titles SET ${sql.join(mirrorSets, sql`, `)} WHERE id = ${row.mirrorTitleId}`);
+/** Liga uma série existente ao contrato: ela e as ocorrências (e compras ligadas) passam a ser obrigação dele. */
+export async function linkObligation(ctx: ServiceContext, id: string, ruleId: string): Promise<ContractDetail> {
+  await withTx(ctx, async (tx) => {
+    const owner = await contractOwner(ctx, tx, id);
+    const rule = await loadRule(tx, ruleId, true);
+    ctx.access.assertWrite(rule.caixaId);
+    await setSeriesContract(tx, rule, { id, direction: owner.direction, entityId: owner.entityId });
+  });
+  return getContract(ctx, id);
 }
 
 function assertLive(contract: ContractRecord) {
   if (contract.status === 'terminated') throw unprocessable(E.terminated, 'contract_terminated');
-  if (contract.status !== 'active' && contract.status !== 'renewal_pending') throw unprocessable(E.notActive, 'contract_not_active');
+  if (contract.status !== 'active') throw unprocessable(E.notActive, 'contract_not_active');
+}
+
+async function contractRuleIds(tx: Executor, contractId: string): Promise<string[]> {
+  const result = await tx.execute<{ id: string }>(
+    sql`SELECT id FROM recurrence_rules WHERE contract_id = ${contractId} ORDER BY created_at, id`,
+  );
+  return result.rows.map((r) => r.id);
 }
 
 /* ---------------- aditivo ---------------- */
 
-type AmendmentPlan = AmendmentPreview & {
-  updates: { row: InstallmentState; amountCents: number; dueDate: string }[];
-  cycles: CycleRecord[];
-};
+type AmendmentPlan = AmendmentPreview & { applies: ((tx: Tx) => Promise<void>)[] };
 
 async function planAmendment(
+  ctx: ServiceContext,
   tx: Executor,
   contract: ContractRecord,
   input: z.output<typeof contractAmendmentInput>,
   lock: boolean,
 ): Promise<AmendmentPlan> {
-  const cycles = await loadCycles(tx, contract.id);
-  const cycle = [...cycles].reverse().find((c) => c.startsOn <= input.effectiveOn && input.effectiveOn <= c.endsOn);
-  if (!cycle) throw unprocessable(E.effectiveOutside, 'contract_effective_outside');
-  const rows = (await originalInstallments(tx, contract, lock)).filter((r) => r.competenceDate >= input.effectiveOn);
-  const closed = await closedMonths(
-    tx,
-    [contract.caixaId, contract.counterpartyCaixaId],
-    rows.map((r) => r.competenceDate),
-  );
-  const skipped: AmendmentPreview['skipped'] = [];
-  const affected: InstallmentState[] = [];
-  for (const row of rows) {
-    const reason =
-      row.status === 'canceled'
-        ? 'canceled'
-        : row.settledCents > 0
-          ? 'settled'
-          : closed.has(monthStart(row.competenceDate))
-            ? 'closed_month'
-            : null;
-    if (reason) skipped.push({ titleId: row.id, installment: row.installment!, competenceDate: row.competenceDate, reason });
-    else affected.push(row);
-  }
-  const touched = cycles.filter((c) => c.seq >= cycle.seq);
-  const recalculated = amendInstallments(affected, input, { dueDay: cycle.dueDay, dueMonthOffset: cycle.dueMonthOffset });
-  const byId = new Map(affected.map((r) => [r.id, r]));
-  const updates = recalculated.map((r) => ({ row: byId.get(r.id)!, amountCents: r.amountCents, dueDate: r.dueDate }));
-
+  const own = new Set(await contractRuleIds(tx, contract.id));
+  const affected: SeriesChangeRow[] = [];
+  const skipped: SeriesChangeSkipped[] = [];
+  const cardFrom: AmendmentPreview['cardFrom'] = [];
+  const applies: ((tx: Tx) => Promise<void>)[] = [];
   const before: Record<string, unknown> = {};
   const after: Record<string, unknown> = {};
-  if (input.installmentCents || input.remainingTotalCents) {
-    before.totalCents = cycle.totalCents;
-    const untouched = rows.filter((r) => r.status !== 'canceled' && !byId.has(r.id) && r.cycleId === cycle.id);
-    const earlier = (await originalInstallments(tx, contract)).filter(
-      (r) => r.cycleId === cycle.id && r.competenceDate < input.effectiveOn && r.status !== 'canceled',
+  for (const ruleId of input.ruleIds) {
+    if (!own.has(ruleId)) throw notFound();
+    const rule = await loadRule(tx, ruleId, lock);
+    ctx.access.assertWrite(rule.caixaId);
+    const plan = await planSeriesChange(
+      ctx,
+      tx,
+      rule,
+      {
+        amountCents: input.amountCents,
+        readjustmentPercent: input.readjustmentPercent,
+        anchorDay: input.anchorDay,
+        categoryId: input.categoryId,
+        accountId: rule.card ? null : input.accountId,
+      },
+      input.effectiveOn,
+      lock,
     );
-    after.totalCents =
-      [...earlier, ...untouched].reduce((acc, r) => acc + r.amountCents, 0) +
-      updates.filter((u) => u.row.cycleId === cycle.id).reduce((acc, u) => acc + u.amountCents, 0);
-    if (input.installmentCents) {
-      before.installmentCents = affected[0]?.amountCents ?? null;
-      after.installmentCents = input.installmentCents;
-    } else {
-      before.remainingTotalCents = affected.reduce((acc, r) => acc + r.amountCents, 0);
-      after.remainingTotalCents = input.remainingTotalCents;
-    }
+    affected.push(...plan.affected);
+    skipped.push(...plan.skipped);
+    cardFrom.push(...plan.cardFrom);
+    applies.push(plan.apply);
+    for (const [k, v] of Object.entries(plan.before)) if (before[k] === undefined) before[k] = v;
+    for (const [k, v] of Object.entries(plan.after)) if (after[k] === undefined) after[k] = v;
   }
-  if (input.dueDay !== null) {
-    before.dueDay = cycle.dueDay;
-    after.dueDay = input.dueDay;
-  }
-  if (input.dueMonthOffset !== null) {
-    before.dueMonthOffset = cycle.dueMonthOffset;
-    after.dueMonthOffset = input.dueMonthOffset;
-  }
-  if (input.categoryId !== null) {
-    before.categoryId = contract.categoryId;
-    after.categoryId = input.categoryId;
-  }
-  return {
-    cycleId: cycle.id,
-    affected: updates.map((u) => ({
-      titleId: u.row.id,
-      installment: u.row.installment!,
-      competenceDate: u.row.competenceDate,
-      before: { amountCents: u.row.amountCents, dueDate: u.row.dueDate },
-      after: { amountCents: u.amountCents, dueDate: u.dueDate },
-    })),
-    skipped,
-    changes: { before, after },
-    updates,
-    cycles: touched,
-  };
+  if (input.readjustmentPercent) after.readjustmentPercent = input.readjustmentPercent;
+  return { effectiveOn: input.effectiveOn, ruleIds: input.ruleIds, affected, skipped, cardFrom, changes: { before, after }, applies };
 }
 
-const publicPlan = ({ updates: _u, cycles: _c, ...preview }: AmendmentPlan): AmendmentPreview => preview;
+const publicPlan = ({ applies: _a, ...preview }: AmendmentPlan): AmendmentPreview => preview;
 
 export async function amendContract(
   ctx: ServiceContext,
@@ -1038,42 +727,22 @@ export async function amendContract(
   ctx.access.assertWrite(contract.caixaId);
   assertLive(contract);
   if (input.categoryId) await assertCategory(ctx.db, input.categoryId, contract.direction);
-  if (dryRun) return { preview: publicPlan(await planAmendment(ctx.db, contract, input, false)), contract: null };
+  if (dryRun) return { preview: publicPlan(await planAmendment(ctx, ctx.db, contract, input, false)), contract: null };
 
   const preview = await withTx(ctx, async (tx) => {
     const locked = await loadContract(tx, id, true);
     assertLive(locked);
-    const plan = await planAmendment(tx, locked, input, true);
-    for (const update of plan.updates) {
-      await patchInstallment(ctx, tx, update.row, {
-        amountCents: update.amountCents !== update.row.amountCents ? update.amountCents : undefined,
-        dueDate: update.dueDate !== update.row.dueDate ? update.dueDate : undefined,
-        categoryId: input.categoryId ?? undefined,
-      });
-    }
-    if (input.categoryId) await tx.execute(sql`UPDATE contracts SET category_id = ${input.categoryId} WHERE id = ${id}`);
-    // Spec 033: as parcelas recalculadas levam a conta do contrato (as com conta própria ficam).
-    await applyPlannedAccount(
-      tx,
-      locked,
-      plan.updates.map((u) => u.row.id),
-    );
-    // Ciclos atingidos: dia/deslocamento novos e o total = soma das parcelas não canceladas.
-    for (const cycle of plan.cycles) {
-      await tx.execute(sql`
-        UPDATE contract_cycles y
-           SET due_day = ${input.dueDay ?? cycle.dueDay}, due_month_offset = ${input.dueMonthOffset ?? cycle.dueMonthOffset},
-               total_cents = coalesce((SELECT sum(x.amount_cents) FROM titles x
-                                        WHERE x.contract_cycle_id = y.id AND x.caixa_id = ${locked.caixaId} AND x.status <> 'canceled'),
-                                      y.total_cents)
-         WHERE y.id = ${cycle.id}`);
-    }
+    const plan = await planAmendment(ctx, tx, locked, input, true);
+    for (const apply of plan.applies) await apply(tx);
+    const cycle = await tx.execute<{ id: string }>(sql`
+      SELECT id FROM contract_cycles WHERE contract_id = ${id} AND starts_on <= ${input.effectiveOn}::date
+       ORDER BY seq DESC LIMIT 1`);
     await tx.execute(sql`
       INSERT INTO contract_amendments (contract_id, contract_cycle_id, document_id, effective_on, changes, affected_title_ids,
-                                       skipped_title_ids, notes, created_by)
-      VALUES (${id}, ${plan.cycleId}, ${input.documentId}, ${input.effectiveOn}::date, ${JSON.stringify(plan.changes)}::jsonb,
-              ${uuidArray(plan.affected.map((a) => a.titleId))}, ${uuidArray(plan.skipped.map((s) => s.titleId))},
-              ${input.notes}, ${ctx.access.actor.id})`);
+                                       skipped_title_ids, recurrence_rule_ids, notes, created_by)
+      VALUES (${id}, ${cycle.rows[0]?.id ?? null}, ${input.documentId}, ${input.effectiveOn}::date, ${JSON.stringify(plan.changes)}::jsonb,
+              ${uuidArray(plan.affected.map((a) => a.titleId).filter((v): v is string => !!v))},
+              ${uuidArray(plan.skipped.map((s) => s.titleId))}, ${uuidArray(input.ruleIds)}, ${input.notes}, ${ctx.access.actor.id})`);
     return publicPlan(plan);
   });
   return { preview, contract: await getContract(ctx, id) };
@@ -1081,53 +750,103 @@ export async function amendContract(
 
 /* ---------------- rescisão ---------------- */
 
+type TerminationRow = {
+  id: string;
+  ruleId: string;
+  occurrence: number | null;
+  mirrorTitleId: string | null;
+  mirrorCaixaId: string | null;
+  mirrorStatus: string | null;
+  competenceDate: string;
+  dueDate: string;
+  amountCents: number;
+  settledCents: number;
+  status: TitleStatus;
+};
+
+type TerminationPlan = TerminationPreview & {
+  rows: Map<string, TerminationRow>;
+  /** Novo fim de cada série. */
+  ruleEnds: { ruleId: string; endsOn: string }[];
+};
+
+/** A rescisão nunca estende a série: uma obrigação que já acabava antes fica com o fim dela. */
+const notLater = (rule: { endsOn?: string | null }, endsOn: string) => (rule.endsOn && rule.endsOn < endsOn ? rule.endsOn : endsOn);
+
 async function planTermination(
+  ctx: ServiceContext,
   tx: Executor,
   contract: ContractRecord,
   terminatedOn: string,
   lock: boolean,
-): Promise<TerminationPreview & { rows: Map<string, InstallmentState> }> {
-  const cycles = await loadCycles(tx, contract.id);
-  const first = cycles[0];
-  const last = cycles.at(-1);
-  if (!first || !last || terminatedOn < first.startsOn) throw unprocessable(E.terminationBeforeStart, 'contract_termination_date');
-  if (terminatedOn > last.endsOn) throw unprocessable(E.terminationAfterEnd, 'contract_termination_date');
-  const rows = await originalInstallments(tx, contract, lock);
-  const periodEnds = new Map<string, string>();
-  for (const cycle of cycles) for (const s of cycleSchedule(termsOf(cycle))) periodEnds.set(`${cycle.id}:${s.installment}`, s.periodEnd);
-  const closed = await closedMonths(
-    tx,
-    [contract.caixaId, contract.counterpartyCaixaId],
-    rows.map((r) => r.competenceDate),
-  );
-  const preview: TerminationPreview = { terminatedOn, canceled: [], current: null, blockedClosed: [], keptSettled: 0 };
-  for (const row of rows) {
-    if (row.status === 'canceled') continue;
-    const periodEnd = periodEnds.get(`${row.cycleId}:${row.installment}`) ?? row.competenceDate;
-    if (row.competenceDate > terminatedOn) {
-      if (row.settledCents > 0) preview.keptSettled += 1;
-      else if (closed.has(monthStart(row.competenceDate)))
-        preview.blockedClosed.push({ titleId: row.id, installment: row.installment!, competenceDate: row.competenceDate });
-      else
-        preview.canceled.push({
-          titleId: row.id,
-          installment: row.installment!,
-          competenceDate: row.competenceDate,
-          amountCents: row.amountCents,
-        });
-    } else if (terminatedOn < periodEnd) {
-      preview.current = {
-        titleId: row.id,
-        installment: row.installment!,
-        competenceDate: row.competenceDate,
-        periodEnd,
-        amountCents: row.amountCents,
-        proratedCents: Math.max(1, proratedAmount(row.amountCents, row.competenceDate, periodEnd, terminatedOn)),
-        settled: row.settledCents > 0,
-      };
+): Promise<TerminationPlan> {
+  if (terminatedOn < contract.startsOn) throw unprocessable(E.terminationBeforeStart, 'contract_termination_date');
+  if (contract.endsOn && terminatedOn > contract.endsOn) throw unprocessable(E.terminationAfterEnd, 'contract_termination_date');
+  const preview: TerminationPlan = {
+    terminatedOn,
+    canceled: [],
+    last: [],
+    blockedClosed: [],
+    keptSettled: 0,
+    cardRules: 0,
+    rows: new Map(),
+    ruleEnds: [],
+  };
+  for (const ruleId of await contractRuleIds(tx, contract.id)) {
+    const rule = await loadRule(tx, ruleId, lock);
+    ctx.access.assertWrite(rule.caixaId);
+    if (rule.card) {
+      preview.cardRules += 1;
+      preview.ruleEnds.push({ ruleId, endsOn: notLater(rule, terminatedOn > rule.startsOn ? terminatedOn : rule.startsOn) });
+      continue;
     }
+    const result = await tx.execute(sql`
+      SELECT x.id, x.recurrence_rule_id AS rule_id, x.occurrence, x.mirror_title_id, m.caixa_id AS mirror_caixa_id, m.mirror_status,
+             x.competence_date, x.due_date, x.amount_cents, b.settled_cents, x.status
+        FROM titles x JOIN title_balances b ON b.title_id = x.id LEFT JOIN titles m ON m.id = x.mirror_title_id
+       WHERE x.recurrence_rule_id = ${ruleId} AND x.mirror_status IS NULL
+       ORDER BY x.occurrence ${lock ? sql`FOR UPDATE OF x` : sql``}`);
+    const rows = result.rows.map((raw) => {
+      const r = camel<TerminationRow>(raw);
+      return { ...r, amountCents: Number(r.amountCents), settledCents: Number(r.settledCents) };
+    });
+    const closed = await closedMonths(
+      tx,
+      [rule.caixaId, ...new Set(rows.map((r) => r.mirrorCaixaId))],
+      rows.map((r) => r.competenceDate),
+    );
+    let lastDue = terminatedOn;
+    for (const row of rows) {
+      preview.rows.set(row.id, row);
+      if (row.status === 'canceled') continue;
+      const item = {
+        ruleId,
+        titleId: row.id,
+        occurrence: row.occurrence,
+        competenceDate: row.competenceDate,
+        dueDate: row.dueDate,
+        amountCents: row.amountCents,
+      };
+      if (row.competenceDate > terminatedOn) {
+        if (row.settledCents > 0) preview.keptSettled += 1;
+        else if (closed.has(monthStart(row.competenceDate))) preview.blockedClosed.push(item);
+        else preview.canceled.push(item);
+        if (row.settledCents > 0 || closed.has(monthStart(row.competenceDate))) lastDue = row.dueDate > lastDue ? row.dueDate : lastDue;
+        continue;
+      }
+      if (row.dueDate > lastDue) lastDue = row.dueDate;
+      const periodEnd = occurrencePeriodEnd(row.competenceDate, rule);
+      if (terminatedOn < periodEnd)
+        preview.last.push({
+          ...item,
+          periodEnd,
+          proratedCents: Math.max(1, proratedAmount(row.amountCents, row.competenceDate, periodEnd, terminatedOn)),
+          settled: row.settledCents > 0,
+        });
+    }
+    preview.ruleEnds.push({ ruleId, endsOn: notLater(rule, lastDue > rule.startsOn ? lastDue : rule.startsOn) });
   }
-  return { ...preview, rows: new Map(rows.map((r) => [r.id, r])) };
+  return preview;
 }
 
 export async function terminateContract(
@@ -1140,28 +859,37 @@ export async function terminateContract(
   ctx.access.assertWrite(contract.caixaId);
   assertLive(contract);
   if (input.penalty) await assertCategory(ctx.db, input.penalty.categoryId, input.penalty.direction);
-  if (dryRun) {
-    const { rows: _r, ...preview } = await planTermination(ctx.db, contract, input.terminatedOn, false);
-    return { preview, contract: null };
-  }
+  const strip = ({ rows: _r, ruleEnds: _e, ...preview }: TerminationPlan): TerminationPreview => preview;
+  if (dryRun) return { preview: strip(await planTermination(ctx, ctx.db, contract, input.terminatedOn, false)), contract: null };
   const preview = await withTx(ctx, async (tx) => {
     const locked = await loadContract(tx, id, true);
     assertLive(locked);
-    const { rows, ...plan } = await planTermination(tx, locked, input.terminatedOn, true);
-    for (const item of plan.canceled) await patchInstallment(ctx, tx, rows.get(item.titleId)!, { status: 'canceled' });
-    if (plan.current && input.currentInstallmentCents && input.currentInstallmentCents !== plan.current.amountCents) {
-      await patchInstallment(ctx, tx, rows.get(plan.current.titleId)!, { amountCents: input.currentInstallmentCents });
+    for (const ruleId of await contractRuleIds(tx, id))
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${ruleId}))`);
+    const plan = await planTermination(ctx, tx, locked, input.terminatedOn, true);
+    for (const item of plan.canceled) await patchOccurrence(ctx, tx, plan.rows.get(item.titleId)!, { status: 'canceled' });
+    for (const change of input.lastAmounts) {
+      const last = plan.last.find((l) => l.titleId === change.titleId);
+      if (!last || last.settled || change.amountCents === last.amountCents) continue;
+      await patchOccurrence(ctx, tx, plan.rows.get(change.titleId)!, { amountCents: change.amountCents });
     }
+    for (const end of plan.ruleEnds)
+      await tx.execute(sql`UPDATE recurrence_rules SET ends_on = ${end.endsOn}::date WHERE id = ${end.ruleId}`);
     if (input.penalty) {
       const penalty = input.penalty;
-      const mirror = await mirrorPlan(ctx, tx, locked);
-      const mirrorForPenalty: MirrorPlan | null =
-        mirror && penalty.direction !== locked.direction
-          ? {
-              ...mirror,
-              categoryId: await defaultMirrorCategory(tx, mirror.caixaId, opposite(penalty.direction)),
-            }
-          : mirror;
+      const accountId = await assertPlannedAccount(tx, locked.caixaId, penalty.accountId);
+      let mirror: MirrorPlan | null = null;
+      if (locked.counterpartyCaixaId) {
+        const holder = await tx.execute<{ holder_entity_id: string }>(
+          sql`SELECT holder_entity_id FROM caixas WHERE id = ${locked.caixaId}`,
+        );
+        mirror = {
+          caixaId: locked.counterpartyCaixaId,
+          entityId: holder.rows[0]!.holder_entity_id,
+          categoryId: await defaultMirrorCategory(tx, locked.counterpartyCaixaId, opposite(penalty.direction)),
+          status: ctx.access.canWrite(locked.counterpartyCaixaId) ? 'accepted' : 'pending',
+        };
+      }
       await insertTitlePair(
         tx,
         {
@@ -1174,30 +902,101 @@ export async function terminateContract(
           dueDate: penalty.dueDate,
           amountCents: penalty.amountCents,
           notes: null,
-          origin: 'contract',
+          origin: 'manual',
           recurrenceRuleId: null,
           occurrence: null,
           contractId: locked.id,
-          contractCycleId: null,
-          contractInstallment: null,
+          plannedAccountId: accountId,
         },
-        mirrorForPenalty,
+        mirror,
       );
     }
-    // A tarefa aberta (se houver) fica recusada: o contrato acabou.
+    // Encerrar e rescindir no mesmo UPDATE: terminated_on = ends_on (contracts_terminated_on_check).
     await tx.execute(sql`
-      UPDATE contract_renewal_tasks SET status = 'declined', decided_at = now(), decided_by = ${ctx.access.actor.id},
-             decision_notes = ${t.contracts.termination.done}
-       WHERE contract_id = ${id} AND status = 'open'`);
-    await tx.execute(sql`
-      UPDATE contracts SET status = 'terminated', terminated_on = ${input.terminatedOn}::date, termination_notes = ${input.notes}
+      UPDATE contracts SET status = 'terminated', terminated_on = ${input.terminatedOn}::date, ends_on = ${input.terminatedOn}::date,
+             termination_notes = ${input.notes}
        WHERE id = ${id}`);
-    return plan;
+    return strip(plan);
   });
   return { preview, contract: await getContract(ctx, id) };
 }
 
 /* ---------------- renovação ---------------- */
+
+/**
+ * As obrigações que acompanham a vigência: as séries com fim (por data) que
+ * iam até o fim do contrato (o fim da série a menos de um período do fim da
+ * vigência). Uma obrigação que já tinha acabado antes não volta.
+ */
+async function renewableRules(tx: Executor, contract: ContractRecord) {
+  if (!contract.endsOn) return [];
+  const result = await tx.execute<{
+    id: string;
+    ends_on: string;
+    frequency: string;
+    interval_count: number;
+    description: string | null;
+    card: boolean;
+  }>(sql`
+    SELECT r.id, r.ends_on, r.frequency, r.interval_count, r.ends_on,
+           coalesce(g.description, (SELECT x.description FROM titles x WHERE x.recurrence_rule_id = r.id AND x.mirror_status IS NULL
+                                     ORDER BY x.occurrence DESC LIMIT 1)) AS description,
+           g.recurrence_rule_id IS NOT NULL AS card
+      FROM recurrence_rules r LEFT JOIN card_recurring_charges g ON g.recurrence_rule_id = r.id
+     WHERE r.contract_id = ${contract.id} AND r.ends_on IS NOT NULL AND r.installments_total IS NULL
+     ORDER BY r.created_at, r.id`);
+  return result.rows.filter((r) => {
+    const back =
+      r.frequency === 'weekly'
+        ? addDays(contract.endsOn!, -7 * Number(r.interval_count))
+        : addMonths(contract.endsOn!, -(r.frequency === 'yearly' ? 12 : 1) * Number(r.interval_count));
+    return r.ends_on > back;
+  });
+}
+
+/** Novo fim da série: o antigo deslocado pelo mesmo tanto que a vigência (ou sem fim). */
+function shiftedEnd(rule: { ends_on: string; frequency: string }, oldEnd: string, newEnd: string | null): string | null {
+  if (newEnd === null) return null;
+  if (rule.frequency === 'weekly') return addDays(rule.ends_on, diffDays(oldEnd, newEnd));
+  return addMonths(rule.ends_on, termMonths(addDays(oldEnd, 1), newEnd));
+}
+
+async function planRenewal(tx: Executor, contract: ContractRecord, endsOn: string | null): Promise<RenewalPreview> {
+  if (!contract.endsOn) throw unprocessable(t.contracts.renewal.indeterminateBlocked, 'contract_indeterminate');
+  if (endsOn !== null && endsOn <= contract.endsOn) throw unprocessable(E.renewBeforeEnd, 'contract_renew_date');
+  const rules = await renewableRules(tx, contract);
+  return {
+    startsOn: addDays(contract.endsOn, 1),
+    endsOn,
+    rules: rules.map((r) => ({
+      ruleId: r.id,
+      description: r.description ?? '',
+      kind: r.card ? 'card' : 'account',
+      endsOn: shiftedEnd(r, contract.endsOn!, endsOn),
+    })),
+  };
+}
+
+/** Renovar numa transação aberta: a nova vigência, o fim do contrato e o das obrigações (o "estender série"). */
+async function renewInTx(
+  ctx: ServiceContext,
+  tx: Tx,
+  contract: ContractRecord,
+  endsOn: string | null,
+): Promise<RenewalPreview & { seq: number }> {
+  const preview = await planRenewal(tx, contract, endsOn);
+  const last = await tx.execute<{ seq: number }>(sql`SELECT max(seq)::int AS seq FROM contract_cycles WHERE contract_id = ${contract.id}`);
+  const seq = Number(last.rows[0]?.seq ?? 0) + 1;
+  await tx.execute(sql`
+    INSERT INTO contract_cycles (contract_id, seq, starts_on, ends_on)
+    VALUES (${contract.id}, ${seq}, ${preview.startsOn}::date, ${endsOn}::date)`);
+  await tx.execute(sql`UPDATE contracts SET status = 'active', ends_on = ${endsOn}::date WHERE id = ${contract.id}`);
+  for (const rule of preview.rules) {
+    const plan = await seriesEndPlanOf(ctx, tx, rule.ruleId, rule.endsOn, true);
+    await applySeriesEnd(tx, plan);
+  }
+  return { ...preview, seq };
+}
 
 export async function renewContract(
   ctx: ServiceContext,
@@ -1207,84 +1006,16 @@ export async function renewContract(
 ): Promise<{ preview: RenewalPreview; contract: ContractDetail | null }> {
   const contract = await loadContract(ctx.db, id);
   ctx.access.assertWrite(contract.caixaId);
-  if (!['active', 'renewal_pending', 'ended'].includes(contract.status))
-    throw unprocessable(contract.status === 'terminated' ? E.terminated : E.notActive, 'contract_not_active');
-  if (input.categoryId) await assertCategory(ctx.db, input.categoryId, contract.direction);
-  const latest = (await loadCycles(ctx.db, id)).at(-1);
-  if (!latest) throw notFound();
-  const terms = {
-    startsOn: addDays(latest.endsOn, 1),
-    durationMonths: input.durationMonths,
-    periodicity: input.periodicity,
-    totalCents: input.totalCents,
-    dueDay: input.dueDay,
-    dueMonthOffset: input.dueMonthOffset,
-  };
-  const schedule = cycleSchedule(terms);
-  const closed = await closedMonths(
-    ctx.db,
-    [contract.caixaId, contract.counterpartyCaixaId],
-    schedule.map((s) => s.competenceDate),
-  );
-  const preview: RenewalPreview = {
-    startsOn: terms.startsOn,
-    endsOn: cycleEnd(terms.startsOn, terms.durationMonths),
-    installments: schedule,
-    closedMonths: [...closed].sort(),
-  };
-  if (dryRun) return { preview, contract: null };
-
-  await withTx(ctx, async (tx) => {
+  if (contract.status === 'terminated') throw unprocessable(E.terminated, 'contract_terminated');
+  if (contract.status === 'draft') throw unprocessable(E.notActive, 'contract_not_active');
+  if (dryRun) return { preview: await planRenewal(ctx.db, contract, input.endsOn), contract: null };
+  const preview = await withTx(ctx, async (tx) => {
     const locked = await loadContract(tx, id, true);
-    if (!['active', 'renewal_pending', 'ended'].includes(locked.status)) throw unprocessable(E.notActive, 'contract_not_active');
-    const current = (await loadCycles(tx, id)).at(-1)!;
-    if (current.id !== latest.id) throw unprocessable(t.errors.generic);
-    const inserted = await tx.execute(sql`
-      INSERT INTO contract_cycles (contract_id, seq, starts_on, duration_months, periodicity, total_cents, due_day, due_month_offset,
-                                   readjustment_percent)
-      VALUES (${id}, ${current.seq + 1}, ${terms.startsOn}::date, ${terms.durationMonths}, ${terms.periodicity}, ${terms.totalCents},
-              ${terms.dueDay}, ${terms.dueMonthOffset}, ${input.readjustmentPercent})
-      RETURNING id, contract_id, seq, starts_on, ends_on, duration_months, periodicity, installments_count, total_cents, due_day,
-                due_month_offset, readjustment_percent`);
-    const cycle = toCycle(inserted.rows[0]!);
-    await tx.execute(sql`
-      UPDATE contract_renewal_tasks SET status = 'approved', decided_at = now(), decided_by = ${ctx.access.actor.id},
-             decision_notes = ${input.notes}, new_cycle_id = ${cycle.id}
-       WHERE contract_id = ${id} AND status = 'open'`);
-    const categoryId = input.categoryId ?? locked.categoryId;
-    await tx.execute(sql`UPDATE contracts SET status = 'active', category_id = ${categoryId} WHERE id = ${id}`);
-    await generateInstallments(ctx, tx, { ...locked, status: 'active', categoryId }, cycle);
-    await syncLifecycle(tx, id);
+    if (locked.status === 'terminated' || locked.status === 'draft') throw unprocessable(E.notActive, 'contract_not_active');
+    const { seq: _s, ...done } = await renewInTx(ctx, tx, locked, input.endsOn);
+    return done;
   });
   return { preview, contract: await getContract(ctx, id) };
-}
-
-/** Não renovar: recusa a tarefa (ou registra a recusa antes de ela abrir); o contrato termina no fim do ciclo. */
-export async function declineRenewal(
-  ctx: ServiceContext,
-  id: string,
-  input: z.output<typeof contractDeclineInput>,
-): Promise<ContractDetail> {
-  await withTx(ctx, async (tx) => {
-    const contract = await loadContract(tx, id, true);
-    ctx.access.assertWrite(contract.caixaId);
-    assertLive(contract);
-    const latest = (await loadCycles(tx, id)).at(-1)!;
-    const updated = await tx.execute(sql`
-      UPDATE contract_renewal_tasks SET status = 'declined', decided_at = now(), decided_by = ${ctx.access.actor.id},
-             decision_notes = ${input.notes}
-       WHERE contract_id = ${id} AND status = 'open' RETURNING id`);
-    if (updated.rows.length === 0) {
-      const existing = await tx.execute(sql`SELECT 1 FROM contract_renewal_tasks WHERE contract_cycle_id = ${latest.id}`);
-      if (existing.rows.length > 0) throw unprocessable(E.noTaskOpen, 'contract_no_task');
-      await tx.execute(sql`
-        INSERT INTO contract_renewal_tasks (contract_id, contract_cycle_id, status, opened_on, due_on, decided_at, decided_by, decision_notes)
-        VALUES (${id}, ${latest.id}, 'declined', ${todayIso()}::date, ${latest.endsOn}::date, now(), ${ctx.access.actor.id}, ${input.notes})`);
-    }
-    if (contract.status === 'renewal_pending') await tx.execute(sql`UPDATE contracts SET status = 'active' WHERE id = ${id}`);
-    await syncLifecycle(tx, id);
-  });
-  return getContract(ctx, id);
 }
 
 /* ---------------- painel de recorrentes ---------------- */
@@ -1296,64 +1027,80 @@ export async function recurringPanel(ctx: ServiceContext, caixaIds: string[]): P
   const until = addDays(addMonths(from, 12), -1);
   const readable = ctx.access.readableCaixaIds();
   const scope: string[] | 'all' = caixaIds.length > 0 ? caixaIds : readable;
-  if (scope !== 'all' && scope.length === 0) return { months: [], renewSoon: [], pendingRenewals: [] };
+  if (scope !== 'all' && scope.length === 0) return { months: [], renewSoon: [], recentlyEnded: [] };
   const inScope = (column: SQL) => (scope === 'all' ? sql`true` : sql`${column} = ANY (${uuidArray(scope)})`);
-  // Um par espelhado com as duas caixas no escopo conta uma vez, pelo lado original.
-  const result = await ctx.db.execute<{ month: string; receivable: number; payable: number }>(sql`
+  // Ocorrências (títulos) das obrigações: um par espelhado com as duas caixas no escopo conta uma vez, pelo lado original.
+  const titles = await ctx.db.execute<{ month: string; receivable: number; payable: number }>(sql`
     SELECT to_char(date_trunc('month', x.competence_date), 'YYYY-MM-DD') AS month,
            coalesce(sum(x.amount_cents) FILTER (WHERE x.direction = 'receivable'), 0)::bigint AS receivable,
            coalesce(sum(x.amount_cents) FILTER (WHERE x.direction = 'payable'), 0)::bigint AS payable
       FROM titles x
       JOIN contracts c ON c.id = x.contract_id
-     WHERE x.contract_cycle_id IS NOT NULL AND x.status <> 'canceled' AND x.archived_at IS NULL AND c.archived_at IS NULL
+     WHERE x.status <> 'canceled' AND x.archived_at IS NULL AND c.archived_at IS NULL
        AND x.competence_date BETWEEN ${from}::date AND ${until}::date
        AND ${inScope(sql`x.caixa_id`)}
        AND (x.mirror_status IS NULL OR NOT coalesce(${inScope(sql`x.counterparty_caixa_id`)}, false))
-     GROUP BY 1 ORDER BY 1`);
-  const byMonth = new Map(result.rows.map((r) => [r.month, r]));
+     GROUP BY 1`);
+  // Cobranças esperadas no cartão (pela pagadora): o valor esperado de cada ocorrência no mês.
+  const cards = await ctx.db.execute<{ month: string; payable: number }>(sql`
+    SELECT to_char(p.competence_date, 'YYYY-MM-DD') AS month, sum(p.amount_cents)::bigint AS payable
+      FROM contracts c
+      CROSS JOIN LATERAL contract_payments(c.id, ${from}::date, ${until}::date, ${today}::date) p
+      JOIN card_recurring_charges g ON g.recurrence_rule_id = p.recurrence_rule_id
+     WHERE c.archived_at IS NULL AND p.kind = 'card_charge' AND ${inScope(sql`g.payer_caixa_id`)}
+       AND EXISTS (SELECT 1 FROM recurrence_rules r JOIN card_recurring_charges h ON h.recurrence_rule_id = r.id WHERE r.contract_id = c.id)
+     GROUP BY 1`);
+  const byMonth = new Map<string, { receivable: number; payable: number }>();
+  for (const r of titles.rows) byMonth.set(r.month, { receivable: Number(r.receivable), payable: Number(r.payable) });
+  for (const r of cards.rows) {
+    const entry = byMonth.get(r.month) ?? { receivable: 0, payable: 0 };
+    entry.payable += Number(r.payable);
+    byMonth.set(r.month, entry);
+  }
   const months = Array.from({ length: 12 }, (_, i) => {
     const month = addMonths(from, i);
     const row = byMonth.get(month);
-    const receivableCents = Number(row?.receivable ?? 0);
-    const payableCents = Number(row?.payable ?? 0);
+    const receivableCents = row?.receivable ?? 0;
+    const payableCents = row?.payable ?? 0;
     return { month, receivableCents, payableCents, netCents: receivableCents - payableCents };
   });
-  const within = (await listContracts(ctx, { withinDays: 90, status: 'current', archived: false, limit: 500 })).filter(
-    (c) => caixaIds.length === 0 || caixaIds.includes(c.caixaId),
-  );
+  const inCaixas = (c: ContractRow) => caixaIds.length === 0 || caixaIds.includes(c.caixaId);
+  const ended = await listContracts(ctx, { status: 'ended', archived: false, limit: 500 });
   return {
     months,
-    renewSoon: within.filter((c) => c.status === 'active'),
-    pendingRenewals: (await listContracts(ctx, { status: 'renewal_pending', archived: false, limit: 500 })).filter(
-      (c) => caixaIds.length === 0 || caixaIds.includes(c.caixaId),
-    ),
+    renewSoon: (await listContracts(ctx, { withinDays: 90, status: 'current', archived: false, limit: 500 })).filter(inCaixas),
+    recentlyEnded: ended.filter((c) => inCaixas(c) && c.endsOn !== null && c.endsOn >= addDays(today, -90)),
   };
 }
 
-/* ---------------- pagamentos (spec 033) ---------------- */
+/* ---------------- pagamentos (specs 033 e 034) ---------------- */
 
 /**
- * Pagamentos das parcelas do contrato (contract_payments no banco), de um
- * ciclo ou de todos: as baixas repartidas, a data da que quitou e os dias de
- * atraso ou adiantamento; aqui entram os nomes das contas legíveis, a visão
- * por mês e o resumo.
+ * Pagamentos das obrigações (contract_payments no banco), de uma vigência ou
+ * de todas: as ocorrências das séries com as baixas repartidas, as cobranças
+ * no cartão com a compra ligada (ou "não cobrada") e os títulos avulsos, com
+ * os dias de atraso ou adiantamento; aqui entram os nomes das contas legíveis,
+ * a visão por mês e o resumo.
  */
 export async function contractPayments(ctx: ServiceContext, id: string, cycleId?: string): Promise<ContractPaymentsDto> {
   const contract = await loadContract(ctx.db, id);
   await contractReadMode(ctx, contract);
+  let range: { from: string | null; to: string | null } = { from: null, to: null };
   if (cycleId) {
-    const cycle = await ctx.db.execute(sql`SELECT 1 FROM contract_cycles WHERE id = ${cycleId} AND contract_id = ${id}`);
-    if (cycle.rows.length === 0) throw notFound();
+    const cycle = await ctx.db.execute<{ starts_on: string; ends_on: string | null }>(
+      sql`SELECT starts_on, ends_on FROM contract_cycles WHERE id = ${cycleId} AND contract_id = ${id}`,
+    );
+    const row = cycle.rows[0];
+    if (!row) throw notFound();
+    range = { from: row.starts_on, to: row.ends_on };
   }
   const result = await ctx.db.execute(sql`
-    SELECT p.*, coalesce(p.funding_account_id, p.account_id) AS shown_account_id,
-           a.name AS account_name, a.caixa_id AS account_caixa_id,
-           pa.name AS planned_account_name, pa.caixa_id AS planned_account_caixa_id, pt.name AS planned_transit_account_name
-      FROM contract_payments(${id}::uuid, ${cycleId ?? null}::uuid, ${todayIso()}::date) p
+    SELECT p.*, a.name AS account_name, a.caixa_id AS account_caixa_id, pa.name AS planned_account_name, pa.caixa_id AS planned_caixa_id
+      FROM contract_payments(${id}::uuid, ${range.from}::date, ${range.to}::date, ${todayIso()}::date) p
       LEFT JOIN financial_accounts a ON a.id = coalesce(p.funding_account_id, p.account_id)
       LEFT JOIN financial_accounts pa ON pa.id = p.planned_account_id
-      LEFT JOIN financial_accounts pt ON pt.id = p.planned_transit_account_id
-     ORDER BY p.cycle_seq, p.installment`);
+     WHERE ${readableFilter(ctx.access, sql`p.caixa_id`)} OR p.kind = 'card_charge'
+     ORDER BY p.due_date, p.kind DESC, p.occurrence NULLS LAST, p.title_id, p.card_purchase_id`);
   const readable = (caixaId: unknown, name: unknown) =>
     typeof caixaId === 'string' && ctx.access.canRead(caixaId) ? ((name as string | null) ?? null) : null;
   const rows: ContractPaymentRow[] = result.rows.map((raw) => {
@@ -1361,13 +1108,13 @@ export async function contractPayments(ctx: ServiceContext, id: string, cycleId?
     const settlements = (r.settlements as Record<string, unknown>[]).map((s) => {
       const x = camel<Record<string, unknown>>(s);
       return {
-        id: String(x.id),
-        settledOn: String(x.settledOn),
+        id: String(x.id ?? x.cardPurchaseId),
+        settledOn: String(x.settledOn ?? x.purchasedOn),
         amountCents: Number(x.amountCents),
-        interestCents: Number(x.interestCents),
-        fineCents: Number(x.fineCents),
-        discountCents: Number(x.discountCents),
-        cashCents: Number(x.cashCents),
+        interestCents: Number(x.interestCents ?? 0),
+        fineCents: Number(x.fineCents ?? 0),
+        discountCents: Number(x.discountCents ?? 0),
+        cashCents: Number(x.cashCents ?? x.amountCents),
         financialAccountId: (x.financialAccountId as string | null) ?? null,
         transferId: (x.transferId as string | null) ?? null,
         fundingAccountId: (x.fundingAccountId as string | null) ?? null,
@@ -1378,15 +1125,18 @@ export async function contractPayments(ctx: ServiceContext, id: string, cycleId?
       };
     });
     return {
-      titleId: String(r.titleId),
-      cycleId: String(r.contractCycleId),
-      cycleSeq: Number(r.cycleSeq),
-      installment: Number(r.installment),
-      installmentsCount: Number(r.installmentsCount),
+      kind: r.kind as 'title' | 'card_charge',
+      ruleId: (r.recurrenceRuleId as string | null) ?? null,
+      occurrence: r.occurrence === null ? null : Number(r.occurrence),
+      titleId: (r.titleId as string | null) ?? null,
+      cardPurchaseId: (r.cardPurchaseId as string | null) ?? null,
+      cardInvoiceId: (r.cardInvoiceId as string | null) ?? null,
+      caixaId: String(r.caixaId),
+      description: String(r.description),
       competenceDate: String(r.competenceDate),
       dueDate: String(r.dueDate),
       amountCents: Number(r.amountCents),
-      status: r.status as TitleStatus,
+      status: r.status as TitleStatus | CardChargeStatus,
       settledCents: Number(r.settledCents),
       openCents: Number(r.openCents),
       interestCents: Number(r.interestCents),
@@ -1397,12 +1147,13 @@ export async function contractPayments(ctx: ServiceContext, id: string, cycleId?
       lastSettledOn: (r.lastSettledOn as string | null) ?? null,
       days: r.days === null ? null : Number(r.days),
       overdue: Boolean(r.overdue),
-      accountId: (r.shownAccountId as string | null) ?? null,
+      notCharged: Boolean(r.notCharged),
+      accountId: (r.fundingAccountId as string | null) ?? (r.accountId as string | null) ?? null,
       accountName: readable(r.accountCaixaId, r.accountName),
+      plannedAccountId: (r.plannedAccountId as string | null) ?? null,
+      plannedAccountName: readable(r.plannedCaixaId, r.plannedAccountName),
       lastOrigin: (r.lastOrigin as PaymentOrigin | null) ?? null,
       settlements,
-      ...plannedOf(r),
-      plannedAccountName: readable(r.plannedAccountCaixaId, r.plannedAccountName),
     };
   });
   return { contractId: id, cycleId: cycleId ?? null, months: paymentMonths(rows), rows, summary: paymentSummary(rows) };
@@ -1431,19 +1182,22 @@ function paymentMonths(rows: ContractPaymentRow[]): ContractPaymentsDto['months'
   return [...months.values()].sort((a, b) => a.month.localeCompare(b.month));
 }
 
+const isPaid = (r: ContractPaymentRow) => r.status === 'paid' || r.status === 'charged';
+
 function paymentSummary(rows: ContractPaymentRow[]): ContractPaymentsSummary {
-  const paid = rows.filter((r) => r.status === 'paid');
+  const paid = rows.filter(isPaid);
   const delays = paid.map((r) => Math.max(0, r.days ?? 0));
   const late = rows.filter((r) => (r.days ?? 0) > 0).map((r) => r.days!);
   return {
-    installments: rows.length,
+    occurrences: rows.length,
     paid: paid.length,
     onTimePercent: paid.length ? Math.round((paid.filter((r) => (r.days ?? 0) <= 0).length / paid.length) * 100) : null,
     avgDelayDays: paid.length ? Math.round((delays.reduce((a, b) => a + b, 0) / paid.length) * 10) / 10 : null,
     maxDelayDays: late.length ? Math.max(...late) : null,
     chargesCents: rows.reduce((acc, r) => acc + r.fineCents + r.interestCents, 0),
     discountCents: rows.reduce((acc, r) => acc + r.discountCents, 0),
-    open: rows.filter((r) => r.openCents > 0).length,
+    open: rows.filter((r) => r.kind === 'title' && r.openCents > 0).length,
     overdue: rows.filter((r) => r.overdue).length,
+    notCharged: rows.filter((r) => r.notCharged).length,
   };
 }

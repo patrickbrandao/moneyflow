@@ -8,7 +8,7 @@ POSTGRES_DB ?= moneyflow
 PSQL := $(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER)
 T ?= /tests
 
-.PHONY: env up down logs psql migrate rollback status new test dump seed reset
+.PHONY: env up down logs psql migrate rollback status new test test-migration dump seed reset
 
 env:            ## cria .env a partir do exemplo, se faltar
 	@test -f .env || cp .env.example .env
@@ -43,6 +43,9 @@ test: up        ## recria o banco de testes, migra e roda pgTAP (make test T=/te
 	$(DBMATE) -e TEST_DATABASE_URL rollback
 	$(DBMATE) -e TEST_DATABASE_URL up
 	$(COMPOSE) exec -T postgres bash -c 'pg_prove -U $(POSTGRES_USER) -d $(POSTGRES_DB)_test --ext .sql -r $(T)'
+
+test-migration: up  ## testa uma migration com dados: subida, descida e subida (make test-migration M=0052)
+	./scripts/test-migration.sh $(M)
 
 dump: migrate   ## regrava schema.sql (estrutura atual, commitado como referência)
 	$(COMPOSE) exec -T postgres pg_dump -U $(POSTGRES_USER) -d $(POSTGRES_DB) --schema-only --no-owner --no-privileges \

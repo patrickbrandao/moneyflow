@@ -475,36 +475,6 @@ export const categories = pgTable(
   ],
 );
 
-export const recurrenceRules = pgTable(
-  'recurrence_rules',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    frequency: text().notNull(),
-    intervalCount: smallint('interval_count').default(1).notNull(),
-    anchorDay: smallint('anchor_day').notNull(),
-    startsOn: date('starts_on').notNull(),
-    endsOn: date('ends_on'),
-    installmentsTotal: smallint('installments_total'),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    check(
-      'recurrence_rules_anchor_day_check',
-      sql`CHECK (
-CASE frequency
-    WHEN 'weekly'::text THEN ((anchor_day >= 1) AND (anchor_day <= 7))
-    ELSE ((anchor_day >= 1) AND (anchor_day <= 31))
-END)`,
-    ),
-    check('recurrence_rules_end_check', sql`(ends_on IS NULL) OR (installments_total IS NULL)`),
-    check('recurrence_rules_ends_on_check', sql`ends_on >= starts_on`),
-    check('recurrence_rules_frequency_check', sql`frequency = ANY (ARRAY['weekly'::text, 'monthly'::text, 'yearly'::text])`),
-    check('recurrence_rules_installments_total_check', sql`(installments_total >= 2) AND (installments_total <= 999)`),
-    check('recurrence_rules_interval_count_check', sql`(interval_count >= 1) AND (interval_count <= 366)`),
-  ],
-);
-
 export const settlements = pgTable(
   'settlements',
   {
@@ -893,82 +863,6 @@ export const agentMcpServers = pgTable(
     }).onDelete('cascade'),
     unique('agent_mcp_servers_key').on(table.agentId, table.mcpServerId),
     check('agent_mcp_servers_enabled_tools_check', sql`CHECK (ai_tool_list_valid(enabled_tools`),
-  ],
-);
-
-export const cardPurchases = pgTable(
-  'card_purchases',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    cardCaixaId: uuid('card_caixa_id').notNull(),
-    kind: text().default('purchase').notNull(),
-    chargeKind: text('charge_kind'),
-    payerCaixaId: uuid('payer_caixa_id').notNull(),
-    entityId: uuid('entity_id').notNull(),
-    categoryId: uuid('category_id').notNull(),
-    purchasedOn: date('purchased_on').notNull(),
-    description: text().notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
-    installmentsTotal: smallint('installments_total').default(1).notNull(),
-    firstInstallment: smallint('first_installment').default(1).notNull(),
-    refundedPurchaseId: uuid('refunded_purchase_id'),
-    notes: text(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('card_purchases_card_caixa_id_purchased_on_idx').using(
-      'btree',
-      table.cardCaixaId.asc().nullsLast().op('uuid_ops'),
-      table.purchasedOn.asc().nullsLast().op('date_ops'),
-    ),
-    index('card_purchases_category_id_idx').using('btree', table.categoryId.asc().nullsLast().op('uuid_ops')),
-    index('card_purchases_description_trgm_idx').using('gin', table.description.asc().nullsLast().op('gin_trgm_ops')),
-    index('card_purchases_entity_id_idx').using('btree', table.entityId.asc().nullsLast().op('uuid_ops')),
-    index('card_purchases_payer_caixa_id_idx').using('btree', table.payerCaixaId.asc().nullsLast().op('uuid_ops')),
-    index('card_purchases_refunded_purchase_id_idx').using('btree', table.refundedPurchaseId.asc().nullsLast().op('uuid_ops')),
-    foreignKey({
-      columns: [table.cardCaixaId],
-      foreignColumns: [caixas.id],
-      name: 'card_purchases_card_caixa_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.categoryId],
-      foreignColumns: [categories.id],
-      name: 'card_purchases_category_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.entityId],
-      foreignColumns: [entities.id],
-      name: 'card_purchases_entity_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.payerCaixaId],
-      foreignColumns: [caixas.id],
-      name: 'card_purchases_payer_caixa_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.refundedPurchaseId],
-      foreignColumns: [table.id],
-      name: 'card_purchases_refunded_purchase_id_fkey',
-    }),
-    check('card_purchases_amount_cents_check', sql`amount_cents > 0`),
-    check(
-      'card_purchases_charge_kind_check',
-      sql`charge_kind = ANY (ARRAY['interest'::text, 'iof'::text, 'fine'::text, 'fee'::text, 'other'::text])`,
-    ),
-    check('card_purchases_description_check', sql`btrim(description) <> ''::text`),
-    check(
-      'card_purchases_installments_check',
-      sql`((installments_total >= 1) AND (installments_total <= 99)) AND ((first_installment >= 1) AND (first_installment <= installments_total))`,
-    ),
-    check('card_purchases_kind_check', sql`kind = ANY (ARRAY['purchase'::text, 'refund'::text, 'charge'::text])`),
-    check(
-      'card_purchases_kind_links_check',
-      sql`((kind = 'refund'::text) = (refunded_purchase_id IS NOT NULL)) AND ((kind = 'charge'::text) = (charge_kind IS NOT NULL))`,
-    ),
-    check('card_purchases_refund_self_check', sql`refunded_purchase_id <> id`),
   ],
 );
 
@@ -1821,183 +1715,6 @@ export const mcpServers = pgTable(
   ],
 );
 
-export const titles = pgTable(
-  'titles',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    caixaId: uuid('caixa_id').notNull(),
-    direction: text().notNull(),
-    entityId: uuid('entity_id').notNull(),
-    categoryId: uuid('category_id').notNull(),
-    description: text().notNull(),
-    competenceDate: date('competence_date').notNull(),
-    dueDate: date('due_date').notNull(),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
-    status: text().default('open').notNull(),
-    origin: text().default('manual').notNull(),
-    recurrenceRuleId: uuid('recurrence_rule_id'),
-    occurrence: smallint(),
-    counterpartyCaixaId: uuid('counterparty_caixa_id'),
-    mirrorTitleId: uuid('mirror_title_id'),
-    mirrorStatus: text('mirror_status'),
-    notes: text(),
-    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    boletoBarcode: text('boleto_barcode'),
-    pixPayload: text('pix_payload'),
-    nfeDocumentId: uuid('nfe_document_id'),
-    cardInvoiceId: uuid('card_invoice_id'),
-    contractId: uuid('contract_id'),
-    contractCycleId: uuid('contract_cycle_id'),
-    contractInstallment: smallint('contract_installment'),
-    plannedAccountId: uuid('planned_account_id'),
-    plannedTransitAccountId: uuid('planned_transit_account_id'),
-    plannedAccountCustom: boolean('planned_account_custom').default(false).notNull(),
-  },
-  (table) => [
-    uniqueIndex('titles_caixa_boleto_barcode_key')
-      .using('btree', table.caixaId.asc().nullsLast().op('text_ops'), table.boletoBarcode.asc().nullsLast().op('text_ops'))
-      .where(sql`((boleto_barcode IS NOT NULL) AND (status <> 'canceled'::text))`),
-    index('titles_caixa_id_competence_date_idx').using(
-      'btree',
-      table.caixaId.asc().nullsLast().op('date_ops'),
-      table.competenceDate.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('titles_caixa_id_due_date_idx').using(
-      'btree',
-      table.caixaId.asc().nullsLast().op('date_ops'),
-      table.dueDate.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('titles_caixa_id_status_due_date_idx').using(
-      'btree',
-      table.caixaId.asc().nullsLast().op('uuid_ops'),
-      table.status.asc().nullsLast().op('uuid_ops'),
-      table.dueDate.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('titles_card_invoice_id_idx').using('btree', table.cardInvoiceId.asc().nullsLast().op('uuid_ops')),
-    index('titles_category_id_idx').using('btree', table.categoryId.asc().nullsLast().op('uuid_ops')),
-    index('titles_contract_id_idx').using('btree', table.contractId.asc().nullsLast().op('uuid_ops')),
-    uniqueIndex('titles_contract_installment_key').using(
-      'btree',
-      table.contractCycleId.asc().nullsLast().op('int2_ops'),
-      table.caixaId.asc().nullsLast().op('uuid_ops'),
-      table.contractInstallment.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('titles_counterparty_caixa_id_idx').using('btree', table.counterpartyCaixaId.asc().nullsLast().op('uuid_ops')),
-    index('titles_due_date_idx')
-      .using('btree', table.dueDate.asc().nullsLast().op('date_ops'))
-      .where(sql`(status = ANY (ARRAY['open'::text, 'partial'::text]))`),
-    index('titles_entity_id_idx').using('btree', table.entityId.asc().nullsLast().op('uuid_ops')),
-    uniqueIndex('titles_mirror_title_id_key').using('btree', table.mirrorTitleId.asc().nullsLast().op('uuid_ops')),
-    index('titles_nfe_document_id_idx').using('btree', table.nfeDocumentId.asc().nullsLast().op('uuid_ops')),
-    index('titles_planned_account_id_idx')
-      .using('btree', table.plannedAccountId.asc().nullsLast().op('uuid_ops'))
-      .where(sql`(planned_account_id IS NOT NULL)`),
-    index('titles_planned_account_open_idx')
-      .using('btree', table.plannedAccountId.asc().nullsLast().op('uuid_ops'), table.dueDate.asc().nullsLast().op('date_ops'))
-      .where(sql`((planned_account_id IS NOT NULL) AND (status = ANY (ARRAY['open'::text, 'partial'::text])))`),
-    index('titles_planned_transit_account_id_idx')
-      .using('btree', table.plannedTransitAccountId.asc().nullsLast().op('uuid_ops'))
-      .where(sql`(planned_transit_account_id IS NOT NULL)`),
-    uniqueIndex('titles_recurrence_occurrence_key').using(
-      'btree',
-      table.recurrenceRuleId.asc().nullsLast().op('int2_ops'),
-      table.caixaId.asc().nullsLast().op('uuid_ops'),
-      table.occurrence.asc().nullsLast().op('int2_ops'),
-    ),
-    foreignKey({
-      columns: [table.caixaId],
-      foreignColumns: [caixas.id],
-      name: 'titles_caixa_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.cardInvoiceId],
-      foreignColumns: [cardInvoices.id],
-      name: 'titles_card_invoice_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.categoryId],
-      foreignColumns: [categories.id],
-      name: 'titles_category_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.contractId, table.contractCycleId],
-      foreignColumns: [contractCycles.id, contractCycles.contractId],
-      name: 'titles_contract_cycle_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.contractId],
-      foreignColumns: [contracts.id],
-      name: 'titles_contract_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.counterpartyCaixaId],
-      foreignColumns: [caixas.id],
-      name: 'titles_counterparty_caixa_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.entityId],
-      foreignColumns: [entities.id],
-      name: 'titles_entity_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.mirrorTitleId],
-      foreignColumns: [table.id],
-      name: 'titles_mirror_title_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.nfeDocumentId],
-      foreignColumns: [nfeDocuments.id],
-      name: 'titles_nfe_document_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.plannedAccountId],
-      foreignColumns: [financialAccounts.id],
-      name: 'titles_planned_account_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.plannedTransitAccountId],
-      foreignColumns: [financialAccounts.id],
-      name: 'titles_planned_transit_account_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.recurrenceRuleId],
-      foreignColumns: [recurrenceRules.id],
-      name: 'titles_recurrence_rule_id_fkey',
-    }),
-    check('titles_amount_cents_check', sql`amount_cents > 0`),
-    check('titles_boleto_barcode_check', sql`CHECK (is_valid_boleto_barcode(boleto_barcode`),
-    check(
-      'titles_card_invoice_check',
-      sql`((origin = 'card_invoice'::text) = (card_invoice_id IS NOT NULL)) AND ((card_invoice_id IS NULL) OR (counterparty_caixa_id IS NOT NULL))`,
-    ),
-    check(
-      'titles_contract_check',
-      sql`((origin = 'contract'::text) = (contract_id IS NOT NULL)) AND ((contract_cycle_id IS NULL) = (contract_installment IS NULL)) AND ((contract_cycle_id IS NULL) OR (contract_id IS NOT NULL))`,
-    ),
-    check('titles_contract_installment_check', sql`contract_installment >= 1`),
-    check('titles_counterparty_caixa_check', sql`counterparty_caixa_id <> caixa_id`),
-    check('titles_description_check', sql`btrim(description) <> ''::text`),
-    check('titles_direction_check', sql`direction = ANY (ARRAY['payable'::text, 'receivable'::text])`),
-    check(
-      'titles_mirror_fields_check',
-      sql`((counterparty_caixa_id IS NULL) = (mirror_title_id IS NULL)) AND ((mirror_status IS NULL) OR (mirror_title_id IS NOT NULL))`,
-    ),
-    check('titles_mirror_self_check', sql`mirror_title_id <> id`),
-    check('titles_mirror_status_check', sql`mirror_status = ANY (ARRAY['pending'::text, 'accepted'::text, 'disputed'::text])`),
-    check('titles_occurrence_check', sql`occurrence >= 1`),
-    check('titles_origin_check', sql`origin = ANY (ARRAY['manual'::text, 'recurrence'::text, 'card_invoice'::text, 'contract'::text])`),
-    check('titles_pix_payload_check', sql`CHECK (is_valid_brcode(pix_payload`),
-    check(
-      'titles_recurrence_check',
-      sql`((recurrence_rule_id IS NULL) = (occurrence IS NULL)) AND ((origin = 'recurrence'::text) = (recurrence_rule_id IS NOT NULL))`,
-    ),
-    check('titles_status_check', sql`status = ANY (ARRAY['open'::text, 'partial'::text, 'paid'::text, 'canceled'::text])`),
-  ],
-);
-
 export const aiBudgets = pgTable(
   'ai_budgets',
   {
@@ -2288,7 +2005,7 @@ export const notifications = pgTable(
     check('notifications_dedup_key_check', sql`(btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300)`),
     check(
       'notifications_kind_check',
-      sql`kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text])`,
+      sql`kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'contract_charge_missing'::text])`,
     ),
     check('notifications_link_check', sql`(link ~ '^/[^/]'::text) OR (link = '/'::text)`),
     check('notifications_title_check', sql`(btrim(title) <> ''::text) AND (length(title) <= 200)`),
@@ -2836,87 +2553,6 @@ export const telegramLinks = pgTable(
   ],
 );
 
-export const aiReconcileRecipeRuns = pgTable(
-  'ai_reconcile_recipe_runs',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    recipeId: uuid('recipe_id').notNull(),
-    importId: uuid('import_id').notNull(),
-    userId: uuid('user_id').notNull(),
-    triggerKind: text('trigger_kind').notNull(),
-    position: integer(),
-    lineIds: uuid('line_ids').array(),
-    status: text().notNull(),
-    skipReason: text('skip_reason'),
-    conversationId: uuid('conversation_id'),
-    runId: uuid('run_id'),
-    startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' }),
-    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'string' }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('ai_reconcile_recipe_runs_conversation_id_idx').using('btree', table.conversationId.asc().nullsLast().op('uuid_ops')),
-    index('ai_reconcile_recipe_runs_import_id_idx').using(
-      'btree',
-      table.importId.asc().nullsLast().op('text_ops'),
-      table.status.asc().nullsLast().op('int4_ops'),
-      table.position.asc().nullsLast().op('text_ops'),
-    ),
-    uniqueIndex('ai_reconcile_recipe_runs_import_queue_key')
-      .using('btree', table.importId.asc().nullsLast().op('uuid_ops'), table.recipeId.asc().nullsLast().op('uuid_ops'))
-      .where(sql`(trigger_kind = 'import'::text)`),
-    index('ai_reconcile_recipe_runs_queued_idx')
-      .using('btree', table.createdAt.asc().nullsLast().op('timestamptz_ops'))
-      .where(sql`(status = 'queued'::text)`),
-    index('ai_reconcile_recipe_runs_recipe_id_idx').using(
-      'btree',
-      table.recipeId.asc().nullsLast().op('uuid_ops'),
-      table.createdAt.desc().nullsFirst().op('timestamptz_ops'),
-    ),
-    index('ai_reconcile_recipe_runs_run_id_idx').using('btree', table.runId.asc().nullsLast().op('uuid_ops')),
-    index('ai_reconcile_recipe_runs_user_id_idx').using('btree', table.userId.asc().nullsLast().op('uuid_ops')),
-    foreignKey({
-      columns: [table.conversationId],
-      foreignColumns: [aiConversations.id],
-      name: 'ai_reconcile_recipe_runs_conversation_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.importId],
-      foreignColumns: [statementImports.id],
-      name: 'ai_reconcile_recipe_runs_import_id_fkey',
-    }).onDelete('cascade'),
-    foreignKey({
-      columns: [table.recipeId],
-      foreignColumns: [aiReconcileRecipes.id],
-      name: 'ai_reconcile_recipe_runs_recipe_id_fkey',
-    }).onDelete('cascade'),
-    foreignKey({
-      columns: [table.runId],
-      foreignColumns: [aiRuns.id],
-      name: 'ai_reconcile_recipe_runs_run_id_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.userId],
-      foreignColumns: [users.id],
-      name: 'ai_reconcile_recipe_runs_user_id_fkey',
-    }).onDelete('cascade'),
-    check('ai_reconcile_recipe_runs_line_ids_check', sql`cardinality(line_ids) >= 1`),
-    check('ai_reconcile_recipe_runs_position_check', sql`(trigger_kind = 'import'::text) = ("position" IS NOT NULL)`),
-    check('ai_reconcile_recipe_runs_queued_check', sql`(status <> 'queued'::text) OR (trigger_kind = 'import'::text)`),
-    check(
-      'ai_reconcile_recipe_runs_reason_check',
-      sql`((status = ANY (ARRAY['skipped'::text, 'failed'::text])) = (skip_reason IS NOT NULL)) AND ((length(skip_reason) >= 1) AND (length(skip_reason) <= 500))`,
-    ),
-    check('ai_reconcile_recipe_runs_run_check', sql`(status <> ALL (ARRAY['queued'::text, 'skipped'::text])) OR (run_id IS NULL)`),
-    check(
-      'ai_reconcile_recipe_runs_status_check',
-      sql`status = ANY (ARRAY['queued'::text, 'started'::text, 'completed'::text, 'skipped'::text, 'failed'::text])`,
-    ),
-    check('ai_reconcile_recipe_runs_trigger_kind_check', sql`trigger_kind = ANY (ARRAY['manual'::text, 'import'::text])`),
-  ],
-);
-
 export const statementLines = pgTable(
   'statement_lines',
   {
@@ -3053,7 +2689,7 @@ export const statementLines = pgTable(
     check('statement_lines_amount_cents_check', sql`amount_cents <> 0`),
     check(
       'statement_lines_auto_settled_check',
-      sql`(NOT auto_settled) OR ((status = 'matched'::text) AND COALESCE((created_entry = ANY (ARRAY['settlement'::text, 'transfer_settlement'::text])), false))`,
+      sql`(NOT auto_settled) OR ((status = 'matched'::text) AND COALESCE((created_entry = ANY (ARRAY['settlement'::text, 'transfer_settlement'::text, 'purchase'::text])), false))`,
     ),
     check(
       'statement_lines_classification_source_check',
@@ -3100,6 +2736,87 @@ END AND ((status = 'matched'::text) = (matched_at IS NOT NULL))`,
       sql`((supersede_suggested_line_id IS NULL) OR (NOT (supersede_outcome IS DISTINCT FROM 'pending'::text))) AND ((supersede_suggestion_reason IS NULL) OR ((supersede_suggested_line_id IS NOT NULL) AND (btrim(supersede_suggestion_reason) <> ''::text) AND (length(supersede_suggestion_reason) <= 500)))`,
     ),
     check('statement_lines_target_check', sql`num_nonnulls(financial_account_id, card_caixa_id) = 1`),
+  ],
+);
+
+export const aiReconcileRecipeRuns = pgTable(
+  'ai_reconcile_recipe_runs',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    recipeId: uuid('recipe_id').notNull(),
+    importId: uuid('import_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    triggerKind: text('trigger_kind').notNull(),
+    position: integer(),
+    lineIds: uuid('line_ids').array(),
+    status: text().notNull(),
+    skipReason: text('skip_reason'),
+    conversationId: uuid('conversation_id'),
+    runId: uuid('run_id'),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' }),
+    finishedAt: timestamp('finished_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_reconcile_recipe_runs_conversation_id_idx').using('btree', table.conversationId.asc().nullsLast().op('uuid_ops')),
+    index('ai_reconcile_recipe_runs_import_id_idx').using(
+      'btree',
+      table.importId.asc().nullsLast().op('text_ops'),
+      table.status.asc().nullsLast().op('int4_ops'),
+      table.position.asc().nullsLast().op('text_ops'),
+    ),
+    uniqueIndex('ai_reconcile_recipe_runs_import_queue_key')
+      .using('btree', table.importId.asc().nullsLast().op('uuid_ops'), table.recipeId.asc().nullsLast().op('uuid_ops'))
+      .where(sql`(trigger_kind = 'import'::text)`),
+    index('ai_reconcile_recipe_runs_queued_idx')
+      .using('btree', table.createdAt.asc().nullsLast().op('timestamptz_ops'))
+      .where(sql`(status = 'queued'::text)`),
+    index('ai_reconcile_recipe_runs_recipe_id_idx').using(
+      'btree',
+      table.recipeId.asc().nullsLast().op('uuid_ops'),
+      table.createdAt.desc().nullsFirst().op('timestamptz_ops'),
+    ),
+    index('ai_reconcile_recipe_runs_run_id_idx').using('btree', table.runId.asc().nullsLast().op('uuid_ops')),
+    index('ai_reconcile_recipe_runs_user_id_idx').using('btree', table.userId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.conversationId],
+      foreignColumns: [aiConversations.id],
+      name: 'ai_reconcile_recipe_runs_conversation_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.importId],
+      foreignColumns: [statementImports.id],
+      name: 'ai_reconcile_recipe_runs_import_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.recipeId],
+      foreignColumns: [aiReconcileRecipes.id],
+      name: 'ai_reconcile_recipe_runs_recipe_id_fkey',
+    }).onDelete('cascade'),
+    foreignKey({
+      columns: [table.runId],
+      foreignColumns: [aiRuns.id],
+      name: 'ai_reconcile_recipe_runs_run_id_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.userId],
+      foreignColumns: [users.id],
+      name: 'ai_reconcile_recipe_runs_user_id_fkey',
+    }).onDelete('cascade'),
+    check('ai_reconcile_recipe_runs_line_ids_check', sql`cardinality(line_ids) >= 1`),
+    check('ai_reconcile_recipe_runs_position_check', sql`(trigger_kind = 'import'::text) = ("position" IS NOT NULL)`),
+    check('ai_reconcile_recipe_runs_queued_check', sql`(status <> 'queued'::text) OR (trigger_kind = 'import'::text)`),
+    check(
+      'ai_reconcile_recipe_runs_reason_check',
+      sql`((status = ANY (ARRAY['skipped'::text, 'failed'::text])) = (skip_reason IS NOT NULL)) AND ((length(skip_reason) >= 1) AND (length(skip_reason) <= 500))`,
+    ),
+    check('ai_reconcile_recipe_runs_run_check', sql`(status <> ALL (ARRAY['queued'::text, 'skipped'::text])) OR (run_id IS NULL)`),
+    check(
+      'ai_reconcile_recipe_runs_status_check',
+      sql`status = ANY (ARRAY['queued'::text, 'started'::text, 'completed'::text, 'skipped'::text, 'failed'::text])`,
+    ),
+    check('ai_reconcile_recipe_runs_trigger_kind_check', sql`trigger_kind = ANY (ARRAY['manual'::text, 'import'::text])`),
   ],
 );
 
@@ -3286,28 +3003,13 @@ export const contractCycles = pgTable(
     contractId: uuid('contract_id').notNull(),
     seq: smallint().notNull(),
     startsOn: date('starts_on').notNull(),
-    durationMonths: smallint('duration_months').notNull(),
-    endsOn: date('ends_on')
-      .notNull()
-      .generatedAlwaysAs(sql`
-CASE
-    WHEN (EXTRACT(day FROM (starts_on + make_interval(months => (duration_months)::integer))) < EXTRACT(day FROM starts_on)) THEN ((starts_on + make_interval(months => (duration_months)::integer)))::date
-    ELSE (((starts_on + make_interval(months => (duration_months)::integer)))::date - 1)
-END`),
-    periodicity: text().notNull(),
-    installmentsCount: smallint('installments_count')
-      .notNull()
-      .generatedAlwaysAs(sql`(
-CASE periodicity
-    WHEN 'monthly'::text THEN (duration_months)::integer
-    WHEN 'quarterly'::text THEN (duration_months / 3)
-    WHEN 'semiannual'::text THEN (duration_months / 6)
-    WHEN 'annual'::text THEN (duration_months / 12)
-    ELSE 1
-END)::smallint`),
+    durationMonths: smallint('duration_months'),
+    endsOn: date('ends_on'),
+    periodicity: text(),
+    installmentsCount: smallint('installments_count'),
     // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    totalCents: bigint('total_cents', { mode: 'number' }).notNull(),
-    dueDay: smallint('due_day').notNull(),
+    totalCents: bigint('total_cents', { mode: 'number' }),
+    dueDay: smallint('due_day'),
     dueMonthOffset: smallint('due_month_offset').default(0).notNull(),
     readjustmentPercent: numeric('readjustment_percent', { precision: 7, scale: 4 }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
@@ -3333,6 +3035,11 @@ CASE periodicity
     WHEN 'annual'::text THEN 12
     ELSE 1
 END) = 0`,
+    ),
+    check('contract_cycles_ends_on_check', sql`ends_on >= starts_on`),
+    check(
+      'contract_cycles_legacy_check',
+      sql`((duration_months IS NULL) = (periodicity IS NULL)) AND ((duration_months IS NULL) = (total_cents IS NULL)) AND ((duration_months IS NULL) = (due_day IS NULL))`,
     ),
     check(
       'contract_cycles_periodicity_check',
@@ -3460,124 +3167,6 @@ export const contractDocumentVersions = pgTable(
   ],
 );
 
-export const contractAmendments = pgTable(
-  'contract_amendments',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    contractId: uuid('contract_id').notNull(),
-    contractCycleId: uuid('contract_cycle_id').notNull(),
-    documentId: uuid('document_id'),
-    effectiveOn: date('effective_on').notNull(),
-    changes: jsonb().notNull(),
-    affectedTitleIds: uuid('affected_title_ids').array().default(['']).notNull(),
-    skippedTitleIds: uuid('skipped_title_ids').array().default(['']).notNull(),
-    notes: text(),
-    createdBy: uuid('created_by'),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('contract_amendments_contract_cycle_id_idx').using('btree', table.contractCycleId.asc().nullsLast().op('uuid_ops')),
-    index('contract_amendments_contract_id_idx').using(
-      'btree',
-      table.contractId.asc().nullsLast().op('date_ops'),
-      table.effectiveOn.asc().nullsLast().op('date_ops'),
-    ),
-    index('contract_amendments_created_by_idx').using('btree', table.createdBy.asc().nullsLast().op('uuid_ops')),
-    index('contract_amendments_document_id_idx').using('btree', table.documentId.asc().nullsLast().op('uuid_ops')),
-    foreignKey({
-      columns: [table.contractId, table.contractCycleId],
-      foreignColumns: [contractCycles.id, contractCycles.contractId],
-      name: 'contract_amendments_contract_cycle_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.contractId],
-      foreignColumns: [contracts.id],
-      name: 'contract_amendments_contract_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.createdBy],
-      foreignColumns: [users.id],
-      name: 'contract_amendments_created_by_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.contractId, table.documentId],
-      foreignColumns: [contractDocuments.id, contractDocuments.contractId],
-      name: 'contract_amendments_document_id_fkey',
-    }),
-    check(
-      'contract_amendments_changes_check',
-      sql`(jsonb_typeof(changes) = 'object'::text) AND COALESCE((jsonb_typeof((changes -> 'before'::text)) = 'object'::text), false) AND COALESCE((jsonb_typeof((changes -> 'after'::text)) = 'object'::text), false)`,
-    ),
-    check(
-      'contract_amendments_title_ids_check',
-      sql`(array_position(affected_title_ids, NULL::uuid) IS NULL) AND (array_position(skipped_title_ids, NULL::uuid) IS NULL)`,
-    ),
-  ],
-);
-
-export const contractRenewalTasks = pgTable(
-  'contract_renewal_tasks',
-  {
-    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
-    contractId: uuid('contract_id').notNull(),
-    contractCycleId: uuid('contract_cycle_id').notNull(),
-    status: text().default('open').notNull(),
-    openedOn: date('opened_on').notNull(),
-    dueOn: date('due_on').notNull(),
-    decidedAt: timestamp('decided_at', { withTimezone: true, mode: 'string' }),
-    decidedBy: uuid('decided_by'),
-    decisionNotes: text('decision_notes'),
-    newCycleId: uuid('new_cycle_id'),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('contract_renewal_tasks_contract_id_idx').using('btree', table.contractId.asc().nullsLast().op('uuid_ops')),
-    index('contract_renewal_tasks_decided_by_idx').using('btree', table.decidedBy.asc().nullsLast().op('uuid_ops')),
-    index('contract_renewal_tasks_due_on_idx')
-      .using('btree', table.dueOn.asc().nullsLast().op('date_ops'))
-      .where(sql`(status = 'open'::text)`),
-    index('contract_renewal_tasks_new_cycle_id_idx').using('btree', table.newCycleId.asc().nullsLast().op('uuid_ops')),
-    uniqueIndex('contract_renewal_tasks_open_key')
-      .using('btree', table.contractId.asc().nullsLast().op('uuid_ops'))
-      .where(sql`(status = 'open'::text)`),
-    foreignKey({
-      columns: [table.contractId, table.contractCycleId],
-      foreignColumns: [contractCycles.id, contractCycles.contractId],
-      name: 'contract_renewal_tasks_contract_cycle_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.contractId],
-      foreignColumns: [contracts.id],
-      name: 'contract_renewal_tasks_contract_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.decidedBy],
-      foreignColumns: [users.id],
-      name: 'contract_renewal_tasks_decided_by_fkey',
-    }).onDelete('set null'),
-    foreignKey({
-      columns: [table.contractId, table.newCycleId],
-      foreignColumns: [contractCycles.id, contractCycles.contractId],
-      name: 'contract_renewal_tasks_new_cycle_id_fkey',
-    }),
-    unique('contract_renewal_tasks_contract_cycle_id_key').on(table.contractCycleId),
-    check(
-      'contract_renewal_tasks_decision_check',
-      sql`CHECK (
-CASE status
-    WHEN 'open'::text THEN ((decided_at IS NULL) AND (new_cycle_id IS NULL))
-    WHEN 'approved'::text THEN ((decided_at IS NOT NULL) AND (new_cycle_id IS NOT NULL))
-    WHEN 'declined'::text THEN ((decided_at IS NOT NULL) AND (new_cycle_id IS NULL))
-    ELSE NULL::boolean
-END)`,
-    ),
-    check('contract_renewal_tasks_new_cycle_self_check', sql`new_cycle_id <> contract_cycle_id`),
-    check('contract_renewal_tasks_status_check', sql`status = ANY (ARRAY['open'::text, 'approved'::text, 'declined'::text])`),
-  ],
-);
-
 export const aiReconcileRecipes = pgTable(
   'ai_reconcile_recipes',
   {
@@ -3626,6 +3215,64 @@ export const aiReconcileRecipes = pgTable(
   ],
 );
 
+export const contractAmendments = pgTable(
+  'contract_amendments',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    contractId: uuid('contract_id').notNull(),
+    contractCycleId: uuid('contract_cycle_id'),
+    documentId: uuid('document_id'),
+    effectiveOn: date('effective_on').notNull(),
+    changes: jsonb().notNull(),
+    affectedTitleIds: uuid('affected_title_ids').array().default(['']).notNull(),
+    skippedTitleIds: uuid('skipped_title_ids').array().default(['']).notNull(),
+    notes: text(),
+    createdBy: uuid('created_by'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    recurrenceRuleIds: uuid('recurrence_rule_ids').array().default(['']).notNull(),
+  },
+  (table) => [
+    index('contract_amendments_contract_cycle_id_idx').using('btree', table.contractCycleId.asc().nullsLast().op('uuid_ops')),
+    index('contract_amendments_contract_id_idx').using(
+      'btree',
+      table.contractId.asc().nullsLast().op('date_ops'),
+      table.effectiveOn.asc().nullsLast().op('date_ops'),
+    ),
+    index('contract_amendments_created_by_idx').using('btree', table.createdBy.asc().nullsLast().op('uuid_ops')),
+    index('contract_amendments_document_id_idx').using('btree', table.documentId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.contractId, table.contractCycleId],
+      foreignColumns: [contractCycles.id, contractCycles.contractId],
+      name: 'contract_amendments_contract_cycle_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.contractId],
+      foreignColumns: [contracts.id],
+      name: 'contract_amendments_contract_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.createdBy],
+      foreignColumns: [users.id],
+      name: 'contract_amendments_created_by_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.contractId, table.documentId],
+      foreignColumns: [contractDocuments.id, contractDocuments.contractId],
+      name: 'contract_amendments_document_id_fkey',
+    }),
+    check(
+      'contract_amendments_changes_check',
+      sql`(jsonb_typeof(changes) = 'object'::text) AND COALESCE((jsonb_typeof((changes -> 'before'::text)) = 'object'::text), false) AND COALESCE((jsonb_typeof((changes -> 'after'::text)) = 'object'::text), false)`,
+    ),
+    check('contract_amendments_rule_ids_check', sql`array_position(recurrence_rule_ids, NULL::uuid) IS NULL`),
+    check(
+      'contract_amendments_title_ids_check',
+      sql`(array_position(affected_title_ids, NULL::uuid) IS NULL) AND (array_position(skipped_title_ids, NULL::uuid) IS NULL)`,
+    ),
+  ],
+);
+
 export const aiReconcileRecipeTargets = pgTable(
   'ai_reconcile_recipe_targets',
   {
@@ -3662,6 +3309,61 @@ export const aiReconcileRecipeTargets = pgTable(
       name: 'ai_reconcile_recipe_targets_recipe_id_fkey',
     }).onDelete('cascade'),
     check('ai_reconcile_recipe_targets_target_check', sql`num_nonnulls(financial_account_id, card_caixa_id) = 1`),
+  ],
+);
+
+export const contractRenewalTasks = pgTable(
+  'contract_renewal_tasks',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    contractId: uuid('contract_id').notNull(),
+    contractCycleId: uuid('contract_cycle_id').notNull(),
+    status: text().notNull(),
+    openedOn: date('opened_on').notNull(),
+    dueOn: date('due_on').notNull(),
+    decidedAt: timestamp('decided_at', { withTimezone: true, mode: 'string' }),
+    decidedBy: uuid('decided_by'),
+    decisionNotes: text('decision_notes'),
+    newCycleId: uuid('new_cycle_id'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('contract_renewal_tasks_contract_id_idx').using('btree', table.contractId.asc().nullsLast().op('uuid_ops')),
+    index('contract_renewal_tasks_decided_by_idx').using('btree', table.decidedBy.asc().nullsLast().op('uuid_ops')),
+    index('contract_renewal_tasks_new_cycle_id_idx').using('btree', table.newCycleId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.contractId, table.contractCycleId],
+      foreignColumns: [contractCycles.id, contractCycles.contractId],
+      name: 'contract_renewal_tasks_contract_cycle_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.contractId],
+      foreignColumns: [contracts.id],
+      name: 'contract_renewal_tasks_contract_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.decidedBy],
+      foreignColumns: [users.id],
+      name: 'contract_renewal_tasks_decided_by_fkey',
+    }).onDelete('set null'),
+    foreignKey({
+      columns: [table.contractId, table.newCycleId],
+      foreignColumns: [contractCycles.id, contractCycles.contractId],
+      name: 'contract_renewal_tasks_new_cycle_id_fkey',
+    }),
+    unique('contract_renewal_tasks_contract_cycle_id_key').on(table.contractCycleId),
+    check(
+      'contract_renewal_tasks_decision_check',
+      sql`CHECK (
+CASE status
+    WHEN 'open'::text THEN ((decided_at IS NULL) AND (new_cycle_id IS NULL))
+    WHEN 'approved'::text THEN ((decided_at IS NOT NULL) AND (new_cycle_id IS NOT NULL))
+    ELSE ((decided_at IS NOT NULL) AND (new_cycle_id IS NULL))
+END)`,
+    ),
+    check('contract_renewal_tasks_new_cycle_self_check', sql`new_cycle_id <> contract_cycle_id`),
+    check('contract_renewal_tasks_status_check', sql`status = ANY (ARRAY['approved'::text, 'declined'::text, 'closed'::text])`),
   ],
 );
 
@@ -3792,6 +3494,378 @@ export const aiRequests = pgTable(
   ],
 );
 
+export const recurrenceRules = pgTable(
+  'recurrence_rules',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    frequency: text().notNull(),
+    intervalCount: smallint('interval_count').default(1).notNull(),
+    anchorDay: smallint('anchor_day').notNull(),
+    startsOn: date('starts_on').notNull(),
+    endsOn: date('ends_on'),
+    installmentsTotal: smallint('installments_total'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    caixaId: uuid('caixa_id').notNull(),
+    contractId: uuid('contract_id'),
+    matchWindowDays: smallint('match_window_days').default(15).notNull(),
+    lateFeePercent: numeric('late_fee_percent', { precision: 6, scale: 4 }),
+    interestMonthPercent: numeric('interest_month_percent', { precision: 6, scale: 4 }),
+    earlyDiscountPercent: numeric('early_discount_percent', { precision: 6, scale: 4 }),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    toleranceCents: bigint('tolerance_cents', { mode: 'number' }).default(0).notNull(),
+    autoSettle: boolean('auto_settle').default(false).notNull(),
+  },
+  (table) => [
+    index('recurrence_rules_caixa_id_idx').using('btree', table.caixaId.asc().nullsLast().op('uuid_ops')),
+    index('recurrence_rules_contract_id_idx').using('btree', table.contractId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.caixaId],
+      foreignColumns: [caixas.id],
+      name: 'recurrence_rules_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.contractId],
+      foreignColumns: [contracts.id],
+      name: 'recurrence_rules_contract_id_fkey',
+    }).onDelete('set null'),
+    unique('recurrence_rules_id_caixa_key').on(table.caixaId, table.id),
+    check(
+      'recurrence_rules_anchor_day_check',
+      sql`CHECK (
+CASE frequency
+    WHEN 'weekly'::text THEN ((anchor_day >= 1) AND (anchor_day <= 7))
+    ELSE ((anchor_day >= 1) AND (anchor_day <= 31))
+END)`,
+    ),
+    check(
+      'recurrence_rules_early_discount_percent_check',
+      sql`(early_discount_percent >= (0)::numeric) AND (early_discount_percent <= (50)::numeric)`,
+    ),
+    check('recurrence_rules_end_check', sql`(ends_on IS NULL) OR (installments_total IS NULL)`),
+    check('recurrence_rules_ends_on_check', sql`ends_on >= starts_on`),
+    check('recurrence_rules_frequency_check', sql`frequency = ANY (ARRAY['weekly'::text, 'monthly'::text, 'yearly'::text])`),
+    check('recurrence_rules_installments_total_check', sql`(installments_total >= 2) AND (installments_total <= 999)`),
+    check(
+      'recurrence_rules_interest_month_percent_check',
+      sql`(interest_month_percent >= (0)::numeric) AND (interest_month_percent <= (10)::numeric)`,
+    ),
+    check('recurrence_rules_interval_count_check', sql`(interval_count >= 1) AND (interval_count <= 366)`),
+    check('recurrence_rules_late_fee_percent_check', sql`(late_fee_percent >= (0)::numeric) AND (late_fee_percent <= (20)::numeric)`),
+    check('recurrence_rules_match_window_days_check', sql`(match_window_days >= 0) AND (match_window_days <= 45)`),
+    check('recurrence_rules_tolerance_cents_check', sql`tolerance_cents >= 0`),
+  ],
+);
+
+export const cardRecurringCharges = pgTable(
+  'card_recurring_charges',
+  {
+    recurrenceRuleId: uuid('recurrence_rule_id').primaryKey().notNull(),
+    payerCaixaId: uuid('payer_caixa_id').notNull(),
+    entityId: uuid('entity_id').notNull(),
+    categoryId: uuid('category_id').notNull(),
+    description: text().notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('card_recurring_charges_category_id_idx').using('btree', table.categoryId.asc().nullsLast().op('uuid_ops')),
+    index('card_recurring_charges_entity_id_idx').using('btree', table.entityId.asc().nullsLast().op('uuid_ops')),
+    index('card_recurring_charges_payer_caixa_id_idx').using('btree', table.payerCaixaId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.categoryId],
+      foreignColumns: [categories.id],
+      name: 'card_recurring_charges_category_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.entityId],
+      foreignColumns: [entities.id],
+      name: 'card_recurring_charges_entity_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.payerCaixaId],
+      foreignColumns: [caixas.id],
+      name: 'card_recurring_charges_payer_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.recurrenceRuleId],
+      foreignColumns: [recurrenceRules.id],
+      name: 'card_recurring_charges_recurrence_rule_id_fkey',
+    }).onDelete('cascade'),
+    check('card_recurring_charges_amount_cents_check', sql`amount_cents > 0`),
+    check('card_recurring_charges_description_check', sql`(btrim(description) <> ''::text) AND (length(description) <= 200)`),
+  ],
+);
+
+export const cardPurchases = pgTable(
+  'card_purchases',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    cardCaixaId: uuid('card_caixa_id').notNull(),
+    kind: text().default('purchase').notNull(),
+    chargeKind: text('charge_kind'),
+    payerCaixaId: uuid('payer_caixa_id').notNull(),
+    entityId: uuid('entity_id').notNull(),
+    categoryId: uuid('category_id').notNull(),
+    purchasedOn: date('purchased_on').notNull(),
+    description: text().notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
+    installmentsTotal: smallint('installments_total').default(1).notNull(),
+    firstInstallment: smallint('first_installment').default(1).notNull(),
+    refundedPurchaseId: uuid('refunded_purchase_id'),
+    notes: text(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    contractId: uuid('contract_id'),
+    recurrenceRuleId: uuid('recurrence_rule_id'),
+    occurrence: smallint(),
+  },
+  (table) => [
+    index('card_purchases_card_caixa_id_purchased_on_idx').using(
+      'btree',
+      table.cardCaixaId.asc().nullsLast().op('date_ops'),
+      table.purchasedOn.asc().nullsLast().op('date_ops'),
+    ),
+    index('card_purchases_category_id_idx').using('btree', table.categoryId.asc().nullsLast().op('uuid_ops')),
+    index('card_purchases_contract_id_idx').using('btree', table.contractId.asc().nullsLast().op('uuid_ops')),
+    index('card_purchases_description_trgm_idx').using('gin', table.description.asc().nullsLast().op('gin_trgm_ops')),
+    index('card_purchases_entity_id_idx').using('btree', table.entityId.asc().nullsLast().op('uuid_ops')),
+    index('card_purchases_payer_caixa_id_idx').using('btree', table.payerCaixaId.asc().nullsLast().op('uuid_ops')),
+    index('card_purchases_recurrence_rule_id_idx').using(
+      'btree',
+      table.recurrenceRuleId.asc().nullsLast().op('int2_ops'),
+      table.occurrence.asc().nullsLast().op('int2_ops'),
+    ),
+    index('card_purchases_refunded_purchase_id_idx').using('btree', table.refundedPurchaseId.asc().nullsLast().op('uuid_ops')),
+    foreignKey({
+      columns: [table.cardCaixaId],
+      foreignColumns: [caixas.id],
+      name: 'card_purchases_card_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.categoryId],
+      foreignColumns: [categories.id],
+      name: 'card_purchases_category_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.contractId],
+      foreignColumns: [contracts.id],
+      name: 'card_purchases_contract_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.entityId],
+      foreignColumns: [entities.id],
+      name: 'card_purchases_entity_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.payerCaixaId],
+      foreignColumns: [caixas.id],
+      name: 'card_purchases_payer_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.cardCaixaId, table.recurrenceRuleId],
+      foreignColumns: [recurrenceRules.id, recurrenceRules.caixaId],
+      name: 'card_purchases_recurrence_rule_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.refundedPurchaseId],
+      foreignColumns: [table.id],
+      name: 'card_purchases_refunded_purchase_id_fkey',
+    }),
+    check('card_purchases_amount_cents_check', sql`amount_cents > 0`),
+    check(
+      'card_purchases_charge_kind_check',
+      sql`charge_kind = ANY (ARRAY['interest'::text, 'iof'::text, 'fine'::text, 'fee'::text, 'other'::text])`,
+    ),
+    check('card_purchases_description_check', sql`btrim(description) <> ''::text`),
+    check(
+      'card_purchases_installments_check',
+      sql`((installments_total >= 1) AND (installments_total <= 99)) AND ((first_installment >= 1) AND (first_installment <= installments_total))`,
+    ),
+    check('card_purchases_kind_check', sql`kind = ANY (ARRAY['purchase'::text, 'refund'::text, 'charge'::text])`),
+    check(
+      'card_purchases_kind_links_check',
+      sql`((kind = 'refund'::text) = (refunded_purchase_id IS NOT NULL)) AND ((kind = 'charge'::text) = (charge_kind IS NOT NULL))`,
+    ),
+    check(
+      'card_purchases_recurrence_check',
+      sql`((recurrence_rule_id IS NULL) = (occurrence IS NULL)) AND ((occurrence IS NULL) OR (occurrence >= 1)) AND (((recurrence_rule_id IS NULL) AND (contract_id IS NULL)) OR (kind = 'purchase'::text))`,
+    ),
+    check('card_purchases_refund_self_check', sql`refunded_purchase_id <> id`),
+  ],
+);
+
+export const titles = pgTable(
+  'titles',
+  {
+    id: uuid().default(sql`uuidv7()`).primaryKey().notNull(),
+    caixaId: uuid('caixa_id').notNull(),
+    direction: text().notNull(),
+    entityId: uuid('entity_id').notNull(),
+    categoryId: uuid('category_id').notNull(),
+    description: text().notNull(),
+    competenceDate: date('competence_date').notNull(),
+    dueDate: date('due_date').notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
+    status: text().default('open').notNull(),
+    origin: text().default('manual').notNull(),
+    recurrenceRuleId: uuid('recurrence_rule_id'),
+    occurrence: smallint(),
+    counterpartyCaixaId: uuid('counterparty_caixa_id'),
+    mirrorTitleId: uuid('mirror_title_id'),
+    mirrorStatus: text('mirror_status'),
+    notes: text(),
+    archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    boletoBarcode: text('boleto_barcode'),
+    pixPayload: text('pix_payload'),
+    nfeDocumentId: uuid('nfe_document_id'),
+    cardInvoiceId: uuid('card_invoice_id'),
+    contractId: uuid('contract_id'),
+    contractCycleId: uuid('contract_cycle_id'),
+    contractInstallment: smallint('contract_installment'),
+    plannedAccountId: uuid('planned_account_id'),
+    plannedAccountCustom: boolean('planned_account_custom').default(false).notNull(),
+  },
+  (table) => [
+    uniqueIndex('titles_caixa_boleto_barcode_key')
+      .using('btree', table.caixaId.asc().nullsLast().op('text_ops'), table.boletoBarcode.asc().nullsLast().op('text_ops'))
+      .where(sql`((boleto_barcode IS NOT NULL) AND (status <> 'canceled'::text))`),
+    index('titles_caixa_id_competence_date_idx').using(
+      'btree',
+      table.caixaId.asc().nullsLast().op('date_ops'),
+      table.competenceDate.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('titles_caixa_id_due_date_idx').using(
+      'btree',
+      table.caixaId.asc().nullsLast().op('date_ops'),
+      table.dueDate.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('titles_caixa_id_status_due_date_idx').using(
+      'btree',
+      table.caixaId.asc().nullsLast().op('uuid_ops'),
+      table.status.asc().nullsLast().op('uuid_ops'),
+      table.dueDate.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('titles_card_invoice_id_idx').using('btree', table.cardInvoiceId.asc().nullsLast().op('uuid_ops')),
+    index('titles_category_id_idx').using('btree', table.categoryId.asc().nullsLast().op('uuid_ops')),
+    index('titles_contract_id_idx').using('btree', table.contractId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('titles_contract_installment_key').using(
+      'btree',
+      table.contractCycleId.asc().nullsLast().op('int2_ops'),
+      table.caixaId.asc().nullsLast().op('uuid_ops'),
+      table.contractInstallment.asc().nullsLast().op('uuid_ops'),
+    ),
+    index('titles_counterparty_caixa_id_idx').using('btree', table.counterpartyCaixaId.asc().nullsLast().op('uuid_ops')),
+    index('titles_due_date_idx')
+      .using('btree', table.dueDate.asc().nullsLast().op('date_ops'))
+      .where(sql`(status = ANY (ARRAY['open'::text, 'partial'::text]))`),
+    index('titles_entity_id_idx').using('btree', table.entityId.asc().nullsLast().op('uuid_ops')),
+    uniqueIndex('titles_mirror_title_id_key').using('btree', table.mirrorTitleId.asc().nullsLast().op('uuid_ops')),
+    index('titles_nfe_document_id_idx').using('btree', table.nfeDocumentId.asc().nullsLast().op('uuid_ops')),
+    index('titles_planned_account_id_idx')
+      .using('btree', table.plannedAccountId.asc().nullsLast().op('uuid_ops'))
+      .where(sql`(planned_account_id IS NOT NULL)`),
+    index('titles_planned_account_open_idx')
+      .using('btree', table.plannedAccountId.asc().nullsLast().op('uuid_ops'), table.dueDate.asc().nullsLast().op('date_ops'))
+      .where(sql`((planned_account_id IS NOT NULL) AND (status = ANY (ARRAY['open'::text, 'partial'::text])))`),
+    uniqueIndex('titles_recurrence_occurrence_key').using(
+      'btree',
+      table.recurrenceRuleId.asc().nullsLast().op('int2_ops'),
+      table.caixaId.asc().nullsLast().op('uuid_ops'),
+      table.occurrence.asc().nullsLast().op('int2_ops'),
+    ),
+    foreignKey({
+      columns: [table.caixaId],
+      foreignColumns: [caixas.id],
+      name: 'titles_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.cardInvoiceId],
+      foreignColumns: [cardInvoices.id],
+      name: 'titles_card_invoice_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.categoryId],
+      foreignColumns: [categories.id],
+      name: 'titles_category_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.contractId, table.contractCycleId],
+      foreignColumns: [contractCycles.id, contractCycles.contractId],
+      name: 'titles_contract_cycle_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.contractId],
+      foreignColumns: [contracts.id],
+      name: 'titles_contract_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.counterpartyCaixaId],
+      foreignColumns: [caixas.id],
+      name: 'titles_counterparty_caixa_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.entityId],
+      foreignColumns: [entities.id],
+      name: 'titles_entity_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.mirrorTitleId],
+      foreignColumns: [table.id],
+      name: 'titles_mirror_title_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.nfeDocumentId],
+      foreignColumns: [nfeDocuments.id],
+      name: 'titles_nfe_document_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.plannedAccountId],
+      foreignColumns: [financialAccounts.id],
+      name: 'titles_planned_account_id_fkey',
+    }),
+    foreignKey({
+      columns: [table.recurrenceRuleId],
+      foreignColumns: [recurrenceRules.id],
+      name: 'titles_recurrence_rule_id_fkey',
+    }),
+    check('titles_amount_cents_check', sql`amount_cents > 0`),
+    check('titles_boleto_barcode_check', sql`CHECK (is_valid_boleto_barcode(boleto_barcode`),
+    check(
+      'titles_card_invoice_check',
+      sql`((origin = 'card_invoice'::text) = (card_invoice_id IS NOT NULL)) AND ((card_invoice_id IS NULL) OR (counterparty_caixa_id IS NOT NULL))`,
+    ),
+    check(
+      'titles_contract_check',
+      sql`((contract_cycle_id IS NULL) = (contract_installment IS NULL)) AND ((contract_cycle_id IS NULL) OR (contract_id IS NOT NULL)) AND ((contract_id IS NULL) OR (origin = ANY (ARRAY['manual'::text, 'recurrence'::text])))`,
+    ),
+    check('titles_contract_installment_check', sql`contract_installment >= 1`),
+    check('titles_counterparty_caixa_check', sql`counterparty_caixa_id <> caixa_id`),
+    check('titles_description_check', sql`btrim(description) <> ''::text`),
+    check('titles_direction_check', sql`direction = ANY (ARRAY['payable'::text, 'receivable'::text])`),
+    check(
+      'titles_mirror_fields_check',
+      sql`((counterparty_caixa_id IS NULL) = (mirror_title_id IS NULL)) AND ((mirror_status IS NULL) OR (mirror_title_id IS NOT NULL))`,
+    ),
+    check('titles_mirror_self_check', sql`mirror_title_id <> id`),
+    check('titles_mirror_status_check', sql`mirror_status = ANY (ARRAY['pending'::text, 'accepted'::text, 'disputed'::text])`),
+    check('titles_occurrence_check', sql`occurrence >= 1`),
+    check('titles_origin_check', sql`origin = ANY (ARRAY['manual'::text, 'recurrence'::text, 'card_invoice'::text])`),
+    check('titles_pix_payload_check', sql`CHECK (is_valid_brcode(pix_payload`),
+    check(
+      'titles_recurrence_check',
+      sql`((recurrence_rule_id IS NULL) = (occurrence IS NULL)) AND ((origin = 'recurrence'::text) = (recurrence_rule_id IS NOT NULL))`,
+    ),
+    check('titles_status_check', sql`status = ANY (ARRAY['open'::text, 'partial'::text, 'paid'::text, 'canceled'::text])`),
+  ],
+);
+
 export const contracts = pgTable(
   'contracts',
   {
@@ -3820,15 +3894,8 @@ export const contracts = pgTable(
     archivedAt: timestamp('archived_at', { withTimezone: true, mode: 'string' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-    paymentAccountId: uuid('payment_account_id'),
-    transitAccountId: uuid('transit_account_id'),
-    lateFeePercent: numeric('late_fee_percent', { precision: 6, scale: 4 }),
-    interestMonthPercent: numeric('interest_month_percent', { precision: 6, scale: 4 }),
-    earlyDiscountPercent: numeric('early_discount_percent', { precision: 6, scale: 4 }),
-    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
-    toleranceCents: bigint('tolerance_cents', { mode: 'number' }).default(0).notNull(),
-    matchWindowDays: smallint('match_window_days').default(15).notNull(),
-    autoSettle: boolean('auto_settle').default(false).notNull(),
+    startsOn: date('starts_on').notNull(),
+    endsOn: date('ends_on'),
   },
   (table) => [
     index('contracts_caixa_id_idx').using('btree', table.caixaId.asc().nullsLast().op('uuid_ops')),
@@ -3838,10 +3905,9 @@ export const contracts = pgTable(
       .where(sql`((archived_at IS NULL) AND (contract_number IS NOT NULL))`),
     index('contracts_counterparty_caixa_id_idx').using('btree', table.counterpartyCaixaId.asc().nullsLast().op('uuid_ops')),
     index('contracts_created_by_idx').using('btree', table.createdBy.asc().nullsLast().op('uuid_ops')),
+    index('contracts_ends_on_idx').using('btree', table.endsOn.asc().nullsLast().op('date_ops')).where(sql`(archived_at IS NULL)`),
     index('contracts_entity_id_idx').using('btree', table.entityId.asc().nullsLast().op('uuid_ops')),
-    index('contracts_payment_account_id_idx').using('btree', table.paymentAccountId.asc().nullsLast().op('uuid_ops')),
     index('contracts_status_idx').using('btree', table.status.asc().nullsLast().op('text_ops')),
-    index('contracts_transit_account_id_idx').using('btree', table.transitAccountId.asc().nullsLast().op('uuid_ops')),
     foreignKey({
       columns: [table.caixaId],
       foreignColumns: [caixas.id],
@@ -3867,29 +3933,11 @@ export const contracts = pgTable(
       foreignColumns: [entities.id],
       name: 'contracts_entity_id_fkey',
     }),
-    foreignKey({
-      columns: [table.paymentAccountId],
-      foreignColumns: [financialAccounts.id],
-      name: 'contracts_payment_account_id_fkey',
-    }),
-    foreignKey({
-      columns: [table.transitAccountId],
-      foreignColumns: [financialAccounts.id],
-      name: 'contracts_transit_account_id_fkey',
-    }),
     check('contracts_contract_number_check', sql`(btrim(contract_number) <> ''::text) AND (length(contract_number) <= 60)`),
     check('contracts_counterparty_caixa_check', sql`counterparty_caixa_id <> caixa_id`),
     check('contracts_direction_check', sql`direction = ANY (ARRAY['payable'::text, 'receivable'::text])`),
-    check(
-      'contracts_early_discount_percent_check',
-      sql`(early_discount_percent >= (0)::numeric) AND (early_discount_percent <= (50)::numeric)`,
-    ),
-    check(
-      'contracts_interest_month_percent_check',
-      sql`(interest_month_percent >= (0)::numeric) AND (interest_month_percent <= (10)::numeric)`,
-    ),
-    check('contracts_late_fee_percent_check', sql`(late_fee_percent >= (0)::numeric) AND (late_fee_percent <= (20)::numeric)`),
-    check('contracts_match_window_days_check', sql`(match_window_days >= 0) AND (match_window_days <= 45)`),
+    check('contracts_ended_term_check', sql`(status <> ALL (ARRAY['ended'::text, 'terminated'::text])) OR (ends_on IS NOT NULL)`),
+    check('contracts_ends_on_check', sql`ends_on >= starts_on`),
     check('contracts_name_check', sql`(btrim(name) <> ''::text) AND (length(name) <= 200)`),
     check('contracts_notice_days_check', sql`(notice_days >= 0) AND (notice_days <= 365)`),
     check(
@@ -3898,14 +3946,11 @@ export const contracts = pgTable(
     ),
     check('contracts_reminder_every_days_check', sql`(reminder_every_days >= 1) AND (reminder_every_days <= 30)`),
     check('contracts_renewal_lead_days_check', sql`(renewal_lead_days >= 1) AND (renewal_lead_days <= 365)`),
-    check(
-      'contracts_status_check',
-      sql`status = ANY (ARRAY['draft'::text, 'active'::text, 'renewal_pending'::text, 'ended'::text, 'terminated'::text])`,
-    ),
+    check('contracts_status_check', sql`status = ANY (ARRAY['draft'::text, 'active'::text, 'ended'::text, 'terminated'::text])`),
     check('contracts_terminated_check', sql`(status = 'terminated'::text) = (terminated_on IS NOT NULL)`),
+    check('contracts_terminated_on_check', sql`(terminated_on IS NULL) OR (terminated_on = ends_on)`),
     check('contracts_termination_penalty_cents_check', sql`termination_penalty_cents > 0`),
     check('contracts_termination_penalty_text_check', sql`length(termination_penalty_text) <= 2000`),
-    check('contracts_tolerance_cents_check', sql`tolerance_cents >= 0`),
   ],
 );
 
@@ -3991,6 +4036,28 @@ export const aiEmbeddingIndexes = pgTable(
     }).onDelete('cascade'),
     primaryKey({ columns: [table.model, table.providerId], name: 'ai_embedding_indexes_pkey' }),
     check('ai_embedding_indexes_model_check', sql`model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text`),
+  ],
+);
+
+export const cardRecurringChargeAmounts = pgTable(
+  'card_recurring_charge_amounts',
+  {
+    recurrenceRuleId: uuid('recurrence_rule_id').notNull(),
+    fromOccurrence: smallint('from_occurrence').notNull(),
+    // You can use { mode: "bigint" } if numbers are exceeding js number limitations
+    amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.recurrenceRuleId],
+      foreignColumns: [cardRecurringCharges.recurrenceRuleId],
+      name: 'card_recurring_charge_amounts_recurrence_rule_id_fkey',
+    }).onDelete('cascade'),
+    primaryKey({ columns: [table.fromOccurrence, table.recurrenceRuleId], name: 'card_recurring_charge_amounts_pkey' }),
+    check('card_recurring_charge_amounts_amount_cents_check', sql`amount_cents > 0`),
+    check('card_recurring_charge_amounts_from_occurrence_check', sql`from_occurrence >= 2`),
   ],
 );
 

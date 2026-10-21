@@ -1,5 +1,5 @@
-import { type CardPurchaseDetail, formatAccounting, formatDate, t, todayIso } from '@moneyflow/shared';
-import { Pencil, Trash2, Undo2, X } from 'lucide-react';
+import { type CardPurchaseDetail, contractLink, formatAccounting, formatDate, t, todayIso } from '@moneyflow/shared';
+import { Handshake, Link2, Pencil, Trash2, Undo2, Unlink, X } from 'lucide-react';
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
@@ -8,13 +8,14 @@ import { entityLink, invoiceLink } from '../../lib/links';
 import { CategoryLabel, LoadError, Money } from '../domain';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
 import { Badge, Button, Field, Modal, Skel, useConfirm } from '../ui';
+import { ChargeLinkModal } from './ChargeLink';
 import { PayerSelect } from './PurchaseFormModal';
 import { monthLabel } from './shared';
 
 /** Gaveta da compra: parcelas por fatura, estornos, editar, excluir e estornar. */
 export function PurchaseDrawer({ purchaseId, onClose, onChanged }: { purchaseId: string; onClose: () => void; onChanged: () => void }) {
   const { data: p, error, reload, setData } = useApi<CardPurchaseDetail>(`/api/card-purchases/${purchaseId}`);
-  const [modal, setModal] = useState<null | 'edit' | 'refund'>(null);
+  const [modal, setModal] = useState<null | 'edit' | 'refund' | 'charge'>(null);
   const confirm = useConfirm();
   const { run } = useAction();
 
@@ -44,6 +45,15 @@ export function PurchaseDrawer({ purchaseId, onClose, onChanged }: { purchaseId:
     if (await run(() => api.del(`/api/card-purchases/${p.id}`), t.card.purchaseDeleted)) {
       onChanged();
       onClose();
+    }
+  }
+
+  /** Soltar a compra da cobrança esperada (spec 034). */
+  async function unlinkCharge() {
+    if (!p) return;
+    if (await run(() => api.post(`/api/card-purchases/${p.id}/charge-link`, { charge: null }), t.contracts.planned.chargeUnlinked)) {
+      void reload();
+      onChanged();
     }
   }
 
@@ -113,6 +123,42 @@ export function PurchaseDrawer({ purchaseId, onClose, onChanged }: { purchaseId:
                 <dd>{p.payerCaixaName}</dd>
                 <dt>{t.card.purchasedOn}</dt>
                 <dd className="mono">{formatDate(p.purchasedOn)}</dd>
+                {/* Cobrança esperada que a compra atende (spec 034): contrato, ocorrência, ligar e soltar. */}
+                {isPurchase && (p.recurrenceRuleId || p.canWrite) && (
+                  <>
+                    <dt>{t.contracts.planned.chargeLabel}</dt>
+                    <dd data-testid="purchase-charge">
+                      {p.recurrenceRuleId ? (
+                        <span className="inline-flex flex-wrap items-center gap-1">
+                          {p.contractId ? (
+                            <Link className="link inline-flex items-center gap-1" to={contractLink(p.contractId)}>
+                              <Handshake className="size-3.5" /> {p.contractName ?? t.contracts.contract}
+                            </Link>
+                          ) : (
+                            <span>{t.contracts.planned.series}</span>
+                          )}
+                          {p.occurrence && <Badge mono>{t.title.occurrenceOf(p.occurrence)}</Badge>}
+                          {p.canWrite && (
+                            <button
+                              type="button"
+                              className="row-action"
+                              title={t.contracts.planned.chargeUnlink}
+                              aria-label={t.contracts.planned.chargeUnlink}
+                              data-testid="purchase-charge-unlink"
+                              onClick={() => void unlinkCharge()}
+                            >
+                              <Unlink />
+                            </button>
+                          )}
+                        </span>
+                      ) : (
+                        <Button size="sm" variant="quiet" onClick={() => setModal('charge')} data-testid="purchase-charge-link">
+                          <Link2 /> {t.contracts.planned.chargeLink}
+                        </Button>
+                      )}
+                    </dd>
+                  </>
+                )}
                 {p.firstInstallment > 1 && (
                   <>
                     <dt>{t.card.firstInstallment}</dt>
@@ -168,6 +214,17 @@ export function PurchaseDrawer({ purchaseId, onClose, onChanged }: { purchaseId:
       </div>
       {p && modal === 'edit' && <EditPurchaseModal purchase={p} onClose={() => setModal(null)} onSaved={saved} />}
       {p && modal === 'refund' && <RefundModal purchase={p} max={refundable} onClose={() => setModal(null)} onSaved={saved} />}
+      {p && modal === 'charge' && (
+        <ChargeLinkModal
+          purchase={p}
+          onClose={() => setModal(null)}
+          onSaved={() => {
+            setModal(null);
+            void reload();
+            onChanged();
+          }}
+        />
+      )}
     </aside>
   );
 }

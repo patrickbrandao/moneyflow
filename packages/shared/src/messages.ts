@@ -116,25 +116,16 @@ export const dedupKeys = {
   invoiceClosed: (invoiceId: string) => `invoice_closed:${invoiceId}`,
   cardLimit: (cardId: string, threshold: number, month: string) => `card_limit:${cardId}:${threshold}:${month}`,
   divergence: (importId: string) => `reconciliation_divergence:${importId}`,
-  // Contratos (spec 020): por contrato e ciclo.
-  contractNotice: (cycleId: string, daysBefore: number) => `contract_notice_deadline:${cycleId}:D-${daysBefore}`,
-  contractEnding: (cycleId: string, daysBefore: number) => `contract_ending:${cycleId}:D-${daysBefore}`,
-  contractRenewal: (taskId: string, day: string) => `contract_renewal_pending:${taskId}:${day}`,
+  // Contratos (specs 020 e 034): por contrato e fim da vigência (`<contrato>:<fim>`).
+  contractNotice: (termKey: string, daysBefore: number) => `contract_notice_deadline:${termKey}:D-${daysBefore}`,
+  contractEnding: (termKey: string, daysBefore: number) => `contract_ending:${termKey}:D-${daysBefore}`,
+  contractRenewed: (contractId: string, seq: number) => `contract_renewed:${contractId}:${seq}`,
   contractReadjustment: (contractId: string, date: string) => `contract_readjustment:${contractId}:${date}`,
+  /** Cobrança no cartão não feita (spec 034): uma vez por ocorrência. */
+  contractChargeMissing: (ruleId: string, occurrence: number) => `contract_charge_missing:${ruleId}:${occurrence}`,
   // Orçamento de IA (spec 028): por orçamento, mês (AAAA-MM) e limiar.
   aiBudgetAlert: (budgetId: string, month: string, threshold: number) => `ai_budget_alert:${budgetId}:${month.slice(0, 7)}:${threshold}`,
 };
-
-/**
- * Renovação pendente: avisa no dia em que a tarefa abre e, com repetição, a
- * cada N dias depois (inclusive vencida). Sem repetição, só no primeiro dia.
- */
-export function renewalReminderDue(openedOn: string, today: string, repeatEveryDays?: number | null): boolean {
-  const days = diffDays(openedOn, today);
-  if (days < 0) return false;
-  if (!repeatEveryDays) return true;
-  return days % repeatEveryDays === 0;
-}
 
 /* ---------------- montagem das mensagens ---------------- */
 
@@ -341,16 +332,6 @@ export function contractEndingMessage(c: ContractMessageInfo, daysBefore: number
     b(T.contractEnding(daysBefore)),
     ...contractHeader(c),
     escapeHtml(T.contractEndingDetail(formatDate(cycleEnd))),
-    linkLine(c.url) && '',
-    linkLine(c.url),
-  ]);
-}
-
-export function contractRenewalMessage(c: ContractMessageInfo, dueOn: string, overdue: boolean): MessagePayload {
-  return payload([
-    b(T.contractRenewalPending),
-    ...contractHeader(c),
-    escapeHtml(T.contractRenewalDetail(formatDate(dueOn), overdue)),
     linkLine(c.url) && '',
     linkLine(c.url),
   ]);

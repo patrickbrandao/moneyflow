@@ -7,12 +7,12 @@ import {
   type RecurringPanelDto,
   t,
 } from '@moneyflow/shared';
-import { CalendarClock, Handshake, Plus, Repeat, Search, TrendingDown, TrendingUp } from 'lucide-react';
+import { CalendarClock, Handshake, History, Plus, Repeat, Search, TrendingDown, TrendingUp } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CaixaFilter } from '../components/CaixaFilter';
 import { ContractFormModal } from '../components/contracts/ContractFormModal';
-import { ContractStatusBadge, ContractsTable } from '../components/contracts/ContractsTable';
+import { ContractStatusBadge, ContractsTable, termText } from '../components/contracts/ContractsTable';
 import { LoadError, Money, PageHead } from '../components/domain';
 import { ExportMenu } from '../components/ExportMenu';
 import { Button, EmptyRow, Panel, Tabs, useDebounced } from '../components/ui';
@@ -25,7 +25,7 @@ import { useParamState } from '../lib/params';
 
 const WITHIN = [30, 60, 90, 180];
 
-/** Contratos (spec 020): lista com filtros e exportação, e o painel de recorrentes. */
+/** Contratos (specs 020 e 034): lista com filtros e exportação, e o painel de recorrentes. */
 export function ContractsPage() {
   const user = useUser();
   const navigate = useNavigate();
@@ -191,7 +191,7 @@ export function ContractsPage() {
   );
 }
 
-/** Receita e despesa contratadas nos próximos 12 meses, a renovar em 90 dias e renovações pendentes. */
+/** Receita e despesa contratadas nos próximos 12 meses, os que terminam em 90 dias e os encerrados há pouco. */
 function RecurringPanel() {
   const [selected, setSelected] = useState<string[]>([]);
   const panel = useApi<RecurringPanelDto>(`/api/contracts/panel${selected.length ? `?caixas=${selected.join(',')}` : ''}`);
@@ -265,33 +265,28 @@ function RecurringPanel() {
           </div>
         </Panel>
         <Panel title={P.renewSoon} icon={<CalendarClock />}>
-          <MiniList rows={data?.renewSoon} />
+          <MiniList rows={data?.renewSoon} testId="panel-renew-soon" />
         </Panel>
-        <Panel title={P.pending} icon={<Repeat />}>
-          <MiniList rows={data?.pendingRenewals} pending />
+        <Panel title={P.recentlyEnded} icon={<History />}>
+          <MiniList rows={data?.recentlyEnded} testId="panel-recently-ended" />
         </Panel>
       </div>
     </>
   );
 }
 
-function MiniList({ rows, pending }: { rows: ContractRow[] | undefined; pending?: boolean }) {
+function MiniList({ rows, testId }: { rows: ContractRow[] | undefined; testId?: string }) {
   const navigate = useNavigate();
   if (!rows) return <p className="hint">{t.common.loading}</p>;
   if (rows.length === 0) return <p className="hint">{t.contracts.panel.none}</p>;
   return (
-    <ul className="item-list">
+    <ul className="item-list" data-testid={testId}>
       {rows.map((row) => (
-        <li key={row.id} className="item cursor-pointer" onClick={() => navigate(`/contracts/${row.id}${pending ? '?tab=renewal' : ''}`)}>
+        <li key={row.id} className="item cursor-pointer" onClick={() => navigate(`/contracts/${row.id}`)}>
           <span className="grow min-w-0">
             <span className="row-title">{row.name}</span>
             <span className="row-sub">
-              {row.entityName} ·{' '}
-              {pending && row.openTask
-                ? t.contracts.renewal.taskDue(formatDate(row.openTask.dueOn))
-                : row.currentCycle
-                  ? `${t.contracts.fields.endsOn} ${formatDate(row.currentCycle.endsOn)}`
-                  : ''}
+              {row.entityName} · {row.terminatedOn ? t.contracts.history.terminatedOn(formatDate(row.terminatedOn)) : termText(row)}
             </span>
           </span>
           <ContractStatusBadge row={row} />

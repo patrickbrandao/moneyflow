@@ -4341,6 +4341,43 @@ COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de
 
 
 --
+-- Name: audit_row_keyed(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.audit_row_keyed() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  o       jsonb;
+  n       jsonb;
+  changed text[];
+BEGIN
+  IF TG_OP <> 'INSERT' THEN o := to_jsonb(OLD); END IF;
+  IF TG_OP <> 'DELETE' THEN n := to_jsonb(NEW); END IF;
+  IF TG_OP = 'UPDATE' THEN
+    SELECT array_agg(k ORDER BY k) INTO changed
+      FROM jsonb_object_keys(n) k
+     WHERE n -> k IS DISTINCT FROM o -> k AND k <> 'updated_at';
+    IF changed IS NULL THEN
+      RETURN NULL;
+    END IF;
+  END IF;
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o, n, changed,
+                      coalesce(n ->> TG_ARGV[0], o ->> TG_ARGV[0])::uuid);
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION audit_row_keyed(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.audit_row_keyed() IS 'Trigger de auditoria de tabelas sem id: grava com record_id = a coluna informada em TG_ARGV[0] (card_recurring_charges e card_recurring_charge_amounts: recurrence_rule_id, o histórico da série).';
+
+
+--
 -- Name: audit_write(text, text, jsonb, jsonb, text[], uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4982,6 +5019,93 @@ $$;
 
 
 --
+-- Name: card_purchases_validate_occurrence(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.card_purchases_validate_occurrence() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  total smallint;
+BEGIN
+  IF NEW.recurrence_rule_id IS NULL OR NEW.kind <> 'purchase'
+     OR (TG_OP = 'UPDATE' AND NEW.recurrence_rule_id IS NOT DISTINCT FROM OLD.recurrence_rule_id
+         AND NEW.occurrence IS NOT DISTINCT FROM OLD.occurrence) THEN
+    RETURN NEW;
+  END IF;
+  SELECT r.installments_total INTO total FROM recurrence_rules r WHERE r.id = NEW.recurrence_rule_id FOR NO KEY UPDATE;
+  IF NEW.occurrence > total THEN
+    RAISE EXCEPTION 'card_purchases: occurrence % exceeds installments total %', NEW.occurrence, total
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'card_purchases_occurrence_total_check';
+  END IF;
+  IF EXISTS (SELECT 1 FROM card_purchases p
+              WHERE p.recurrence_rule_id = NEW.recurrence_rule_id AND p.occurrence = NEW.occurrence
+                AND p.id <> NEW.id AND p.kind = 'purchase'
+                AND p.amount_cents > coalesce((SELECT sum(x.amount_cents) FROM card_purchases x
+                                                WHERE x.refunded_purchase_id = p.id), 0)) THEN
+    RAISE EXCEPTION 'card_purchases: occurrence % of series % already has a purchase', NEW.occurrence, NEW.recurrence_rule_id
+      USING ERRCODE = 'unique_violation', CONSTRAINT = 'card_purchases_occurrence_key';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: card_recurring_charge_amount(uuid, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.card_recurring_charge_amount(p_rule_id uuid, p_occurrence integer) RETURNS bigint
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT coalesce(
+    (SELECT a.amount_cents FROM card_recurring_charge_amounts a
+      WHERE a.recurrence_rule_id = p_rule_id AND a.from_occurrence <= p_occurrence
+      ORDER BY a.from_occurrence DESC LIMIT 1),
+    (SELECT g.amount_cents FROM card_recurring_charges g WHERE g.recurrence_rule_id = p_rule_id))
+$$;
+
+
+--
+-- Name: FUNCTION card_recurring_charge_amount(p_rule_id uuid, p_occurrence integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.card_recurring_charge_amount(p_rule_id uuid, p_occurrence integer) IS 'Valor esperado da ocorrência n de uma cobrança no cartão: o do último degrau de card_recurring_charge_amounts com from_occurrence <= n, senão card_recurring_charges.amount_cents. Nulo se a série não é de cartão.';
+
+
+--
+-- Name: card_recurring_charges_validate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.card_recurring_charges_validate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  ck text;
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.recurrence_rule_id <> OLD.recurrence_rule_id THEN
+    RAISE EXCEPTION 'card_recurring_charges: the series of a card charge cannot change'
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'card_recurring_charges_immutable_check';
+  END IF;
+  SELECT c.kind INTO ck FROM recurrence_rules r JOIN caixas c ON c.id = r.caixa_id WHERE r.id = NEW.recurrence_rule_id;
+  IF FOUND AND ck <> 'credit_card' THEN
+    RAISE EXCEPTION 'card_recurring_charges: series % is not in a credit card caixa', NEW.recurrence_rule_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'card_recurring_charges_card_check';
+  END IF;
+  IF EXISTS (SELECT 1 FROM caixas c WHERE c.id = NEW.payer_caixa_id AND c.kind <> 'general') THEN
+    RAISE EXCEPTION 'card_recurring_charges: payer % must be a general caixa', NEW.payer_caixa_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'card_recurring_charges_payer_kind_check';
+  END IF;
+  IF EXISTS (SELECT 1 FROM categories c WHERE c.id = NEW.category_id AND c.kind <> 'expense') THEN
+    RAISE EXCEPTION 'card_recurring_charges: category % must be an expense category', NEW.category_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'card_recurring_charges_category_kind_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
 -- Name: categories_validate(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5342,17 +5466,12 @@ DECLARE
   st text;
 BEGIN
   SELECT k.status INTO st FROM contracts k WHERE k.id = p_contract_id;
-  IF NOT FOUND THEN
+  IF NOT FOUND OR st <> 'draft' THEN
     RETURN;
   END IF;
-  IF (st = 'renewal_pending')
-     <> EXISTS (SELECT 1 FROM contract_renewal_tasks r WHERE r.contract_id = p_contract_id AND r.status = 'open') THEN
-    RAISE EXCEPTION 'contracts: contract % is % but % an open renewal task', p_contract_id, st,
-      CASE WHEN st = 'renewal_pending' THEN 'has no' ELSE 'has' END
-      USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_renewal_pending_check';
-  END IF;
-  IF st = 'draft' AND EXISTS (SELECT 1 FROM titles t WHERE t.contract_id = p_contract_id) THEN
-    RAISE EXCEPTION 'contracts: draft contract % cannot have titles', p_contract_id
+  IF EXISTS (SELECT 1 FROM titles t WHERE t.contract_id = p_contract_id)
+     OR EXISTS (SELECT 1 FROM card_purchases p WHERE p.contract_id = p_contract_id) THEN
+    RAISE EXCEPTION 'contracts: draft contract % cannot have titles or card purchases', p_contract_id
       USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_draft_titles_check';
   END IF;
 END
@@ -5363,7 +5482,7 @@ $$;
 -- Name: FUNCTION contract_assert(p_contract_id uuid); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.contract_assert(p_contract_id uuid) IS 'Interna (constraint triggers no COMMIT): contrato renewal_pending ⇔ tarefa de renovação open (contracts_renewal_pending_check) e rascunho sem títulos (contracts_draft_titles_check).';
+COMMENT ON FUNCTION public.contract_assert(p_contract_id uuid) IS 'Interna (constraint triggers no COMMIT): rascunho sem títulos nem compras de cartão ligadas (contracts_draft_titles_check).';
 
 
 --
@@ -5379,7 +5498,7 @@ DECLARE
   prev_end date;
 BEGIN
   FOR r IN SELECT y.seq, y.starts_on, y.ends_on FROM contract_cycles y WHERE y.contract_id = p_contract_id ORDER BY y.seq LOOP
-    IF r.seq <> prev_seq + 1 OR (prev_end IS NOT NULL AND r.starts_on <> prev_end + 1) THEN
+    IF r.seq <> prev_seq + 1 OR (prev_seq > 0 AND (prev_end IS NULL OR r.starts_on <> prev_end + 1)) THEN
       RAISE EXCEPTION 'contract_cycles: cycle % of contract % must start on the day after cycle % ends (%)',
         r.seq, p_contract_id, prev_seq, prev_end
         USING ERRCODE = 'check_violation', CONSTRAINT = 'contract_cycles_contiguous_check';
@@ -5401,6 +5520,32 @@ CREATE FUNCTION public.contract_cycles_contiguous_check() RETURNS trigger
 BEGIN
   PERFORM contract_cycles_assert(CASE TG_OP WHEN 'DELETE' THEN OLD.contract_id ELSE NEW.contract_id END);
   RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: contract_cycles_fill(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_cycles_fill() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  x timestamp;
+BEGIN
+  IF NEW.duration_months IS NOT NULL THEN
+    x := NEW.starts_on + make_interval(months => NEW.duration_months);
+    NEW.ends_on := CASE WHEN extract(day FROM x) < extract(day FROM NEW.starts_on) THEN x::date ELSE x::date - 1 END;
+  END IF;
+  NEW.installments_count := (CASE NEW.periodicity
+                               WHEN 'monthly' THEN NEW.duration_months
+                               WHEN 'quarterly' THEN NEW.duration_months / 3
+                               WHEN 'semiannual' THEN NEW.duration_months / 6
+                               WHEN 'annual' THEN NEW.duration_months / 12
+                               WHEN 'single' THEN 1
+                             END)::smallint;
+  RETURN NEW;
 END
 $$;
 
@@ -5578,37 +5723,35 @@ $$;
 
 
 --
--- Name: contract_payments(uuid, uuid, date); Type: FUNCTION; Schema: public; Owner: -
+-- Name: contract_payments(uuid, date, date, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.contract_payments(p_contract_id uuid, p_cycle_id uuid DEFAULT NULL::uuid, p_today date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date) RETURNS TABLE(title_id uuid, contract_cycle_id uuid, cycle_seq integer, installment integer, installments_count integer, competence_date date, due_date date, amount_cents bigint, status text, settled_cents bigint, open_cents bigint, interest_cents bigint, fine_cents bigint, discount_cents bigint, cash_cents bigint, settlement_count integer, last_settled_on date, paid_on date, days integer, overdue boolean, account_id uuid, funding_account_id uuid, planned_account_id uuid, planned_transit_account_id uuid, planned_account_custom boolean, last_origin text, settlements jsonb)
+CREATE FUNCTION public.contract_payments(p_contract_id uuid, p_from date DEFAULT NULL::date, p_to date DEFAULT NULL::date, p_today date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date) RETURNS TABLE(kind text, recurrence_rule_id uuid, occurrence integer, title_id uuid, card_purchase_id uuid, caixa_id uuid, card_invoice_id uuid, description text, competence_date date, due_date date, amount_cents bigint, status text, settled_cents bigint, open_cents bigint, interest_cents bigint, fine_cents bigint, discount_cents bigint, cash_cents bigint, settlement_count integer, last_settled_on date, paid_on date, days integer, overdue boolean, not_charged boolean, account_id uuid, funding_account_id uuid, planned_account_id uuid, planned_account_custom boolean, last_origin text, settlements jsonb)
     LANGUAGE sql STABLE
     AS $$
-  WITH parcels AS (
-    SELECT t.*, y.seq AS y_seq, y.installments_count AS y_count
+  WITH obligations AS (
+    SELECT t.*
       FROM titles t
-      JOIN contract_cycles y ON y.id = t.contract_cycle_id
      WHERE t.contract_id = p_contract_id
-       AND (p_cycle_id IS NULL OR t.contract_cycle_id = p_cycle_id)
        AND t.mirror_status IS NULL           -- o lado do contrato (o espelho repete as baixas)
        AND t.status <> 'canceled'
+       AND (p_from IS NULL OR t.due_date >= p_from)
+       AND (p_to IS NULL OR t.due_date <= p_to)
   ), legs AS (
     SELECT s.id, s.title_id, s.settled_on, s.amount_cents, s.interest_cents, s.fine_cents, s.discount_cents,
            s.amount_cents + s.interest_cents + s.fine_cents - s.discount_cents AS cash_cents,
            s.financial_account_id,
            tr.id AS transfer_id,
-           CASE p.direction WHEN 'payable' THEN tr.from_account_id ELSE tr.to_account_id END AS funding_account_id,
+           CASE o.direction WHEN 'payable' THEN tr.from_account_id ELSE tr.to_account_id END AS funding_account_id,
            ln.id AS statement_line_id,
            CASE WHEN ln.auto_settled THEN 'auto'
                 WHEN ln.created_entry IN ('title', 'settlement', 'transfer_settlement') THEN 'reconciliation'
                 ELSE 'manual' END AS origin,
            ln.id IS NOT NULL AS reconciled,
-           (s.settled_on - p.due_date) AS days
+           (s.settled_on - o.due_date) AS days
       FROM settlements s
-      JOIN parcels p ON p.id = s.title_id
+      JOIN obligations o ON o.id = s.title_id
       LEFT JOIN transfers tr ON tr.settlement_id = s.id
-      -- A linha conciliada com a baixa: o movimento dela (ou da perna do espelho) ou a perna da
-      -- transferência; a que criou a baixa primeiro.
       LEFT JOIN LATERAL (
         SELECT l.id, l.auto_settled, l.created_entry
           FROM statement_lines l
@@ -5642,32 +5785,159 @@ CREATE FUNCTION public.contract_payments(p_contract_id uuid, p_cycle_id uuid DEF
            (array_agg(g.origin ORDER BY g.settled_on DESC, g.id DESC))[1]               AS last_origin
       FROM legs g
      GROUP BY g.title_id
+  ), title_rows AS (
+    SELECT 'title'::text AS kind, o.recurrence_rule_id, o.occurrence::int AS occurrence, o.id AS title_id,
+           NULL::uuid AS card_purchase_id, o.caixa_id, NULL::uuid AS card_invoice_id, o.description,
+           o.competence_date, o.due_date, o.amount_cents, o.status,
+           coalesce(a.settled_cents, 0) AS settled_cents, o.amount_cents - coalesce(a.settled_cents, 0) AS open_cents,
+           coalesce(a.interest_cents, 0) AS interest_cents, coalesce(a.fine_cents, 0) AS fine_cents,
+           coalesce(a.discount_cents, 0) AS discount_cents, coalesce(a.cash_cents, 0) AS cash_cents,
+           coalesce(a.settlement_count, 0) AS settlement_count,
+           a.last_settled_on,
+           CASE WHEN o.status = 'paid' THEN a.last_settled_on END AS paid_on,
+           CASE WHEN o.status = 'paid' THEN a.last_settled_on - o.due_date
+                WHEN o.due_date < p_today THEN p_today - o.due_date END AS days,
+           o.status <> 'paid' AND o.due_date < p_today AS overdue,
+           false AS not_charged,
+           a.account_id, a.funding_account_id, o.planned_account_id, o.planned_account_custom,
+           a.last_origin, coalesce(a.settlements, '[]'::jsonb) AS settlements
+      FROM obligations o
+      LEFT JOIN agg a ON a.title_id = o.id
+  ), charges AS (
+    SELECT r.id AS rule_id, r.caixa_id AS card_caixa_id, r.frequency, r.interval_count, r.anchor_day, r.starts_on,
+           r.installments_total, g.description,
+           least(coalesce(r.ends_on, 'infinity'::date), coalesce(p_to, (p_today + interval '12 months')::date)) AS until
+      FROM recurrence_rules r
+      JOIN card_recurring_charges g ON g.recurrence_rule_id = r.id
+     WHERE r.contract_id = p_contract_id
+  ), expected AS (
+    SELECT c.rule_id, n.n
+      FROM charges c
+     CROSS JOIN LATERAL generate_series(1, greatest(0, least(coalesce(c.installments_total::int, 32767),
+       CASE c.frequency
+         WHEN 'weekly' THEN (c.until - c.starts_on) / (7 * c.interval_count) + 1
+         ELSE ((extract(year FROM c.until)::int * 12 + extract(month FROM c.until)::int)
+               - (extract(year FROM c.starts_on)::int * 12 + extract(month FROM c.starts_on)::int))
+              / (c.interval_count * CASE c.frequency WHEN 'yearly' THEN 12 ELSE 1 END) + 1
+       END))) AS n (n)
+     WHERE recurrence_occurrence_due(c.frequency, c.interval_count, c.anchor_day, c.starts_on, n.n) <= c.until
+    UNION
+    SELECT p.recurrence_rule_id, p.occurrence
+      FROM card_purchases p JOIN charges c ON c.rule_id = p.recurrence_rule_id
+     WHERE p.kind = 'purchase'
+  ), occ AS (
+    SELECT e.rule_id, e.n, c.card_caixa_id, c.description,
+           recurrence_occurrence_due(c.frequency, c.interval_count, c.anchor_day, c.starts_on, e.n) AS due,
+           card_recurring_charge_amount(e.rule_id, e.n) AS expected_cents
+      FROM expected e JOIN charges c ON c.rule_id = e.rule_id
+  ), card_rows AS (
+    SELECT 'card_charge'::text AS kind, o.rule_id AS recurrence_rule_id, o.n AS occurrence, NULL::uuid AS title_id,
+           pu.id AS card_purchase_id, o.card_caixa_id AS caixa_id,
+           CASE WHEN pu.charged THEN pi.card_invoice_id ELSE inv.id END AS card_invoice_id, o.description,
+           date_trunc('month', o.due::timestamp)::date AS competence_date, o.due AS due_date,
+           o.expected_cents AS amount_cents,
+           CASE WHEN pu.charged THEN 'charged' WHEN inv.closed_at IS NOT NULL THEN 'not_charged' ELSE 'expected' END AS status,
+           CASE WHEN pu.charged THEN pu.net_cents ELSE 0 END AS settled_cents,
+           CASE WHEN pu.charged THEN 0 ELSE o.expected_cents END AS open_cents,
+           0::bigint AS interest_cents, 0::bigint AS fine_cents, 0::bigint AS discount_cents,
+           CASE WHEN pu.charged THEN pu.net_cents ELSE 0 END AS cash_cents,
+           CASE WHEN pu.charged THEN 1 ELSE 0 END AS settlement_count,
+           CASE WHEN pu.charged THEN pu.purchased_on END AS last_settled_on,
+           CASE WHEN pu.charged THEN pu.purchased_on END AS paid_on,
+           CASE WHEN pu.charged THEN pu.purchased_on - o.due END AS days,
+           false AS overdue,
+           coalesce(NOT pu.charged, true) AND inv.closed_at IS NOT NULL AS not_charged,
+           NULL::uuid AS account_id, NULL::uuid AS funding_account_id, NULL::uuid AS planned_account_id,
+           false AS planned_account_custom,
+           CASE WHEN pu.charged IS NOT TRUE THEN NULL WHEN ln.auto_settled THEN 'auto'
+                WHEN ln.created_entry = 'purchase' THEN 'reconciliation' ELSE 'manual' END AS last_origin,
+           CASE WHEN pu.charged THEN jsonb_build_array(jsonb_build_object(
+             'card_purchase_id', pu.id, 'purchased_on', pu.purchased_on, 'amount_cents', pu.net_cents,
+             'card_invoice_id', pi.card_invoice_id, 'statement_line_id', ln.id, 'reconciled', ln.id IS NOT NULL,
+             'origin', CASE WHEN ln.auto_settled THEN 'auto' WHEN ln.created_entry = 'purchase' THEN 'reconciliation'
+                            ELSE 'manual' END,
+             'days', pu.purchased_on - o.due))
+           ELSE '[]'::jsonb END AS settlements
+      FROM occ o
+      LEFT JOIN LATERAL (
+        SELECT q.id, q.purchased_on, q.net_cents, q.net_cents > 0 AS charged
+          FROM (SELECT p.id, p.purchased_on,
+                       p.amount_cents - coalesce((SELECT sum(x.amount_cents) FROM card_purchases x
+                                                   WHERE x.refunded_purchase_id = p.id), 0)::bigint AS net_cents
+                  FROM card_purchases p
+                 WHERE p.recurrence_rule_id = o.rule_id AND p.occurrence = o.n AND p.kind = 'purchase') q
+         ORDER BY q.net_cents > 0 DESC, q.purchased_on DESC, q.id DESC
+         LIMIT 1
+      ) pu ON true
+      LEFT JOIN LATERAL (
+        SELECT i.id AS item_id, i.card_invoice_id FROM card_invoice_items i
+         WHERE i.card_purchase_id = pu.id AND pu.charged ORDER BY i.installment_number LIMIT 1
+      ) pi ON true
+      LEFT JOIN LATERAL (
+        SELECT v.id, v.closed_at FROM card_invoices v
+         WHERE v.card_caixa_id = o.card_caixa_id AND v.closing_date >= o.due
+         ORDER BY v.closing_date LIMIT 1
+      ) inv ON true
+      LEFT JOIN LATERAL (
+        SELECT l.id, l.auto_settled, l.created_entry FROM statement_lines l
+         WHERE l.status = 'matched' AND l.card_invoice_item_id = pi.item_id
+         ORDER BY l.auto_settled DESC, (l.created_entry IS NOT NULL) DESC, l.matched_at, l.id
+         LIMIT 1
+      ) ln ON true
+     WHERE (p_from IS NULL OR o.due >= p_from) AND (p_to IS NULL OR o.due <= p_to)
+  ), loose_rows AS (
+    -- Compra ligada só ao contrato (sem ocorrência de série).
+    SELECT 'card_charge'::text AS kind, NULL::uuid AS recurrence_rule_id, NULL::int AS occurrence, NULL::uuid AS title_id,
+           p.id AS card_purchase_id, p.card_caixa_id AS caixa_id, pi.card_invoice_id, p.description,
+           date_trunc('month', p.purchased_on::timestamp)::date AS competence_date, p.purchased_on AS due_date,
+           p.amount_cents, 'charged'::text AS status, net.cents AS settled_cents, 0::bigint AS open_cents,
+           0::bigint AS interest_cents, 0::bigint AS fine_cents, 0::bigint AS discount_cents, net.cents AS cash_cents,
+           1 AS settlement_count, p.purchased_on AS last_settled_on, p.purchased_on AS paid_on, 0 AS days,
+           false AS overdue, false AS not_charged,
+           NULL::uuid AS account_id, NULL::uuid AS funding_account_id, NULL::uuid AS planned_account_id,
+           false AS planned_account_custom,
+           CASE WHEN ln.auto_settled THEN 'auto' WHEN ln.created_entry = 'purchase' THEN 'reconciliation'
+                ELSE 'manual' END AS last_origin,
+           jsonb_build_array(jsonb_build_object(
+             'card_purchase_id', p.id, 'purchased_on', p.purchased_on, 'amount_cents', net.cents,
+             'card_invoice_id', pi.card_invoice_id, 'statement_line_id', ln.id, 'reconciled', ln.id IS NOT NULL,
+             'origin', CASE WHEN ln.auto_settled THEN 'auto' WHEN ln.created_entry = 'purchase' THEN 'reconciliation'
+                            ELSE 'manual' END,
+             'days', 0)) AS settlements
+      FROM card_purchases p
+      CROSS JOIN LATERAL (
+        SELECT p.amount_cents - coalesce((SELECT sum(x.amount_cents) FROM card_purchases x
+                                           WHERE x.refunded_purchase_id = p.id), 0)::bigint AS cents
+      ) net
+      LEFT JOIN LATERAL (
+        SELECT i.id AS item_id, i.card_invoice_id FROM card_invoice_items i
+         WHERE i.card_purchase_id = p.id ORDER BY i.installment_number LIMIT 1
+      ) pi ON true
+      LEFT JOIN LATERAL (
+        SELECT l.id, l.auto_settled, l.created_entry FROM statement_lines l
+         WHERE l.status = 'matched' AND l.card_invoice_item_id = pi.item_id
+         ORDER BY l.auto_settled DESC, (l.created_entry IS NOT NULL) DESC, l.matched_at, l.id
+         LIMIT 1
+      ) ln ON true
+     WHERE p.contract_id = p_contract_id AND p.recurrence_rule_id IS NULL AND p.kind = 'purchase' AND net.cents > 0
+       AND (p_from IS NULL OR p.purchased_on >= p_from) AND (p_to IS NULL OR p.purchased_on <= p_to)
   )
-  SELECT p.id, p.contract_cycle_id, p.y_seq::int, p.contract_installment::int, p.y_count::int,
-         p.competence_date, p.due_date, p.amount_cents, p.status,
-         coalesce(a.settled_cents, 0), p.amount_cents - coalesce(a.settled_cents, 0),
-         coalesce(a.interest_cents, 0), coalesce(a.fine_cents, 0), coalesce(a.discount_cents, 0),
-         coalesce(a.cash_cents, 0), coalesce(a.settlement_count, 0),
-         a.last_settled_on,
-         CASE WHEN p.status = 'paid' THEN a.last_settled_on END,
-         CASE WHEN p.status = 'paid' THEN a.last_settled_on - p.due_date
-              WHEN p.due_date < p_today THEN p_today - p.due_date END,
-         p.status <> 'paid' AND p.due_date < p_today,
-         a.account_id, a.funding_account_id,
-         p.planned_account_id, p.planned_transit_account_id, p.planned_account_custom,
-         a.last_origin,
-         coalesce(a.settlements, '[]'::jsonb)
-    FROM parcels p
-    LEFT JOIN agg a ON a.title_id = p.id
-   ORDER BY p.y_seq, p.contract_installment
+  SELECT * FROM (
+    SELECT * FROM title_rows
+    UNION ALL
+    SELECT * FROM card_rows
+    UNION ALL
+    SELECT * FROM loose_rows
+  ) x
+  ORDER BY x.due_date, x.kind DESC, x.occurrence NULLS LAST, x.title_id, x.card_purchase_id
 $$;
 
 
 --
--- Name: FUNCTION contract_payments(p_contract_id uuid, p_cycle_id uuid, p_today date); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION contract_payments(p_contract_id uuid, p_from date, p_to date, p_today date); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.contract_payments(p_contract_id uuid, p_cycle_id uuid, p_today date) IS 'Pagamentos das parcelas de um contrato (spec 033): as parcelas não canceladas do lado do contrato, do ciclo p_cycle_id (nulo = todos), em ordem de ciclo e parcela, com as baixas ativas somadas (principal, juros, multa, desconto, dinheiro) e uma a uma em settlements (jsonb: id, settled_on, valores, financial_account_id, transfer_id, funding_account_id = a conta da outra caixa que pagou pela transferência, statement_line_id, reconciled, origin manual|reconciliation|auto, days). paid_on = data da última baixa ativa do título pago; days = paid_on − vencimento (+ atraso, − adiantamento) ou, em aberto/parcial vencido, p_today − vencimento (overdue); nulo no prazo. account_id, funding_account_id e last_origin são os da última baixa ativa. p_today padrão = hoje em America/Sao_Paulo. SECURITY INVOKER; quem pode ler o contrato é checado pela aplicação, que monta o resumo.';
+COMMENT ON FUNCTION public.contract_payments(p_contract_id uuid, p_from date, p_to date, p_today date) IS 'Pagamentos das obrigações de um contrato (spec 034), com vencimento entre p_from e p_to (nulos = sem limite), em ordem de vencimento. kind = title: os títulos não cancelados do lado do contrato (ocorrências das séries dele e avulsos ligados), com as baixas ativas somadas e uma a uma em settlements (como na 033: conta, transferência, funding_account_id, linha, origin manual|reconciliation|auto, days); paid_on = data da última baixa do título pago; days = paid_on − vencimento ou, em aberto vencido, p_today − vencimento (overdue). kind = card_charge: as ocorrências esperadas das cobranças no cartão do contrato (calendário da série até o fim dela e até p_to, ou p_today + 12 meses), mais as que têm compra ligada; amount_cents = valor esperado; status charged (compra ligada não estornada por inteiro: settled/cash = valor líquido da compra, paid_on = data da compra, days = compra − data esperada), not_charged (a fatura que fecha na data esperada ou depois já fechou sem compra; not_charged = true) ou expected; card_invoice_id = a fatura da compra ou a esperada; e as compras ligadas só ao contrato, sem ocorrência (recurrence_rule_id nulo). SECURITY INVOKER; quem lê o contrato é a aplicação, que monta o resumo.';
 
 
 --
@@ -5781,9 +6051,10 @@ BEGIN
     END IF;
     IF NEW.status <> OLD.status AND NOT (
          (OLD.status = 'draft' AND NEW.status = 'active')
-      OR (OLD.status = 'active' AND NEW.status IN ('renewal_pending', 'ended', 'terminated'))
-      OR (OLD.status = 'renewal_pending' AND NEW.status IN ('active', 'ended', 'terminated'))
-      OR (OLD.status = 'ended' AND NEW.status IN ('active', 'renewal_pending'))) THEN
+      OR (OLD.status = 'active' AND NEW.status IN ('ended', 'terminated'))
+      OR (OLD.status = 'ended' AND NEW.status = 'active')
+      -- só a migração 0052 (renewal_pending some): renewal_pending → active
+      OR (OLD.status = 'renewal_pending' AND NEW.status = 'active')) THEN
       RAISE EXCEPTION 'contracts: status cannot go from % to % (contract %)', OLD.status, NEW.status, OLD.id
         USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_status_transition_check';
     END IF;
@@ -5818,21 +6089,6 @@ BEGIN
     END IF;
   END IF;
 
-  RETURN NEW;
-END
-$$;
-
-
---
--- Name: contracts_validate_accounts(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.contracts_validate_accounts() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  PERFORM payment_accounts_assert(NEW.caixa_id, NEW.payment_account_id, NEW.transit_account_id, 'contracts',
-                                  'contracts_payment_account_check', 'contracts_transit_account_check');
   RETURN NEW;
 END
 $$;
@@ -5999,27 +6255,9 @@ CREATE FUNCTION public.financial_accounts_validate_payment_refs() RETURNS trigge
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF NEW.caixa_id <> OLD.caixa_id OR NEW.kind NOT IN ('checking', 'savings') THEN
-    IF EXISTS (SELECT 1 FROM contracts c WHERE c.payment_account_id = OLD.id) THEN
-      RAISE EXCEPTION 'financial_accounts: account % is the installments account of a contract and must stay a '
-                      'checking/savings account of caixa %', OLD.id, OLD.caixa_id
-        USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_payment_account_check';
-    END IF;
-    IF EXISTS (SELECT 1 FROM titles t WHERE t.planned_account_id = OLD.id) THEN
-      RAISE EXCEPTION 'financial_accounts: account % is the planned account of a title and must stay a '
-                      'checking/savings account of caixa %', OLD.id, OLD.caixa_id
-        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_planned_account_check';
-    END IF;
-  END IF;
-  IF NEW.caixa_id <> OLD.caixa_id THEN
-    IF EXISTS (SELECT 1 FROM contracts c WHERE c.transit_account_id = OLD.id) THEN
-      RAISE EXCEPTION 'financial_accounts: account % is the transit account of a contract and cannot change caixa', OLD.id
-        USING ERRCODE = 'check_violation', CONSTRAINT = 'contracts_transit_account_check';
-    END IF;
-    IF EXISTS (SELECT 1 FROM titles t WHERE t.planned_transit_account_id = OLD.id) THEN
-      RAISE EXCEPTION 'financial_accounts: account % is the planned transit account of a title and cannot change caixa', OLD.id
-        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_planned_transit_account_check';
-    END IF;
+  IF NEW.caixa_id <> OLD.caixa_id AND EXISTS (SELECT 1 FROM titles t WHERE t.planned_account_id = OLD.id) THEN
+    RAISE EXCEPTION 'financial_accounts: account % is the planned account of a title and cannot change caixa', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_planned_account_check';
   END IF;
   RETURN NEW;
 END
@@ -7095,63 +7333,6 @@ $$;
 
 
 --
--- Name: payment_accounts_assert(uuid, uuid, uuid, text, text, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.payment_accounts_assert(p_caixa_id uuid, p_account_id uuid, p_transit_id uuid, p_what text, p_account_constraint text, p_transit_constraint text) RETURNS void
-    LANGUAGE plpgsql STABLE
-    AS $$
-DECLARE
-  acc financial_accounts;
-  tr  financial_accounts;
-BEGIN
-  IF p_account_id IS NULL THEN
-    IF p_transit_id IS NOT NULL THEN
-      RAISE EXCEPTION '%: a transit account needs a payment account', p_what
-        USING ERRCODE = 'check_violation', CONSTRAINT = p_transit_constraint;
-    END IF;
-    RETURN;
-  END IF;
-
-  SELECT * INTO acc FROM financial_accounts a WHERE a.id = p_account_id;
-  IF NOT FOUND THEN
-    RETURN;  -- a FK recusa
-  END IF;
-  IF acc.kind NOT IN ('checking', 'savings') THEN
-    RAISE EXCEPTION '%: payment account % must be checking or savings (got %)', p_what, acc.id, acc.kind
-      USING ERRCODE = 'check_violation', CONSTRAINT = p_account_constraint;
-  END IF;
-
-  IF acc.caixa_id = p_caixa_id THEN
-    IF p_transit_id IS NOT NULL THEN
-      RAISE EXCEPTION '%: payment account % is in caixa %, so there is no transit account', p_what, acc.id, p_caixa_id
-        USING ERRCODE = 'check_violation', CONSTRAINT = p_transit_constraint;
-    END IF;
-    RETURN;
-  END IF;
-
-  IF p_transit_id IS NULL THEN
-    RAISE EXCEPTION '%: payment account % is in another caixa and needs a transit account of caixa %',
-      p_what, acc.id, p_caixa_id
-      USING ERRCODE = 'check_violation', CONSTRAINT = p_transit_constraint;
-  END IF;
-  SELECT * INTO tr FROM financial_accounts a WHERE a.id = p_transit_id;
-  IF FOUND AND tr.caixa_id <> p_caixa_id THEN
-    RAISE EXCEPTION '%: transit account % must be in caixa %', p_what, tr.id, p_caixa_id
-      USING ERRCODE = 'check_violation', CONSTRAINT = p_transit_constraint;
-  END IF;
-END
-$$;
-
-
---
--- Name: FUNCTION payment_accounts_assert(p_caixa_id uuid, p_account_id uuid, p_transit_id uuid, p_what text, p_account_constraint text, p_transit_constraint text); Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON FUNCTION public.payment_accounts_assert(p_caixa_id uuid, p_account_id uuid, p_transit_id uuid, p_what text, p_account_constraint text, p_transit_constraint text) IS 'Usada pelos triggers de contracts e titles (spec 033; roda como quem escreve, por isso sem REVOKE):conta de pagamento checking/savings de qualquer caixa; a de passagem obrigatória quando a conta é de outra caixa, nula senão, sempre da caixa dona. 23514 com o nome de constraint informado.';
-
-
---
 -- Name: period_assert_open(uuid, date, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7251,6 +7432,126 @@ COMMENT ON FUNCTION public.period_is_closed(p_caixa_id uuid, p_on date) IS 'true
 
 
 --
+-- Name: recurrence_occurrence_due(text, integer, integer, date, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.recurrence_occurrence_due(p_frequency text, p_interval_count integer, p_anchor_day integer, p_starts_on date, p_occurrence integer) RETURNS date
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  m date;
+BEGIN
+  IF p_occurrence IS NULL OR p_occurrence < 1 OR p_starts_on IS NULL THEN
+    RETURN NULL;
+  END IF;
+  IF p_frequency = 'weekly' THEN
+    RETURN p_starts_on + ((p_anchor_day - extract(isodow FROM p_starts_on)::int + 7) % 7)
+                       + (p_occurrence - 1) * 7 * p_interval_count;
+  END IF;
+  m := (date_trunc('month', p_starts_on::timestamp)
+        + make_interval(months => (p_occurrence - 1) * p_interval_count
+                                  * CASE p_frequency WHEN 'yearly' THEN 12 ELSE 1 END))::date;
+  RETURN m + least(p_anchor_day, extract(day FROM ((m + interval '1 month')::date - 1))::int) - 1;
+END
+$$;
+
+
+--
+-- Name: FUNCTION recurrence_occurrence_due(p_frequency text, p_interval_count integer, p_anchor_day integer, p_starts_on date, p_occurrence integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.recurrence_occurrence_due(p_frequency text, p_interval_count integer, p_anchor_day integer, p_starts_on date, p_occurrence integer) IS 'Data da ocorrência n (1 = primeira) de uma série (spec 005), igual a occurrenceDueDate do shared: weekly = primeira data >= starts_on no dia ISO âncora + (n−1)·7·intervalo dias; monthly/yearly = mês de starts_on + (n−1)·intervalo (·12 no yearly) meses, no dia âncora (meses curtos: o último dia).';
+
+
+--
+-- Name: recurrence_rule_assert(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.recurrence_rule_assert(p_rule_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  r          recurrence_rules;
+  ck         text;
+  has_charge boolean;
+  dir        text;
+  bad        uuid;
+BEGIN
+  SELECT * INTO r FROM recurrence_rules x WHERE x.id = p_rule_id;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+  SELECT c.kind INTO ck FROM caixas c WHERE c.id = r.caixa_id;
+  has_charge := EXISTS (SELECT 1 FROM card_recurring_charges g WHERE g.recurrence_rule_id = r.id);
+  IF coalesce(ck = 'credit_card', false) <> has_charge THEN
+    RAISE EXCEPTION 'recurrence_rules: series % in a % caixa must % a card charge', r.id, ck,
+      CASE WHEN has_charge THEN 'not have' ELSE 'have' END
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'recurrence_rules_target_check';
+  END IF;
+
+  -- Títulos: o lado original fica na caixa da série; série de cartão não tem títulos.
+  SELECT t.id INTO bad FROM titles t
+   WHERE t.recurrence_rule_id = r.id AND (has_charge OR (t.mirror_status IS NULL AND t.caixa_id <> r.caixa_id))
+   LIMIT 1;
+  IF FOUND THEN
+    RAISE EXCEPTION 'titles: title % of series % must be in the series caixa %', bad, r.id, r.caixa_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_recurrence_caixa_check';
+  END IF;
+
+  -- Contrato: os títulos e as compras ligadas carregam o contrato da série.
+  SELECT t.id INTO bad FROM titles t
+   WHERE t.recurrence_rule_id = r.id AND t.contract_id IS DISTINCT FROM r.contract_id LIMIT 1;
+  IF FOUND THEN
+    RAISE EXCEPTION 'titles: title % of series % must have the series contract %', bad, r.id, r.contract_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_recurrence_contract_check';
+  END IF;
+  SELECT p.id INTO bad FROM card_purchases p
+   WHERE p.recurrence_rule_id = r.id AND p.contract_id IS DISTINCT FROM r.contract_id LIMIT 1;
+  IF FOUND THEN
+    RAISE EXCEPTION 'card_purchases: purchase % of series % must have the series contract %', bad, r.id, r.contract_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'card_purchases_recurrence_contract_check';
+  END IF;
+
+  -- Cobrança no cartão só em contrato a pagar.
+  IF has_charge AND r.contract_id IS NOT NULL THEN
+    SELECT k.direction INTO dir FROM contracts k WHERE k.id = r.contract_id;
+    IF dir = 'receivable' THEN
+      RAISE EXCEPTION 'card_recurring_charges: card charge % belongs to a receivable contract %', r.id, r.contract_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'card_recurring_charges_contract_check';
+    END IF;
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION recurrence_rule_assert(p_rule_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.recurrence_rule_assert(p_rule_id uuid) IS 'Interna (constraint triggers no COMMIT): série em caixa de cartão ⇔ tem card_recurring_charges (recurrence_rules_target_check); lado original dos títulos na caixa da série e série de cartão sem títulos (titles_recurrence_caixa_check); títulos e compras ligadas com o contrato da série (titles_recurrence_contract_check, card_purchases_recurrence_contract_check); cobrança no cartão só em contrato a pagar (card_recurring_charges_contract_check).';
+
+
+--
+-- Name: recurrence_rule_integrity_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.recurrence_rule_integrity_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_TABLE_NAME = 'recurrence_rules' THEN
+    PERFORM recurrence_rule_assert(NEW.id);
+  ELSIF TG_OP = 'DELETE' THEN
+    PERFORM recurrence_rule_assert(OLD.recurrence_rule_id);
+  ELSIF NEW.recurrence_rule_id IS NOT NULL THEN
+    PERFORM recurrence_rule_assert(NEW.recurrence_rule_id);
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+
+--
 -- Name: recurrence_rules_validate(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7259,8 +7560,9 @@ CREATE FUNCTION public.recurrence_rules_validate() RETURNS trigger
     AS $$
 BEGIN
   IF NEW.installments_total IS NOT NULL
-     AND EXISTS (SELECT 1 FROM titles t
-                  WHERE t.recurrence_rule_id = NEW.id AND t.occurrence > NEW.installments_total) THEN
+     AND (EXISTS (SELECT 1 FROM titles t WHERE t.recurrence_rule_id = NEW.id AND t.occurrence > NEW.installments_total)
+          OR EXISTS (SELECT 1 FROM card_purchases p
+                      WHERE p.recurrence_rule_id = NEW.id AND p.occurrence > NEW.installments_total)) THEN
     RAISE EXCEPTION 'recurrence_rules: rule % has occurrences above %', NEW.id, NEW.installments_total
       USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_occurrence_total_check';
   END IF;
@@ -8811,20 +9113,10 @@ BEGIN
     RETURN NEW;  -- a FK reporta o erro.
   END IF;
 
-  IF NEW.mirror_status IS NULL THEN
-    -- Lado original: na caixa do contrato; a parcela segue direção e contraparte do contrato.
-    IF NEW.caixa_id <> c.caixa_id THEN
-      RAISE EXCEPTION 'titles: contract % title must be in the contract caixa %', c.id, c.caixa_id
-        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_contract_caixa_check';
-    END IF;
-    IF NEW.contract_cycle_id IS NOT NULL AND (NEW.direction <> c.direction OR NEW.entity_id <> c.entity_id) THEN
-      RAISE EXCEPTION 'titles: contract % installment must be % with entity %', c.id, c.direction, c.entity_id
-        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_contract_match_check';
-    END IF;
-  ELSIF NEW.counterparty_caixa_id IS DISTINCT FROM c.caixa_id THEN
-    -- Lado espelho: o outro lado está na caixa do contrato.
-    RAISE EXCEPTION 'titles: mirror of contract % title must point to the contract caixa %', c.id, c.caixa_id
-      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_contract_caixa_check';
+  IF NEW.mirror_status IS NULL AND (NEW.recurrence_rule_id IS NOT NULL OR NEW.contract_cycle_id IS NOT NULL)
+     AND (NEW.direction <> c.direction OR NEW.entity_id <> c.entity_id) THEN
+    RAISE EXCEPTION 'titles: contract % obligation must be % with entity %', c.id, c.direction, c.entity_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_contract_match_check';
   END IF;
 
   IF NEW.contract_cycle_id IS NOT NULL THEN
@@ -8848,9 +9140,16 @@ $$;
 CREATE FUNCTION public.titles_validate_planned_account() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
+DECLARE
+  acc_caixa uuid;
 BEGIN
-  PERFORM payment_accounts_assert(NEW.caixa_id, NEW.planned_account_id, NEW.planned_transit_account_id, 'titles',
-                                  'titles_planned_account_check', 'titles_planned_transit_account_check');
+  IF NEW.planned_account_id IS NOT NULL THEN
+    SELECT a.caixa_id INTO acc_caixa FROM financial_accounts a WHERE a.id = NEW.planned_account_id;
+    IF FOUND AND acc_caixa <> NEW.caixa_id THEN
+      RAISE EXCEPTION 'titles: planned account % must be an account of caixa %', NEW.planned_account_id, NEW.caixa_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_planned_account_check';
+    END IF;
+  END IF;
   RETURN NEW;
 END
 $$;
@@ -11824,12 +12123,16 @@ CREATE TABLE public.card_purchases (
     notes text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    contract_id uuid,
+    recurrence_rule_id uuid,
+    occurrence smallint,
     CONSTRAINT card_purchases_amount_cents_check CHECK ((amount_cents > 0)),
     CONSTRAINT card_purchases_charge_kind_check CHECK ((charge_kind = ANY (ARRAY['interest'::text, 'iof'::text, 'fine'::text, 'fee'::text, 'other'::text]))),
     CONSTRAINT card_purchases_description_check CHECK ((btrim(description) <> ''::text)),
     CONSTRAINT card_purchases_installments_check CHECK ((((installments_total >= 1) AND (installments_total <= 99)) AND ((first_installment >= 1) AND (first_installment <= installments_total)))),
     CONSTRAINT card_purchases_kind_check CHECK ((kind = ANY (ARRAY['purchase'::text, 'refund'::text, 'charge'::text]))),
     CONSTRAINT card_purchases_kind_links_check CHECK ((((kind = 'refund'::text) = (refunded_purchase_id IS NOT NULL)) AND ((kind = 'charge'::text) = (charge_kind IS NOT NULL)))),
+    CONSTRAINT card_purchases_recurrence_check CHECK ((((recurrence_rule_id IS NULL) = (occurrence IS NULL)) AND ((occurrence IS NULL) OR (occurrence >= 1)) AND (((recurrence_rule_id IS NULL) AND (contract_id IS NULL)) OR (kind = 'purchase'::text)))),
     CONSTRAINT card_purchases_refund_self_check CHECK ((refunded_purchase_id <> id))
 );
 
@@ -11902,6 +12205,27 @@ COMMENT ON COLUMN public.card_purchases.first_installment IS 'Primeira parcela r
 --
 
 COMMENT ON COLUMN public.card_purchases.refunded_purchase_id IS 'Estorno: a compra (ou encargo) original estornada.';
+
+
+--
+-- Name: COLUMN card_purchases.contract_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.card_purchases.contract_id IS 'Contrato da compra (spec 034): o da série quando ligada a uma ocorrência (checado no COMMIT). Só em purchase.';
+
+
+--
+-- Name: COLUMN card_purchases.recurrence_rule_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.card_purchases.recurrence_rule_id IS 'Série de cobrança no cartão (do mesmo cartão: FK composta com card_caixa_id) cuja ocorrência esta compra atende.';
+
+
+--
+-- Name: COLUMN card_purchases.occurrence; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.card_purchases.occurrence IS 'Ocorrência atendida (n, junto com recurrence_rule_id). No máximo uma compra não estornada por série e ocorrência (card_purchases_occurrence_key, 23505): a estornada por inteiro libera a ocorrência.';
 
 
 --
@@ -12034,12 +12358,11 @@ CREATE TABLE public.titles (
     contract_cycle_id uuid,
     contract_installment smallint,
     planned_account_id uuid,
-    planned_transit_account_id uuid,
     planned_account_custom boolean DEFAULT false NOT NULL,
     CONSTRAINT titles_amount_cents_check CHECK ((amount_cents > 0)),
     CONSTRAINT titles_boleto_barcode_check CHECK (public.is_valid_boleto_barcode(boleto_barcode)),
     CONSTRAINT titles_card_invoice_check CHECK ((((origin = 'card_invoice'::text) = (card_invoice_id IS NOT NULL)) AND ((card_invoice_id IS NULL) OR (counterparty_caixa_id IS NOT NULL)))),
-    CONSTRAINT titles_contract_check CHECK ((((origin = 'contract'::text) = (contract_id IS NOT NULL)) AND ((contract_cycle_id IS NULL) = (contract_installment IS NULL)) AND ((contract_cycle_id IS NULL) OR (contract_id IS NOT NULL)))),
+    CONSTRAINT titles_contract_check CHECK ((((contract_cycle_id IS NULL) = (contract_installment IS NULL)) AND ((contract_cycle_id IS NULL) OR (contract_id IS NOT NULL)) AND ((contract_id IS NULL) OR (origin = ANY (ARRAY['manual'::text, 'recurrence'::text]))))),
     CONSTRAINT titles_contract_installment_check CHECK ((contract_installment >= 1)),
     CONSTRAINT titles_counterparty_caixa_check CHECK ((counterparty_caixa_id <> caixa_id)),
     CONSTRAINT titles_description_check CHECK ((btrim(description) <> ''::text)),
@@ -12048,7 +12371,7 @@ CREATE TABLE public.titles (
     CONSTRAINT titles_mirror_self_check CHECK ((mirror_title_id <> id)),
     CONSTRAINT titles_mirror_status_check CHECK ((mirror_status = ANY (ARRAY['pending'::text, 'accepted'::text, 'disputed'::text]))),
     CONSTRAINT titles_occurrence_check CHECK ((occurrence >= 1)),
-    CONSTRAINT titles_origin_check CHECK ((origin = ANY (ARRAY['manual'::text, 'recurrence'::text, 'card_invoice'::text, 'contract'::text]))),
+    CONSTRAINT titles_origin_check CHECK ((origin = ANY (ARRAY['manual'::text, 'recurrence'::text, 'card_invoice'::text]))),
     CONSTRAINT titles_pix_payload_check CHECK (public.is_valid_brcode(pix_payload)),
     CONSTRAINT titles_recurrence_check CHECK ((((recurrence_rule_id IS NULL) = (occurrence IS NULL)) AND ((origin = 'recurrence'::text) = (recurrence_rule_id IS NOT NULL)))),
     CONSTRAINT titles_status_check CHECK ((status = ANY (ARRAY['open'::text, 'partial'::text, 'paid'::text, 'canceled'::text])))
@@ -12087,7 +12410,7 @@ COMMENT ON COLUMN public.titles.status IS 'open | partial | paid: derivado da so
 -- Name: COLUMN titles.origin; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.titles.origin IS 'manual, recurrence (gerado por recurrence_rules), card_invoice (fatura de cartão, F2) ou contract (parcela ou título extra de um contrato, F5). O espelho herda a origem do original.';
+COMMENT ON COLUMN public.titles.origin IS 'manual, recurrence (ocorrência de recurrence_rules) ou card_invoice (fatura de cartão, F2). O espelho herda a origem do original. Título de contrato (spec 034) é recurrence (obrigação em série) ou manual (avulso: parcela única, multa); a origem contract saiu na 0052.';
 
 
 --
@@ -12150,42 +12473,35 @@ COMMENT ON COLUMN public.titles.card_invoice_id IS 'origin = card_invoice: a fat
 -- Name: COLUMN titles.contract_id; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.titles.contract_id IS 'Contrato (origin = contract). O lado original fica na caixa do contrato; o espelho aponta para ela em counterparty_caixa_id.';
+COMMENT ON COLUMN public.titles.contract_id IS 'Contrato do título (spec 034): a ocorrência de uma série do contrato (= recurrence_rules.contract_id, no COMMIT) ou um avulso ligado a ele. O espelho repete o contrato.';
 
 
 --
 -- Name: COLUMN titles.contract_cycle_id; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.titles.contract_cycle_id IS 'Ciclo da parcela. Nulo num título de contrato = título extra ligado a ele (multa, valor rescisório; qualquer direção).';
+COMMENT ON COLUMN public.titles.contract_cycle_id IS 'Legado (até a 0051): ciclo da parcela gerada pelo contrato, mantido como histórico nos títulos migrados. Não preencha em títulos novos.';
 
 
 --
 -- Name: COLUMN titles.contract_installment; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.titles.contract_installment IS 'Número da parcela n no ciclo (N = contract_cycles.installments_count).';
+COMMENT ON COLUMN public.titles.contract_installment IS 'Legado (até a 0051): número da parcela n no ciclo (N = contract_cycles.installments_count). Histórico.';
 
 
 --
 -- Name: COLUMN titles.planned_account_id; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.titles.planned_account_id IS 'Conta prevista (spec 033): checking/savings da caixa do título ou de outra caixa. O contrato preenche nas parcelas; vale em qualquer título. O espelho tem a dele.';
-
-
---
--- Name: COLUMN titles.planned_transit_account_id; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.titles.planned_transit_account_id IS 'Conta de passagem da conta prevista: da caixa do título, obrigatória quando planned_account_id é de outra caixa e nula senão.';
+COMMENT ON COLUMN public.titles.planned_account_id IS 'Conta prevista (specs 033 e 034): conta da caixa do título (corrente, poupança ou cofre), onde o pagamento sai ou o recebimento entra. A série copia a da ocorrência modelo; a conciliação procura a ocorrência pela conta.';
 
 
 --
 -- Name: COLUMN titles.planned_account_custom; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.titles.planned_account_custom IS 'A conta prevista foi escolhida na parcela: trocar a conta do contrato não a muda. Padrão false (segue o contrato).';
+COMMENT ON COLUMN public.titles.planned_account_custom IS 'A ocorrência escolheu a conta dela (troca avulsa); padrão false. Sem regra no banco: a aplicação decide se a troca da conta da série ("esta e as próximas") a respeita.';
 
 
 --
@@ -12333,6 +12649,88 @@ CREATE VIEW public.card_limits WITH (security_invoker='true') AS
 --
 
 COMMENT ON VIEW public.card_limits IS 'Limite do cartão: used_cents = parcelas lançadas em todas as faturas (inclusive futuras, encargos e estornos) − principal pago nos títulos de fatura (lado do cartão); available_cents = limite − usado (pode ficar negativo).';
+
+
+--
+-- Name: card_recurring_charge_amounts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.card_recurring_charge_amounts (
+    recurrence_rule_id uuid NOT NULL,
+    from_occurrence smallint NOT NULL,
+    amount_cents bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT card_recurring_charge_amounts_amount_cents_check CHECK ((amount_cents > 0)),
+    CONSTRAINT card_recurring_charge_amounts_from_occurrence_check CHECK ((from_occurrence >= 2))
+);
+
+
+--
+-- Name: TABLE card_recurring_charge_amounts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.card_recurring_charge_amounts IS 'Valor esperado de uma cobrança no cartão a partir da ocorrência from_occurrence (aditivo/reajuste "dali em diante", spec 034); as anteriores ficam com o valor de antes. Valor da ocorrência n: card_recurring_charge_amount(série, n).';
+
+
+--
+-- Name: card_recurring_charges; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.card_recurring_charges (
+    recurrence_rule_id uuid NOT NULL,
+    payer_caixa_id uuid NOT NULL,
+    entity_id uuid NOT NULL,
+    category_id uuid NOT NULL,
+    description text NOT NULL,
+    amount_cents bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT card_recurring_charges_amount_cents_check CHECK ((amount_cents > 0)),
+    CONSTRAINT card_recurring_charges_description_check CHECK (((btrim(description) <> ''::text) AND (length(description) <= 200)))
+);
+
+
+--
+-- Name: TABLE card_recurring_charges; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.card_recurring_charges IS 'Cobrança recorrente esperada num cartão (spec 034): o alvo de uma série cuja caixa (recurrence_rules.caixa_id) é a do cartão. Não gera título nem compra adiantada; as ocorrências são calculadas pelo calendário da série e a compra que atende uma ocorrência fica ligada a ela (card_purchases.recurrence_rule_id/occurrence). Uma por série.';
+
+
+--
+-- Name: COLUMN card_recurring_charges.payer_caixa_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.card_recurring_charges.payer_caixa_id IS 'Caixa pagadora da cobrança (general): a da compra criada ao confirmar.';
+
+
+--
+-- Name: COLUMN card_recurring_charges.entity_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.card_recurring_charges.entity_id IS 'Recebedor final esperado (o lojista da cobrança).';
+
+
+--
+-- Name: COLUMN card_recurring_charges.category_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.card_recurring_charges.category_id IS 'Categoria de despesa da compra.';
+
+
+--
+-- Name: COLUMN card_recurring_charges.description; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.card_recurring_charges.description IS 'Descrição da obrigação (1–200), usada na sugestão da fatura.';
+
+
+--
+-- Name: COLUMN card_recurring_charges.amount_cents; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.card_recurring_charges.amount_cents IS 'Valor esperado a partir da ocorrência 1; mudanças "dali em diante" ficam em card_recurring_charge_amounts.';
 
 
 --
@@ -12496,7 +12894,7 @@ COMMENT ON COLUMN public.classification_rules.copied_from_rule_id IS 'Regra de o
 CREATE TABLE public.contract_amendments (
     id uuid DEFAULT uuidv7() NOT NULL,
     contract_id uuid NOT NULL,
-    contract_cycle_id uuid NOT NULL,
+    contract_cycle_id uuid,
     document_id uuid,
     effective_on date NOT NULL,
     changes jsonb NOT NULL,
@@ -12506,7 +12904,9 @@ CREATE TABLE public.contract_amendments (
     created_by uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    recurrence_rule_ids uuid[] DEFAULT '{}'::uuid[] NOT NULL,
     CONSTRAINT contract_amendments_changes_check CHECK (((jsonb_typeof(changes) = 'object'::text) AND COALESCE((jsonb_typeof((changes -> 'before'::text)) = 'object'::text), false) AND COALESCE((jsonb_typeof((changes -> 'after'::text)) = 'object'::text), false))),
+    CONSTRAINT contract_amendments_rule_ids_check CHECK ((array_position(recurrence_rule_ids, NULL::uuid) IS NULL)),
     CONSTRAINT contract_amendments_title_ids_check CHECK (((array_position(affected_title_ids, NULL::uuid) IS NULL) AND (array_position(skipped_title_ids, NULL::uuid) IS NULL)))
 );
 
@@ -12522,7 +12922,7 @@ COMMENT ON TABLE public.contract_amendments IS 'Histórico de aditivos de um con
 -- Name: COLUMN contract_amendments.contract_cycle_id; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.contract_amendments.contract_cycle_id IS 'Ciclo aditado (do mesmo contrato).';
+COMMENT ON COLUMN public.contract_amendments.contract_cycle_id IS 'Ciclo aditado (legado; opcional desde a 0052).';
 
 
 --
@@ -12561,6 +12961,13 @@ COMMENT ON COLUMN public.contract_amendments.skipped_title_ids IS 'Títulos que 
 
 
 --
+-- Name: COLUMN contract_amendments.recurrence_rule_ids; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.contract_amendments.recurrence_rule_ids IS 'Obrigações (séries) atingidas pelo aditivo (spec 034), com "esta e as próximas" a partir da data de efeito.';
+
+
+--
 -- Name: contract_cycles; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -12569,23 +12976,12 @@ CREATE TABLE public.contract_cycles (
     contract_id uuid NOT NULL,
     seq smallint NOT NULL,
     starts_on date NOT NULL,
-    duration_months smallint NOT NULL,
-    ends_on date GENERATED ALWAYS AS (
-CASE
-    WHEN (EXTRACT(day FROM (starts_on + make_interval(months => (duration_months)::integer))) < EXTRACT(day FROM starts_on)) THEN ((starts_on + make_interval(months => (duration_months)::integer)))::date
-    ELSE (((starts_on + make_interval(months => (duration_months)::integer)))::date - 1)
-END) STORED NOT NULL,
-    periodicity text NOT NULL,
-    installments_count smallint GENERATED ALWAYS AS ((
-CASE periodicity
-    WHEN 'monthly'::text THEN (duration_months)::integer
-    WHEN 'quarterly'::text THEN (duration_months / 3)
-    WHEN 'semiannual'::text THEN (duration_months / 6)
-    WHEN 'annual'::text THEN (duration_months / 12)
-    ELSE 1
-END)::smallint) STORED NOT NULL,
-    total_cents bigint NOT NULL,
-    due_day smallint NOT NULL,
+    duration_months smallint,
+    ends_on date,
+    periodicity text,
+    installments_count smallint,
+    total_cents bigint,
+    due_day smallint,
     due_month_offset smallint DEFAULT 0 NOT NULL,
     readjustment_percent numeric(7,4),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -12600,6 +12996,8 @@ CASE periodicity
     WHEN 'annual'::text THEN 12
     ELSE 1
 END) = 0)),
+    CONSTRAINT contract_cycles_ends_on_check CHECK ((ends_on >= starts_on)),
+    CONSTRAINT contract_cycles_legacy_check CHECK ((((duration_months IS NULL) = (periodicity IS NULL)) AND ((duration_months IS NULL) = (total_cents IS NULL)) AND ((duration_months IS NULL) = (due_day IS NULL)))),
     CONSTRAINT contract_cycles_periodicity_check CHECK ((periodicity = ANY (ARRAY['monthly'::text, 'quarterly'::text, 'semiannual'::text, 'annual'::text, 'single'::text]))),
     CONSTRAINT contract_cycles_readjustment_percent_check CHECK ((readjustment_percent > ('-100'::integer)::numeric)),
     CONSTRAINT contract_cycles_seq_check CHECK ((seq >= 1)),
@@ -12611,21 +13009,21 @@ END) = 0)),
 -- Name: TABLE contract_cycles; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.contract_cycles IS 'Ciclos (vigências) de um contrato, seq 1, 2, 3… contíguos (o seguinte começa no dia seguinte ao fim do anterior; checado no COMMIT). Com títulos ligados, starts_on, duration_months e periodicity ficam imutáveis.';
+COMMENT ON TABLE public.contract_cycles IS 'Histórico das vigências de um contrato (spec 034): seq 1, 2, 3… contíguos (o seguinte começa no dia seguinte ao fim do anterior; o sem fim só no último; no COMMIT). Renovar acrescenta um. Os ciclos de parcelas de antes da 0052 têm os campos do ciclo (duração, periodicidade, total, dia), com ends_on e installments_count calculados; com títulos ligados, início, duração e periodicidade ficam imutáveis.';
 
 
 --
 -- Name: COLUMN contract_cycles.duration_months; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.contract_cycles.duration_months IS 'Duração em meses (1–120), múltipla dos meses do período (single aceita qualquer).';
+COMMENT ON COLUMN public.contract_cycles.duration_months IS 'Legado (ciclo de parcelas): duração em meses (1–120), múltipla do período. Nulo nas vigências novas, junto com periodicity, total_cents e due_day (contract_cycles_legacy_check).';
 
 
 --
 -- Name: COLUMN contract_cycles.ends_on; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.contract_cycles.ends_on IS 'Gerada: x = starts_on + duration_months meses; x se o dia não existe no mês final (31/01 + 1 → 28/02, o seguinte começa em 01/03), senão x − 1 dia (01/03/2025 + 12 → 28/02/2026; 29/01/2024 + 1 → 28/02/2024).';
+COMMENT ON COLUMN public.contract_cycles.ends_on IS 'Fim da vigência (nulo = indeterminado, só no último ciclo). Num ciclo com duration_months, calculado como antes: x = starts_on + duração meses; x se o dia não existe no mês final, senão x − 1 dia.';
 
 
 --
@@ -12639,7 +13037,7 @@ COMMENT ON COLUMN public.contract_cycles.periodicity IS 'monthly (1 mês), quart
 -- Name: COLUMN contract_cycles.installments_count; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.contract_cycles.installments_count IS 'Gerada: número de parcelas = duração ÷ meses do período (single = 1).';
+COMMENT ON COLUMN public.contract_cycles.installments_count IS 'Legado: número de parcelas = duração ÷ meses do período (single = 1), calculado; nulo sem os campos do ciclo.';
 
 
 --
@@ -12752,7 +13150,7 @@ CREATE TABLE public.contract_renewal_tasks (
     id uuid DEFAULT uuidv7() NOT NULL,
     contract_id uuid NOT NULL,
     contract_cycle_id uuid NOT NULL,
-    status text DEFAULT 'open'::text NOT NULL,
+    status text NOT NULL,
     opened_on date NOT NULL,
     due_on date NOT NULL,
     decided_at timestamp with time zone,
@@ -12765,11 +13163,10 @@ CREATE TABLE public.contract_renewal_tasks (
 CASE status
     WHEN 'open'::text THEN ((decided_at IS NULL) AND (new_cycle_id IS NULL))
     WHEN 'approved'::text THEN ((decided_at IS NOT NULL) AND (new_cycle_id IS NOT NULL))
-    WHEN 'declined'::text THEN ((decided_at IS NOT NULL) AND (new_cycle_id IS NULL))
-    ELSE NULL::boolean
+    ELSE ((decided_at IS NOT NULL) AND (new_cycle_id IS NULL))
 END),
     CONSTRAINT contract_renewal_tasks_new_cycle_self_check CHECK ((new_cycle_id <> contract_cycle_id)),
-    CONSTRAINT contract_renewal_tasks_status_check CHECK ((status = ANY (ARRAY['open'::text, 'approved'::text, 'declined'::text])))
+    CONSTRAINT contract_renewal_tasks_status_check CHECK ((status = ANY (ARRAY['approved'::text, 'declined'::text, 'closed'::text])))
 );
 
 
@@ -12777,7 +13174,7 @@ END),
 -- Name: TABLE contract_renewal_tasks; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.contract_renewal_tasks IS 'Tarefa de renovação de um ciclo (uma por ciclo; no máximo uma open por contrato). Aprovada pelo usuário (cria o ciclo seguinte, new_cycle_id) ou recusada; decidida é final. Contrato renewal_pending ⇔ tarefa open (no COMMIT).';
+COMMENT ON TABLE public.contract_renewal_tasks IS 'Histórico das tarefas de renovação (até a 0052): approved (com o ciclo criado), declined ou closed (aberta fechada pela migração 0052, quando o aviso de fim de vigência assumiu). Nenhuma tarefa nova abre.';
 
 
 --
@@ -12791,7 +13188,7 @@ COMMENT ON COLUMN public.contract_renewal_tasks.contract_cycle_id IS 'Ciclo que 
 -- Name: COLUMN contract_renewal_tasks.status; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.contract_renewal_tasks.status IS 'open → approved (decided_at e new_cycle_id) | declined (decided_at). Decidida é final.';
+COMMENT ON COLUMN public.contract_renewal_tasks.status IS 'approved (decided_at e new_cycle_id) | declined | closed (decided_at). Final.';
 
 
 --
@@ -12844,31 +13241,23 @@ CREATE TABLE public.contracts (
     archived_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    payment_account_id uuid,
-    transit_account_id uuid,
-    late_fee_percent numeric(6,4),
-    interest_month_percent numeric(6,4),
-    early_discount_percent numeric(6,4),
-    tolerance_cents bigint DEFAULT 0 NOT NULL,
-    match_window_days smallint DEFAULT 15 NOT NULL,
-    auto_settle boolean DEFAULT false NOT NULL,
+    starts_on date NOT NULL,
+    ends_on date,
     CONSTRAINT contracts_contract_number_check CHECK (((btrim(contract_number) <> ''::text) AND (length(contract_number) <= 60))),
     CONSTRAINT contracts_counterparty_caixa_check CHECK ((counterparty_caixa_id <> caixa_id)),
     CONSTRAINT contracts_direction_check CHECK ((direction = ANY (ARRAY['payable'::text, 'receivable'::text]))),
-    CONSTRAINT contracts_early_discount_percent_check CHECK (((early_discount_percent >= (0)::numeric) AND (early_discount_percent <= (50)::numeric))),
-    CONSTRAINT contracts_interest_month_percent_check CHECK (((interest_month_percent >= (0)::numeric) AND (interest_month_percent <= (10)::numeric))),
-    CONSTRAINT contracts_late_fee_percent_check CHECK (((late_fee_percent >= (0)::numeric) AND (late_fee_percent <= (20)::numeric))),
-    CONSTRAINT contracts_match_window_days_check CHECK (((match_window_days >= 0) AND (match_window_days <= 45))),
+    CONSTRAINT contracts_ended_term_check CHECK (((status <> ALL (ARRAY['ended'::text, 'terminated'::text])) OR (ends_on IS NOT NULL))),
+    CONSTRAINT contracts_ends_on_check CHECK ((ends_on >= starts_on)),
     CONSTRAINT contracts_name_check CHECK (((btrim(name) <> ''::text) AND (length(name) <= 200))),
     CONSTRAINT contracts_notice_days_check CHECK (((notice_days >= 0) AND (notice_days <= 365))),
     CONSTRAINT contracts_readjustment_index_check CHECK ((readjustment_index = ANY (ARRAY['none'::text, 'ipca'::text, 'igpm'::text, 'inpc'::text, 'other'::text]))),
     CONSTRAINT contracts_reminder_every_days_check CHECK (((reminder_every_days >= 1) AND (reminder_every_days <= 30))),
     CONSTRAINT contracts_renewal_lead_days_check CHECK (((renewal_lead_days >= 1) AND (renewal_lead_days <= 365))),
-    CONSTRAINT contracts_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'active'::text, 'renewal_pending'::text, 'ended'::text, 'terminated'::text]))),
+    CONSTRAINT contracts_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'active'::text, 'ended'::text, 'terminated'::text]))),
     CONSTRAINT contracts_terminated_check CHECK (((status = 'terminated'::text) = (terminated_on IS NOT NULL))),
+    CONSTRAINT contracts_terminated_on_check CHECK (((terminated_on IS NULL) OR (terminated_on = ends_on))),
     CONSTRAINT contracts_termination_penalty_cents_check CHECK ((termination_penalty_cents > 0)),
-    CONSTRAINT contracts_termination_penalty_text_check CHECK ((length(termination_penalty_text) <= 2000)),
-    CONSTRAINT contracts_tolerance_cents_check CHECK ((tolerance_cents >= 0))
+    CONSTRAINT contracts_termination_penalty_text_check CHECK ((length(termination_penalty_text) <= 2000))
 );
 
 
@@ -12876,7 +13265,7 @@ CREATE TABLE public.contracts (
 -- Name: TABLE contracts; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.contracts IS 'Contratos (spec 020): acordo com uma entidade dentro de uma caixa general. Gera os títulos das parcelas por ciclo (contract_cycles); documentos, aditivos e tarefas de renovação ficam nas tabelas contract_*. Só rascunho é excluído.';
+COMMENT ON TABLE public.contracts IS 'Contratos (specs 020 e 034): acordo com uma entidade dentro de uma caixa general, com vigência, documentos, avisos e obrigações (as séries com recurrence_rules.contract_id, em contas ou no cartão, e títulos avulsos ligados). contract_cycles, contract_amendments e contract_renewal_tasks guardam o histórico. Só rascunho é excluído.';
 
 
 --
@@ -12925,7 +13314,7 @@ COMMENT ON COLUMN public.contracts.counterparty_caixa_id IS 'Caixa onde as parce
 -- Name: COLUMN contracts.status; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.contracts.status IS 'draft (sem títulos) → active; active → renewal_pending | ended | terminated; renewal_pending → active | ended | terminated; ended → active | renewal_pending; terminated é final; nada volta para draft. renewal_pending ⇔ existe tarefa de renovação open (checado no COMMIT).';
+COMMENT ON COLUMN public.contracts.status IS 'draft (sem títulos nem compras ligadas) → active; active → ended | terminated; ended → active (renovar); terminated é final; nada volta para draft. renewal_pending saiu na 0052 (renovar é uma ação).';
 
 
 --
@@ -12981,63 +13370,21 @@ COMMENT ON COLUMN public.contracts.termination_penalty_cents IS 'Multa rescisór
 -- Name: COLUMN contracts.terminated_on; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.contracts.terminated_on IS 'Data de encerramento da rescisão; preenchida se e somente se status = terminated.';
+COMMENT ON COLUMN public.contracts.terminated_on IS 'Data de encerramento da rescisão; preenchida se e somente se status = terminated, e igual ao fim da vigência.';
 
 
 --
--- Name: COLUMN contracts.payment_account_id; Type: COMMENT; Schema: public; Owner: -
+-- Name: COLUMN contracts.starts_on; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.contracts.payment_account_id IS 'Conta das parcelas (spec 033): checking/savings onde o pagamento sai ou o recebimento entra, da caixa do contrato ou de outra caixa (a pagadora; a permissão é da aplicação). Nula = sem conta. Copiada para titles.planned_account_id.';
-
-
---
--- Name: COLUMN contracts.transit_account_id; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.contracts.transit_account_id IS 'Conta de passagem (spec 033): da caixa do contrato, obrigatória quando payment_account_id é de outra caixa e nula senão. A baixa da parcela é nela, com a transferência a partir da conta das parcelas.';
+COMMENT ON COLUMN public.contracts.starts_on IS 'Início da vigência (spec 034).';
 
 
 --
--- Name: COLUMN contracts.late_fee_percent; Type: COMMENT; Schema: public; Owner: -
+-- Name: COLUMN contracts.ends_on; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.contracts.late_fee_percent IS 'Multa por atraso (0–20%) sobre a parcela, uma vez. Nula = sem. Só para reconhecer o valor pago.';
-
-
---
--- Name: COLUMN contracts.interest_month_percent; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.contracts.interest_month_percent IS 'Juros de mora (0–10% ao mês), pró-rata por dia (mês = 30 dias). Nulo = sem.';
-
-
---
--- Name: COLUMN contracts.early_discount_percent; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.contracts.early_discount_percent IS 'Desconto por pontualidade (0–50%) até o vencimento. Nulo = sem.';
-
-
---
--- Name: COLUMN contracts.tolerance_cents; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.contracts.tolerance_cents IS 'Diferença aceita além dos encargos (≥ 0, padrão 0). O teto de 10% da parcela é da aplicação (o valor da parcela muda por ciclo e aditivo).';
-
-
---
--- Name: COLUMN contracts.match_window_days; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.contracts.match_window_days IS 'Janela da conciliação em dias em torno do vencimento (0–45, padrão 15), além do mês do vencimento.';
-
-
---
--- Name: COLUMN contracts.auto_settle; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.contracts.auto_settle IS 'Baixar sem confirmação: a linha com um único candidato, parcela deste contrato na conta prevista e valor exato ou dentro dos encargos/desconto vira conciliada direto (statement_lines.auto_settled).';
+COMMENT ON COLUMN public.contracts.ends_on IS 'Fim da vigência (nulo = indeterminado; obrigatório em ended e terminated; no rescindido, = terminated_on). Renovar estende a vigência e o fim das séries.';
 
 
 --
@@ -13917,7 +14264,7 @@ CREATE TABLE public.notifications (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT notifications_data_check CHECK ((jsonb_typeof(data) = 'object'::text)),
     CONSTRAINT notifications_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
-    CONSTRAINT notifications_kind_check CHECK ((kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text]))),
+    CONSTRAINT notifications_kind_check CHECK ((kind = ANY (ARRAY['agent_completed'::text, 'agent_message'::text, 'mirror_pending'::text, 'mirror_disputed'::text, 'invoice_closed'::text, 'due_reminder'::text, 'overdue'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'message_failed'::text, 'system'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'contract_charge_missing'::text]))),
     CONSTRAINT notifications_link_check CHECK (((link ~ '^/[^/]'::text) OR (link = '/'::text))),
     CONSTRAINT notifications_title_check CHECK (((btrim(title) <> ''::text) AND (length(title) <= 200)))
 );
@@ -13934,7 +14281,7 @@ COMMENT ON TABLE public.notifications IS 'Notificações do sino, por usuário. 
 -- Name: COLUMN notifications.kind; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.notifications.kind IS 'agent_completed, agent_message, mirror_pending, mirror_disputed, invoice_closed, due_reminder, overdue, card_limit, reconciliation_divergence, message_failed, system, contract_notice_deadline, contract_ending, contract_renewal_pending, contract_readjustment, ai_budget_alert (spec 028; dedup por orçamento, mês e limiar) ou ai_awaiting_approval (spec 029: tarefa agendada ou conciliação com IA esperando aprovação).';
+COMMENT ON COLUMN public.notifications.kind IS 'agent_completed, agent_message, mirror_pending, mirror_disputed, invoice_closed, due_reminder, overdue, card_limit, reconciliation_divergence, message_failed, system, contract_notice_deadline, contract_ending, contract_renewal_pending (histórico), contract_readjustment, ai_budget_alert (spec 028; dedup por orçamento, mês e limiar), ai_awaiting_approval (spec 029) ou contract_charge_missing (spec 034: ocorrência de cobrança no cartão não cobrada, uma vez por ocorrência).';
 
 
 --
@@ -14016,16 +14363,29 @@ CREATE TABLE public.recurrence_rules (
     installments_total smallint,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    caixa_id uuid NOT NULL,
+    contract_id uuid,
+    match_window_days smallint DEFAULT 15 NOT NULL,
+    late_fee_percent numeric(6,4),
+    interest_month_percent numeric(6,4),
+    early_discount_percent numeric(6,4),
+    tolerance_cents bigint DEFAULT 0 NOT NULL,
+    auto_settle boolean DEFAULT false NOT NULL,
     CONSTRAINT recurrence_rules_anchor_day_check CHECK (
 CASE frequency
     WHEN 'weekly'::text THEN ((anchor_day >= 1) AND (anchor_day <= 7))
     ELSE ((anchor_day >= 1) AND (anchor_day <= 31))
 END),
+    CONSTRAINT recurrence_rules_early_discount_percent_check CHECK (((early_discount_percent >= (0)::numeric) AND (early_discount_percent <= (50)::numeric))),
     CONSTRAINT recurrence_rules_end_check CHECK (((ends_on IS NULL) OR (installments_total IS NULL))),
     CONSTRAINT recurrence_rules_ends_on_check CHECK ((ends_on >= starts_on)),
     CONSTRAINT recurrence_rules_frequency_check CHECK ((frequency = ANY (ARRAY['weekly'::text, 'monthly'::text, 'yearly'::text]))),
     CONSTRAINT recurrence_rules_installments_total_check CHECK (((installments_total >= 2) AND (installments_total <= 999))),
-    CONSTRAINT recurrence_rules_interval_count_check CHECK (((interval_count >= 1) AND (interval_count <= 366)))
+    CONSTRAINT recurrence_rules_interest_month_percent_check CHECK (((interest_month_percent >= (0)::numeric) AND (interest_month_percent <= (10)::numeric))),
+    CONSTRAINT recurrence_rules_interval_count_check CHECK (((interval_count >= 1) AND (interval_count <= 366))),
+    CONSTRAINT recurrence_rules_late_fee_percent_check CHECK (((late_fee_percent >= (0)::numeric) AND (late_fee_percent <= (20)::numeric))),
+    CONSTRAINT recurrence_rules_match_window_days_check CHECK (((match_window_days >= 0) AND (match_window_days <= 45))),
+    CONSTRAINT recurrence_rules_tolerance_cents_check CHECK ((tolerance_cents >= 0))
 );
 
 
@@ -14033,7 +14393,7 @@ END),
 -- Name: TABLE recurrence_rules; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.recurrence_rules IS 'Calendário de uma série de títulos (recorrência ou parcelamento). Os títulos apontam para a regra com titles.occurrence; o worker materializa até 12 meses à frente (spec 005).';
+COMMENT ON TABLE public.recurrence_rules IS 'Série recorrente ou parcelamento (spec 005): o calendário, a caixa (caixa_id) e, opcionalmente, o contrato de que é obrigação (contract_id, spec 034) e os ajustes de reconhecimento do pagamento. Série numa caixa general = títulos materializados pelo worker até 12 meses à frente (titles.recurrence_rule_id/occurrence; modelo = a ocorrência mais recente). Série na caixa de um cartão = cobrança esperada (card_recurring_charges), sem títulos.';
 
 
 --
@@ -14076,6 +14436,62 @@ COMMENT ON COLUMN public.recurrence_rules.ends_on IS 'Recorrência: última data
 --
 
 COMMENT ON COLUMN public.recurrence_rules.installments_total IS 'Parcelamento: total de parcelas N (2–999). Exclusivo com ends_on.';
+
+
+--
+-- Name: COLUMN recurrence_rules.caixa_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.caixa_id IS 'Caixa da série: a do lado original dos títulos (a da conta da obrigação) ou, na cobrança esperada, a do cartão (credit_card ⇔ card_recurring_charges, no COMMIT). Mudar exige mover os títulos na mesma transação.';
+
+
+--
+-- Name: COLUMN recurrence_rules.contract_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.contract_id IS 'Contrato de que a série é obrigação (spec 034; ON DELETE SET NULL). Os títulos da série e as compras ligadas carregam o mesmo contract_id (no COMMIT): ligar ou desligar a série muda os dois na mesma transação.';
+
+
+--
+-- Name: COLUMN recurrence_rules.match_window_days; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.match_window_days IS 'Reconhecimento: janela em dias em torno do vencimento (0–45, padrão 15), além do mês do vencimento.';
+
+
+--
+-- Name: COLUMN recurrence_rules.late_fee_percent; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.late_fee_percent IS 'Reconhecimento: multa por atraso (0–20%) sobre o valor, uma vez. Nula = sem.';
+
+
+--
+-- Name: COLUMN recurrence_rules.interest_month_percent; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.interest_month_percent IS 'Reconhecimento: juros de mora (0–10% ao mês), pró-rata por dia. Nulo = sem.';
+
+
+--
+-- Name: COLUMN recurrence_rules.early_discount_percent; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.early_discount_percent IS 'Reconhecimento: desconto por pontualidade (0–50%) até o vencimento. Nulo = sem.';
+
+
+--
+-- Name: COLUMN recurrence_rules.tolerance_cents; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.tolerance_cents IS 'Reconhecimento: diferença aceita além dos encargos (≥ 0, padrão 0; o teto de 10% do valor é da aplicação).';
+
+
+--
+-- Name: COLUMN recurrence_rules.auto_settle; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.recurrence_rules.auto_settle IS 'Baixar sem confirmação: a linha do extrato (ou da fatura) com um único candidato desta série vira conciliada direto (statement_lines.auto_settled; no cartão, a compra criada com created_entry purchase).';
 
 
 --
@@ -14204,7 +14620,7 @@ CREATE TABLE public.statement_lines (
     supersede_suggestion_reason text,
     auto_settled boolean DEFAULT false NOT NULL,
     CONSTRAINT statement_lines_amount_cents_check CHECK ((amount_cents <> 0)),
-    CONSTRAINT statement_lines_auto_settled_check CHECK (((NOT auto_settled) OR ((status = 'matched'::text) AND COALESCE((created_entry = ANY (ARRAY['settlement'::text, 'transfer_settlement'::text])), false)))),
+    CONSTRAINT statement_lines_auto_settled_check CHECK (((NOT auto_settled) OR ((status = 'matched'::text) AND COALESCE((created_entry = ANY (ARRAY['settlement'::text, 'transfer_settlement'::text, 'purchase'::text])), false)))),
     CONSTRAINT statement_lines_classification_source_check CHECK (((classification_source = ANY (ARRAY['rule'::text, 'agent'::text, 'user'::text])) AND ((classification_rule_id IS NULL) OR (NOT (classification_source IS DISTINCT FROM 'rule'::text))))),
     CONSTRAINT statement_lines_created_entry_check CHECK (((created_entry IS NULL) OR ((created_entry = ANY (ARRAY['adjustment'::text, 'title'::text, 'settlement'::text, 'transfer_settlement'::text, 'purchase'::text])) AND (status = 'matched'::text)))),
     CONSTRAINT statement_lines_created_entry_links_check CHECK (
@@ -14383,7 +14799,7 @@ COMMENT ON COLUMN public.statement_lines.supersede_suggestion_reason IS 'Motivo 
 -- Name: COLUMN statement_lines.auto_settled; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.statement_lines.auto_settled IS 'A baixa desta linha foi feita sem confirmação (contracts.auto_settle, spec 033). Só em matched com created_entry settlement ou transfer_settlement; a aplicação limpa junto com created_entry.';
+COMMENT ON COLUMN public.statement_lines.auto_settled IS 'O lançamento desta linha foi feito sem confirmação (recurrence_rules.auto_settle, specs 033 e 034). Só em matched com created_entry settlement, transfer_settlement ou purchase (a compra da cobrança no cartão); a aplicação limpa junto com created_entry.';
 
 
 --
@@ -15220,6 +15636,22 @@ ALTER TABLE ONLY public.card_purchases
 
 
 --
+-- Name: card_recurring_charge_amounts card_recurring_charge_amounts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.card_recurring_charge_amounts
+    ADD CONSTRAINT card_recurring_charge_amounts_pkey PRIMARY KEY (recurrence_rule_id, from_occurrence);
+
+
+--
+-- Name: card_recurring_charges card_recurring_charges_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.card_recurring_charges
+    ADD CONSTRAINT card_recurring_charges_pkey PRIMARY KEY (recurrence_rule_id);
+
+
+--
 -- Name: categories categories_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -15593,6 +16025,14 @@ ALTER TABLE ONLY public.period_closings
 
 ALTER TABLE ONLY public.period_closings
     ADD CONSTRAINT period_closings_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: recurrence_rules recurrence_rules_id_caixa_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recurrence_rules
+    ADD CONSTRAINT recurrence_rules_id_caixa_key UNIQUE (id, caixa_id);
 
 
 --
@@ -16524,6 +16964,13 @@ CREATE INDEX card_purchases_category_id_idx ON public.card_purchases USING btree
 
 
 --
+-- Name: card_purchases_contract_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX card_purchases_contract_id_idx ON public.card_purchases USING btree (contract_id);
+
+
+--
 -- Name: card_purchases_description_trgm_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -16545,10 +16992,38 @@ CREATE INDEX card_purchases_payer_caixa_id_idx ON public.card_purchases USING bt
 
 
 --
+-- Name: card_purchases_recurrence_rule_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX card_purchases_recurrence_rule_id_idx ON public.card_purchases USING btree (recurrence_rule_id, occurrence);
+
+
+--
 -- Name: card_purchases_refunded_purchase_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX card_purchases_refunded_purchase_id_idx ON public.card_purchases USING btree (refunded_purchase_id);
+
+
+--
+-- Name: card_recurring_charges_category_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX card_recurring_charges_category_id_idx ON public.card_recurring_charges USING btree (category_id);
+
+
+--
+-- Name: card_recurring_charges_entity_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX card_recurring_charges_entity_id_idx ON public.card_recurring_charges USING btree (entity_id);
+
+
+--
+-- Name: card_recurring_charges_payer_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX card_recurring_charges_payer_caixa_id_idx ON public.card_recurring_charges USING btree (payer_caixa_id);
 
 
 --
@@ -16720,24 +17195,10 @@ CREATE INDEX contract_renewal_tasks_decided_by_idx ON public.contract_renewal_ta
 
 
 --
--- Name: contract_renewal_tasks_due_on_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX contract_renewal_tasks_due_on_idx ON public.contract_renewal_tasks USING btree (due_on) WHERE (status = 'open'::text);
-
-
---
 -- Name: contract_renewal_tasks_new_cycle_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX contract_renewal_tasks_new_cycle_id_idx ON public.contract_renewal_tasks USING btree (new_cycle_id);
-
-
---
--- Name: contract_renewal_tasks_open_key; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX contract_renewal_tasks_open_key ON public.contract_renewal_tasks USING btree (contract_id) WHERE (status = 'open'::text);
 
 
 --
@@ -16776,6 +17237,13 @@ CREATE INDEX contracts_created_by_idx ON public.contracts USING btree (created_b
 
 
 --
+-- Name: contracts_ends_on_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX contracts_ends_on_idx ON public.contracts USING btree (ends_on) WHERE (archived_at IS NULL);
+
+
+--
 -- Name: contracts_entity_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -16783,24 +17251,10 @@ CREATE INDEX contracts_entity_id_idx ON public.contracts USING btree (entity_id)
 
 
 --
--- Name: contracts_payment_account_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX contracts_payment_account_id_idx ON public.contracts USING btree (payment_account_id);
-
-
---
 -- Name: contracts_status_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX contracts_status_idx ON public.contracts USING btree (status);
-
-
---
--- Name: contracts_transit_account_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX contracts_transit_account_id_idx ON public.contracts USING btree (transit_account_id);
 
 
 --
@@ -17123,6 +17577,20 @@ CREATE INDEX notifications_user_id_created_at_idx ON public.notifications USING 
 --
 
 CREATE INDEX period_closings_closed_by_user_id_idx ON public.period_closings USING btree (closed_by_user_id);
+
+
+--
+-- Name: recurrence_rules_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX recurrence_rules_caixa_id_idx ON public.recurrence_rules USING btree (caixa_id);
+
+
+--
+-- Name: recurrence_rules_contract_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX recurrence_rules_contract_id_idx ON public.recurrence_rules USING btree (contract_id);
 
 
 --
@@ -17529,13 +17997,6 @@ CREATE INDEX titles_planned_account_id_idx ON public.titles USING btree (planned
 --
 
 CREATE INDEX titles_planned_account_open_idx ON public.titles USING btree (planned_account_id, due_date) WHERE ((planned_account_id IS NOT NULL) AND (status = ANY (ARRAY['open'::text, 'partial'::text])));
-
-
---
--- Name: titles_planned_transit_account_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX titles_planned_transit_account_id_idx ON public.titles USING btree (planned_transit_account_id) WHERE (planned_transit_account_id IS NOT NULL);
 
 
 --
@@ -18232,6 +18693,13 @@ CREATE TRIGGER card_purchases_audit AFTER INSERT OR DELETE OR UPDATE ON public.c
 
 
 --
+-- Name: card_purchases card_purchases_contract_integrity_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER card_purchases_contract_integrity_check AFTER INSERT OR UPDATE OF contract_id ON public.card_purchases DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.contract_refs_integrity_check();
+
+
+--
 -- Name: card_purchases card_purchases_integrity_check; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -18246,6 +18714,13 @@ CREATE TRIGGER card_purchases_period_lock BEFORE INSERT OR DELETE OR UPDATE ON p
 
 
 --
+-- Name: card_purchases card_purchases_recurrence_integrity_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER card_purchases_recurrence_integrity_check AFTER INSERT OR UPDATE OF recurrence_rule_id, contract_id ON public.card_purchases DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.recurrence_rule_integrity_check();
+
+
+--
 -- Name: card_purchases card_purchases_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -18257,6 +18732,55 @@ CREATE TRIGGER card_purchases_set_updated_at BEFORE UPDATE ON public.card_purcha
 --
 
 CREATE TRIGGER card_purchases_validate BEFORE INSERT OR UPDATE ON public.card_purchases FOR EACH ROW EXECUTE FUNCTION public.card_purchases_validate();
+
+
+--
+-- Name: card_purchases card_purchases_validate_occurrence; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER card_purchases_validate_occurrence BEFORE INSERT OR UPDATE OF recurrence_rule_id, occurrence ON public.card_purchases FOR EACH ROW EXECUTE FUNCTION public.card_purchases_validate_occurrence();
+
+
+--
+-- Name: card_recurring_charge_amounts card_recurring_charge_amounts_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER card_recurring_charge_amounts_audit AFTER INSERT OR DELETE OR UPDATE ON public.card_recurring_charge_amounts FOR EACH ROW EXECUTE FUNCTION public.audit_row_keyed('recurrence_rule_id');
+
+
+--
+-- Name: card_recurring_charge_amounts card_recurring_charge_amounts_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER card_recurring_charge_amounts_set_updated_at BEFORE UPDATE ON public.card_recurring_charge_amounts FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: card_recurring_charges card_recurring_charges_audit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER card_recurring_charges_audit AFTER INSERT OR DELETE OR UPDATE ON public.card_recurring_charges FOR EACH ROW EXECUTE FUNCTION public.audit_row_keyed('recurrence_rule_id');
+
+
+--
+-- Name: card_recurring_charges card_recurring_charges_integrity_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER card_recurring_charges_integrity_check AFTER INSERT OR DELETE ON public.card_recurring_charges DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.recurrence_rule_integrity_check();
+
+
+--
+-- Name: card_recurring_charges card_recurring_charges_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER card_recurring_charges_set_updated_at BEFORE UPDATE ON public.card_recurring_charges FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: card_recurring_charges card_recurring_charges_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER card_recurring_charges_validate BEFORE INSERT OR UPDATE ON public.card_recurring_charges FOR EACH ROW EXECUTE FUNCTION public.card_recurring_charges_validate();
 
 
 --
@@ -18340,7 +18864,14 @@ CREATE TRIGGER contract_cycles_audit AFTER INSERT OR DELETE OR UPDATE ON public.
 -- Name: contract_cycles contract_cycles_contiguous_check; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE CONSTRAINT TRIGGER contract_cycles_contiguous_check AFTER INSERT OR DELETE OR UPDATE OF seq, starts_on, duration_months ON public.contract_cycles DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.contract_cycles_contiguous_check();
+CREATE CONSTRAINT TRIGGER contract_cycles_contiguous_check AFTER INSERT OR DELETE OR UPDATE OF seq, starts_on, ends_on, duration_months ON public.contract_cycles DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.contract_cycles_contiguous_check();
+
+
+--
+-- Name: contract_cycles contract_cycles_fill; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER contract_cycles_fill BEFORE INSERT OR UPDATE ON public.contract_cycles FOR EACH ROW EXECUTE FUNCTION public.contract_cycles_fill();
 
 
 --
@@ -18421,13 +18952,6 @@ CREATE TRIGGER contract_renewal_tasks_audit AFTER INSERT OR DELETE OR UPDATE ON 
 
 
 --
--- Name: contract_renewal_tasks contract_renewal_tasks_integrity_check; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE CONSTRAINT TRIGGER contract_renewal_tasks_integrity_check AFTER INSERT OR DELETE OR UPDATE OF status, contract_id ON public.contract_renewal_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.contract_refs_integrity_check();
-
-
---
 -- Name: contract_renewal_tasks contract_renewal_tasks_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -18449,10 +18973,10 @@ CREATE TRIGGER contracts_audit AFTER INSERT OR DELETE OR UPDATE ON public.contra
 
 
 --
--- Name: contracts contracts_renewal_pending_check; Type: TRIGGER; Schema: public; Owner: -
+-- Name: contracts contracts_integrity_check; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE CONSTRAINT TRIGGER contracts_renewal_pending_check AFTER INSERT OR UPDATE OF status ON public.contracts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.contracts_status_integrity_check();
+CREATE CONSTRAINT TRIGGER contracts_integrity_check AFTER INSERT OR UPDATE OF status ON public.contracts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.contracts_status_integrity_check();
 
 
 --
@@ -18467,13 +18991,6 @@ CREATE TRIGGER contracts_set_updated_at BEFORE UPDATE ON public.contracts FOR EA
 --
 
 CREATE TRIGGER contracts_validate BEFORE INSERT OR DELETE OR UPDATE ON public.contracts FOR EACH ROW EXECUTE FUNCTION public.contracts_validate();
-
-
---
--- Name: contracts contracts_validate_accounts; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER contracts_validate_accounts BEFORE INSERT OR UPDATE OF caixa_id, payment_account_id, transit_account_id ON public.contracts FOR EACH ROW EXECUTE FUNCTION public.contracts_validate_accounts();
 
 
 --
@@ -18648,7 +19165,7 @@ CREATE TRIGGER financial_accounts_validate_history BEFORE UPDATE OF caixa_id, op
 -- Name: financial_accounts financial_accounts_validate_payment_refs; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER financial_accounts_validate_payment_refs BEFORE UPDATE OF caixa_id, kind ON public.financial_accounts FOR EACH ROW EXECUTE FUNCTION public.financial_accounts_validate_payment_refs();
+CREATE TRIGGER financial_accounts_validate_payment_refs BEFORE UPDATE OF caixa_id ON public.financial_accounts FOR EACH ROW EXECUTE FUNCTION public.financial_accounts_validate_payment_refs();
 
 
 --
@@ -18859,6 +19376,13 @@ CREATE TRIGGER period_closings_validate BEFORE DELETE OR UPDATE ON public.period
 --
 
 CREATE TRIGGER recurrence_rules_audit AFTER INSERT OR DELETE OR UPDATE ON public.recurrence_rules FOR EACH ROW EXECUTE FUNCTION public.audit_row();
+
+
+--
+-- Name: recurrence_rules recurrence_rules_integrity_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER recurrence_rules_integrity_check AFTER INSERT OR UPDATE OF caixa_id, contract_id ON public.recurrence_rules DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.recurrence_rule_integrity_check();
 
 
 --
@@ -19128,6 +19652,13 @@ CREATE TRIGGER titles_period_lock BEFORE INSERT OR DELETE OR UPDATE ON public.ti
 
 
 --
+-- Name: titles titles_recurrence_integrity_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER titles_recurrence_integrity_check AFTER INSERT OR UPDATE OF recurrence_rule_id, caixa_id, contract_id, mirror_status ON public.titles DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.recurrence_rule_integrity_check();
+
+
+--
 -- Name: titles titles_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -19152,14 +19683,14 @@ CREATE TRIGGER titles_validate_card_invoice BEFORE INSERT OR UPDATE OF card_invo
 -- Name: titles titles_validate_contract; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER titles_validate_contract BEFORE INSERT OR UPDATE OF contract_id, contract_cycle_id, contract_installment, caixa_id, direction, entity_id, counterparty_caixa_id, mirror_status ON public.titles FOR EACH ROW EXECUTE FUNCTION public.titles_validate_contract();
+CREATE TRIGGER titles_validate_contract BEFORE INSERT OR UPDATE OF contract_id, contract_cycle_id, contract_installment, recurrence_rule_id, direction, entity_id, mirror_status ON public.titles FOR EACH ROW EXECUTE FUNCTION public.titles_validate_contract();
 
 
 --
 -- Name: titles titles_validate_planned_account; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER titles_validate_planned_account BEFORE INSERT OR UPDATE OF caixa_id, planned_account_id, planned_transit_account_id ON public.titles FOR EACH ROW EXECUTE FUNCTION public.titles_validate_planned_account();
+CREATE TRIGGER titles_validate_planned_account BEFORE INSERT OR UPDATE OF caixa_id, planned_account_id ON public.titles FOR EACH ROW EXECUTE FUNCTION public.titles_validate_planned_account();
 
 
 --
@@ -19958,6 +20489,14 @@ ALTER TABLE ONLY public.card_purchases
 
 
 --
+-- Name: card_purchases card_purchases_contract_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.card_purchases
+    ADD CONSTRAINT card_purchases_contract_id_fkey FOREIGN KEY (contract_id) REFERENCES public.contracts(id);
+
+
+--
 -- Name: card_purchases card_purchases_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -19974,11 +20513,59 @@ ALTER TABLE ONLY public.card_purchases
 
 
 --
+-- Name: card_purchases card_purchases_recurrence_rule_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.card_purchases
+    ADD CONSTRAINT card_purchases_recurrence_rule_id_fkey FOREIGN KEY (recurrence_rule_id, card_caixa_id) REFERENCES public.recurrence_rules(id, caixa_id);
+
+
+--
 -- Name: card_purchases card_purchases_refunded_purchase_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.card_purchases
     ADD CONSTRAINT card_purchases_refunded_purchase_id_fkey FOREIGN KEY (refunded_purchase_id) REFERENCES public.card_purchases(id);
+
+
+--
+-- Name: card_recurring_charge_amounts card_recurring_charge_amounts_recurrence_rule_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.card_recurring_charge_amounts
+    ADD CONSTRAINT card_recurring_charge_amounts_recurrence_rule_id_fkey FOREIGN KEY (recurrence_rule_id) REFERENCES public.card_recurring_charges(recurrence_rule_id) ON DELETE CASCADE;
+
+
+--
+-- Name: card_recurring_charges card_recurring_charges_category_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.card_recurring_charges
+    ADD CONSTRAINT card_recurring_charges_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.categories(id);
+
+
+--
+-- Name: card_recurring_charges card_recurring_charges_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.card_recurring_charges
+    ADD CONSTRAINT card_recurring_charges_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(id);
+
+
+--
+-- Name: card_recurring_charges card_recurring_charges_payer_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.card_recurring_charges
+    ADD CONSTRAINT card_recurring_charges_payer_caixa_id_fkey FOREIGN KEY (payer_caixa_id) REFERENCES public.caixas(id);
+
+
+--
+-- Name: card_recurring_charges card_recurring_charges_recurrence_rule_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.card_recurring_charges
+    ADD CONSTRAINT card_recurring_charges_recurrence_rule_id_fkey FOREIGN KEY (recurrence_rule_id) REFERENCES public.recurrence_rules(id) ON DELETE CASCADE;
 
 
 --
@@ -20227,22 +20814,6 @@ ALTER TABLE ONLY public.contracts
 
 ALTER TABLE ONLY public.contracts
     ADD CONSTRAINT contracts_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(id);
-
-
---
--- Name: contracts contracts_payment_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.contracts
-    ADD CONSTRAINT contracts_payment_account_id_fkey FOREIGN KEY (payment_account_id) REFERENCES public.financial_accounts(id);
-
-
---
--- Name: contracts contracts_transit_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.contracts
-    ADD CONSTRAINT contracts_transit_account_id_fkey FOREIGN KEY (transit_account_id) REFERENCES public.financial_accounts(id);
 
 
 --
@@ -20547,6 +21118,22 @@ ALTER TABLE ONLY public.period_closings
 
 ALTER TABLE ONLY public.period_closings
     ADD CONSTRAINT period_closings_closed_by_user_id_fkey FOREIGN KEY (closed_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: recurrence_rules recurrence_rules_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recurrence_rules
+    ADD CONSTRAINT recurrence_rules_caixa_id_fkey FOREIGN KEY (caixa_id) REFERENCES public.caixas(id);
+
+
+--
+-- Name: recurrence_rules recurrence_rules_contract_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recurrence_rules
+    ADD CONSTRAINT recurrence_rules_contract_id_fkey FOREIGN KEY (contract_id) REFERENCES public.contracts(id) ON DELETE SET NULL;
 
 
 --
@@ -20899,14 +21486,6 @@ ALTER TABLE ONLY public.titles
 
 ALTER TABLE ONLY public.titles
     ADD CONSTRAINT titles_planned_account_id_fkey FOREIGN KEY (planned_account_id) REFERENCES public.financial_accounts(id);
-
-
---
--- Name: titles titles_planned_transit_account_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.titles
-    ADD CONSTRAINT titles_planned_transit_account_id_fkey FOREIGN KEY (planned_transit_account_id) REFERENCES public.financial_accounts(id);
 
 
 --

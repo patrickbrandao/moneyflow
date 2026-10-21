@@ -6,17 +6,18 @@ import { Badge, EmptyRow, type Tone } from '../ui';
 const STATUS_TONE: Record<ContractStatus, Tone> = {
   draft: 'outline',
   active: 'ok',
-  renewal_pending: 'warn',
   ended: 'neutral',
   terminated: 'neutral',
 };
 
-/** Situação do contrato; renovação pendente vencida em vermelho. */
-export function ContractStatusBadge({ row }: { row: Pick<ContractRow, 'status' | 'openTask'> }) {
-  if (row.status === 'renewal_pending' && row.openTask?.overdue)
-    return <Badge tone="danger">{`${t.contracts.statuses.renewal_pending} · ${t.contracts.panel.overdue}`}</Badge>;
+/** Situação do contrato (rascunho, vigente, encerrado, rescindido). */
+export function ContractStatusBadge({ row }: { row: Pick<ContractRow, 'status'> }) {
   return <Badge tone={STATUS_TONE[row.status]}>{t.contracts.statuses[row.status]}</Badge>;
 }
+
+/** Vigência legível ("01/03/2026 – 28/02/2027" ou "… – indeterminado"). */
+export const termText = (row: Pick<ContractRow, 'startsOn' | 'endsOn'>) =>
+  t.contracts.termRange(formatDate(row.startsOn), row.endsOn ? formatDate(row.endsOn) : null);
 
 /** Tabela de contratos (lista, aba da entidade e painel). */
 export function ContractsTable({
@@ -35,14 +36,14 @@ export function ContractsTable({
   const cols = 5 + (showCaixa ? 1 : 0) + (showEntity ? 1 : 0);
   return (
     <div className="table-wrap">
-      <table className="data">
+      <table className="data" data-testid="contracts-table">
         <thead>
           <tr>
             <th>{C.name}</th>
             {showEntity && <th>{C.entity}</th>}
             {showCaixa && <th>{C.caixa}</th>}
-            <th>{C.cycle}</th>
-            <th className="num">{C.value}</th>
+            <th>{C.term}</th>
+            <th className="num">{C.obligations}</th>
             <th>{C.next}</th>
             <th>{C.status}</th>
           </tr>
@@ -55,6 +56,7 @@ export function ContractsTable({
               key={row.id}
               className={`cursor-pointer${row.archivedAt ? ' is-off' : ''}`}
               onClick={() => navigate(`/contracts/${row.id}`)}
+              data-testid="contract-row"
             >
               <td>
                 <span className="flex items-center gap-2">
@@ -70,21 +72,23 @@ export function ContractsTable({
               </td>
               {showEntity && <td>{row.entityName}</td>}
               {showCaixa && <td className="text-dim">{row.caixaName}</td>}
-              <td className="mono text-xs">
-                {row.currentCycle
-                  ? t.contracts.cycleRange(formatDate(row.currentCycle.startsOn), formatDate(row.currentCycle.endsOn))
-                  : '—'}
+              <td className="mono text-xs">{termText(row)}</td>
+              <td className="num">
+                <span className="inline-flex items-center gap-1">
+                  {row.withoutAccount > 0 && (
+                    <Badge tone="warn" title={t.contracts.obligation.noAccount}>
+                      {t.contracts.obligation.withoutAccount(row.withoutAccount)}
+                    </Badge>
+                  )}
+                  <span className="mono">{row.obligationCount}</span>
+                </span>
               </td>
-              <td className="num">{row.currentCycle ? <Money cents={row.currentCycle.totalCents} /> : '—'}</td>
               <td>
-                {row.nextInstallment ? (
+                {row.nextOccurrence ? (
                   <span className="text-xs">
-                    <span className="mono">{formatDate(row.nextInstallment.dueDate)}</span> ·{' '}
-                    <Money cents={row.nextInstallment.amountCents} />
-                    <span className="text-faint">
-                      {' '}
-                      ({row.nextInstallment.installment}/{row.nextInstallment.total})
-                    </span>
+                    <span className="mono">{formatDate(row.nextOccurrence.dueDate)}</span> ·{' '}
+                    <Money cents={row.nextOccurrence.amountCents} />
+                    <span className="row-sub">{row.nextOccurrence.description}</span>
                   </span>
                 ) : (
                   <span className="text-faint">—</span>

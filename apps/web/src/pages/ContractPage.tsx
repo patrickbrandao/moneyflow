@@ -1,34 +1,36 @@
 import {
   CONTRACT_DOCUMENT_KINDS,
-  type ContractCycleDto,
   type ContractDetail,
   type ContractDocumentDto,
   type ContractDocumentKind,
-  type ContractInstallmentDto,
   type ContractMarkdownCreateInput,
-  cycleSchedule,
   type DeleteResult,
   entityLink,
   formatAccounting,
   formatDate,
   formatDateTime,
   formatMonth,
+  type SeriesDto,
   t,
   titleLink,
 } from '@moneyflow/shared';
 import {
   Archive,
   ArchiveRestore,
-  Ban,
+  CalendarX,
+  ExternalLink,
   FilePlus,
   FileText,
   FileUp,
   GitBranchPlus,
   History,
+  Link2,
   Pencil,
   Play,
+  Plus,
   RefreshCw,
   Trash2,
+  Unlink,
   XCircle,
 } from 'lucide-react';
 import { type FormEvent, useRef, useState } from 'react';
@@ -37,10 +39,17 @@ import { useAgentScreenContext } from '../agents/AgentsProvider';
 import { AuditHistory } from '../components/audit/AuditHistory';
 import { AmendmentModal, RenewalModal, TerminationModal } from '../components/contracts/ContractActionModals';
 import { ContractFormModal } from '../components/contracts/ContractFormModal';
-import { ContractStatusBadge } from '../components/contracts/ContractsTable';
+import { ContractStatusBadge, termText } from '../components/contracts/ContractsTable';
 import { DocumentView } from '../components/contracts/DocumentView';
+import {
+  calendarText,
+  LinkSeriesModal,
+  ObligationFormModal,
+  SeriesEditModal,
+  SeriesRuleEndModal,
+  termsText,
+} from '../components/contracts/ObligationFormModal';
 import { PaymentsSection } from '../components/contracts/PaymentsSection';
-import { PlannedAccountButton, PlannedAccountLabel } from '../components/contracts/PlannedAccount';
 import { CategoryLabel, LoadError, Money, PageHead, TitleStatusBadge } from '../components/domain';
 import { FormError, ModalActions } from '../components/forms';
 import { useCrumbs } from '../components/shell/Layout';
@@ -50,10 +59,19 @@ import { useAction, useApi } from '../lib/hooks';
 import { useParamState } from '../lib/params';
 import { upload } from '../lib/upload';
 
-type Dialog = 'edit' | 'amend' | 'terminate' | 'renew' | 'history' | 'markdown' | null;
+type Dialog =
+  | { kind: 'edit' | 'amend' | 'terminate' | 'renew' | 'history' | 'markdown' | 'addObligation' | 'linkSeries' }
+  | { kind: 'editSeries' | 'endSeries'; series: SeriesDto }
+  | null;
 const C = t.contracts;
+const O = C.obligation;
 
-/** Detalhe do contrato (spec 020): ciclos, parcelas, documentos, aditivos, renovação e realizado × contratado. */
+/**
+ * Detalhe do contrato (spec 034): cabeçalho com a vigência e as ações
+ * (editar, ativar, aditivo, renovar, rescindir, arquivar), as obrigações
+ * (séries numa conta ou cobranças no cartão), os pagamentos somando as
+ * obrigações, os documentos e o histórico (vigências, aditivos, rescisão).
+ */
 export function ContractPage() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
@@ -73,30 +91,17 @@ export function ContractPage() {
     setData(next);
     setDialog(null);
   };
-  const live = contract.status === 'active' || contract.status === 'renewal_pending';
-  const canWrite = contract.canWrite;
-  const current = contract.cycles.find((c) => c.id === contract.currentCycle?.id) ?? contract.cycles[0] ?? null;
-  const openTask = contract.renewalTasks.find((k) => k.status === 'open') ?? null;
+  const seriesSaved = () => {
+    setDialog(null);
+    void reload();
+  };
+  const live = contract.status === 'active';
+  const canWrite = contract.canWrite && !contract.viaMirror;
+  const current = tab ?? 'obligations';
 
   async function activate() {
-    const count = current?.installmentsCount ?? 0;
-    if (!(await confirm({ title: C.activateTitle, description: C.activateBody(count), confirmLabel: C.actions.activate }))) return;
-    const next = await run(() => api.post<ContractDetail>(`/api/contracts/${id}/activate`), C.activated(count));
-    if (next) setData(next);
-  }
-
-  async function decline() {
-    const end = contract!.cycles[0]?.endsOn ?? '';
-    if (
-      !(await confirm({
-        title: C.renewal.declineTitle,
-        description: C.renewal.declineBody(formatDate(end)),
-        confirmLabel: C.actions.decline,
-        danger: true,
-      }))
-    )
-      return;
-    const next = await run(() => api.post<ContractDetail>(`/api/contracts/${id}/decline-renewal`, {}), C.renewal.declined);
+    if (!(await confirm({ title: C.activateTitle, description: C.activateBody, confirmLabel: C.actions.activate }))) return;
+    const next = await run(() => api.post<ContractDetail>(`/api/contracts/${id}/activate`), C.activated);
     if (next) setData(next);
   }
 
@@ -118,6 +123,13 @@ export function ContractPage() {
     if (next) setData(next);
   }
 
+  async function unlink(series: SeriesDto) {
+    if (!(await confirm({ title: O.unlinkConfirm(series.description), description: O.unlinkBody, confirmLabel: O.unlink, danger: true })))
+      return;
+    const done = await run(() => api.patch<SeriesDto>(`/api/series/${series.id}`, { contractId: null }), O.unlinked);
+    if (done) void reload();
+  }
+
   return (
     <div className="page wide">
       <PageHead
@@ -126,7 +138,11 @@ export function ContractPage() {
           <span className="flex flex-wrap items-center gap-2">
             <ContractStatusBadge row={contract} />
             <span>{C.directions[contract.direction]}</span>·<Link to={entityLink(contract.entityId)}>{contract.entityName}</Link>·
-            <span>{contract.caixaName}</span>
+            <span>{contract.caixaName}</span>·
+            <span className="mono text-xs" data-testid="contract-term">
+              {termText(contract)}
+            </span>
+            {contract.autoRenew && <Badge tone="info">{C.fields.autoRenew}</Badge>}
             {contract.contractNumber && <span className="mono text-xs">nº {contract.contractNumber}</span>}
             {contract.archivedAt && <Badge>{t.common.archived}</Badge>}
           </span>
@@ -135,37 +151,45 @@ export function ContractPage() {
           canWrite && (
             <>
               {contract.status === 'draft' && (
-                <Button onClick={() => void activate()} disabled={busy}>
+                <Button onClick={() => void activate()} disabled={busy} data-testid="contract-activate">
                   <Play /> {C.actions.activate}
                 </Button>
               )}
-              {live && (
-                <Button variant="ghost" onClick={() => setDialog('amend')}>
+              {live && contract.obligations.length > 0 && (
+                <Button variant="ghost" onClick={() => setDialog({ kind: 'amend' })} data-testid="contract-amend">
                   <GitBranchPlus /> {C.actions.amend}
                 </Button>
               )}
-              {(live || contract.status === 'ended') && (
-                <Button variant={openTask ? 'primary' : 'ghost'} onClick={() => setDialog('renew')}>
+              {(live || contract.status === 'ended') && contract.endsOn && (
+                <Button variant="ghost" onClick={() => setDialog({ kind: 'renew' })} data-testid="contract-renew">
                   <RefreshCw /> {C.actions.renew}
                 </Button>
               )}
               {live && (
-                <Button variant="ghost" onClick={() => setDialog('terminate')}>
+                <Button variant="ghost" onClick={() => setDialog({ kind: 'terminate' })} data-testid="contract-terminate">
                   <XCircle /> {C.actions.terminate}
                 </Button>
               )}
-              <Button variant="ghost" onClick={() => setDialog('edit')} aria-label={t.common.edit}>
-                <Pencil /> {t.common.edit}
-              </Button>
-              <Button variant="ghost" onClick={() => setDialog('history')} aria-label={t.audit.history}>
+              {contract.status !== 'terminated' && (
+                <Button variant="ghost" onClick={() => setDialog({ kind: 'edit' })} aria-label={t.common.edit} data-testid="contract-edit">
+                  <Pencil /> {t.common.edit}
+                </Button>
+              )}
+              <Button variant="ghost" onClick={() => setDialog({ kind: 'history' })} aria-label={t.audit.history}>
                 <History />
               </Button>
               {contract.archivedAt ? (
-                <Button variant="ghost" onClick={() => void restore()}>
+                <Button variant="ghost" onClick={() => void restore()} data-testid="contract-restore">
                   <ArchiveRestore /> {t.common.restore}
                 </Button>
               ) : (
-                <Button variant="ghost" onClick={() => void remove()} aria-label={t.common.remove}>
+                <Button
+                  variant="ghost"
+                  onClick={() => void remove()}
+                  aria-label={contract.status === 'draft' ? C.actions.remove : C.actions.archive}
+                  title={contract.status === 'draft' ? C.actions.remove : C.actions.archive}
+                  data-testid="contract-remove"
+                >
                   {contract.status === 'draft' ? <Trash2 /> : <Archive />}
                 </Button>
               )}
@@ -174,25 +198,6 @@ export function ContractPage() {
         }
       />
       {contract.viaMirror && <p className="notice info mb-3">{C.readOnlyMirror}</p>}
-      {openTask && (
-        <div className={`notice ${openTask.overdue ? 'danger' : 'warn'} mb-4 flex flex-wrap items-center gap-3`}>
-          <span className="flex-1">
-            {openTask.overdue
-              ? C.renewal.taskOverdue(formatDate(openTask.dueOn))
-              : `${C.renewal.taskOpen(formatDate(openTask.openedOn))} ${C.renewal.taskDue(formatDate(openTask.dueOn))}`}
-          </span>
-          {canWrite && (
-            <>
-              <Button size="sm" onClick={() => setDialog('renew')}>
-                {C.renewal.approve}
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => void decline()}>
-                <Ban /> {C.actions.decline}
-              </Button>
-            </>
-          )}
-        </div>
-      )}
 
       {docId ? (
         <DocumentView
@@ -204,49 +209,59 @@ export function ContractPage() {
         />
       ) : (
         <>
-          {current && <Totals cycle={current} direction={contract.direction} />}
+          <Totals contract={contract} />
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
             <div className="min-w-0">
               <Tabs
-                value={tab ?? 'installments'}
-                onChange={(key) => setTab(key === 'installments' ? null : key)}
+                value={current}
+                onChange={(key) => setTab(key === 'obligations' ? null : key)}
                 items={[
-                  { key: 'installments', label: C.tabs.installments },
-                  ...(contract.status === 'draft' ? [] : [{ key: 'payments', label: C.payments.tab }]),
+                  { key: 'obligations', label: C.tabs.obligations, count: contract.obligations.length },
+                  ...(contract.status === 'draft' ? [] : [{ key: 'payments', label: C.tabs.payments }]),
                   { key: 'documents', label: C.tabs.documents, count: contract.documents.length },
-                  { key: 'amendments', label: C.tabs.amendments, count: contract.amendments.length },
-                  { key: 'renewal', label: C.tabs.renewal, count: contract.renewalTasks.length },
+                  { key: 'history', label: C.tabs.history },
                 ]}
               />
-              {(tab ?? 'installments') === 'installments' && <Installments contract={contract} onChanged={() => void reload()} />}
-              {tab === 'payments' && <PaymentsSection contract={contract} onChanged={() => void reload()} />}
-              {tab === 'documents' && (
+              {current === 'obligations' && (
+                <Obligations
+                  contract={contract}
+                  canWrite={canWrite}
+                  onAdd={() => setDialog({ kind: 'addObligation' })}
+                  onLink={() => setDialog({ kind: 'linkSeries' })}
+                  onEdit={(series) => setDialog({ kind: 'editSeries', series })}
+                  onEnd={(series) => setDialog({ kind: 'endSeries', series })}
+                  onUnlink={(series) => void unlink(series)}
+                />
+              )}
+              {current === 'payments' && <PaymentsSection contract={contract} />}
+              {current === 'documents' && (
                 <Documents
                   contract={contract}
                   canWrite={canWrite}
                   onOpen={setDocId}
-                  onNewMarkdown={() => setDialog('markdown')}
+                  onNewMarkdown={() => setDialog({ kind: 'markdown' })}
                   onChanged={() => void reload()}
                 />
               )}
-              {tab === 'amendments' && <Amendments contract={contract} />}
-              {tab === 'renewal' && (
-                <Renewals contract={contract} canWrite={canWrite} onRenew={() => setDialog('renew')} onDecline={() => void decline()} />
-              )}
+              {current === 'history' && <ContractHistory contract={contract} />}
             </div>
             <Summary contract={contract} />
           </div>
         </>
       )}
 
-      {dialog === 'edit' && <ContractFormModal contract={contract} onClose={() => setDialog(null)} onSaved={saved} />}
-      {dialog === 'amend' && <AmendmentModal contract={contract} onClose={() => setDialog(null)} onSaved={saved} />}
-      {dialog === 'terminate' && <TerminationModal contract={contract} onClose={() => setDialog(null)} onSaved={saved} />}
-      {dialog === 'renew' && <RenewalModal contract={contract} onClose={() => setDialog(null)} onSaved={saved} />}
-      {dialog === 'history' && (
+      {dialog?.kind === 'edit' && <ContractFormModal contract={contract} onClose={() => setDialog(null)} onSaved={saved} />}
+      {dialog?.kind === 'amend' && <AmendmentModal contract={contract} onClose={() => setDialog(null)} onSaved={saved} />}
+      {dialog?.kind === 'terminate' && <TerminationModal contract={contract} onClose={() => setDialog(null)} onSaved={saved} />}
+      {dialog?.kind === 'renew' && <RenewalModal contract={contract} onClose={() => setDialog(null)} onSaved={saved} />}
+      {dialog?.kind === 'addObligation' && <ObligationFormModal contract={contract} onClose={() => setDialog(null)} onSaved={saved} />}
+      {dialog?.kind === 'linkSeries' && <LinkSeriesModal contract={contract} onClose={() => setDialog(null)} onSaved={saved} />}
+      {dialog?.kind === 'editSeries' && <SeriesEditModal series={dialog.series} onClose={() => setDialog(null)} onSaved={seriesSaved} />}
+      {dialog?.kind === 'endSeries' && <SeriesRuleEndModal series={dialog.series} onClose={() => setDialog(null)} onSaved={seriesSaved} />}
+      {dialog?.kind === 'history' && (
         <AuditHistory table="contracts" recordId={contract.id} title={contract.name} onClose={() => setDialog(null)} />
       )}
-      {dialog === 'markdown' && (
+      {dialog?.kind === 'markdown' && (
         <NewMarkdownModal
           contractId={contract.id}
           onClose={() => setDialog(null)}
@@ -261,42 +276,47 @@ export function ContractPage() {
   );
 }
 
-/** Realizado × contratado do ciclo atual. */
-function Totals({ cycle, direction }: { cycle: ContractCycleDto; direction: 'receivable' | 'payable' }) {
-  const T = C.totals;
-  const tiles = [
-    { label: T.contracted, cents: cycle.totals.contractedCents },
-    { label: direction === 'receivable' ? T.settledReceivable : T.settledPayable, cents: cycle.totals.settledCents },
-    { label: T.open, cents: cycle.totals.openCents },
-    { label: T.overdue, cents: cycle.totals.overdueCents },
-  ];
+/** Números das obrigações: quantas, a próxima ocorrência, em aberto e vencidas. */
+function Totals({ contract }: { contract: ContractDetail }) {
+  const open = contract.obligations.reduce((acc, o) => acc + o.openCount, 0);
+  const overdue = contract.obligations.reduce((acc, o) => acc + o.overdueCount, 0);
+  const next = contract.nextOccurrence;
+  const P = C.payments;
   return (
-    <div className="stat-tiles" aria-label={T.title}>
-      {tiles.map((tile) => (
-        <div key={tile.label} className="stat-tile">
-          <div className="v">
-            <Money cents={tile.cents} muted={tile.cents === 0} />
-          </div>
-          <div className="k">{tile.label}</div>
+    <div className="stat-tiles" data-testid="contract-totals">
+      <div className="stat-tile">
+        <div className="v">{contract.obligationCount}</div>
+        <div className="k">{C.fields.obligations}</div>
+      </div>
+      <div className="stat-tile">
+        <div className="v">
+          {next ? (
+            <span className="text-sm">
+              <span className="mono">{formatDate(next.dueDate)}</span> · <Money cents={next.amountCents} />
+            </span>
+          ) : (
+            '—'
+          )}
         </div>
-      ))}
+        <div className="k">{next ? `${C.fields.nextOccurrence} · ${next.description}` : C.fields.nextOccurrence}</div>
+      </div>
+      <div className="stat-tile">
+        <div className="v">{open}</div>
+        <div className="k">{P.openCount}</div>
+      </div>
+      <div className="stat-tile">
+        <div className={`v${overdue > 0 ? ' text-danger' : ''}`}>{overdue}</div>
+        <div className="k">{P.overdueCount}</div>
+      </div>
     </div>
   );
 }
 
 function Summary({ contract }: { contract: ContractDetail }) {
   const F = C.fields;
-  const cycle = contract.currentCycle;
   const rows: [string, React.ReactNode][] = [
     [F.category, <CategoryLabel key="c" name={contract.categoryName} slot={contract.categoryColorSlot} />],
-    ...(cycle
-      ? ([
-          [F.currentCycle, C.cycleRange(formatDate(cycle.startsOn), formatDate(cycle.endsOn))],
-          [F.periodicity, C.installmentsSummary(cycle.installmentsCount, C.periodicities[cycle.periodicity]!)],
-          [F.cycleValue, <Money key="v" cents={cycle.totalCents} />],
-          [F.dueDay, C.dueRule(cycle.dueDay, cycle.dueMonthOffset)],
-        ] as [string, React.ReactNode][])
-      : []),
+    [F.term, termText(contract)],
     [F.autoRenew, contract.autoRenew ? t.common.yes : t.common.no],
     [
       F.noticeDays,
@@ -307,30 +327,6 @@ function Summary({ contract }: { contract: ContractDetail }) {
       `${C.indexes[contract.readjustmentIndex]}${contract.nextReadjustment ? ` · ${formatDate(contract.nextReadjustment)}` : ''}`,
     ],
     ...(contract.counterpartyCaixaName ? ([[F.mirrorCaixa, contract.counterpartyCaixaName]] as [string, React.ReactNode][]) : []),
-    ...(contract.paymentAccountId
-      ? ([
-          [
-            C.payment.account,
-            `${contract.paymentAccountName ?? '—'}${contract.paymentAccountCaixaId !== contract.caixaId && contract.paymentAccountCaixaName ? ` (${contract.paymentAccountCaixaName})` : ''}`,
-          ],
-          ...(contract.transitAccountId ? [[C.payment.transit, contract.transitAccountName ?? '—']] : []),
-        ] as [string, React.ReactNode][])
-      : []),
-    ...(contract.lateFeePercent || contract.interestMonthPercent || contract.earlyDiscountPercent
-      ? ([
-          [
-            C.payments.charges,
-            [
-              contract.lateFeePercent ? `${C.payment.lateFee}: ${contract.lateFeePercent}` : null,
-              contract.interestMonthPercent ? `${C.payment.interest}: ${contract.interestMonthPercent}` : null,
-              contract.earlyDiscountPercent ? `${C.payment.discount}: ${contract.earlyDiscountPercent}` : null,
-            ]
-              .filter(Boolean)
-              .join(' · '),
-          ],
-        ] as [string, React.ReactNode][])
-      : []),
-    ...(contract.autoSettle ? ([[C.payment.autoSettle, t.common.yes]] as [string, React.ReactNode][]) : []),
     ...(contract.terminationPenaltyText || contract.terminationPenaltyCents
       ? ([
           [
@@ -351,7 +347,7 @@ function Summary({ contract }: { contract: ContractDetail }) {
   ];
   return (
     <Panel title={C.contract} icon={<FileText />}>
-      <dl className="kv">
+      <dl className="kv" data-testid="contract-summary">
         {rows.map(([label, value]) => (
           <div key={label}>
             <dt>{label}</dt>
@@ -364,129 +360,181 @@ function Summary({ contract }: { contract: ContractDetail }) {
   );
 }
 
-function InstallmentRows({ rows, canWrite, onChanged }: { rows: ContractInstallmentDto[]; canWrite: boolean; onChanged: () => void }) {
-  const navigate = useNavigate();
-  const H = C.columns;
-  return (
-    <div className="table-wrap">
-      <table className="data">
-        <thead>
-          <tr>
-            <th>{H.installment}</th>
-            <th>{H.competence}</th>
-            <th>{H.due}</th>
-            <th className="num">{H.amount}</th>
-            <th className="num">{H.settled}</th>
-            <th className="num">{H.open}</th>
-            <th>{C.payment.plannedAccount}</th>
-            <th>{H.status}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 && <EmptyRow colSpan={8}>{C.noInstallments}</EmptyRow>}
-          {rows.map((row) => (
-            <tr
-              key={row.titleId}
-              className={`cursor-pointer${row.archived || row.status === 'canceled' ? ' is-off' : ''}`}
-              onClick={() => navigate(titleLink({ id: row.titleId, caixaId: row.caixaId, direction: row.direction }))}
-            >
-              <td className="mono">{row.installment ?? '—'}</td>
-              <td className="mono">{formatMonth(row.competenceDate)}</td>
-              <td className="mono">{formatDate(row.dueDate)}</td>
-              <td className="num">
-                <Money cents={row.amountCents} />
-              </td>
-              <td className="num">
-                <Money cents={row.settledCents} muted={row.settledCents === 0} />
-              </td>
-              <td className="num">
-                <Money cents={row.openCents} muted={row.openCents === 0} />
-              </td>
-              <td>
-                <span className="inline-flex items-center gap-1">
-                  <PlannedAccountLabel planned={row} />
-                  {canWrite && !row.archived && (row.status === 'open' || row.status === 'partial') && (
-                    <PlannedAccountButton title={row} onSaved={onChanged} />
-                  )}
-                </span>
-              </td>
-              <td>
-                <TitleStatusBadge title={row} />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
+/** Onde a obrigação vive: a conta (e a caixa dela) ou o cartão com a pagadora. */
+function placeOf(series: SeriesDto): string {
+  if (series.kind === 'card') return `${series.caixaName}${series.payerCaixaName ? ` · ${O.payerOf(series.payerCaixaName)}` : ''}`;
+  return series.accountName ? `${series.accountName} (${series.caixaName})` : series.caixaName;
 }
 
-function Installments({ contract, onChanged }: { contract: ContractDetail; onChanged: () => void }) {
-  if (contract.status === 'draft') {
-    const cycle = contract.cycles[0];
-    const preview = cycle ? cycleSchedule(cycle) : [];
-    return (
-      <>
-        <p className="hint mb-2">{C.noInstallments}</p>
-        <h3 className="mb-2 text-sm font-semibold">{C.draftPreview}</h3>
-        <div className="table-wrap">
-          <table className="data">
-            <thead>
-              <tr>
-                <th>{C.columns.installment}</th>
-                <th>{C.columns.competence}</th>
-                <th>{C.columns.due}</th>
-                <th className="num">{C.columns.amount}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {preview.map((row) => (
-                <tr key={row.installment}>
-                  <td className="mono">
-                    {row.installment}/{preview.length}
-                  </td>
-                  <td className="mono">{formatMonth(row.competenceDate)}</td>
-                  <td className="mono">{formatDate(row.dueDate)}</td>
-                  <td className="num">
-                    <Money cents={row.amountCents} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </>
-    );
-  }
-  const [latest, ...previous] = contract.cycles;
+function Obligations({
+  contract,
+  canWrite,
+  onAdd,
+  onLink,
+  onEdit,
+  onEnd,
+  onUnlink,
+}: {
+  contract: ContractDetail;
+  canWrite: boolean;
+  onAdd: () => void;
+  onLink: () => void;
+  onEdit: (series: SeriesDto) => void;
+  onEnd: (series: SeriesDto) => void;
+  onUnlink: (series: SeriesDto) => void;
+}) {
+  const navigate = useNavigate();
+  const live = contract.status === 'active';
   return (
-    <div className="grid gap-4">
-      {latest && (
-        <section>
-          <h3 className="mb-2 text-sm font-semibold">
-            {C.cycleLabel(latest.seq)} · {C.cycleRange(formatDate(latest.startsOn), formatDate(latest.endsOn))}
-          </h3>
-          <InstallmentRows rows={latest.installments} canWrite={contract.canWrite} onChanged={onChanged} />
-        </section>
+    <div className="grid gap-4" data-testid="contract-obligations">
+      {canWrite && live && (
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" onClick={onAdd} data-testid="contract-add-obligation">
+            <Plus /> {C.actions.addObligation}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={onLink} data-testid="contract-link-series">
+            <Link2 /> {C.actions.linkSeries}
+          </Button>
+        </div>
+      )}
+      {contract.withoutAccount > 0 && (
+        <p className="notice warn" data-testid="contract-without-account">
+          {O.noAccount} ({O.withoutAccount(contract.withoutAccount)})
+        </p>
+      )}
+      {contract.status === 'draft' && <p className="hint">{C.draftNoObligations}</p>}
+      {contract.status !== 'draft' && contract.obligations.length === 0 && <p className="hint">{C.noObligations}</p>}
+      {contract.obligations.length > 0 && (
+        <ul className="item-list">
+          {contract.obligations.map((s) => {
+            const ended = Boolean(s.endsOn && !s.next && s.openCount === 0);
+            return (
+              <li key={s.id} className={`item${ended ? ' is-off' : ''}`} data-testid="obligation-row" data-kind={s.kind}>
+                <span className="grow min-w-0">
+                  <span className="row-title flex flex-wrap items-center gap-2">
+                    {s.description}
+                    <Badge tone="outline">{O.kinds[s.kind]}</Badge>
+                    {ended && <Badge>{O.ended}</Badge>}
+                    {s.withoutAccount > 0 && (
+                      <Badge tone="warn" title={O.noAccount}>
+                        {O.withoutAccount(s.withoutAccount)}
+                      </Badge>
+                    )}
+                  </span>
+                  <span className="row-sub">
+                    {placeOf(s)} · {s.categoryName}
+                  </span>
+                  <span className="row-sub">
+                    {calendarText(s)} · {O.period(formatDate(s.startsOn), s.endsOn ? formatDate(s.endsOn) : null)}
+                  </span>
+                  <span className="row-sub" data-testid="obligation-terms-summary">
+                    {termsText(s.terms)}
+                  </span>
+                  {s.next && (
+                    <span className="row-sub" data-testid="obligation-next">
+                      {O.next(formatDate(s.next.dueDate), formatAccounting(s.next.amountCents))}
+                      {(s.openCount > 0 || s.overdueCount > 0) && ` · ${O.counts(s.openCount, s.overdueCount)}`}
+                    </span>
+                  )}
+                </span>
+                <span className="flex shrink-0 items-center gap-1">
+                  <Money cents={s.amountCents} />
+                  {s.next?.titleId && (
+                    <button
+                      type="button"
+                      className="row-action"
+                      title={O.openNext}
+                      aria-label={`${O.openNext}: ${s.description}`}
+                      onClick={() => navigate(titleLink({ id: s.next!.titleId!, caixaId: s.caixaId, direction: s.direction }))}
+                    >
+                      <ExternalLink />
+                    </button>
+                  )}
+                  {canWrite && s.canWrite && (
+                    <>
+                      <button
+                        type="button"
+                        className="row-action"
+                        title={O.edit}
+                        aria-label={`${O.edit}: ${s.description}`}
+                        onClick={() => onEdit(s)}
+                        data-testid="obligation-edit"
+                      >
+                        <Pencil />
+                      </button>
+                      <button
+                        type="button"
+                        className="row-action"
+                        title={O.endAction}
+                        aria-label={`${O.endAction}: ${s.description}`}
+                        onClick={() => onEnd(s)}
+                        data-testid="obligation-end"
+                      >
+                        <CalendarX />
+                      </button>
+                      <button
+                        type="button"
+                        className="row-action"
+                        title={O.unlink}
+                        aria-label={`${O.unlink}: ${s.description}`}
+                        onClick={() => onUnlink(s)}
+                        data-testid="obligation-unlink"
+                      >
+                        <Unlink />
+                      </button>
+                    </>
+                  )}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
       )}
       {contract.extraTitles.length > 0 && (
         <section>
           <h3 className="mb-2 text-sm font-semibold">{C.extraTitles}</h3>
-          <InstallmentRows rows={contract.extraTitles} canWrite={contract.canWrite} onChanged={onChanged} />
+          <div className="table-wrap">
+            <table className="data" data-testid="contract-extra-titles">
+              <thead>
+                <tr>
+                  <th>{O.description}</th>
+                  <th>{C.columns.competence}</th>
+                  <th>{C.columns.due}</th>
+                  <th className="num">{C.columns.amount}</th>
+                  <th className="num">{C.columns.settled}</th>
+                  <th className="num">{C.columns.open}</th>
+                  <th>{C.columns.status}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {contract.extraTitles.map((row) => (
+                  <tr
+                    key={row.titleId}
+                    className={`cursor-pointer${row.archived || row.status === 'canceled' ? ' is-off' : ''}`}
+                    onClick={() => navigate(titleLink({ id: row.titleId, caixaId: row.caixaId, direction: row.direction }))}
+                  >
+                    <td>{row.description}</td>
+                    <td className="mono">{formatMonth(row.competenceDate)}</td>
+                    <td className="mono">{formatDate(row.dueDate)}</td>
+                    <td className="num">
+                      <Money cents={row.amountCents} />
+                    </td>
+                    <td className="num">
+                      <Money cents={row.settledCents} muted={row.settledCents === 0} />
+                    </td>
+                    <td className="num">
+                      <Money cents={row.openCents} muted={row.openCents === 0} />
+                    </td>
+                    <td>
+                      <TitleStatusBadge title={row} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </section>
       )}
-      {previous.length > 0 && <h3 className="text-sm font-semibold">{C.previousCycles}</h3>}
-      {previous.map((cycle) => (
-        <details key={cycle.id} className="well">
-          <summary className="cursor-pointer text-sm">
-            {C.cycleLabel(cycle.seq)} · {C.cycleRange(formatDate(cycle.startsOn), formatDate(cycle.endsOn))} ·{' '}
-            <Money cents={cycle.totals.contractedCents} />
-          </summary>
-          <div className="mt-2">
-            <InstallmentRows rows={cycle.installments} canWrite={contract.canWrite} onChanged={onChanged} />
-          </div>
-        </details>
-      ))}
     </div>
   );
 }
@@ -592,93 +640,118 @@ function Documents({
   );
 }
 
-function Amendments({ contract }: { contract: ContractDetail }) {
-  const A = C.amendment;
-  if (contract.amendments.length === 0) return <p className="hint">{A.noHistory}</p>;
-  const show = (key: string, value: unknown) =>
-    value === null || value === undefined
-      ? '—'
-      : key.endsWith('Cents')
-        ? formatAccounting(Number(value))
-        : key === 'dueMonthOffset'
-          ? C.offsets[Number(value)]
-          : String(value);
-  return (
-    <ul className="item-list">
-      {contract.amendments.map((a) => (
-        <li key={a.id} className="item">
-          <span className="grow min-w-0">
-            <span className="row-title">
-              {formatDate(a.effectiveOn)} · {C.cycleLabel(a.cycleSeq)} {a.documentTitle && <Badge tone="outline">{a.documentTitle}</Badge>}
-            </span>
-            <span className="row-sub">
-              {Object.keys(a.changes.after)
-                .filter((key) => key !== 'categoryId')
-                .map((key) => `${A.changeLabels[key] ?? key}: ${show(key, a.changes.before[key])} → ${show(key, a.changes.after[key])}`)
-                .join(' · ')}
-            </span>
-            <span className="row-sub">
-              {A.affected(a.affectedCount)}
-              {a.skippedCount > 0 && ` · ${A.skipped(a.skippedCount)}`} · {a.createdByName ?? '—'} · {formatDateTime(a.createdAt)}
-              {a.notes ? ` · ${a.notes}` : ''}
-            </span>
-          </span>
-        </li>
-      ))}
-    </ul>
-  );
+/** Valor de uma mudança do aditivo, legível. */
+function changeValue(key: string, value: unknown): string {
+  if (value === null || value === undefined) return '—';
+  if (key.endsWith('Cents') && typeof value === 'number') return formatAccounting(value);
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
 }
 
-function Renewals({
-  contract,
-  canWrite,
-  onRenew,
-  onDecline,
-}: {
-  contract: ContractDetail;
-  canWrite: boolean;
-  onRenew: () => void;
-  onDecline: () => void;
-}) {
+/** Histórico: vigências (as antigas com o resumo do ciclo), aditivos, rescisão e as tarefas de renovação antigas. */
+function ContractHistory({ contract }: { contract: ContractDetail }) {
+  const A = C.amendment;
   const R = C.renewal;
-  const live = contract.status === 'active' || contract.status === 'renewal_pending';
+  const H = C.history;
+  const nameOf = (ruleId: string) => contract.obligations.find((o) => o.id === ruleId)?.description ?? ruleId.slice(0, 8);
   return (
-    <div>
-      {!contract.autoRenew && live && <p className="hint mb-3">{R.manualHint}</p>}
-      {canWrite && (live || contract.status === 'ended') && (
-        <div className="mb-3 flex gap-2">
-          <Button size="sm" onClick={onRenew}>
-            <RefreshCw /> {C.actions.renew}
-          </Button>
-          {live && (
-            <Button size="sm" variant="ghost" onClick={onDecline}>
-              <Ban /> {C.actions.decline}
-            </Button>
-          )}
-        </div>
-      )}
-      {contract.renewalTasks.length === 0 ? (
-        <p className="hint">{R.noTask}</p>
-      ) : (
-        <ul className="item-list">
-          {contract.renewalTasks.map((task) => (
-            <li key={task.id} className="item">
+    <div className="grid gap-5" data-testid="contract-history">
+      <section>
+        <h3 className="mb-2 text-sm font-semibold">{H.cycles}</h3>
+        <ul className="item-list" data-testid="contract-cycles">
+          {contract.cycles.map((cycle) => (
+            <li key={cycle.id} className="item">
               <span className="grow min-w-0">
                 <span className="row-title">
-                  {C.cycleLabel(task.cycleSeq)} · {R.taskOpen(formatDate(task.openedOn))}
+                  {C.cycleLabel(cycle.seq)} · {C.termRange(formatDate(cycle.startsOn), cycle.endsOn ? formatDate(cycle.endsOn) : null)}
                 </span>
-                <span className="row-sub">
-                  {R.taskDue(formatDate(task.dueOn))}
-                  {task.decidedAt && ` · ${R.decidedBy(task.decidedByName ?? '—', formatDateTime(task.decidedAt))}`}
-                  {task.decisionNotes ? ` · ${task.decisionNotes}` : ''}
-                </span>
+                {cycle.legacy && (
+                  <span className="row-sub">
+                    {C.legacyCycle(
+                      cycle.legacy.installmentsCount,
+                      C.periodicities[cycle.legacy.periodicity] ?? cycle.legacy.periodicity,
+                      formatAccounting(cycle.legacy.totalCents),
+                    )}
+                  </span>
+                )}
               </span>
-              <Badge tone={task.status === 'open' ? (task.overdue ? 'danger' : 'warn') : task.status === 'approved' ? 'ok' : 'neutral'}>
-                {R.taskStatuses[task.status]}
-              </Badge>
             </li>
           ))}
         </ul>
+      </section>
+
+      <section>
+        <h3 className="mb-2 text-sm font-semibold">{A.history}</h3>
+        {contract.amendments.length === 0 ? (
+          <p className="hint">{A.noHistory}</p>
+        ) : (
+          <ul className="item-list" data-testid="contract-amendments">
+            {contract.amendments.map((a) => {
+              const keys = Object.keys(a.changes.after).filter(
+                (key) => !(key.endsWith('Id') && `${key.slice(0, -2)}Name` in a.changes.after),
+              );
+              return (
+                <li key={a.id} className="item">
+                  <span className="grow min-w-0">
+                    <span className="row-title flex flex-wrap items-center gap-2">
+                      {formatDate(a.effectiveOn)}
+                      {a.cycleSeq !== null && <span className="text-faint text-xs">{C.cycleLabel(a.cycleSeq)}</span>}
+                      {a.documentTitle && <Badge tone="outline">{a.documentTitle}</Badge>}
+                    </span>
+                    {a.ruleIds.length > 0 && (
+                      <span className="row-sub">
+                        {A.obligations}: {a.ruleIds.map(nameOf).join(', ')}
+                      </span>
+                    )}
+                    <span className="row-sub">
+                      {keys
+                        .map(
+                          (key) =>
+                            `${A.changeLabels[key] ?? key}: ${changeValue(key, a.changes.before[key])} → ${changeValue(key, a.changes.after[key])}`,
+                        )
+                        .join(' · ')}
+                    </span>
+                    <span className="row-sub">
+                      {A.affected(a.affectedCount)}
+                      {a.skippedCount > 0 && ` · ${A.skipped(a.skippedCount)}`} · {a.createdByName ?? '—'} · {formatDateTime(a.createdAt)}
+                      {a.notes ? ` · ${a.notes}` : ''}
+                    </span>
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      {contract.terminatedOn && (
+        <section data-testid="contract-termination">
+          <h3 className="mb-2 text-sm font-semibold">{H.termination}</h3>
+          <p className="text-sm">{H.terminatedOn(formatDate(contract.terminatedOn))}</p>
+          {contract.terminationNotes && <p className="hint whitespace-pre-wrap">{contract.terminationNotes}</p>}
+        </section>
+      )}
+
+      {contract.renewalTasks.length > 0 && (
+        <section>
+          <h3 className="mb-2 text-sm font-semibold">{R.tasks}</h3>
+          <ul className="item-list">
+            {contract.renewalTasks.map((task) => (
+              <li key={task.id} className="item">
+                <span className="grow min-w-0">
+                  <span className="row-title">
+                    {C.cycleLabel(task.cycleSeq)} · {formatDate(task.openedOn)} – {formatDate(task.dueOn)}
+                  </span>
+                  <span className="row-sub">
+                    {task.decidedAt ? R.decidedBy(task.decidedByName ?? '—', formatDateTime(task.decidedAt)) : '—'}
+                    {task.decisionNotes ? ` · ${task.decisionNotes}` : ''}
+                  </span>
+                </span>
+                <Badge tone={task.status === 'approved' ? 'ok' : 'neutral'}>{R.taskStatuses[task.status]}</Badge>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
     </div>
   );

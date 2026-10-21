@@ -28,9 +28,10 @@ import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { notFound, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
-import { PLANNED_JOINS, PLANNED_SELECT, plannedOf, resolvePlannedAccount } from './planned-account';
+import { assertPlannedAccount, PLANNED_JOINS, PLANNED_SELECT, plannedOf } from './planned-account';
 import { clearStatementSuggestions } from './reconciliation-guards';
 import { MATERIALIZE_LOCK, materializeRule } from './recurrence';
+import { assertTolerance, ruleDto, termsColumns } from './series-core';
 import { insertTitlePair, type MirrorPlan, opposite } from './title-pair';
 import { deleteOrArchive, withTx } from './tx';
 import { camel } from './util';
@@ -99,6 +100,7 @@ export async function listTitles(
   if (query.caixaId) where.push(sql`t.caixa_id = ${query.caixaId}`);
   if (query.direction) where.push(sql`t.direction = ${query.direction}`);
   if (query.entityId) where.push(sql`t.entity_id = ${query.entityId}`);
+  if (query.plannedAccountId) where.push(sql`t.planned_account_id = ${query.plannedAccountId}`);
   if (query.from) where.push(sql`t.due_date >= ${query.from}::date`);
   if (query.to) where.push(sql`t.due_date <= ${query.to}::date`);
   if (query.q) where.push(sql`(t.description ILIKE ${`%${query.q}%`} OR e.name ILIKE ${`%${query.q}%`})`);
@@ -166,21 +168,7 @@ export async function getTitle(ctx: ServiceContext, id: string): Promise<TitleDe
   if (!raw) throw notFound();
   const row = toRow(raw);
   ctx.access.assertRead(row.caixaId);
-  let rule: RecurrenceRuleDto | null = null;
-  if (row.recurrenceRuleId) {
-    const [r] = await ctx.db.select().from(recurrenceRules).where(eq(recurrenceRules.id, row.recurrenceRuleId));
-    if (r) {
-      rule = {
-        id: r.id,
-        frequency: r.frequency as RecurrenceRuleDto['frequency'],
-        intervalCount: r.intervalCount,
-        anchorDay: r.anchorDay,
-        startsOn: r.startsOn,
-        endsOn: r.endsOn,
-        installmentsTotal: r.installmentsTotal,
-      };
-    }
-  }
+  const rule: RecurrenceRuleDto | null = row.recurrenceRuleId ? await ruleDto(ctx.db, row.recurrenceRuleId) : null;
   let mirror: TitleDetail['mirror'] = null;
   if (row.mirrorTitleId) {
     const [m] = await ctx.db
@@ -296,9 +284,13 @@ export async function createTitle(ctx: ServiceContext, input: z.output<typeof ti
     if (!caixa) throw notFound();
     const mirror = await resolveMirror(ctx, tx, input, caixa.holderEntityId);
 
+    const plannedAccountId = await assertPlannedAccount(tx, input.caixaId, input.plannedAccountId);
     let ruleId: string | null = null;
     if (input.series) {
       const series = input.series;
+      // A série mora na caixa do título (spec 034), com os ajustes de reconhecimento do pagamento.
+      const terms = input.seriesTerms ?? {};
+      assertTolerance(terms.toleranceCents, input.amountCents);
       const [rule] = await tx
         .insert(recurrenceRules)
         .values({
@@ -308,6 +300,8 @@ export async function createTitle(ctx: ServiceContext, input: z.output<typeof ti
           startsOn: input.dueDate,
           endsOn: series.kind === 'recurrence' ? series.endsOn : null,
           installmentsTotal: series.kind === 'installments' ? series.count : null,
+          caixaId: input.caixaId,
+          ...termsColumns(terms),
         })
         .returning({ id: recurrenceRules.id });
       ruleId = rule!.id;
@@ -331,6 +325,7 @@ export async function createTitle(ctx: ServiceContext, input: z.output<typeof ti
         boletoBarcode: normalizeBoleto(input.boletoBarcode),
         pixPayload: input.pixPayload,
         nfeDocumentId: input.nfeDocumentId,
+        plannedAccountId,
       },
       mirror,
     );
@@ -365,27 +360,19 @@ export async function updateTitle(ctx: ServiceContext, id: string, input: z.outp
     if (input.notes !== undefined) patch.notes = input.notes;
     if (input.boletoBarcode !== undefined) patch.boletoBarcode = normalizeBoleto(input.boletoBarcode);
     if (input.pixPayload !== undefined) patch.pixPayload = input.pixPayload;
-    // Conta prevista (spec 033): só deste título, que passa a ter conta própria (o contrato não a muda mais).
-    if (input.plannedAccountId !== undefined || input.plannedTransitAccountId !== undefined) {
-      const planned = await resolvePlannedAccount(
-        ctx,
-        tx,
-        title.caixaId,
-        input.plannedAccountId !== undefined ? input.plannedAccountId : title.plannedAccountId,
-        input.plannedTransitAccountId !== undefined ? input.plannedTransitAccountId : title.plannedTransitAccountId,
-      );
-      const changed =
-        planned.plannedAccountId !== title.plannedAccountId || planned.plannedTransitAccountId !== title.plannedTransitAccountId;
-      if (changed) {
-        if (title.status !== 'open' && title.status !== 'partial')
-          throw unprocessable(strings.contracts.errors.plannedAccountClosed, 'title_planned_account_closed');
-        Object.assign(patch, planned, { plannedAccountCustom: true });
-      }
+    // Conta prevista (specs 033 e 034): em "só esta", a ocorrência fica com conta própria; em "esta e as próximas", segue a série.
+    const following = input.scope === 'following' && !!title.recurrenceRuleId && !!title.occurrence;
+    const plannedChanged = input.plannedAccountId !== undefined && input.plannedAccountId !== title.plannedAccountId;
+    if (plannedChanged) {
+      await assertPlannedAccount(tx, title.caixaId, input.plannedAccountId ?? null);
+      if (title.status !== 'open' && title.status !== 'partial')
+        throw unprocessable(strings.contracts.errors.plannedAccountClosed, 'title_planned_account_closed');
+      Object.assign(patch, { plannedAccountId: input.plannedAccountId ?? null, plannedAccountCustom: !following });
     }
     if (Object.keys(patch).length > 0) await tx.update(titles).set(patch).where(eq(titles.id, id));
 
     // "Esta e as próximas": reescreve as ocorrências futuras ainda em aberto (datas seguem a regra).
-    if (input.scope === 'following' && title.recurrenceRuleId && title.occurrence) {
+    if (following && title.recurrenceRuleId && title.occurrence) {
       const following = await tx
         .select()
         .from(titles)
@@ -404,6 +391,7 @@ export async function updateTitle(ctx: ServiceContext, id: string, input: z.outp
       if (input.amountCents !== undefined) futurePatch.amountCents = input.amountCents;
       if (input.notes !== undefined) futurePatch.notes = input.notes;
       if (input.entityId !== undefined && !mirror) futurePatch.entityId = input.entityId;
+      if (plannedChanged) Object.assign(futurePatch, { plannedAccountId: input.plannedAccountId ?? null, plannedAccountCustom: false });
       for (const next of following) {
         if (Object.keys(futurePatch).length === 0) break;
         if (next.mirrorTitleId && input.amountCents !== undefined && input.amountCents !== next.amountCents) {
@@ -531,7 +519,15 @@ async function seriesEndPlan(ctx: ServiceContext, tx: Executor, titleId: string,
   const title = await loadTitle(tx, titleId);
   ctx.access.assertRead(title.caixaId);
   if (!title.recurrenceRuleId) throw unprocessable(strings.errors.validation);
-  const ruleId = title.recurrenceRuleId;
+  return seriesEndPlanOf(ctx, tx, title.recurrenceRuleId, endsOn, lock);
+}
+
+/**
+ * O plano pela série (também a cobrança esperada no cartão, que não tem
+ * títulos: só o fim muda). A série é do lado original: encerrar pede escrita
+ * na caixa dela.
+ */
+export async function seriesEndPlanOf(ctx: ServiceContext, tx: Executor, ruleId: string, endsOn: string | null, lock: boolean) {
   if (lock) {
     // Mesma chave do worker: nada materializa a série enquanto ela muda.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${ruleId}))`);
@@ -539,16 +535,14 @@ async function seriesEndPlan(ctx: ServiceContext, tx: Executor, titleId: string,
   const ruleQuery = tx.select().from(recurrenceRules).where(eq(recurrenceRules.id, ruleId));
   const [rule] = lock ? await ruleQuery.for('update') : await ruleQuery;
   if (!rule) throw notFound();
+  ctx.access.assertRead(rule.caixaId);
   if (rule.installmentsTotal !== null) throw unprocessable(strings.errors.seriesEndInstallments);
   if (endsOn !== null && endsOn < rule.startsOn) throw unprocessable(strings.errors.seriesEndBeforeStart);
+  ctx.access.assertWrite(rule.caixaId);
 
   const query = tx.select().from(titles).where(eq(titles.recurrenceRuleId, ruleId)).orderBy(titles.occurrence);
   const rows = lock ? await query.for('update') : await query;
   const originals = rows.filter((r) => r.mirrorStatus === null && r.occurrence !== null);
-  const original = originals[0];
-  if (!original) throw notFound();
-  // A série é do lado original: encerrar pede escrita na caixa dele.
-  ctx.access.assertWrite(original.caixaId);
 
   const mirrorOf = new Map(rows.filter((r) => r.mirrorTitleId).map((r) => [r.id, r.mirrorTitleId!]));
   const byId = new Map(rows.map((r) => [r.id, r]));
@@ -584,6 +578,26 @@ export async function previewSeriesEnd(ctx: ServiceContext, titleId: string, end
   return (await seriesEndPlan(ctx, ctx.db, titleId, endsOn, false)).preview;
 }
 
+/** Aplica o plano: o novo fim, as canceladas e as reabertas, e materializa até o horizonte. */
+export async function applySeriesEnd(tx: Tx, plan: Awaited<ReturnType<typeof seriesEndPlanOf>>): Promise<number> {
+  if (plan.preview.blocked.length > 0) {
+    const list = plan.preview.blocked.map((o) => `#${o.occurrence} ${formatDate(o.dueDate)}`).join(', ');
+    throw unprocessable(strings.errors.seriesEndBlocked(list), 'series_end_blocked');
+  }
+  await tx.update(recurrenceRules).set({ endsOn: plan.preview.endsOn }).where(eq(recurrenceRules.id, plan.preview.ruleId));
+  if (plan.cancelIds.length > 0) {
+    await clearStatementSuggestions(tx, { titleIds: plan.cancelIds });
+    await tx.update(titles).set({ status: 'canceled' }).where(inArray(titles.id, plan.cancelIds));
+  }
+  if (plan.reopenIds.length > 0) {
+    await tx
+      .update(titles)
+      .set({ status: 'open' })
+      .where(and(inArray(titles.id, plan.reopenIds), eq(titles.status, 'canceled')));
+  }
+  return materializeRule(tx, plan.preview.ruleId);
+}
+
 /**
  * Encerra (ou estende) a série numa data: ajusta o "Termina em" da regra,
  * cancela as ocorrências seguintes em aberto (sem apagar: auditoria e
@@ -594,22 +608,7 @@ export async function previewSeriesEnd(ctx: ServiceContext, titleId: string, end
 export async function endSeries(ctx: ServiceContext, titleId: string, endsOn: string | null): Promise<SeriesEndResult> {
   const { preview, created } = await withTx(ctx, async (tx) => {
     const plan = await seriesEndPlan(ctx, tx, titleId, endsOn, true);
-    if (plan.preview.blocked.length > 0) {
-      const list = plan.preview.blocked.map((o) => `#${o.occurrence} ${formatDate(o.dueDate)}`).join(', ');
-      throw unprocessable(strings.errors.seriesEndBlocked(list), 'series_end_blocked');
-    }
-    await tx.update(recurrenceRules).set({ endsOn }).where(eq(recurrenceRules.id, plan.preview.ruleId));
-    if (plan.cancelIds.length > 0) {
-      await clearStatementSuggestions(tx, { titleIds: plan.cancelIds });
-      await tx.update(titles).set({ status: 'canceled' }).where(inArray(titles.id, plan.cancelIds));
-    }
-    if (plan.reopenIds.length > 0) {
-      await tx
-        .update(titles)
-        .set({ status: 'open' })
-        .where(and(inArray(titles.id, plan.reopenIds), eq(titles.status, 'canceled')));
-    }
-    return { preview: plan.preview, created: await materializeRule(tx, plan.preview.ruleId) };
+    return { preview: plan.preview, created: await applySeriesEnd(tx, plan) };
   });
   return { ...preview, created, title: await getTitle(ctx, titleId) };
 }

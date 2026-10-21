@@ -1,17 +1,17 @@
 import {
-  cycleSchedule,
   diffLines,
   diffRows,
   diffStats,
   formatBRL,
   formatDate,
-  installmentsCount,
+  formatMonth,
   type OPERATION_TOOLS,
   type PreviewField,
   type PreviewRow,
   parseBoleto,
   parseNfeXml,
   t,
+  todayIso,
 } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
@@ -23,6 +23,7 @@ import * as categories from '../services/categories';
 import * as documents from '../services/contract-documents';
 import * as contracts from '../services/contracts';
 import * as rec from '../services/reconciliation';
+import * as series from '../services/series';
 import * as statements from '../services/statements';
 import { nfeEntry, pixEntry, readDocument } from '../services/title-entry';
 import * as titles from '../services/titles';
@@ -40,7 +41,7 @@ import { type Handlers, nameOf, toolAttachment, withNames } from './tool-helpers
 type OperationToolName = (typeof OPERATION_TOOLS)[number]['name'];
 
 const DIRECTION = (v: unknown) => t.contracts.directionsShort[String(v)] ?? String(v);
-const PERIODICITY = (v: unknown) => t.contracts.periodicities[String(v)] ?? String(v);
+const EVERY: Record<string, string> = { weekly: 'semana(s)', monthly: 'mês(es)', yearly: 'ano(s)' };
 const listed = (items: string[], max = 12) =>
   items.length > max ? `${items.slice(0, max).join(', ')} e mais ${items.length - max}` : items.join(', ') || '—';
 
@@ -50,15 +51,11 @@ const CONTRACT_FIELDS: PreviewField[] = [
   { key: 'caixaId', label: 'Caixa' },
   { key: 'direction', label: 'Tipo', format: DIRECTION },
   { key: 'entityId', label: 'Entidade' },
-  { key: 'categoryId', label: 'Categoria' },
+  { key: 'categoryId', label: 'Categoria padrão' },
   { key: 'name', label: 'Nome' },
   { key: 'contractNumber', label: 'Número' },
-  { key: 'startsOn', label: 'Início', format: 'date' },
-  { key: 'durationMonths', label: 'Duração (meses)' },
-  { key: 'periodicity', label: 'Periodicidade', format: PERIODICITY },
-  { key: 'totalCents', label: 'Valor total do ciclo', format: 'money' },
-  { key: 'dueDay', label: 'Dia de vencimento' },
-  { key: 'dueMonthOffset', label: 'Vencimento (meses depois)' },
+  { key: 'startsOn', label: 'Início da vigência', format: 'date' },
+  { key: 'endsOn', label: 'Fim da vigência', format: (v) => (v ? formatDate(String(v)) : 'Indeterminado') },
   { key: 'autoRenew', label: 'Renovação automática', format: 'bool' },
   { key: 'noticeDays', label: 'Aviso prévio (dias)' },
   { key: 'readjustmentIndex', label: 'Reajuste', format: (v) => t.contracts.indexes[String(v)] ?? String(v) },
@@ -66,24 +63,19 @@ const CONTRACT_FIELDS: PreviewField[] = [
   { key: 'terminationPenaltyText', label: 'Multa rescisória' },
   { key: 'terminationPenaltyCents', label: 'Multa (valor)', format: 'money' },
   { key: 'notes', label: 'Observações' },
-  // Conta das parcelas e encargos (spec 033).
-  { key: 'paymentAccountId', label: t.contracts.payment.account },
-  { key: 'transitAccountId', label: t.contracts.payment.transit },
+];
+
+const CONTRACT_NAMES = { caixaId: 'caixa', entityId: 'entity', categoryId: 'category' } as const;
+
+/** Ajustes de reconhecimento da série (spec 034), na prévia. */
+const TERMS_FIELDS: PreviewField[] = [
+  { key: 'matchWindowDays', label: t.contracts.payment.window },
   { key: 'lateFeePercent', label: t.contracts.payment.lateFee },
   { key: 'interestMonthPercent', label: t.contracts.payment.interest },
   { key: 'earlyDiscountPercent', label: t.contracts.payment.discount },
   { key: 'toleranceCents', label: t.contracts.payment.tolerance, format: 'money' },
-  { key: 'matchWindowDays', label: t.contracts.payment.window },
   { key: 'autoSettle', label: t.contracts.payment.autoSettle, format: 'bool' },
 ];
-
-const CONTRACT_NAMES = {
-  caixaId: 'caixa',
-  entityId: 'entity',
-  categoryId: 'category',
-  paymentAccountId: 'account',
-  transitAccountId: 'account',
-} as const;
 
 async function writableContract(ctx: ServiceContext, contractId: string) {
   const contract = await contracts.getContract(ctx, contractId);
@@ -91,19 +83,38 @@ async function writableContract(ctx: ServiceContext, contractId: string) {
   return contract;
 }
 
-/** Valores atuais do contrato e do ciclo atual, no formato dos campos (antes do diff). */
-function contractValues(contract: Awaited<ReturnType<typeof contracts.getContract>>): Record<string, unknown> {
-  const cycle = contract.cycles.at(-1) ?? contract.currentCycle;
+type ObligationLike = {
+  kind: string;
+  description: string;
+  amountCents: number;
+  frequency: string;
+  intervalCount: number;
+  firstDueDate: string;
+  accountId: string | null;
+  cardCaixaId: string | null;
+};
+
+/** Uma obrigação nova numa linha da prévia: valor, calendário e onde o dinheiro se move. */
+async function obligationRow(ctx: ServiceContext, o: ObligationLike): Promise<PreviewRow> {
+  const where =
+    o.kind === 'card'
+      ? `cartão ${(await nameOf(ctx, 'caixa', o.cardCaixaId)) ?? ''}`
+      : `conta ${(await nameOf(ctx, 'account', o.accountId)) ?? ''}`;
   return {
-    ...contract,
-    startsOn: cycle?.startsOn,
-    durationMonths: cycle?.durationMonths,
-    periodicity: cycle?.periodicity,
-    totalCents: cycle?.totalCents,
-    dueDay: cycle?.dueDay,
-    dueMonthOffset: cycle?.dueMonthOffset,
+    label: `Obrigação: ${o.description}`,
+    after: `${formatBRL(o.amountCents)} a cada ${o.intervalCount} ${EVERY[o.frequency] ?? o.frequency} desde ${formatDate(o.firstDueDate)} · ${where}`,
   };
 }
+
+const changeRow = (a: {
+  occurrence: number;
+  before: { amountCents: number; dueDate: string };
+  after: { amountCents: number; dueDate: string };
+}) => ({
+  label: `Ocorrência ${a.occurrence}`,
+  before: `${formatBRL(a.before.amountCents)} · venc. ${formatDate(a.before.dueDate)}`,
+  after: `${formatBRL(a.after.amountCents)} · venc. ${formatDate(a.after.dueDate)}`,
+});
 
 /* ---------------- títulos ---------------- */
 
@@ -232,37 +243,29 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
       ctx.access.assertWrite(i.caixaId);
       const values = await withNames(ctx, i, CONTRACT_NAMES);
       const rows = diffRows(CONTRACT_FIELDS, values);
-      const count = installmentsCount(i.durationMonths, i.periodicity);
-      if (count) rows.push({ label: 'Parcelas', after: `${count} (${PERIODICITY(i.periodicity).toLowerCase()})` });
+      for (const o of i.obligations) rows.push(await obligationRow(ctx, o));
       if (i.mirrorCaixaId === null) rows.push({ label: 'Espelho', after: 'Sem espelho' });
       else if (i.mirrorCaixaId) rows.push({ label: 'Espelho em', after: (await nameOf(ctx, 'caixa', i.mirrorCaixaId)) ?? '' });
+      const draft = i.activate === false || i.obligations.length === 0;
       return {
         title: 'Criar contrato',
-        summary: `${i.name} · ${formatBRL(i.totalCents)}`,
+        summary: `${i.name} · ${i.obligations.length} obrigação(ões)`,
         action: 'create',
         rows,
-        warnings: ['Fica em rascunho: nenhuma parcela é gerada até activate_contract.'],
+        warnings: draft
+          ? ['Fica em rascunho, sem obrigações: ative com activate_contract e acrescente-as com add_contract_obligation.']
+          : ['As obrigações nas contas geram as ocorrências como títulos até 12 meses à frente.'],
       };
     },
-    run: (ctx, i) => contracts.createContract(ctx, { ...i, activate: false }),
+    run: (ctx, i) => contracts.createContract(ctx, i),
   },
   update_contract: {
     preview: async (ctx, i) => {
       const before = await writableContract(ctx, i.contractId);
-      const old = await withNames(ctx, contractValues(before), CONTRACT_NAMES);
+      const old = await withNames(ctx, before as unknown as Record<string, unknown>, CONTRACT_NAMES);
       const after = await withNames(ctx, i.changes as Record<string, unknown>, CONTRACT_NAMES);
       const rows = diffRows(CONTRACT_FIELDS, after, old);
-      const accountChanged =
-        (i.changes.paymentAccountId !== undefined && i.changes.paymentAccountId !== before.paymentAccountId) ||
-        (i.changes.transitAccountId !== undefined && i.changes.transitAccountId !== before.transitAccountId);
-      const warnings = accountChanged
-        ? [
-            i.changes.applyAccountToInstallments
-              ? `A nova conta vale também para ${before.followingOpenInstallments} parcela(s) em aberto que seguem o contrato (as com conta própria ficam).`
-              : `Só o contrato muda: ${before.followingOpenInstallments} parcela(s) em aberto continuam com a conta anterior (applyAccountToInstallments true as muda junto).`,
-          ]
-        : [];
-      const locked = ['startsOn', 'durationMonths', 'periodicity', 'totalCents', 'dueDay', 'dueMonthOffset', 'entityId', 'categoryId'];
+      const locked = ['startsOn', 'endsOn', 'entityId', 'categoryId'];
       if (before.status !== 'draft' && rows.some((row) => CONTRACT_FIELDS.some((f) => f.label === row.label && locked.includes(f.key))))
         throw unprocessable(t.contracts.lockedActive, 'contract_locked');
       if (i.changes.mirrorCaixaId !== undefined) {
@@ -272,7 +275,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
           after: i.changes.mirrorCaixaId ? ((await nameOf(ctx, 'caixa', i.changes.mirrorCaixaId)) ?? '') : 'Sem espelho',
         });
       }
-      return { title: 'Editar contrato', summary: before.name, action: 'update', rows, warnings };
+      return { title: 'Editar contrato', summary: before.name, action: 'update', rows };
     },
     run: (ctx, i) => contracts.updateContract(ctx, i.contractId, i.changes),
   },
@@ -280,48 +283,66 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     preview: async (ctx, i) => {
       const contract = await writableContract(ctx, i.contractId);
       if (contract.status !== 'draft') throw unprocessable(t.contracts.errors.alreadyActive, 'contract_not_draft');
-      const cycle = contract.cycles[0];
-      if (!cycle) throw notFound();
-      const schedule = cycleSchedule({
-        startsOn: cycle.startsOn,
-        durationMonths: cycle.durationMonths,
-        periodicity: cycle.periodicity,
-        totalCents: cycle.totalCents,
-        dueDay: cycle.dueDay,
-        dueMonthOffset: cycle.dueMonthOffset,
-      });
-      const rows: PreviewRow[] = [{ label: 'Situação', before: 'Rascunho', after: 'Vigente' }];
-      for (const s of schedule.slice(0, 24))
-        rows.push({
-          label: `Parcela ${s.installment}/${schedule.length}`,
-          after: `${formatBRL(s.amountCents)} · venc. ${formatDate(s.dueDate)}`,
-        });
       return {
         title: 'Ativar contrato',
         summary: `${contract.name} (${contract.entityName})`,
-        action: 'create',
-        rows,
-        warnings: [
-          ...(schedule.length > 24 ? [`E mais ${schedule.length - 24} parcela(s).`] : []),
-          ...(contract.counterpartyCaixaId ? [`Cada parcela é espelhada em ${contract.counterpartyCaixaName}.`] : []),
-        ],
+        action: 'update',
+        rows: [{ label: 'Situação', before: 'Rascunho', after: 'Vigente' }],
+        warnings: ['Depois, acrescente as obrigações com add_contract_obligation.'],
       };
     },
     run: (ctx, i) => contracts.activateContract(ctx, i.contractId),
+  },
+  add_contract_obligation: {
+    preview: async (ctx, i) => {
+      const contract = await writableContract(ctx, i.contractId);
+      if (contract.status === 'draft') throw unprocessable(t.contracts.errors.obligationDraft, 'contracts_draft_titles_check');
+      const rows: PreviewRow[] = [await obligationRow(ctx, i.obligation)];
+      rows.push(...diffRows(TERMS_FIELDS, i.obligation as unknown as Record<string, unknown>));
+      return {
+        title: 'Acrescentar obrigação',
+        summary: `${contract.name} · ${i.obligation.description}`,
+        action: 'create',
+        rows,
+        warnings: [
+          `Termina em ${i.obligation.endsOn === undefined ? (contract.endsOn ? formatDate(contract.endsOn) : 'sem fim') : i.obligation.endsOn ? formatDate(i.obligation.endsOn) : 'sem fim'}.`,
+        ],
+      };
+    },
+    run: (ctx, i) => contracts.addObligation(ctx, i.contractId, i.obligation),
+  },
+  link_series_to_contract: {
+    preview: async (ctx, i) => {
+      const contract = await writableContract(ctx, i.contractId);
+      const target = await series.getSeries(ctx, i.ruleId);
+      if (!target.canWrite) throw forbidden(t.errors.readOnly);
+      if (target.direction !== contract.direction || target.entityId !== contract.entityId)
+        throw unprocessable(t.contracts.errors.seriesLinkMismatch, 'titles_contract_match_check');
+      return {
+        title: 'Ligar série ao contrato',
+        summary: `${target.description} → ${contract.name}`,
+        action: 'update',
+        rows: [{ label: 'Contrato da série', before: target.contractName ?? '—', after: contract.name }],
+        warnings: ['As ocorrências da série (e as compras ligadas, no cartão) passam a ser do contrato.'],
+      };
+    },
+    run: (ctx, i) => contracts.linkObligation(ctx, i.contractId, i.ruleId),
   },
   add_contract_amendment: {
     preview: async (ctx, i) => {
       const contract = await writableContract(ctx, i.contractId);
       const { preview } = await contracts.amendContract(ctx, i.contractId, i.amendment, true);
       const rows: PreviewRow[] = [{ label: 'Efeito a partir de', after: formatDate(i.amendment.effectiveOn) }];
-      for (const a of preview.affected.slice(0, 24)) {
+      if (i.amendment.readjustmentPercent) rows.push({ label: 'Reajuste', after: `${i.amendment.readjustmentPercent}%` });
+      for (const a of preview.affected.slice(0, 24)) rows.push(changeRow(a));
+      for (const c of preview.cardFrom)
         rows.push({
-          label: `Parcela ${a.installment}`,
-          before: `${formatBRL(a.before.amountCents)} · venc. ${formatDate(a.before.dueDate)}`,
-          after: `${formatBRL(a.after.amountCents)} · venc. ${formatDate(a.after.dueDate)}`,
+          label: `Cobrança no cartão (a partir da ${c.fromOccurrence}ª)`,
+          before: formatBRL(c.beforeCents),
+          after: formatBRL(c.afterCents),
         });
-      }
       if (i.amendment.categoryId) rows.push({ label: 'Categoria', after: (await nameOf(ctx, 'category', i.amendment.categoryId)) ?? '' });
+      if (i.amendment.accountId) rows.push({ label: 'Conta', after: (await nameOf(ctx, 'account', i.amendment.accountId)) ?? '' });
       if (i.amendment.notes) rows.push({ label: 'Observações', after: i.amendment.notes });
       return {
         title: 'Registrar aditivo',
@@ -329,9 +350,9 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         action: 'update',
         rows,
         warnings: [
-          ...(preview.affected.length > 24 ? [`E mais ${preview.affected.length - 24} parcela(s) alteradas.`] : []),
+          ...(preview.affected.length > 24 ? [`E mais ${preview.affected.length - 24} ocorrência(s) alteradas.`] : []),
           ...(preview.skipped.length > 0
-            ? [`${preview.skipped.length} parcela(s) ficam como estão (paga, mês fechado ou cancelada).`]
+            ? [`${preview.skipped.length} ocorrência(s) ficam como estão (com baixa ou em mês fechado).`]
             : []),
         ],
       };
@@ -348,15 +369,15 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
       ];
       if (preview.canceled.length > 0)
         rows.push({
-          label: 'Parcelas canceladas',
-          after: listed(preview.canceled.map((c) => `#${c.installment} ${formatBRL(c.amountCents)}`)),
+          label: 'Ocorrências canceladas',
+          after: listed(preview.canceled.map((c) => `${formatMonth(c.competenceDate)} ${formatBRL(c.amountCents)}`)),
         });
-      if (preview.current) {
-        const next = i.termination.currentInstallmentCents ?? preview.current.amountCents;
+      for (const last of preview.last) {
+        const next = i.termination.lastAmounts.find((l) => l.titleId === last.titleId)?.amountCents ?? last.amountCents;
         rows.push({
-          label: `Parcela ${preview.current.installment} (cobre a data)`,
-          before: formatBRL(preview.current.amountCents),
-          after: `${formatBRL(next)} (proporcional sugerido: ${formatBRL(preview.current.proratedCents)})`,
+          label: `Última ocorrência (${formatMonth(last.competenceDate)})`,
+          before: formatBRL(last.amountCents),
+          after: `${formatBRL(next)} (proporcional sugerido: ${formatBRL(last.proratedCents)})`,
         });
       }
       if (i.termination.penalty)
@@ -370,55 +391,77 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         action: 'delete',
         rows,
         warnings: [
-          ...(preview.keptSettled > 0 ? [`${preview.keptSettled} parcela(s) paga(s) ficam como estão.`] : []),
-          ...(preview.blockedClosed.length > 0 ? [`${preview.blockedClosed.length} parcela(s) em mês fechado não são canceladas.`] : []),
+          ...(preview.keptSettled > 0 ? [`${preview.keptSettled} ocorrência(s) com baixa ficam como estão.`] : []),
+          ...(preview.blockedClosed.length > 0 ? [`${preview.blockedClosed.length} ocorrência(s) em mês fechado não são canceladas.`] : []),
+          ...(preview.cardRules > 0 ? [`${preview.cardRules} cobrança(s) no cartão terminam na data.`] : []),
           'A rescisão não volta atrás.',
         ],
       };
     },
     run: (ctx, i) => contracts.terminateContract(ctx, i.contractId, i.termination, false),
   },
-  decide_contract_renewal: {
+  renew_contract: {
     preview: async (ctx, i) => {
       const contract = await writableContract(ctx, i.contractId);
-      if (i.decision === 'decline') {
-        if (!contract.renewalTasks.some((task) => task.status === 'open'))
-          throw unprocessable(t.contracts.errors.noTaskOpen, 'no_task_open');
-        return {
-          title: 'Recusar renovação',
-          summary: contract.name,
-          action: 'update',
-          rows: [
-            { label: 'Renovação', before: 'Pendente', after: 'Recusada' },
-            ...(i.notes ? [{ label: 'Observações', after: i.notes }] : []),
-          ],
-          warnings: ['O contrato termina no fim do ciclo atual.'],
-        };
-      }
-      const renewal = i.renewal!;
-      const { preview } = await contracts.renewContract(ctx, i.contractId, renewal, true);
+      const { preview } = await contracts.renewContract(ctx, i.contractId, i.renewal, true);
       const rows: PreviewRow[] = [
-        { label: 'Novo ciclo', after: `${formatDate(preview.startsOn)} a ${formatDate(preview.endsOn)}` },
-        { label: 'Valor total', after: formatBRL(renewal.totalCents) },
-        { label: 'Periodicidade', after: PERIODICITY(renewal.periodicity) },
+        {
+          label: 'Vigência',
+          before: `${formatDate(contract.startsOn)} a ${contract.endsOn ? formatDate(contract.endsOn) : 'indeterminado'}`,
+          after: `${formatDate(preview.startsOn)} a ${preview.endsOn ? formatDate(preview.endsOn) : 'indeterminado'}`,
+        },
       ];
-      for (const s of preview.installments.slice(0, 24))
+      for (const r of preview.rules)
+        rows.push({ label: `Obrigação: ${r.description}`, after: `termina em ${r.endsOn ? formatDate(r.endsOn) : 'sem fim'}` });
+      return { title: 'Renovar contrato', summary: contract.name, action: 'update', rows };
+    },
+    run: (ctx, i) => contracts.renewContract(ctx, i.contractId, i.renewal, false),
+  },
+  get_series: { run: (ctx, i) => series.getSeries(ctx, i.ruleId) },
+  create_series: {
+    preview: async (ctx, i) => {
+      const rows: PreviewRow[] = [await obligationRow(ctx, i)];
+      if (i.contractId) rows.push({ label: 'Contrato', after: (await contracts.getContract(ctx, i.contractId)).name });
+      if (i.entityId) rows.push({ label: 'Entidade', after: (await nameOf(ctx, 'entity', i.entityId)) ?? '' });
+      if (i.categoryId) rows.push({ label: 'Categoria', after: (await nameOf(ctx, 'category', i.categoryId)) ?? '' });
+      rows.push(...diffRows(TERMS_FIELDS, i as unknown as Record<string, unknown>));
+      return { title: 'Criar série recorrente', summary: i.description, action: 'create', rows };
+    },
+    run: (ctx, i) => series.createSeries(ctx, i),
+  },
+  update_series: {
+    preview: async (ctx, i) => {
+      const before = await series.getSeries(ctx, i.ruleId);
+      if (!before.canWrite) throw forbidden(t.errors.readOnly);
+      const rows = diffRows(TERMS_FIELDS, i.changes as Record<string, unknown>, before.terms as unknown as Record<string, unknown>);
+      if (i.changes.amountCents)
+        rows.push({ label: 'Valor', before: formatBRL(before.amountCents), after: formatBRL(i.changes.amountCents) });
+      if (i.changes.description) rows.push({ label: 'Descrição', before: before.description, after: i.changes.description });
+      if (i.changes.anchorDay) rows.push({ label: 'Dia', before: String(before.anchorDay), after: String(i.changes.anchorDay) });
+      if (i.changes.categoryId)
+        rows.push({ label: 'Categoria', before: before.categoryName, after: (await nameOf(ctx, 'category', i.changes.categoryId)) ?? '' });
+      if (i.changes.accountId)
+        rows.push({ label: 'Conta', before: before.accountName ?? '—', after: (await nameOf(ctx, 'account', i.changes.accountId)) ?? '' });
+      if (i.changes.contractId !== undefined)
         rows.push({
-          label: `Parcela ${s.installment}/${preview.installments.length}`,
-          after: `${formatBRL(s.amountCents)} · venc. ${formatDate(s.dueDate)}`,
+          label: 'Contrato',
+          before: before.contractName ?? '—',
+          after: i.changes.contractId ? (await contracts.getContract(ctx, i.changes.contractId)).name : '—',
         });
+      const changesSeries = ['amountCents', 'description', 'anchorDay', 'categoryId', 'accountId', 'payerCaixaId'].some(
+        (k) => (i.changes as Record<string, unknown>)[k] !== undefined,
+      );
       return {
-        title: 'Aprovar renovação',
-        summary: contract.name,
-        action: 'create',
+        title: 'Editar série',
+        summary: before.description,
+        action: 'update',
         rows,
-        warnings: preview.closedMonths.length > 0 ? [`Meses fechados no período: ${preview.closedMonths.join(', ')}.`] : [],
+        warnings: changesSeries
+          ? [`Vale para as ocorrências em aberto sem baixa a partir de ${formatDate(i.changes.effectiveOn ?? todayIso())}.`]
+          : [],
       };
     },
-    run: async (ctx, i) => {
-      if (i.decision === 'decline') return contracts.declineRenewal(ctx, i.contractId, { notes: i.notes });
-      return contracts.renewContract(ctx, i.contractId, { ...i.renewal!, notes: i.renewal!.notes ?? i.notes }, false);
-    },
+    run: (ctx, i) => series.updateSeries(ctx, i.ruleId, i.changes),
   },
   get_contract_document: {
     run: async (ctx, i) => {

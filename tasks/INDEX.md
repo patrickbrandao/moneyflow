@@ -4,6 +4,8 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 
 | Nº | Tarefa | Status | Tipo | Responsável | Origem |
 |---|---|---|---|---|---|
+| 043 | [Contratos sobre séries recorrentes no banco (F20)](043-contratos-sobre-series-no-banco.md) | concluida | banco | dba | usuario |
+| 044 | [Contratos sobre séries recorrentes na aplicação (F20)](044-contratos-sobre-series-na-aplicacao.md) (depois da 043) | concluida | melhoria | app | usuario |
 | 041 | [Pagamentos de contrato no extrato no banco (F19)](041-pagamentos-de-contrato-no-banco.md) (depois da 039) | concluida | banco | dba | usuario |
 | 042 | [Pagamentos de contrato no extrato na aplicação (F19)](042-pagamentos-de-contrato-na-aplicacao.md) (depois da 040 e da 041) | concluida | melhoria | app | usuario |
 | 040 | [Regras de classificação por conta na aplicação (F18)](040-regras-por-conta-na-aplicacao.md) (depois da 039) | concluida | melhoria | app | usuario |

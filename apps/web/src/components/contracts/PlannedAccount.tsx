@@ -7,92 +7,74 @@ import { FormError, ModalActions } from '../forms';
 import { Badge, Button, Field, Modal } from '../ui';
 
 /*
- * Conta prevista (spec 033): a conta das parcelas do contrato e a de cada
- * título. Conta corrente ou poupança desta caixa ou de outra em que o usuário
- * escreve; de outra caixa, pede a conta de passagem (desta caixa), onde a baixa
- * é registrada com a transferência a partir da conta prevista.
+ * Conta prevista (spec 034): a conta da caixa do título — corrente, poupança
+ * ou cofre — onde o pagamento sai ou o recebimento entra. Não há conta de
+ * passagem: a série mora na caixa da conta. Numa ocorrência de série, a troca
+ * vale "só esta" (fica própria) ou "esta e as próximas" em aberto.
  */
 
 const P = t.contracts.payment;
+const PL = t.contracts.planned;
 
+export const PLANNED_KINDS = new Set(['checking', 'savings', 'cash']);
+
+/** Contas da caixa que podem ser a conta prevista (as arquivadas só se já forem a escolhida). */
+export function plannedAccountOptions(accounts: AccountRow[], caixaId: string, current: string | null): AccountRow[] {
+  return accounts.filter(
+    (a) => a.caixaId === caixaId && PLANNED_KINDS.has(a.kind) && (!a.archivedAt || a.id === current) && (a.canWrite || a.id === current),
+  );
+}
+
+/** Todas as contas legíveis (o seletor filtra pela caixa). */
 export function usePaymentAccounts() {
   return useApi<AccountRow[]>('/api/accounts');
 }
 
-/** Seletores da conta prevista e, se ela é de outra caixa, da conta de passagem. */
+/** Contas da caixa (todas, para o seletor da conta prevista). */
+export function useCaixaAccounts(caixaId: string | null) {
+  return useApi<AccountRow[]>(caixaId ? `/api/accounts?caixaId=${caixaId}` : null);
+}
+
+/** Seletor da conta prevista: só as contas da caixa do título, cofre inclusive. */
 export function PlannedAccountSelect({
   caixaId,
   accounts,
   accountId,
-  transitId,
   onChange,
-  label = P.account,
-  hint = P.accountHint,
+  label = P.plannedAccount,
+  hint = PL.accountHint,
+  className,
 }: {
   caixaId: string;
   accounts: AccountRow[];
   accountId: string | null;
-  transitId: string | null;
-  onChange: (accountId: string | null, transitId: string | null) => void;
+  onChange: (accountId: string | null) => void;
   label?: string;
   hint?: string;
+  className?: string;
 }) {
-  const payable = accounts.filter(
-    (a) => (a.kind === 'checking' || a.kind === 'savings') && (!a.archivedAt || a.id === accountId) && (a.canWrite || a.id === accountId),
-  );
-  const groups = [...new Set(payable.map((a) => a.caixaName))];
-  const selected = accounts.find((a) => a.id === accountId) ?? null;
-  const otherCaixa = selected !== null && selected.caixaId !== caixaId;
-  const transits = accounts.filter((a) => a.caixaId === caixaId && (!a.archivedAt || a.id === transitId));
+  const options = plannedAccountOptions(accounts, caixaId, accountId);
   return (
-    <>
-      <Field label={label} hint={hint}>
-        <select
-          className="field"
-          value={accountId ?? ''}
-          aria-label={label}
-          onChange={(e) => {
-            const next = accounts.find((a) => a.id === e.target.value) ?? null;
-            const keepTransit = next && next.caixaId !== caixaId ? transitId : null;
-            onChange(next?.id ?? null, keepTransit);
-          }}
-        >
-          <option value="">{P.accountNone}</option>
-          {groups.map((group) => (
-            <optgroup key={group} label={group}>
-              {payable
-                .filter((a) => a.caixaName === group)
-                .map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-            </optgroup>
-          ))}
-        </select>
-      </Field>
-      {otherCaixa && (
-        <Field label={P.transit} hint={P.transitHint}>
-          <select
-            className="field"
-            value={transitId ?? ''}
-            aria-label={P.transit}
-            onChange={(e) => onChange(accountId, e.target.value || null)}
-          >
-            <option value="">—</option>
-            {transits.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-      )}
-    </>
+    <Field label={label} hint={hint} className={className}>
+      <select
+        className="field"
+        value={accountId ?? ''}
+        aria-label={label}
+        data-testid="planned-account-select"
+        onChange={(e) => onChange(e.target.value || null)}
+      >
+        <option value="">{P.plannedNone}</option>
+        {options.map((a) => (
+          <option key={a.id} value={a.id}>
+            {a.name} · {t.caixa.accountKinds[a.kind]}
+          </option>
+        ))}
+      </select>
+    </Field>
   );
 }
 
-/** Nome da conta prevista com a marca "própria" (parcela que não segue o contrato). */
+/** Nome da conta prevista com a marca "própria" (ocorrência que não segue a série). */
 export function PlannedAccountLabel({ planned, showCustom = true }: { planned: PlannedAccount; showCustom?: boolean }) {
   if (!planned.plannedAccountId) return <span className="text-faint">—</span>;
   return (
@@ -107,14 +89,17 @@ export function PlannedAccountLabel({ planned, showCustom = true }: { planned: P
   );
 }
 
+/** O título cuja conta prevista se troca; com série, oferece "só esta" ou "esta e as próximas". */
+export type PlannedAccountTarget = {
+  titleId: string;
+  caixaId: string;
+  /** Série da ocorrência (qualquer um dos dois nomes). */
+  recurrenceRuleId?: string | null;
+  ruleId?: string | null;
+} & Pick<PlannedAccount, 'plannedAccountId' | 'plannedAccountName'>;
+
 /** Botão de trocar a conta prevista de um título em aberto ou parcial (abre o modal). */
-export function PlannedAccountButton({
-  title,
-  onSaved,
-}: {
-  title: { titleId: string; caixaId: string } & PlannedAccount;
-  onSaved: (detail: TitleDetail) => void;
-}) {
+export function PlannedAccountButton({ title, onSaved }: { title: PlannedAccountTarget; onSaved: (detail: TitleDetail) => void }) {
   const [open, setOpen] = useState(false);
   return (
     // O botão fica dentro de linhas clicáveis: nada do modal (portal) chega ao clique da linha.
@@ -122,8 +107,9 @@ export function PlannedAccountButton({
       <button
         type="button"
         className="row-action"
-        aria-label={`${P.plannedAccount}: ${title.plannedAccountName ?? P.accountNone}`}
+        aria-label={`${P.plannedAccount}: ${title.plannedAccountName ?? P.plannedNone}`}
         title={P.plannedAccount}
+        data-testid="planned-account-edit"
         onClick={(e) => {
           e.stopPropagation();
           setOpen(true);
@@ -150,23 +136,22 @@ export function PlannedAccountModal({
   onClose,
   onSaved,
 }: {
-  title: { titleId: string; caixaId: string } & PlannedAccount;
+  title: PlannedAccountTarget;
   onClose: () => void;
   onSaved: (detail: TitleDetail) => void;
 }) {
-  const accounts = usePaymentAccounts();
+  const accounts = useCaixaAccounts(title.caixaId);
+  const inSeries = Boolean(title.recurrenceRuleId ?? title.ruleId);
   const [accountId, setAccountId] = useState(title.plannedAccountId);
-  const [transitId, setTransitId] = useState(title.plannedTransitAccountId);
+  const [scope, setScope] = useState<'this' | 'following'>(inSeries ? 'following' : 'this');
   const [error, setError] = useState<string | null>(null);
   const { run, busy } = useAction();
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const selected = accounts.data?.find((a) => a.id === accountId);
-    if (selected && selected.caixaId !== title.caixaId && !transitId) return setError(P.plannedTransitNeeded);
     setError(null);
     const saved = await run(
-      () => api.patch<TitleDetail>(`/api/titles/${title.titleId}`, { plannedAccountId: accountId, plannedTransitAccountId: transitId }),
+      () => api.patch<TitleDetail>(`/api/titles/${title.titleId}`, { plannedAccountId: accountId, scope }),
       P.plannedSaved,
     );
     if (saved) onSaved(saved);
@@ -176,24 +161,27 @@ export function PlannedAccountModal({
     <Modal open title={P.plannedAccount} onClose={onClose}>
       <form onSubmit={(e) => void submit(e)}>
         <div className="modal-body form-grid">
-          <PlannedAccountSelect
-            caixaId={title.caixaId}
-            accounts={accounts.data ?? []}
-            accountId={accountId}
-            transitId={transitId}
-            label={P.plannedAccount}
-            onChange={(a, tr) => {
-              setAccountId(a);
-              setTransitId(tr);
-            }}
-          />
+          <PlannedAccountSelect caixaId={title.caixaId} accounts={accounts.data ?? []} accountId={accountId} onChange={setAccountId} />
+          {inSeries && (
+            <fieldset className="grid gap-1" data-testid="planned-account-scope">
+              <legend className="mb-1 text-[13px] text-muted">{PL.scope}</legend>
+              <label className="check">
+                <input type="radio" name="planned-scope" checked={scope === 'this'} onChange={() => setScope('this')} />
+                {PL.scopeThis}
+              </label>
+              <label className="check">
+                <input type="radio" name="planned-scope" checked={scope === 'following'} onChange={() => setScope('following')} />
+                {PL.scopeFollowing}
+              </label>
+            </fieldset>
+          )}
           <FormError>{error}</FormError>
         </div>
         <ModalActions>
           <Button variant="ghost" onClick={onClose}>
             {t.common.cancel}
           </Button>
-          <Button type="submit" disabled={busy}>
+          <Button type="submit" disabled={busy || accounts.loading}>
             {busy ? t.common.saving : t.common.save}
           </Button>
         </ModalActions>

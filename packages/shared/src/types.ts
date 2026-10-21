@@ -34,7 +34,7 @@ export type UserRow = {
 export type { EntityKind } from './documents';
 
 import type { EntityKind } from './documents';
-import type { ContractCandidateInfo, SettlementSplit } from './reconcile';
+import type { SeriesCandidateInfo, SeriesTerms, SettlementSplit } from './reconcile';
 import type { LINE_CREATED_ENTRIES } from './schemas/operation';
 import type { SupersedeOutcome } from './supersede';
 
@@ -224,11 +224,14 @@ export type TitleRow = {
   amountCents: number;
   settledCents: number;
   openCents: number;
-  origin: 'manual' | 'recurrence' | 'card_invoice' | 'contract';
+  origin: 'manual' | 'recurrence' | 'card_invoice';
   recurrenceRuleId: string | null;
   occurrence: number | null;
   installmentsTotal: number | null;
-  /** origin = contract (spec 020): o contrato e a parcela n/N (n nulo = título extra, como a multa). */
+  /**
+   * Contrato do título (spec 034): ocorrência de uma obrigação (série) ou
+   * avulso ligado (multa). n/N só nas parcelas de antes da F20 (histórico).
+   */
   contractId: string | null;
   contractName: string | null;
   contractInstallment: number | null;
@@ -280,6 +283,12 @@ export type RecurrenceRuleDto = {
   startsOn: string;
   endsOn: string | null;
   installmentsTotal: number | null;
+  /** Caixa da série (a da conta, ou a do cartão na cobrança esperada) e o contrato de que é obrigação (spec 034). */
+  caixaId: string;
+  contractId: string | null;
+  contractName: string | null;
+  /** Ajustes de reconhecimento do pagamento (spec 034). */
+  terms: SeriesTerms;
 };
 
 /** Uma ocorrência da série afetada pelo encerramento (lado original). */
@@ -300,15 +309,12 @@ export type SeriesEndPreview = {
 
 export type SeriesEndResult = SeriesEndPreview & { created: number; title: TitleDetail };
 
-/** Conta prevista do título (spec 033): onde o pagamento deve sair (ou o recebimento entrar). */
+/** Conta prevista do título (specs 033 e 034): a conta da caixa do título (corrente, poupança ou cofre) onde o dinheiro se move. */
 export type PlannedAccount = {
   plannedAccountId: string | null;
   plannedAccountName: string | null;
-  /** Caixa da conta prevista (outra caixa = a baixa usa a conta de passagem e a transferência). */
-  plannedAccountCaixaId: string | null;
-  plannedTransitAccountId: string | null;
-  plannedTransitAccountName: string | null;
-  /** Escolhida na própria parcela: trocar a conta do contrato não a muda. */
+  plannedAccountKind: 'checking' | 'savings' | 'cash' | null;
+  /** Escolhida só nesta ocorrência (troca avulsa). */
   plannedAccountCustom: boolean;
 };
 
@@ -542,6 +548,11 @@ export type CardPurchaseRow = {
   attachmentCount: number;
   /** Todas as parcelas em faturas abertas (pode editar/excluir). */
   editable: boolean;
+  /** Cobrança esperada que a compra atende (spec 034): a série, a ocorrência e o contrato. */
+  recurrenceRuleId: string | null;
+  occurrence: number | null;
+  contractId: string | null;
+  contractName: string | null;
 };
 
 export type CardPurchaseDetail = CardPurchaseRow & {
@@ -623,9 +634,14 @@ export type StatementLineRow = {
     description: string;
     amountCents: number;
     entityName: string | null;
-    /** Sugestão de parcela de contrato (spec 033): a parcela e a repartição da baixa que a linha faria. */
-    contract?: ContractCandidateInfo | null;
+    /** Sugestão de ocorrência de série (specs 033 e 034): a ocorrência e a repartição da baixa que a linha faria. */
+    series?: SeriesCandidateInfo | null;
   } | null;
+  /**
+   * Linha nova da fatura que casa com uma cobrança esperada no cartão (spec
+   * 034): a sugestão "Lançar como cobrança de <obrigação> de <mês>".
+   */
+  cardCharge?: CardChargeSuggestion | null;
   entityId: string | null;
   entityName: string | null;
   categoryId: string | null;
@@ -739,15 +755,41 @@ export type StatementInspect = {
 };
 
 export type MatchCandidateRow = {
-  kind: 'movement' | 'title' | 'card_item';
+  kind: 'movement' | 'title' | 'card_item' | 'card_charge';
   id: string;
   date: string;
   amountCents: number;
   description: string;
   entityName: string | null;
   score: number | null;
-  /** Parcela de contrato (spec 033): a parcela e a repartição da baixa. */
-  contract: ContractCandidateInfo | null;
+  /** Ocorrência de série (specs 033 e 034): a ocorrência e a repartição da baixa. */
+  series: SeriesCandidateInfo | null;
+};
+
+/** Cobrança esperada no cartão que uma linha da fatura (ou uma compra) atende (spec 034). */
+export type CardChargeSuggestion = {
+  ruleId: string;
+  occurrence: number;
+  dueDate: string;
+  expectedCents: number;
+  description: string;
+  entityName: string | null;
+  contractId: string | null;
+  contractName: string | null;
+  autoSettle: boolean;
+};
+
+/** Ocorrência em aberto de uma série no cofre que um lançamento avulso pode baixar ("É o pagamento de…?", spec 034). */
+export type ObligationMatch = {
+  titleId: string;
+  ruleId: string;
+  description: string;
+  occurrence: number | null;
+  dueDate: string;
+  openCents: number;
+  contractId: string | null;
+  contractName: string | null;
+  split: SettlementSplit;
 };
 
 export type CsvMappingRow = {
@@ -1201,6 +1243,7 @@ export type NotificationKind =
   | 'contract_ending'
   | 'contract_renewal_pending'
   | 'contract_readjustment'
+  | 'contract_charge_missing'
   | 'agent_completed'
   | 'agent_message'
   | 'ai_budget_alert'
@@ -1228,22 +1271,19 @@ export type NotificationDto = {
 
 export type NotificationList = { unread: number; items: NotificationDto[] };
 
-/* ---------------- contratos (spec 020) ---------------- */
+/* ---------------- contratos (specs 020 e 034) ---------------- */
 
 export type ContractDirection = 'receivable' | 'payable';
 
-export type ContractCycleBrief = {
-  id: string;
-  seq: number;
-  startsOn: string;
-  endsOn: string;
-  durationMonths: number;
-  periodicity: import('./contracts').ContractPeriodicity;
-  installmentsCount: number;
-  totalCents: number;
-  dueDay: number;
-  dueMonthOffset: number;
-  readjustmentPercent: number | null;
+/** Próxima ocorrência em aberto (ou esperada, no cartão) de uma obrigação. */
+export type ObligationNext = {
+  ruleId: string;
+  occurrence: number;
+  dueDate: string;
+  amountCents: number;
+  /** Ocorrência materializada (série de títulos); null na cobrança esperada do cartão. */
+  titleId: string | null;
+  description: string;
 };
 
 export type ContractRow = {
@@ -1260,19 +1300,80 @@ export type ContractRow = {
   categoryColorSlot: number | null;
   status: import('./contracts').ContractStatus;
   autoRenew: boolean;
-  currentCycle: ContractCycleBrief | null;
-  nextInstallment: { titleId: string; dueDate: string; amountCents: number; installment: number; total: number } | null;
-  openTask: { id: string; dueOn: string; overdue: boolean } | null;
+  /** Vigência (sem fim = indeterminado). */
+  startsOn: string;
+  endsOn: string | null;
+  obligationCount: number;
+  nextOccurrence: ObligationNext | null;
+  /** Ocorrências em aberto de obrigações sem conta prevista ("obrigação sem conta"). */
+  withoutAccount: number;
   terminatedOn: string | null;
   archivedAt: string | null;
   canWrite: boolean;
 };
 
-export type ContractInstallmentDto = {
+/**
+ * Uma série recorrente (spec 005) — a obrigação de um contrato (spec 034) ou
+ * uma série solta: numa conta (títulos materializados, com a conta prevista)
+ * ou num cartão (cobrança esperada, sem títulos).
+ */
+export type SeriesDto = {
+  id: string;
+  kind: import('./contracts').ObligationKind;
+  caixaId: string;
+  caixaName: string;
+  contractId: string | null;
+  contractName: string | null;
+  direction: ContractDirection;
+  description: string;
+  entityId: string;
+  entityName: string;
+  categoryId: string;
+  categoryName: string;
+  frequency: 'weekly' | 'monthly' | 'yearly';
+  intervalCount: number;
+  anchorDay: number;
+  startsOn: string;
+  endsOn: string | null;
+  installmentsTotal: number | null;
+  /** Valor da próxima ocorrência (ou da última, se a série acabou). */
+  amountCents: number;
+  /** Conta prevista da próxima ocorrência em aberto (ou da mais recente). */
+  accountId: string | null;
+  accountName: string | null;
+  accountKind: 'checking' | 'savings' | 'cash' | null;
+  /** Cobrança no cartão: a caixa pagadora. */
+  payerCaixaId: string | null;
+  payerCaixaName: string | null;
+  terms: SeriesTerms;
+  next: ObligationNext | null;
+  openCount: number;
+  overdueCount: number;
+  /** Ocorrências em aberto sem conta prevista. */
+  withoutAccount: number;
+  canWrite: boolean;
+};
+
+/** Vigência do contrato (contract_cycles): a primeira e as renovações; as anteriores à F20 trazem o ciclo de parcelas. */
+export type ContractCycleDto = {
+  id: string;
+  seq: number;
+  startsOn: string;
+  endsOn: string | null;
+  legacy: {
+    periodicity: import('./contracts').ContractPeriodicity;
+    durationMonths: number;
+    installmentsCount: number;
+    totalCents: number;
+    dueDay: number;
+  } | null;
+};
+
+/** Título avulso ligado ao contrato (multa, valor rescisório, parcela única). */
+export type ContractTitleDto = {
   titleId: string;
   caixaId: string;
   direction: ContractDirection;
-  installment: number | null;
   description: string;
   competenceDate: string;
   dueDate: string;
@@ -1282,17 +1383,7 @@ export type ContractInstallmentDto = {
   status: TitleStatus;
   overdue: boolean;
   archived: boolean;
-} & PlannedAccount;
-
-export type ContractTotals = {
-  contractedCents: number;
-  settledCents: number;
-  openCents: number;
-  overdueCents: number;
-  canceledCents: number;
 };
-
-export type ContractCycleDto = ContractCycleBrief & { installments: ContractInstallmentDto[]; totals: ContractTotals };
 
 export type ContractDocumentDto = {
   id: string;
@@ -1330,10 +1421,12 @@ export type ContractDocumentVersionContent = ContractDocumentVersionDto & { cont
 
 export type ContractAmendmentDto = {
   id: string;
-  cycleSeq: number;
+  cycleSeq: number | null;
   effectiveOn: string;
   documentId: string | null;
   documentTitle: string | null;
+  /** Obrigações atingidas. */
+  ruleIds: string[];
   changes: { before: Record<string, unknown>; after: Record<string, unknown> };
   affectedCount: number;
   skippedCount: number;
@@ -1342,18 +1435,16 @@ export type ContractAmendmentDto = {
   createdByName: string | null;
 };
 
+/** Tarefas de renovação de antes da F20 (histórico). */
 export type RenewalTaskDto = {
   id: string;
-  cycleId: string;
   cycleSeq: number;
-  status: 'open' | 'approved' | 'declined';
+  status: 'approved' | 'declined' | 'closed';
   openedOn: string;
   dueOn: string;
-  overdue: boolean;
   decidedAt: string | null;
   decidedByName: string | null;
   decisionNotes: string | null;
-  newCycleId: string | null;
 };
 
 export type ContractDetail = ContractRow & {
@@ -1361,46 +1452,30 @@ export type ContractDetail = ContractRow & {
   counterpartyCaixaName: string | null;
   notes: string | null;
   noticeDays: number;
-  renewalLeadDays: number;
-  reminderEveryDays: number;
   readjustmentIndex: import('./contracts').ReadjustmentIndex;
   readjustmentBaseDate: string | null;
   terminationPenaltyText: string | null;
   terminationPenaltyCents: number | null;
   terminationNotes: string | null;
-  /** Conta das parcelas e a de passagem (quando ela é de outra caixa), encargos e conciliação (spec 033). */
-  paymentAccountId: string | null;
-  paymentAccountName: string | null;
-  paymentAccountCaixaId: string | null;
-  paymentAccountCaixaName: string | null;
-  transitAccountId: string | null;
-  transitAccountName: string | null;
-  lateFeePercent: number | null;
-  interestMonthPercent: number | null;
-  earlyDiscountPercent: number | null;
-  toleranceCents: number;
-  matchWindowDays: number;
-  autoSettle: boolean;
-  /** Parcelas em aberto ou parciais que seguem a conta do contrato (trocá-la as muda junto, se pedido). */
-  followingOpenInstallments: number;
   createdAt: string;
-  /** Último dia do aviso prévio do ciclo atual. */
+  /** Último dia do aviso prévio da vigência. */
   noticeDeadline: string | null;
   /** Próxima data-base de reajuste (índice ≠ nenhum). */
   nextReadjustment: string | null;
-  /** Leitura pela parcela espelhada (somente leitura). */
+  /** Leitura pelo título espelhado (somente leitura). */
   viaMirror: boolean;
+  obligations: SeriesDto[];
+  extraTitles: ContractTitleDto[];
   cycles: ContractCycleDto[];
-  extraTitles: ContractInstallmentDto[];
   documents: ContractDocumentDto[];
   amendments: ContractAmendmentDto[];
   renewalTasks: RenewalTaskDto[];
 };
 
-/** Origem da baixa de uma parcela (spec 033). */
+/** Origem da baixa de uma ocorrência (spec 033): manual, pela conciliação ou sem confirmação. */
 export type PaymentOrigin = 'manual' | 'reconciliation' | 'auto';
 
-/** Uma baixa ativa da parcela, repartida. */
+/** Uma baixa ativa da ocorrência, repartida (ou a compra ligada, no cartão). */
 export type ContractPaymentSettlement = {
   id: string;
   settledOn: string;
@@ -1410,8 +1485,8 @@ export type ContractPaymentSettlement = {
   discountCents: number;
   cashCents: number;
   financialAccountId: string | null;
+  /** Baixa antiga com transferência (até a F19). */
   transferId: string | null;
-  /** A conta de outra caixa que pagou (ou recebeu) pela transferência. */
   fundingAccountId: string | null;
   statementLineId: string | null;
   reconciled: boolean;
@@ -1419,37 +1494,48 @@ export type ContractPaymentSettlement = {
   days: number;
 };
 
+/** status de uma cobrança no cartão: com compra ligada, a fatura fechou sem ela, ou ainda esperada. */
+export type CardChargeStatus = 'charged' | 'not_charged' | 'expected';
+
 export type ContractPaymentRow = {
-  titleId: string;
-  cycleId: string;
-  cycleSeq: number;
-  installment: number;
-  installmentsCount: number;
+  kind: 'title' | 'card_charge';
+  ruleId: string | null;
+  occurrence: number | null;
+  titleId: string | null;
+  cardPurchaseId: string | null;
+  cardInvoiceId: string | null;
+  caixaId: string;
+  /** Descrição da obrigação (ou do título avulso). */
+  description: string;
   competenceDate: string;
   dueDate: string;
   amountCents: number;
-  status: TitleStatus;
+  status: TitleStatus | CardChargeStatus;
   settledCents: number;
   openCents: number;
   interestCents: number;
   fineCents: number;
   discountCents: number;
   cashCents: number;
-  /** Data da última baixa ativa da parcela paga. */
+  /** Data da última baixa ativa do título pago (no cartão, a data da compra). */
   paidOn: string | null;
   lastSettledOn: string | null;
   /** + atraso, − adiantamento, 0 no dia; em aberto e vencida, o atraso até hoje (overdue). Nulo = em aberto no prazo. */
   days: number | null;
   overdue: boolean;
-  /** Conta da última baixa (ou a de outra caixa que a pagou, pela transferência). */
+  /** Cobrança no cartão cuja fatura fechou sem compra ligada. */
+  notCharged: boolean;
+  /** Conta da última baixa. */
   accountId: string | null;
   accountName: string | null;
+  plannedAccountId: string | null;
+  plannedAccountName: string | null;
   lastOrigin: PaymentOrigin | null;
   settlements: ContractPaymentSettlement[];
-} & PlannedAccount;
+};
 
 export type ContractPaymentsSummary = {
-  installments: number;
+  occurrences: number;
   paid: number;
   /** Pagas no prazo (dias ≤ 0) sobre as pagas, em % (null sem pagas). */
   onTimePercent: number | null;
@@ -1459,12 +1545,14 @@ export type ContractPaymentsSummary = {
   discountCents: number;
   open: number;
   overdue: number;
+  notCharged: number;
 };
 
 export type ContractPaymentsDto = {
   contractId: string;
+  /** Vigência filtrada (null = todas). */
   cycleId: string | null;
-  /** Por mês do vencimento (AAAA-MM-01): previsto e o pago/recebido (principal), encargos e desconto das baixas do mês. */
+  /** Por mês (AAAA-MM-01): previsto pelo vencimento; pago (principal), encargos e desconto pelo mês da baixa. */
   months: { month: string; plannedCents: number; paidCents: number; chargesCents: number; discountCents: number }[];
   rows: ContractPaymentRow[];
   summary: ContractPaymentsSummary;
@@ -1473,48 +1561,73 @@ export type ContractPaymentsDto = {
 /** Repartição da baixa feita a partir de uma linha (spec 033). */
 export type LineSettlementSplit = SettlementSplit;
 
+/** Uma ocorrência atingida por "esta e as próximas" (aditivo ou edição da série). */
+export type SeriesChangeRow = {
+  ruleId: string;
+  titleId: string | null;
+  occurrence: number;
+  dueDate: string;
+  before: { amountCents: number; dueDate: string };
+  after: { amountCents: number; dueDate: string };
+};
+
+export type SeriesChangeSkipped = {
+  ruleId: string;
+  titleId: string;
+  occurrence: number;
+  dueDate: string;
+  reason: 'settled' | 'closed_month';
+};
+
+/** Prévia de "esta e as próximas" numa ou mais séries (aditivo, spec 034). */
 export type AmendmentPreview = {
-  cycleId: string;
-  affected: {
-    titleId: string;
-    installment: number;
-    competenceDate: string;
-    before: { amountCents: number; dueDate: string };
-    after: { amountCents: number; dueDate: string };
-  }[];
-  skipped: { titleId: string; installment: number; competenceDate: string; reason: 'settled' | 'closed_month' | 'canceled' }[];
+  effectiveOn: string;
+  ruleIds: string[];
+  affected: SeriesChangeRow[];
+  skipped: SeriesChangeSkipped[];
+  /** Cobrança no cartão: o valor esperado muda a partir da ocorrência n. */
+  cardFrom: { ruleId: string; fromOccurrence: number; beforeCents: number; afterCents: number }[];
   changes: { before: Record<string, unknown>; after: Record<string, unknown> };
+};
+
+export type TerminationOccurrence = {
+  ruleId: string;
+  titleId: string;
+  occurrence: number | null;
+  competenceDate: string;
+  dueDate: string;
+  amountCents: number;
 };
 
 export type TerminationPreview = {
   terminatedOn: string;
-  canceled: { titleId: string; installment: number; competenceDate: string; amountCents: number }[];
-  current: {
-    titleId: string;
-    installment: number;
-    competenceDate: string;
-    periodEnd: string;
-    amountCents: number;
-    proratedCents: number;
-    settled: boolean;
-  } | null;
-  blockedClosed: { titleId: string; installment: number; competenceDate: string }[];
+  /** Ocorrências em aberto com competência depois da data: canceladas (com o espelho). */
+  canceled: TerminationOccurrence[];
+  /** A última ocorrência de cada obrigação (a que cobre a data), com o proporcional sugerido. */
+  last: (TerminationOccurrence & { periodEnd: string; proratedCents: number; settled: boolean })[];
+  /** Em mês fechado: não mudam. */
+  blockedClosed: TerminationOccurrence[];
+  /** Com baixa depois da data: ficam como estão. */
   keptSettled: number;
+  /** Cobranças no cartão encerradas na data. */
+  cardRules: number;
 };
 
 export type RenewalPreview = {
   startsOn: string;
-  endsOn: string;
-  installments: import('./contracts').ScheduledInstallment[];
-  closedMonths: string[];
+  endsOn: string | null;
+  /** Obrigações estendidas (o fim da série vai junto com a vigência). */
+  rules: { ruleId: string; description: string; kind: import('./contracts').ObligationKind; endsOn: string | null }[];
 };
 
 export type ContractActionResult<P> = { preview: P; contract: ContractDetail | null };
 
 export type RecurringPanelDto = {
   months: { month: string; receivableCents: number; payableCents: number; netCents: number }[];
+  /** Vigência terminando em 90 dias. */
   renewSoon: ContractRow[];
-  pendingRenewals: ContractRow[];
+  /** Encerrados nos últimos 90 dias (sem renovar). */
+  recentlyEnded: ContractRow[];
 };
 
 export type ContractReadingDto = {

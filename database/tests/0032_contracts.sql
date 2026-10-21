@@ -31,9 +31,8 @@ SELECT columns_are('contracts', ARRAY['id', 'caixa_id', 'entity_id', 'direction'
   'counterparty_caixa_id', 'status', 'auto_renew', 'notice_days', 'renewal_lead_days', 'reminder_every_days',
   'readjustment_index', 'readjustment_base_date', 'termination_penalty_text', 'termination_penalty_cents', 'terminated_on',
   'termination_notes', 'notes', 'created_by', 'archived_at', 'created_at', 'updated_at',
-  -- 0051 (pagamentos no extrato)
-  'payment_account_id', 'transit_account_id', 'late_fee_percent', 'interest_month_percent', 'early_discount_percent',
-  'tolerance_cents', 'match_window_days', 'auto_settle']);
+  -- 0052 (contratos sobre séries): a vigência; as colunas da 0051 foram para as séries
+  'starts_on', 'ends_on']);
 SELECT columns_are('contract_cycles', ARRAY['id', 'contract_id', 'seq', 'starts_on', 'duration_months', 'ends_on',
   'periodicity', 'installments_count', 'total_cents', 'due_day', 'due_month_offset', 'readjustment_percent',
   'created_at', 'updated_at']);
@@ -43,12 +42,14 @@ SELECT columns_are('contract_documents', ARRAY['id', 'contract_id', 'kind', 'for
 SELECT columns_are('contract_document_versions', ARRAY['id', 'document_id', 'version', 'content', 'note', 'author_kind',
   'author_user_id', 'ai_run_id', 'restored_from_version_id', 'created_at', 'updated_at']);
 SELECT columns_are('contract_amendments', ARRAY['id', 'contract_id', 'contract_cycle_id', 'document_id', 'effective_on',
-  'changes', 'affected_title_ids', 'skipped_title_ids', 'notes', 'created_by', 'created_at', 'updated_at']);
+  'changes', 'affected_title_ids', 'skipped_title_ids', 'notes', 'created_by', 'created_at', 'updated_at',
+  'recurrence_rule_ids']);
 SELECT columns_are('contract_renewal_tasks', ARRAY['id', 'contract_id', 'contract_cycle_id', 'status', 'opened_on',
   'due_on', 'decided_at', 'decided_by', 'decision_notes', 'new_cycle_id', 'created_at', 'updated_at']);
 SELECT has_column('titles', c) FROM unnest(ARRAY['contract_id', 'contract_cycle_id', 'contract_installment']) c;
-SELECT is((SELECT attgenerated::text FROM pg_attribute WHERE attrelid = 'contract_cycles'::regclass AND attname = c), 's',
-          c || ' é coluna gerada') FROM unnest(ARRAY['ends_on', 'installments_count']) c;
+SELECT is((SELECT attgenerated::text FROM pg_attribute WHERE attrelid = 'contract_cycles'::regclass AND attname = c), '',
+          c || ' deixou de ser gerada (0052; calculada por contract_cycles_fill no ciclo de parcelas)')
+  FROM unnest(ARRAY['ends_on', 'installments_count']) c;
 
 SELECT fk_ok('contracts', 'caixa_id', 'caixas', 'id');
 SELECT fk_ok('contracts', 'entity_id', 'entities', 'id');
@@ -79,7 +80,7 @@ SELECT has_index('contract_documents', i) FROM unnest(ARRAY['contract_documents_
   'contract_documents_attachment_id_idx', 'contract_documents_current_version_id_idx',
   'contract_documents_source_document_id_idx', 'contract_documents_created_by_idx']) i;
 SELECT has_index('contract_renewal_tasks', i) FROM unnest(ARRAY['contract_renewal_tasks_contract_id_idx',
-  'contract_renewal_tasks_open_key', 'contract_renewal_tasks_new_cycle_id_idx', 'contract_renewal_tasks_decided_by_idx']) i;
+  'contract_renewal_tasks_new_cycle_id_idx', 'contract_renewal_tasks_decided_by_idx']) i;
 
 -- Toda FK das tabelas novas (e as novas de titles) tem índice começando pelas colunas da FK.
 SELECT is_empty($$
@@ -93,7 +94,7 @@ SELECT is_empty($$
                       WHERE i.indrelid = c.conrelid AND (i.indkey::int2[])[0] = c.conkey[1])
 $$, 'toda FK nova tem índice começando pela sua primeira coluna');
 
-SELECT has_trigger('contracts', t) FROM unnest(ARRAY['contracts_validate', 'contracts_renewal_pending_check',
+SELECT has_trigger('contracts', t) FROM unnest(ARRAY['contracts_validate', 'contracts_integrity_check',
   'contracts_audit', 'contracts_set_updated_at']) t;
 SELECT has_trigger('titles', t) FROM unnest(ARRAY['titles_validate_contract', 'titles_contract_integrity_check',
   'titles_mirror_check']) t;
@@ -126,60 +127,60 @@ INSERT INTO attachments (id, file_name, mime_type, content) VALUES
   ('00000000-0000-7000-8000-0000000a7002', 'aditivo-01.pdf', 'application/pdf', '\x255044462d31');
 
 -- Contrato: regras imediatas -------------------------------------------------------------------------------------------
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id)
-  VALUES ('00000000-0000-7000-8000-0000000c0010', '00000000-0000-7000-8000-00000000e003', 'payable', 'X',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0010', '00000000-0000-7000-8000-00000000e003', 'payable', 'X',
           '00000000-0000-7000-8000-00000000ca02')$$), '23514 contracts_caixa_kind_check', 'contrato só em caixa general');
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e002', 'receivable', 'X',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e002', 'receivable', 'X',
           '00000000-0000-7000-8000-00000000ca01')$$), '23514 contracts_entity_check', 'contraparte diferente do titular');
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
           '00000000-0000-7000-8000-00000000ca02')$$), '23514 contracts_category_kind_check', 'receivable exige income');
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id, counterparty_caixa_id)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id, counterparty_caixa_id)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
           '00000000-0000-7000-8000-00000000ca01', '00000000-0000-7000-8000-0000000c0001')$$),
           '23514 contracts_counterparty_caixa_check', 'caixa da contraparte é do titular = entidade');
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', '  ',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', '  ',
           '00000000-0000-7000-8000-00000000ca01')$$), '23514 contracts_name_check', 'nome obrigatório');
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id, contract_number)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id, contract_number)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
           '00000000-0000-7000-8000-00000000ca01', repeat('9', 61))$$), '23514 contracts_contract_number_check', 'número ≤ 60');
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id, notice_days)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id, notice_days)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
           '00000000-0000-7000-8000-00000000ca01', 366)$$), '23514 contracts_notice_days_check', 'aviso prévio 0–365');
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id, reminder_every_days)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id, reminder_every_days)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
           '00000000-0000-7000-8000-00000000ca01', 31)$$), '23514 contracts_reminder_every_days_check', 'lembrete 1–30');
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id, readjustment_index)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id, readjustment_index)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
           '00000000-0000-7000-8000-00000000ca01', 'selic')$$), '23514 contracts_readjustment_index_check', 'índice fechado');
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id, termination_penalty_cents)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id, termination_penalty_cents)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
           '00000000-0000-7000-8000-00000000ca01', 0)$$), '23514 contracts_termination_penalty_cents_check', 'multa > 0');
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id, terminated_on)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id, terminated_on)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
           '00000000-0000-7000-8000-00000000ca01', '2025-05-01')$$), '23514 contracts_terminated_check',
           'terminated_on só com status terminated');
 
 -- Contrato K1: Minha Empresa recebe da ACME (que tem caixa: as parcelas espelham).
-INSERT INTO contracts (id, caixa_id, entity_id, direction, name, contract_number, category_id, counterparty_caixa_id,
+INSERT INTO contracts (starts_on, id, caixa_id, entity_id, direction, name, contract_number, category_id, counterparty_caixa_id,
                        auto_renew, created_by)
-VALUES ('00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003',
+VALUES ('2025-03-01', '00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003',
         'receivable', 'Suporte mensal ACME', 'CT-001', '00000000-0000-7000-8000-00000000ca01',
         '00000000-0000-7000-8000-0000000c0003', true, '00000000-0000-7000-8000-0000000000a1');
 SELECT is((SELECT status || '/' || notice_days || '/' || renewal_lead_days || '/' || reminder_every_days || '/' || readjustment_index
              FROM contracts WHERE id = '00000000-0000-7000-8000-000000000c01'), 'draft/30/60/7/none', 'padrões');
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id, contract_number)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e001', 'payable', 'Outro',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id, contract_number)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e001', 'payable', 'Outro',
           '00000000-0000-7000-8000-00000000ca02', 'ct-001')$$), '23505 contracts_contract_number_key',
           'número único por caixa sem distinção de maiúsculas');
-SELECT is(pg_temp.violation($$INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id, contract_number)
-  VALUES ('00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-00000000e003', 'payable', 'Outro',
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id, contract_number)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-00000000e003', 'payable', 'Outro',
           '00000000-0000-7000-8000-00000000ca02', 'CT-001')$$), 'ok', 'mesmo número em outra caixa');
 SELECT is(pg_temp.violation($$UPDATE contracts SET archived_at = now() WHERE id = '00000000-0000-7000-8000-000000000c01';
-  INSERT INTO contracts (caixa_id, entity_id, direction, name, category_id, contract_number)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e001', 'payable', 'Outro',
+  INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id, contract_number)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e001', 'payable', 'Outro',
           '00000000-0000-7000-8000-00000000ca02', 'CT-001');
   SELECT 1/0$$), '22012 -', 'arquivado libera o número (o 1/0 desfaz o bloco)');
 SELECT is(pg_temp.violation($$UPDATE contracts SET entity_id = '00000000-0000-7000-8000-00000000e001',
@@ -210,8 +211,8 @@ INSERT INTO cycle_cases VALUES
   ('2025-03-31', 1, 'monthly', '2025-04-30', 1), ('2025-01-30', 1, 'monthly', '2025-02-28', 1),
   ('2024-01-29', 1, 'single', '2024-02-28', 1), ('2025-03-31', 6, 'quarterly', '2025-09-30', 2),
   ('2025-03-15', 12, 'semiannual', '2026-03-14', 2), ('2025-02-01', 24, 'single', '2027-01-31', 1);
-INSERT INTO contracts (id, caixa_id, entity_id, direction, name, category_id)
-VALUES ('00000000-0000-7000-8000-000000000c09', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-00000000e004',
+INSERT INTO contracts (starts_on, id, caixa_id, entity_id, direction, name, category_id)
+VALUES ('2025-03-01', '00000000-0000-7000-8000-000000000c09', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-00000000e004',
         'payable', 'Casos de ciclo', '00000000-0000-7000-8000-00000000ca02');
 INSERT INTO contract_cycles (contract_id, seq, starts_on, duration_months, periodicity, total_cents, due_day)
 SELECT '00000000-0000-7000-8000-000000000c09', row_number() OVER (ORDER BY s), s, n, p, 100, 1 FROM cycle_cases;
@@ -223,8 +224,8 @@ SELECT is(pg_temp.violation('SELECT 1'), '23514 contract_cycles_contiguous_check
 DELETE FROM contracts WHERE id = '00000000-0000-7000-8000-000000000c09';
 SELECT is(pg_temp.violation('SELECT 1'), 'ok', 'rascunho excluído leva os ciclos');
 SELECT is(pg_temp.violation($$
-  INSERT INTO contracts (id, caixa_id, entity_id, direction, name, category_id)
-  VALUES ('00000000-0000-7000-8000-000000000c08', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-00000000e004',
+  INSERT INTO contracts (starts_on, id, caixa_id, entity_id, direction, name, category_id)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-000000000c08', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-00000000e004',
           'payable', 'Fim de mês', '00000000-0000-7000-8000-00000000ca02');
   INSERT INTO contract_cycles (contract_id, seq, starts_on, duration_months, periodicity, total_cents, due_day) VALUES
     ('00000000-0000-7000-8000-000000000c08', 1, '2025-01-31', 1, 'monthly', 100, 31),
@@ -264,7 +265,7 @@ LANGUAGE sql AS $$
   SELECT format($f$INSERT INTO titles (id, caixa_id, direction, entity_id, category_id, description, competence_date, due_date,
                                        amount_cents, origin, contract_id, contract_cycle_id, contract_installment)
     VALUES (%L, '00000000-0000-7000-8000-0000000c0002', 'receivable', '00000000-0000-7000-8000-00000000e003',
-            '00000000-0000-7000-8000-00000000ca01', %L, %L, %L, %s, 'contract', '00000000-0000-7000-8000-000000000c01',
+            '00000000-0000-7000-8000-00000000ca01', %L, %L, %L, %s, 'manual', '00000000-0000-7000-8000-000000000c01',
             '00000000-0000-7000-8000-000000000d01', %s) %s$f$,
     ('00000000-0000-7000-8000-0000000f01' || lpad(p_n::text, 2, '0'))::uuid,
     'Suporte mensal ACME ' || p_n || '/12',
@@ -278,18 +279,13 @@ SELECT is(pg_temp.violation($$INSERT INTO titles (caixa_id, direction, entity_id
                                                   amount_cents, origin)
   VALUES ('00000000-0000-7000-8000-0000000c0002', 'receivable', '00000000-0000-7000-8000-00000000e003',
           '00000000-0000-7000-8000-00000000ca01', 'X', '2025-03-01', '2025-04-10', 100, 'contract')$$),
-  '23514 titles_contract_check', 'origin contract exige o contrato');
+  '23514 titles_origin_check', 'a origem contract saiu (0052): obrigação em série ou avulso');
 SELECT is(pg_temp.violation($$INSERT INTO titles (caixa_id, direction, entity_id, category_id, description, competence_date, due_date,
                                                   amount_cents, origin, contract_id, contract_cycle_id)
   VALUES ('00000000-0000-7000-8000-0000000c0002', 'receivable', '00000000-0000-7000-8000-00000000e003',
-          '00000000-0000-7000-8000-00000000ca01', 'X', '2025-03-01', '2025-04-10', 100, 'contract',
+          '00000000-0000-7000-8000-00000000ca01', 'X', '2025-03-01', '2025-04-10', 100, 'manual',
           '00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d01')$$),
-  '23514 titles_contract_check', 'ciclo e número da parcela andam juntos');
-SELECT is(pg_temp.violation($$INSERT INTO titles (caixa_id, direction, entity_id, category_id, description, competence_date, due_date,
-                                                  amount_cents, contract_id)
-  VALUES ('00000000-0000-7000-8000-0000000c0002', 'receivable', '00000000-0000-7000-8000-00000000e003',
-          '00000000-0000-7000-8000-00000000ca01', 'X', '2025-03-01', '2025-04-10', 100, '00000000-0000-7000-8000-000000000c01')$$),
-  '23514 titles_contract_check', 'contrato exige origin contract');
+  '23514 titles_contract_check', 'ciclo e número da parcela (legados) andam juntos');
 
 -- Ativar: status e as 12 parcelas na mesma transação (a 1ª espelhada na caixa da ACME).
 SELECT is(pg_temp.violation($$
@@ -299,11 +295,11 @@ SELECT is(pg_temp.violation($$
                       mirror_status)
   VALUES ('00000000-0000-7000-8000-0000000f0101', '00000000-0000-7000-8000-0000000c0002', 'receivable',
           '00000000-0000-7000-8000-00000000e003', '00000000-0000-7000-8000-00000000ca01', 'Suporte mensal ACME 1/12',
-          '2025-03-01', '2025-04-10', 500012, 'contract', '00000000-0000-7000-8000-000000000c01',
+          '2025-03-01', '2025-04-10', 500012, 'manual', '00000000-0000-7000-8000-000000000c01',
           '00000000-0000-7000-8000-000000000d01', 1, '00000000-0000-7000-8000-0000000c0003', '00000000-0000-7000-8000-0000000f0201', NULL),
          ('00000000-0000-7000-8000-0000000f0201', '00000000-0000-7000-8000-0000000c0003', 'payable',
           '00000000-0000-7000-8000-00000000e002', '00000000-0000-7000-8000-00000000ca02', 'Suporte mensal ACME 1/12',
-          '2025-03-01', '2025-04-10', 500012, 'contract', '00000000-0000-7000-8000-000000000c01',
+          '2025-03-01', '2025-04-10', 500012, 'manual', '00000000-0000-7000-8000-000000000c01',
           '00000000-0000-7000-8000-000000000d01', 1, '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-0000000f0101',
           'pending');
 $$), 'ok', 'ativar: vigente com a 1ª parcela espelhada');
@@ -317,14 +313,14 @@ SELECT is(pg_temp.violation(pg_temp.parcel_sql(13)), '23514 titles_contract_inst
 SELECT is(pg_temp.violation(replace(pg_temp.parcel_sql(2), '0000000f0102', '0000000f0199')),
           '23505 titles_contract_installment_key', 'uma parcela n por ciclo em cada caixa');
 SELECT is(pg_temp.violation(replace(replace(pg_temp.parcel_sql(3), '0000000f0103', '0000000f0198'),
-                                    '0000000c0002', '0000000c0001')),
-          '23514 titles_contract_caixa_check', 'lado original fica na caixa do contrato');
+                                    '0000000c0002', '0000000c0001') || '; SELECT 1/0'),
+          '22012 -', 'o título do contrato pode ficar em outra caixa (0052: a da conta da obrigação; desfeito)');
 SELECT is(pg_temp.violation($$UPDATE titles SET entity_id = '00000000-0000-7000-8000-00000000e001'
                                WHERE id = '00000000-0000-7000-8000-0000000f0105'$$),
           '23514 titles_contract_match_check', 'parcela segue a contraparte do contrato');
 SELECT is(pg_temp.violation($$UPDATE titles SET counterparty_caixa_id = '00000000-0000-7000-8000-0000000c0001'
                                WHERE id = '00000000-0000-7000-8000-0000000f0201'$$),
-          '23514 titles_contract_caixa_check', 'o espelho aponta para a caixa do contrato');
+          '23514 titles_mirror_caixa_check', 'o espelho aponta para a caixa do outro lado');
 SELECT is(pg_temp.violation($$UPDATE titles SET contract_installment = 2 WHERE id = '00000000-0000-7000-8000-0000000f0201'$$),
           '23514 titles_mirror_match_check', 'espelho com o mesmo contrato, ciclo e parcela');
 SELECT is(pg_temp.violation($$UPDATE titles SET amount_cents = 480000 WHERE id IN ('00000000-0000-7000-8000-0000000f0101',
@@ -334,8 +330,8 @@ SELECT is(pg_temp.violation($$UPDATE titles SET amount_cents = 480000 WHERE id I
 SELECT is(pg_temp.violation($$INSERT INTO titles (caixa_id, direction, entity_id, category_id, description, competence_date, due_date,
                                                   amount_cents, origin, contract_id)
   VALUES ('00000000-0000-7000-8000-0000000c0002', 'payable', '00000000-0000-7000-8000-00000000e003',
-          '00000000-0000-7000-8000-00000000ca02', 'Multa rescisória', '2025-06-01', '2025-06-10', 10000, 'contract',
-          '00000000-0000-7000-8000-000000000c01')$$), 'ok', 'título extra ligado ao contrato');
+          '00000000-0000-7000-8000-00000000ca02', 'Multa rescisória', '2025-06-01', '2025-06-10', 10000, 'manual',
+          '00000000-0000-7000-8000-000000000c01')$$), 'ok', 'título avulso ligado ao contrato (multa), em qualquer direção');
 
 SELECT is(pg_temp.violation($$UPDATE contract_cycles SET duration_months = 24 WHERE id = '00000000-0000-7000-8000-000000000d01'$$),
           '23514 contract_cycles_locked_check', 'com títulos, a duração não muda');
@@ -353,36 +349,27 @@ SELECT is(pg_temp.violation($$DELETE FROM contracts WHERE id = '00000000-0000-70
 SELECT is(pg_temp.violation($$UPDATE contracts SET name = 'Suporte ACME', notes = 'renegociado', notice_days = 45
                                WHERE id = '00000000-0000-7000-8000-000000000c01'$$), 'ok', 'descrição e avisos livres');
 
--- Renovação ------------------------------------------------------------------------------------------------------------
+-- Renovação: histórico desde a 0052 (renovar = acrescentar a vigência e estender as séries) -----------------------
 SELECT is(pg_temp.violation($$UPDATE contracts SET status = 'renewal_pending' WHERE id = '00000000-0000-7000-8000-000000000c01'$$),
-          '23514 contracts_renewal_pending_check', 'renovação pendente exige tarefa aberta');
-SELECT is(pg_temp.violation($$INSERT INTO contract_renewal_tasks (contract_id, contract_cycle_id, opened_on, due_on)
-  VALUES ('00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d01', '2025-12-30', '2026-02-28')$$),
-          '23514 contracts_renewal_pending_check', 'tarefa aberta exige contrato em renovação pendente');
-SELECT is(pg_temp.violation($$INSERT INTO contract_renewal_tasks (contract_id, contract_cycle_id, opened_on, due_on)
-  VALUES ('00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d01', '2025-12-30', '2026-03-01')$$),
+          '23514 contracts_status_transition_check', 'renewal_pending saiu (0052): nenhuma transição leva a ele');
+SELECT is(pg_temp.violation($$INSERT INTO contracts (starts_on, caixa_id, entity_id, direction, name, category_id, status)
+  VALUES ('2025-03-01', '00000000-0000-7000-8000-0000000c0002', '00000000-0000-7000-8000-00000000e003', 'receivable', 'X',
+          '00000000-0000-7000-8000-00000000ca01', 'renewal_pending')$$), '23514 contracts_status_check', 'nem como status');
+SELECT is(pg_temp.violation($$INSERT INTO contract_renewal_tasks (contract_id, contract_cycle_id, opened_on, due_on, status)
+  VALUES ('00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d01', '2025-12-30', '2026-02-28', 'open')$$),
+          '23514 contract_renewal_tasks_status_check', 'nenhuma tarefa nova abre');
+SELECT is(pg_temp.violation($$INSERT INTO contract_renewal_tasks (contract_id, contract_cycle_id, opened_on, due_on, status, decided_at)
+  VALUES ('00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d01', '2025-12-30', '2026-03-01',
+          'declined', now())$$),
           '23514 contract_renewal_tasks_due_on_check', 'due_on = fim do ciclo');
 SELECT is(pg_temp.violation($$INSERT INTO contract_renewal_tasks (contract_id, contract_cycle_id, opened_on, due_on, status, decided_at)
   VALUES ('00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d01', '2025-12-30', '2026-02-28',
           'approved', now())$$), '23514 contract_renewal_tasks_decision_check', 'aprovada exige o novo ciclo');
-SELECT is(pg_temp.violation($$
-  INSERT INTO contract_renewal_tasks (id, contract_id, contract_cycle_id, opened_on, due_on)
-  VALUES ('00000000-0000-7000-8000-000000000e01', '00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d01',
-          '2025-12-30', '2026-02-28');
-  UPDATE contracts SET status = 'renewal_pending' WHERE id = '00000000-0000-7000-8000-000000000c01'$$), 'ok',
-  'worker abre a tarefa e o contrato fica em renovação pendente');
-SELECT is(pg_temp.violation($$UPDATE contracts SET status = 'terminated', terminated_on = '2025-12-31'
-                               WHERE id = '00000000-0000-7000-8000-000000000c01'$$),
-          '23514 contracts_renewal_pending_check', 'rescindir exige fechar a tarefa aberta');
-SELECT is(pg_temp.violation($$UPDATE contract_renewal_tasks SET status = 'declined', decided_at = now()
-                               WHERE id = '00000000-0000-7000-8000-000000000e01'$$),
-          '23514 contracts_renewal_pending_check', 'recusar também tira o contrato de renovação pendente');
-SELECT is(pg_temp.violation($$UPDATE contract_renewal_tasks SET contract_cycle_id = '00000000-0000-7000-8000-000000000d01',
-                                                                   contract_id = '00000000-0000-7000-8000-000000000c01',
-                                                                   opened_on = '2025-12-31'
-                               WHERE id = '00000000-0000-7000-8000-000000000e01'$$), 'ok', 'tarefa aberta é editável');
+SELECT is(pg_temp.violation($$INSERT INTO contract_renewal_tasks (contract_id, contract_cycle_id, opened_on, due_on, status)
+  VALUES ('00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d01', '2025-12-30', '2026-02-28',
+          'closed')$$), '23514 contract_renewal_tasks_decision_check', 'fechada exige decided_at');
 
--- Aprovar: ciclo 2 (reajuste de 4,5%), tarefa aprovada e contrato de volta a vigente.
+-- Renovar (o backup traz a tarefa aprovada como histórico): o ciclo 2 e o fim da vigência estendido.
 SELECT is(pg_temp.violation($$
   INSERT INTO contract_cycles (id, contract_id, seq, starts_on, duration_months, periodicity, total_cents, due_day,
                                due_month_offset, readjustment_percent)
@@ -390,35 +377,64 @@ SELECT is(pg_temp.violation($$
           6270001, 10, 1, 4.5);
   INSERT INTO contract_cycles (id, contract_id, seq, starts_on, duration_months, periodicity, total_cents, due_day)
   VALUES ('00000000-0000-7000-8000-000000000d03', '00000000-0000-7000-8000-000000000c01', 3, '2027-03-01', 12, 'monthly', 1200, 10);
-  UPDATE contract_renewal_tasks SET status = 'approved', decided_at = now(), new_cycle_id = '00000000-0000-7000-8000-000000000d03'
-   WHERE id = '00000000-0000-7000-8000-000000000e01'$$),
+  INSERT INTO contract_renewal_tasks (id, contract_id, contract_cycle_id, opened_on, due_on, status, decided_at, new_cycle_id)
+  VALUES ('00000000-0000-7000-8000-000000000e01', '00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d01',
+          '2025-12-30', '2026-02-28', 'approved', now(), '00000000-0000-7000-8000-000000000d03')$$),
   '23514 contract_renewal_tasks_new_cycle_check', 'o novo ciclo é o seguinte (seq + 1)');
 SELECT is(pg_temp.violation($$
   INSERT INTO contract_cycles (id, contract_id, seq, starts_on, duration_months, periodicity, total_cents, due_day,
                                due_month_offset, readjustment_percent)
   VALUES ('00000000-0000-7000-8000-000000000d02', '00000000-0000-7000-8000-000000000c01', 2, '2026-03-01', 12, 'monthly',
           6270001, 10, 1, 4.5);
-  UPDATE contract_renewal_tasks SET status = 'approved', decided_at = now(), decided_by = '00000000-0000-7000-8000-0000000000a1',
-                                    new_cycle_id = '00000000-0000-7000-8000-000000000d02'
-   WHERE id = '00000000-0000-7000-8000-000000000e01';
-  UPDATE contracts SET status = 'active' WHERE id = '00000000-0000-7000-8000-000000000c01'$$), 'ok', 'renovar');
+  INSERT INTO contract_renewal_tasks (id, contract_id, contract_cycle_id, opened_on, due_on, status, decided_at, decided_by,
+                                      new_cycle_id)
+  VALUES ('00000000-0000-7000-8000-000000000e01', '00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d01',
+          '2025-12-30', '2026-02-28', 'approved', now(), '00000000-0000-7000-8000-0000000000a1',
+          '00000000-0000-7000-8000-000000000d02');
+  UPDATE contracts SET ends_on = '2027-02-28' WHERE id = '00000000-0000-7000-8000-000000000c01'$$), 'ok', 'renovar');
 SELECT is((SELECT ends_on FROM contract_cycles WHERE id = '00000000-0000-7000-8000-000000000d02'), date '2027-02-28',
-          'ciclo 2 até 28/02/2027');
+          'ciclo 2 (com os campos do ciclo de parcelas) até 28/02/2027, calculado');
 SELECT is(pg_temp.violation($$UPDATE contract_renewal_tasks SET decision_notes = 'reajuste IPCA'
                                WHERE id = '00000000-0000-7000-8000-000000000e01'$$), 'ok', 'nota da decisão editável');
 SELECT is(pg_temp.violation($$UPDATE contract_renewal_tasks SET status = 'declined', new_cycle_id = NULL
                                WHERE id = '00000000-0000-7000-8000-000000000e01'$$),
           '23514 contract_renewal_tasks_final_check', 'decidida é final');
-SELECT is(pg_temp.violation($$INSERT INTO contract_renewal_tasks (contract_id, contract_cycle_id, opened_on, due_on)
-  VALUES ('00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d01', '2026-01-01', '2026-02-28')$$),
+SELECT is(pg_temp.violation($$INSERT INTO contract_renewal_tasks (contract_id, contract_cycle_id, opened_on, due_on, status, decided_at)
+  VALUES ('00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d01', '2026-01-01', '2026-02-28',
+          'declined', now())$$),
           '23505 contract_renewal_tasks_contract_cycle_id_key', 'uma tarefa por ciclo');
+
+-- Vigência nova (0052): sem os campos do ciclo de parcelas, com o fim informado ou sem fim (só a última).
 SELECT is(pg_temp.violation($$
-  INSERT INTO contract_renewal_tasks (contract_id, contract_cycle_id, opened_on, due_on)
-  VALUES ('00000000-0000-7000-8000-000000000c01', '00000000-0000-7000-8000-000000000d02', '2026-12-30', '2027-02-28');
-  UPDATE contracts SET status = 'renewal_pending' WHERE id = '00000000-0000-7000-8000-000000000c01';
-  UPDATE contracts SET status = 'ended' WHERE id = '00000000-0000-7000-8000-000000000c01'$$),
-  '23514 contracts_renewal_pending_check', 'encerrado com tarefa aberta falha');
+  INSERT INTO contract_cycles (id, contract_id, seq, starts_on, ends_on)
+  VALUES ('00000000-0000-7000-8000-000000000d04', '00000000-0000-7000-8000-000000000c01', 3, '2027-03-01', '2028-02-29');
+  UPDATE contracts SET ends_on = '2028-02-29' WHERE id = '00000000-0000-7000-8000-000000000c01'$$), 'ok',
+  'renovar acrescenta uma vigência com o fim informado');
+SELECT is((SELECT installments_count FROM contract_cycles WHERE id = '00000000-0000-7000-8000-000000000d04'), NULL,
+          'vigência nova não tem parcelas');
+SELECT is(pg_temp.violation($$INSERT INTO contract_cycles (contract_id, seq, starts_on, duration_months)
+  VALUES ('00000000-0000-7000-8000-000000000c01', 4, '2028-03-01', 12)$$),
+  '23514 contract_cycles_legacy_check', 'os campos do ciclo de parcelas vêm todos ou nenhum');
+SELECT is(pg_temp.violation($$INSERT INTO contract_cycles (contract_id, seq, starts_on, ends_on)
+  VALUES ('00000000-0000-7000-8000-000000000c01', 4, '2028-03-01', '2028-02-01')$$),
+  '23514 contract_cycles_ends_on_check', 'fim não antes do início');
+SELECT is(pg_temp.violation($$INSERT INTO contract_cycles (contract_id, seq, starts_on) VALUES
+    ('00000000-0000-7000-8000-000000000c01', 4, '2028-03-01'), ('00000000-0000-7000-8000-000000000c01', 5, '2029-03-01')$$),
+  '23514 contract_cycles_contiguous_check', 'vigência sem fim só na última');
+SELECT is(pg_temp.violation($$INSERT INTO contract_cycles (contract_id, seq, starts_on)
+  VALUES ('00000000-0000-7000-8000-000000000c01', 4, '2028-03-01'); SELECT 1/0$$), '22012 -',
+  'renovar por prazo indeterminado (desfeito)');
+
+-- Status e vigência.
+SELECT is(pg_temp.violation($$UPDATE contracts SET ends_on = '2025-02-01' WHERE id = '00000000-0000-7000-8000-000000000c01'$$),
+          '23514 contracts_ends_on_check', 'fim da vigência não antes do início');
+SELECT is(pg_temp.violation($$UPDATE contracts SET status = 'ended', ends_on = NULL
+                               WHERE id = '00000000-0000-7000-8000-000000000c01'$$),
+          '23514 contracts_ended_term_check', 'encerrado tem fim');
 SELECT is(pg_temp.violation($$UPDATE contracts SET status = 'terminated', terminated_on = '2026-06-30'
+                               WHERE id = '00000000-0000-7000-8000-000000000c01'$$),
+          '23514 contracts_terminated_on_check', 'a rescisão é o fim da vigência');
+SELECT is(pg_temp.violation($$UPDATE contracts SET status = 'terminated', terminated_on = '2026-06-30', ends_on = '2026-06-30'
                                WHERE id = '00000000-0000-7000-8000-000000000c01';
                              UPDATE contracts SET status = 'active', terminated_on = NULL
                                WHERE id = '00000000-0000-7000-8000-000000000c01'$$),
@@ -555,8 +571,14 @@ SELECT is(pg_temp.violation($$UPDATE contract_amendments SET effective_on = '202
           '23514 contract_amendments_immutable_check', 'aditivo imutável');
 SELECT is(pg_temp.violation($$UPDATE contract_amendments SET notes = 'assinado', document_id = NULL
                                WHERE id = '00000000-0000-7000-8000-0000000ad001'$$), 'ok', 'documento e notas mudam');
-INSERT INTO contracts (id, caixa_id, entity_id, direction, name, category_id)
-VALUES ('00000000-0000-7000-8000-000000000c02', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-00000000e004',
+SELECT is(pg_temp.violation($$INSERT INTO contract_amendments (contract_id, effective_on, changes, recurrence_rule_ids)
+  VALUES ('00000000-0000-7000-8000-000000000c01', '2026-08-01', '{"before": {}, "after": {}}',
+          ARRAY['00000000-0000-7000-8000-0000000ad0ff'::uuid])$$), 'ok', 'aditivo sem ciclo, sobre as obrigações (0052)');
+SELECT is(pg_temp.violation($$INSERT INTO contract_amendments (contract_id, effective_on, changes, recurrence_rule_ids)
+  VALUES ('00000000-0000-7000-8000-000000000c01', '2026-08-01', '{"before": {}, "after": {}}', ARRAY[NULL::uuid])$$),
+  '23514 contract_amendments_rule_ids_check', 'lista de séries sem nulos');
+INSERT INTO contracts (starts_on, id, caixa_id, entity_id, direction, name, category_id)
+VALUES ('2025-03-01', '00000000-0000-7000-8000-000000000c02', '00000000-0000-7000-8000-0000000c0001', '00000000-0000-7000-8000-00000000e004',
         'payable', 'Internet', '00000000-0000-7000-8000-00000000ca02');
 SELECT is(pg_temp.violation($$INSERT INTO contract_amendments (contract_id, contract_cycle_id, effective_on, changes)
   VALUES ('00000000-0000-7000-8000-000000000c02', '00000000-0000-7000-8000-000000000d01', '2025-08-01',

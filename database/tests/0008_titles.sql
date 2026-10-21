@@ -13,10 +13,10 @@ SELECT columns_are('titles', ARRAY['id', 'caixa_id', 'direction', 'entity_id', '
                                    'competence_date', 'due_date', 'amount_cents', 'status', 'origin',
                                    'recurrence_rule_id', 'occurrence', 'counterparty_caixa_id', 'mirror_title_id',
                                    'mirror_status', 'notes', 'archived_at', 'created_at', 'updated_at',
-                                   -- 0012 (entrada de títulos), 0013 (cartão), 0032 (contratos) e 0051 (conta prevista)
+                                   -- 0012 (entrada de títulos), 0013 (cartão), 0032 (contratos), 0051 (conta prevista; a de passagem saiu na 0052)
                                    'boleto_barcode', 'pix_payload', 'nfe_document_id', 'card_invoice_id',
                                    'contract_id', 'contract_cycle_id', 'contract_installment',
-                                   'planned_account_id', 'planned_transit_account_id', 'planned_account_custom']);
+                                   'planned_account_id', 'planned_account_custom']);
 SELECT col_type_is('titles', 'amount_cents', 'bigint');
 SELECT col_type_is('titles', 'due_date', 'date');
 SELECT col_type_is('titles', 'competence_date', 'date');
@@ -114,8 +114,8 @@ SELECT throws_ok($$INSERT INTO titles (caixa_id, direction, entity_id, category_
                  '23514', NULL, 'fatura-título sem fatura nem espelho é rejeitada');
 
 -- Recorrência e parcelamento --------------------------------------------------------------------
-INSERT INTO recurrence_rules (id, frequency, anchor_day, starts_on, installments_total) VALUES
-  ('00000000-0000-7000-8000-0000000f0001', 'monthly', 10, '2026-10-10', 3);
+INSERT INTO recurrence_rules (id, caixa_id, frequency, anchor_day, starts_on, installments_total) VALUES
+  ('00000000-0000-7000-8000-0000000f0001', '00000000-0000-7000-8000-0000000c0001', 'monthly', 10, '2026-10-10', 3);
 SELECT lives_ok($$INSERT INTO titles (caixa_id, direction, entity_id, category_id, description, competence_date, due_date, amount_cents,
                                       origin, recurrence_rule_id, occurrence)
                   SELECT '00000000-0000-7000-8000-0000000c0001', 'payable', '00000000-0000-7000-8000-00000000e005',

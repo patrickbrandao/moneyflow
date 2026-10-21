@@ -30,8 +30,8 @@ import {
   cardInvoices,
   agentMcpServers,
   mcpServers,
-  cardPurchases,
   cardInvoiceItems,
+  cardPurchases,
   cardPurchaseAttachments,
   statementCsvMappings,
   classificationRules,
@@ -51,9 +51,6 @@ import {
   userApiTokens,
   aiEmbeddings,
   aiEmbeddingIndexes,
-  contractCycles,
-  contracts,
-  recurrenceRules,
   aiBudgets,
   aiUsage,
   aiModelPrices,
@@ -70,15 +67,20 @@ import {
   userAiSettings,
   aiAgentPromptVersions,
   aiAttachmentDerivatives,
+  contracts,
+  contractCycles,
   contractDocuments,
   contractDocumentVersions,
   contractAmendments,
-  contractRenewalTasks,
   aiReconcileRecipeTargets,
+  contractRenewalTasks,
+  recurrenceRules,
+  cardRecurringCharges,
   telegramUpdatesSeen,
   entityTagLinks,
   entityTags,
   aiToolKitTools,
+  cardRecurringChargeAmounts,
   aiAgentInferences,
   aiRequestAttempts,
 } from './schema';
@@ -130,9 +132,9 @@ export const usersRelations = relations(users, ({ many }) => ({
   aiAgentPromptVersions: many(aiAgentPromptVersions),
   contractDocuments: many(contractDocuments),
   contractDocumentVersions: many(contractDocumentVersions),
+  aiReconcileRecipes: many(aiReconcileRecipes),
   contractAmendments: many(contractAmendments),
   contractRenewalTasks: many(contractRenewalTasks),
-  aiReconcileRecipes: many(aiReconcileRecipes),
   aiRequests: many(aiRequests),
   contracts: many(contracts),
 }));
@@ -164,10 +166,11 @@ export const entitiesRelations = relations(entities, ({ many }) => ({
   nfeDocuments_recipientEntityId: many(nfeDocuments, {
     relationName: 'nfeDocuments_recipientEntityId_entities_id',
   }),
-  cardPurchases: many(cardPurchases),
   classificationRules: many(classificationRules),
-  titles: many(titles),
   statementLines: many(statementLines),
+  cardRecurringCharges: many(cardRecurringCharges),
+  cardPurchases: many(cardPurchases),
+  titles: many(titles),
   contracts: many(contracts),
   entityTagLinks: many(entityTagLinks),
 }));
@@ -233,24 +236,12 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
   }),
   caixaHiddenCategories: many(caixaHiddenCategories),
   cardInvoices: many(cardInvoices),
-  cardPurchases_cardCaixaId: many(cardPurchases, {
-    relationName: 'cardPurchases_cardCaixaId_caixas_id',
-  }),
-  cardPurchases_payerCaixaId: many(cardPurchases, {
-    relationName: 'cardPurchases_payerCaixaId_caixas_id',
-  }),
   cardInvoiceItems: many(cardInvoiceItems),
   statementCsvMappings: many(statementCsvMappings),
   classificationRules: many(classificationRules),
   periodClosings: many(periodClosings),
   messageSubscriptionCaixas: many(messageSubscriptionCaixas),
   aiEmbeddings: many(aiEmbeddings),
-  titles_caixaId: many(titles, {
-    relationName: 'titles_caixaId_caixas_id',
-  }),
-  titles_counterpartyCaixaId: many(titles, {
-    relationName: 'titles_counterpartyCaixaId_caixas_id',
-  }),
   messageOutboxes: many(messageOutbox),
   notifications: many(notifications),
   financialAccounts: many(financialAccounts),
@@ -260,6 +251,20 @@ export const caixasRelations = relations(caixas, ({ one, many }) => ({
   userAiSettings: many(userAiSettings),
   aiReconcileRecipes: many(aiReconcileRecipes),
   aiReconcileRecipeTargets: many(aiReconcileRecipeTargets),
+  recurrenceRules: many(recurrenceRules),
+  cardRecurringCharges: many(cardRecurringCharges),
+  cardPurchases_cardCaixaId: many(cardPurchases, {
+    relationName: 'cardPurchases_cardCaixaId_caixas_id',
+  }),
+  cardPurchases_payerCaixaId: many(cardPurchases, {
+    relationName: 'cardPurchases_payerCaixaId_caixas_id',
+  }),
+  titles_caixaId: many(titles, {
+    relationName: 'titles_caixaId_caixas_id',
+  }),
+  titles_counterpartyCaixaId: many(titles, {
+    relationName: 'titles_counterpartyCaixaId_caixas_id',
+  }),
   contracts_caixaId: many(contracts, {
     relationName: 'contracts_caixaId_caixas_id',
   }),
@@ -340,10 +345,11 @@ export const categoriesRelations = relations(categories, ({ one, many }) => ({
     relationName: 'categories_parentId_categories_id',
   }),
   movements: many(movements),
-  cardPurchases: many(cardPurchases),
   classificationRules: many(classificationRules),
-  titles: many(titles),
   statementLines: many(statementLines),
+  cardRecurringCharges: many(cardRecurringCharges),
+  cardPurchases: many(cardPurchases),
+  titles: many(titles),
   contracts: many(contracts),
 }));
 
@@ -380,12 +386,6 @@ export const financialAccountsRelations = relations(financialAccounts, ({ one, m
   movements: many(movements),
   statementCsvMappings: many(statementCsvMappings),
   classificationRules: many(classificationRules),
-  titles_plannedAccountId: many(titles, {
-    relationName: 'titles_plannedAccountId_financialAccounts_id',
-  }),
-  titles_plannedTransitAccountId: many(titles, {
-    relationName: 'titles_plannedTransitAccountId_financialAccounts_id',
-  }),
   caixa: one(caixas, {
     fields: [financialAccounts.caixaId],
     references: [caixas.id],
@@ -393,17 +393,13 @@ export const financialAccountsRelations = relations(financialAccounts, ({ one, m
   statementImports: many(statementImports),
   statementLines: many(statementLines),
   aiReconcileRecipeTargets: many(aiReconcileRecipeTargets),
-  contracts_paymentAccountId: many(contracts, {
-    relationName: 'contracts_paymentAccountId_financialAccounts_id',
-  }),
-  contracts_transitAccountId: many(contracts, {
-    relationName: 'contracts_transitAccountId_financialAccounts_id',
-  }),
+  titles: many(titles),
 }));
 
 export const titlesRelations = relations(titles, ({ one, many }) => ({
   settlements: many(settlements),
   titleAttachments: many(titleAttachments),
+  statementLines: many(statementLines),
   caixa_caixaId: one(caixas, {
     fields: [titles.caixaId],
     references: [caixas.id],
@@ -446,21 +442,14 @@ export const titlesRelations = relations(titles, ({ one, many }) => ({
     fields: [titles.nfeDocumentId],
     references: [nfeDocuments.id],
   }),
-  financialAccount_plannedAccountId: one(financialAccounts, {
+  financialAccount: one(financialAccounts, {
     fields: [titles.plannedAccountId],
     references: [financialAccounts.id],
-    relationName: 'titles_plannedAccountId_financialAccounts_id',
-  }),
-  financialAccount_plannedTransitAccountId: one(financialAccounts, {
-    fields: [titles.plannedTransitAccountId],
-    references: [financialAccounts.id],
-    relationName: 'titles_plannedTransitAccountId_financialAccounts_id',
   }),
   recurrenceRule: one(recurrenceRules, {
     fields: [titles.recurrenceRuleId],
     references: [recurrenceRules.id],
   }),
-  statementLines: many(statementLines),
 }));
 
 export const transfersRelations = relations(transfers, ({ one, many }) => ({
@@ -609,8 +598,8 @@ export const cardInvoicesRelations = relations(cardInvoices, ({ one, many }) => 
   cardInvoiceItems_carriedFromInvoiceId: many(cardInvoiceItems, {
     relationName: 'cardInvoiceItems_carriedFromInvoiceId_cardInvoices_id',
   }),
-  titles: many(titles),
   statementImports: many(statementImports),
+  titles: many(titles),
 }));
 
 export const agentMcpServersRelations = relations(agentMcpServers, ({ one }) => ({
@@ -630,37 +619,6 @@ export const mcpServersRelations = relations(mcpServers, ({ one, many }) => ({
     fields: [mcpServers.createdByUserId],
     references: [users.id],
   }),
-}));
-
-export const cardPurchasesRelations = relations(cardPurchases, ({ one, many }) => ({
-  caixa_cardCaixaId: one(caixas, {
-    fields: [cardPurchases.cardCaixaId],
-    references: [caixas.id],
-    relationName: 'cardPurchases_cardCaixaId_caixas_id',
-  }),
-  category: one(categories, {
-    fields: [cardPurchases.categoryId],
-    references: [categories.id],
-  }),
-  entity: one(entities, {
-    fields: [cardPurchases.entityId],
-    references: [entities.id],
-  }),
-  caixa_payerCaixaId: one(caixas, {
-    fields: [cardPurchases.payerCaixaId],
-    references: [caixas.id],
-    relationName: 'cardPurchases_payerCaixaId_caixas_id',
-  }),
-  cardPurchase: one(cardPurchases, {
-    fields: [cardPurchases.refundedPurchaseId],
-    references: [cardPurchases.id],
-    relationName: 'cardPurchases_refundedPurchaseId_cardPurchases_id',
-  }),
-  cardPurchases: many(cardPurchases, {
-    relationName: 'cardPurchases_refundedPurchaseId_cardPurchases_id',
-  }),
-  cardInvoiceItems: many(cardInvoiceItems),
-  cardPurchaseAttachments: many(cardPurchaseAttachments),
 }));
 
 export const cardInvoiceItemsRelations = relations(cardInvoiceItems, ({ one, many }) => ({
@@ -683,6 +641,45 @@ export const cardInvoiceItemsRelations = relations(cardInvoiceItems, ({ one, man
     references: [caixas.id],
   }),
   statementLines: many(statementLines),
+}));
+
+export const cardPurchasesRelations = relations(cardPurchases, ({ one, many }) => ({
+  cardInvoiceItems: many(cardInvoiceItems),
+  cardPurchaseAttachments: many(cardPurchaseAttachments),
+  caixa_cardCaixaId: one(caixas, {
+    fields: [cardPurchases.cardCaixaId],
+    references: [caixas.id],
+    relationName: 'cardPurchases_cardCaixaId_caixas_id',
+  }),
+  category: one(categories, {
+    fields: [cardPurchases.categoryId],
+    references: [categories.id],
+  }),
+  contract: one(contracts, {
+    fields: [cardPurchases.contractId],
+    references: [contracts.id],
+  }),
+  entity: one(entities, {
+    fields: [cardPurchases.entityId],
+    references: [entities.id],
+  }),
+  caixa_payerCaixaId: one(caixas, {
+    fields: [cardPurchases.payerCaixaId],
+    references: [caixas.id],
+    relationName: 'cardPurchases_payerCaixaId_caixas_id',
+  }),
+  recurrenceRule: one(recurrenceRules, {
+    fields: [cardPurchases.cardCaixaId],
+    references: [recurrenceRules.id],
+  }),
+  cardPurchase: one(cardPurchases, {
+    fields: [cardPurchases.refundedPurchaseId],
+    references: [cardPurchases.id],
+    relationName: 'cardPurchases_refundedPurchaseId_cardPurchases_id',
+  }),
+  cardPurchases: many(cardPurchases, {
+    relationName: 'cardPurchases_refundedPurchaseId_cardPurchases_id',
+  }),
 }));
 
 export const cardPurchaseAttachmentsRelations = relations(cardPurchaseAttachments, ({ one }) => ({
@@ -1013,62 +1010,6 @@ export const aiEmbeddingIndexesRelations = relations(aiEmbeddingIndexes, ({ one,
   }),
 }));
 
-export const contractCyclesRelations = relations(contractCycles, ({ one, many }) => ({
-  titles: many(titles),
-  contract: one(contracts, {
-    fields: [contractCycles.contractId],
-    references: [contracts.id],
-  }),
-  contractAmendments: many(contractAmendments),
-  contractRenewalTasks_contractId: many(contractRenewalTasks, {
-    relationName: 'contractRenewalTasks_contractId_contractCycles_id',
-  }),
-}));
-
-export const contractsRelations = relations(contracts, ({ one, many }) => ({
-  titles: many(titles),
-  contractCycles: many(contractCycles),
-  contractDocuments: many(contractDocuments),
-  contractAmendments: many(contractAmendments),
-  contractRenewalTasks: many(contractRenewalTasks),
-  caixa_caixaId: one(caixas, {
-    fields: [contracts.caixaId],
-    references: [caixas.id],
-    relationName: 'contracts_caixaId_caixas_id',
-  }),
-  category: one(categories, {
-    fields: [contracts.categoryId],
-    references: [categories.id],
-  }),
-  caixa_counterpartyCaixaId: one(caixas, {
-    fields: [contracts.counterpartyCaixaId],
-    references: [caixas.id],
-    relationName: 'contracts_counterpartyCaixaId_caixas_id',
-  }),
-  user: one(users, {
-    fields: [contracts.createdBy],
-    references: [users.id],
-  }),
-  entity: one(entities, {
-    fields: [contracts.entityId],
-    references: [entities.id],
-  }),
-  financialAccount_paymentAccountId: one(financialAccounts, {
-    fields: [contracts.paymentAccountId],
-    references: [financialAccounts.id],
-    relationName: 'contracts_paymentAccountId_financialAccounts_id',
-  }),
-  financialAccount_transitAccountId: one(financialAccounts, {
-    fields: [contracts.transitAccountId],
-    references: [financialAccounts.id],
-    relationName: 'contracts_transitAccountId_financialAccounts_id',
-  }),
-}));
-
-export const recurrenceRulesRelations = relations(recurrenceRules, ({ many }) => ({
-  titles: many(titles),
-}));
-
 export const aiBudgetsRelations = relations(aiBudgets, ({ one }) => ({
   aiAgent: one(aiAgents, {
     fields: [aiBudgets.agentId],
@@ -1244,8 +1185,8 @@ export const statementImportsRelations = relations(statementImports, ({ one, man
   statementImports: many(statementImports, {
     relationName: 'statementImports_supersededByImportId_statementImports_id',
   }),
-  aiReconcileRecipeRuns: many(aiReconcileRecipeRuns),
   statementLines: many(statementLines),
+  aiReconcileRecipeRuns: many(aiReconcileRecipeRuns),
 }));
 
 export const telegramPairingCodesRelations = relations(telegramPairingCodes, ({ one }) => ({
@@ -1370,6 +1311,50 @@ export const aiAttachmentDerivativesRelations = relations(aiAttachmentDerivative
   }),
 }));
 
+export const contractCyclesRelations = relations(contractCycles, ({ one, many }) => ({
+  contract: one(contracts, {
+    fields: [contractCycles.contractId],
+    references: [contracts.id],
+  }),
+  contractAmendments: many(contractAmendments),
+  contractRenewalTasks_contractId: many(contractRenewalTasks, {
+    relationName: 'contractRenewalTasks_contractId_contractCycles_id',
+  }),
+  titles: many(titles),
+}));
+
+export const contractsRelations = relations(contracts, ({ one, many }) => ({
+  contractCycles: many(contractCycles),
+  contractDocuments: many(contractDocuments),
+  contractAmendments: many(contractAmendments),
+  contractRenewalTasks: many(contractRenewalTasks),
+  recurrenceRules: many(recurrenceRules),
+  cardPurchases: many(cardPurchases),
+  titles: many(titles),
+  caixa_caixaId: one(caixas, {
+    fields: [contracts.caixaId],
+    references: [caixas.id],
+    relationName: 'contracts_caixaId_caixas_id',
+  }),
+  category: one(categories, {
+    fields: [contracts.categoryId],
+    references: [categories.id],
+  }),
+  caixa_counterpartyCaixaId: one(caixas, {
+    fields: [contracts.counterpartyCaixaId],
+    references: [caixas.id],
+    relationName: 'contracts_counterpartyCaixaId_caixas_id',
+  }),
+  user: one(users, {
+    fields: [contracts.createdBy],
+    references: [users.id],
+  }),
+  entity: one(entities, {
+    fields: [contracts.entityId],
+    references: [entities.id],
+  }),
+}));
+
 export const contractDocumentsRelations = relations(contractDocuments, ({ one, many }) => ({
   attachment: one(attachments, {
     fields: [contractDocuments.attachmentId],
@@ -1448,6 +1433,21 @@ export const contractAmendmentsRelations = relations(contractAmendments, ({ one 
   }),
 }));
 
+export const aiReconcileRecipeTargetsRelations = relations(aiReconcileRecipeTargets, ({ one }) => ({
+  caixa: one(caixas, {
+    fields: [aiReconcileRecipeTargets.cardCaixaId],
+    references: [caixas.id],
+  }),
+  financialAccount: one(financialAccounts, {
+    fields: [aiReconcileRecipeTargets.financialAccountId],
+    references: [financialAccounts.id],
+  }),
+  aiReconcileRecipe: one(aiReconcileRecipes, {
+    fields: [aiReconcileRecipeTargets.recipeId],
+    references: [aiReconcileRecipes.id],
+  }),
+}));
+
 export const contractRenewalTasksRelations = relations(contractRenewalTasks, ({ one }) => ({
   contractCycle_contractId: one(contractCycles, {
     fields: [contractRenewalTasks.contractId],
@@ -1464,19 +1464,38 @@ export const contractRenewalTasksRelations = relations(contractRenewalTasks, ({ 
   }),
 }));
 
-export const aiReconcileRecipeTargetsRelations = relations(aiReconcileRecipeTargets, ({ one }) => ({
+export const recurrenceRulesRelations = relations(recurrenceRules, ({ one, many }) => ({
   caixa: one(caixas, {
-    fields: [aiReconcileRecipeTargets.cardCaixaId],
+    fields: [recurrenceRules.caixaId],
     references: [caixas.id],
   }),
-  financialAccount: one(financialAccounts, {
-    fields: [aiReconcileRecipeTargets.financialAccountId],
-    references: [financialAccounts.id],
+  contract: one(contracts, {
+    fields: [recurrenceRules.contractId],
+    references: [contracts.id],
   }),
-  aiReconcileRecipe: one(aiReconcileRecipes, {
-    fields: [aiReconcileRecipeTargets.recipeId],
-    references: [aiReconcileRecipes.id],
+  cardRecurringCharges: many(cardRecurringCharges),
+  cardPurchases: many(cardPurchases),
+  titles: many(titles),
+}));
+
+export const cardRecurringChargesRelations = relations(cardRecurringCharges, ({ one, many }) => ({
+  category: one(categories, {
+    fields: [cardRecurringCharges.categoryId],
+    references: [categories.id],
   }),
+  entity: one(entities, {
+    fields: [cardRecurringCharges.entityId],
+    references: [entities.id],
+  }),
+  caixa: one(caixas, {
+    fields: [cardRecurringCharges.payerCaixaId],
+    references: [caixas.id],
+  }),
+  recurrenceRule: one(recurrenceRules, {
+    fields: [cardRecurringCharges.recurrenceRuleId],
+    references: [recurrenceRules.id],
+  }),
+  cardRecurringChargeAmounts: many(cardRecurringChargeAmounts),
 }));
 
 export const telegramUpdatesSeenRelations = relations(telegramUpdatesSeen, ({ one }) => ({
@@ -1505,6 +1524,13 @@ export const aiToolKitToolsRelations = relations(aiToolKitTools, ({ one }) => ({
   aiToolKit: one(aiToolKits, {
     fields: [aiToolKitTools.kitId],
     references: [aiToolKits.id],
+  }),
+}));
+
+export const cardRecurringChargeAmountsRelations = relations(cardRecurringChargeAmounts, ({ one }) => ({
+  cardRecurringCharge: one(cardRecurringCharges, {
+    fields: [cardRecurringChargeAmounts.recurrenceRuleId],
+    references: [cardRecurringCharges.recurrenceRuleId],
   }),
 }));
 

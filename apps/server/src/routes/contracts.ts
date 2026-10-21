@@ -1,9 +1,9 @@
 import {
   contractAmendmentInput,
   contractCreateInput,
-  contractDeclineInput,
   contractDocumentUpdateInput,
   contractDocumentUploadQuery,
+  contractLinkSeriesInput,
   contractListQuery,
   contractMarkdownCreateInput,
   contractPanelQuery,
@@ -14,6 +14,7 @@ import {
   contractUpdateInput,
   contractVersionCreateInput,
   dryRunQuery,
+  obligationInput,
 } from '@moneyflow/shared';
 import type { FastifyInstance } from 'fastify';
 import { param, parse, type Req } from '../http';
@@ -21,7 +22,7 @@ import * as documents from '../services/contract-documents';
 import * as contracts from '../services/contracts';
 import { UPLOAD_BODY_LIMIT } from './attachments';
 
-/* Contratos (spec 020): cadastro, ciclo de vida, documentos e leitura por IA. */
+/* Contratos (specs 020 e 034): cadastro, obrigações, ciclo de vida, documentos e leitura por IA. */
 export async function contractRoutes(app: FastifyInstance) {
   const id = (r: Req) => param(r, 'id');
   const dryRun = (r: Req) => parse(dryRunQuery, r.query).dryRun;
@@ -35,7 +36,7 @@ export async function contractRoutes(app: FastifyInstance) {
     documents.readContractWithAi(r.ctx, parse(contractReadingQuery, r.query), { content: r.body as Buffer }),
   );
   app.get('/api/contracts/:id', (r: Req) => contracts.getContract(r.ctx, id(r)));
-  // Pagamentos das parcelas (spec 033): baixas repartidas, dias de atraso/adiantamento e o resumo.
+  // Pagamentos das obrigações (specs 033 e 034): baixas repartidas, cobranças no cartão, dias de atraso/adiantamento e o resumo.
   app.get('/api/contracts/:id/payments', (r: Req) =>
     contracts.contractPayments(r.ctx, id(r), parse(contractPaymentsQuery, r.query).cycleId),
   );
@@ -43,6 +44,10 @@ export async function contractRoutes(app: FastifyInstance) {
   app.delete('/api/contracts/:id', (r: Req) => contracts.deleteContract(r.ctx, id(r)));
   app.post('/api/contracts/:id/restore', (r: Req) => contracts.restoreContract(r.ctx, id(r)));
   app.post('/api/contracts/:id/activate', (r: Req) => contracts.activateContract(r.ctx, id(r)));
+  app.post('/api/contracts/:id/obligations', (r: Req) => contracts.addObligation(r.ctx, id(r), parse(obligationInput, r.body)));
+  app.post('/api/contracts/:id/obligations/link', (r: Req) =>
+    contracts.linkObligation(r.ctx, id(r), parse(contractLinkSeriesInput, r.body).ruleId),
+  );
   app.post('/api/contracts/:id/amendments', (r: Req) =>
     contracts.amendContract(r.ctx, id(r), parse(contractAmendmentInput, r.body), dryRun(r)),
   );
@@ -50,7 +55,6 @@ export async function contractRoutes(app: FastifyInstance) {
     contracts.terminateContract(r.ctx, id(r), parse(contractTerminationInput, r.body), dryRun(r)),
   );
   app.post('/api/contracts/:id/renew', (r: Req) => contracts.renewContract(r.ctx, id(r), parse(contractRenewalInput, r.body), dryRun(r)));
-  app.post('/api/contracts/:id/decline-renewal', (r: Req) => contracts.declineRenewal(r.ctx, id(r), parse(contractDeclineInput, r.body)));
 
   // Documentos.
   app.post('/api/contracts/:id/documents', raw, (r: Req) =>

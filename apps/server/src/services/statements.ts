@@ -3,29 +3,35 @@ import { attachments, type Executor, statementCsvMappings, statementImports, sta
 import {
   addDays,
   applyCsvMapping,
-  type ContractCandidateInfo,
+  type CardChargeSuggestion,
   type CsvMapping,
-  contractMatch,
+  cardChargeMatch,
   decodeStatementFile,
   detectDelimiter,
   type importBankBalanceInput,
+  importLink,
   type importRenameInput,
   type LineStatus,
   type MatchCandidate,
   normalizeDescriptionForDedup,
+  type ObligationMatch,
   type OfxInspectStatement,
   type OfxStatement,
   type OfxTargetAccount,
+  type obligationMatchQuery,
   parseCsv,
   parseOfxStatements,
   pickMatch,
   pickOfxStatement,
-  reconciliationLink,
+  pickSeriesOccurrences,
+  type SeriesCandidateInfo,
   type StatementImportDetail,
   type StatementImportSummary,
   type StatementInspect,
   type StatementLineRow,
   type SupersedeResult,
+  scoreCandidate,
+  seriesMatch,
   splitSettlement,
   type statementImportQuery,
   t,
@@ -36,9 +42,11 @@ import type { ServiceContext } from '../context';
 import { AppError, notFound, unprocessable } from '../errors';
 import { cleanFileName, storeAttachment } from './attachments';
 import { getAccount } from './caixas';
+import { expectedCardOccurrences, insertChargePurchase, toSuggestion } from './card-charges';
 import { loadCard } from './card-core';
-import { settleFromLine, termsOfRow } from './line-settle';
+import { settleFromLine } from './line-settle';
 import { createNotifications } from './notifications';
+import { TERMS_SQL, termsOf } from './series-core';
 import { activeProvisionals, lockImports, previewSupersedeForFile, supersedeInTx } from './statement-supersede';
 import { withTx } from './tx';
 import { camel, iso } from './util';
@@ -511,19 +519,15 @@ type LineRow = {
 };
 
 /**
- * Candidatos de uma linha: movimentos da conta, títulos em aberto da caixa,
- * itens da fatura do cartão e, numa conta, as parcelas de contrato pela regra
- * do contrato (spec 033). `canRead` filtra as parcelas de outras caixas
- * achadas pela conta prevista (sem ele, só as da caixa da conta).
+ * Candidatos de uma linha: movimentos da conta, títulos em aberto da caixa
+ * (valor exato, ±3 dias), as ocorrências de séries pela regra de
+ * reconhecimento da série (specs 033 e 034) e, na fatura do cartão, os itens
+ * e as cobranças esperadas das obrigações no cartão.
  */
-export async function candidatesFor(
-  tx: Executor,
-  line: LineRow,
-  windowDays = 3,
-  canRead?: (caixaId: string) => boolean,
-): Promise<MatchCandidate[]> {
+export async function candidatesFor(tx: Executor, line: LineRow, windowDays = 3): Promise<MatchCandidate[]> {
   const from = addDays(line.posted_on, -windowDays);
   const to = addDays(line.posted_on, windowDays);
+  const matchLine = { postedOn: line.posted_on, amountCents: Number(line.amount_cents), description: line.description };
   if (line.card_caixa_id) {
     const items = await tx.execute<{ id: string; date: string; amount_cents: number; description: string; entity_name: string | null }>(sql`
       SELECT i.id, p.purchased_on AS date, -i.amount_cents AS amount_cents, p.description, e.name AS entity_name
@@ -535,14 +539,19 @@ export async function candidatesFor(
          AND -i.amount_cents = ${line.amount_cents}
          AND p.purchased_on BETWEEN ${from}::date AND ${to}::date
          AND NOT EXISTS (SELECT 1 FROM statement_lines sl WHERE sl.card_invoice_item_id = i.id AND sl.status = 'matched')`);
-    return items.rows.map((r) => ({
-      kind: 'card_item' as const,
-      id: r.id,
-      date: r.date,
-      amountCents: Number(r.amount_cents),
-      description: r.description,
-      entityName: r.entity_name,
-    }));
+    // Cobranças esperadas (spec 034): pré-filtro largo, a janela vai a 45 dias e o mesmo mês soma até 31.
+    const charges = await expectedCardOccurrences(tx, line.card_caixa_id, addDays(line.posted_on, -76), addDays(line.posted_on, 76));
+    return [
+      ...items.rows.map((r) => ({
+        kind: 'card_item' as const,
+        id: r.id,
+        date: r.date,
+        amountCents: Number(r.amount_cents),
+        description: r.description,
+        entityName: r.entity_name,
+      })),
+      ...charges.map((c) => cardChargeMatch(matchLine, c)).filter((c): c is MatchCandidate => c !== null),
+    ];
   }
   const [moves, open] = await Promise.all([
     tx.execute<{ id: string; date: string; amount_cents: number; description: string | null; entity_name: string | null }>(sql`
@@ -567,9 +576,9 @@ export async function candidatesFor(
          AND t.direction = ${line.amount_cents < 0 ? 'payable' : 'receivable'}
          AND t.due_date BETWEEN ${from}::date AND ${to}::date`),
   ]);
-  const installments = await contractCandidates(tx, line, canRead);
+  const occurrences = await seriesCandidates(tx, line);
   return [
-    ...installments,
+    ...occurrences,
     ...moves.rows.map((r) => ({
       kind: 'movement' as const,
       id: r.id,
@@ -590,51 +599,30 @@ export async function candidatesFor(
 }
 
 /**
- * Parcelas de contrato em aberto (ou parciais) na direção da linha, da caixa
- * da conta ou com a conta prevista = a conta da linha, que batem pela regra do
- * contrato (contractMatch: o mesmo mês ou a janela; exato, encargos, desconto,
- * tolerância ou parcial).
+ * Ocorrências em aberto (ou parciais) de séries na direção da linha, da caixa
+ * da conta e com a conta prevista igual à da linha (ou sem conta), que batem
+ * pela regra da série (seriesMatch: o mesmo mês ou a janela; exato, encargos,
+ * desconto, tolerância ou parcial).
  */
-async function contractCandidates(tx: Executor, line: LineRow, canRead?: (caixaId: string) => boolean): Promise<MatchCandidate[]> {
+async function seriesCandidates(tx: Executor, line: LineRow, entityId?: string): Promise<MatchCandidate[]> {
   if (!line.financial_account_id) return [];
   // Pré-filtro largo: a janela vai a 45 dias e o mesmo mês soma até 31.
   const from = addDays(line.posted_on, -76);
   const to = addDays(line.posted_on, 76);
-  const result = await tx.execute<{
-    id: string;
-    caixa_id: string;
-    account_caixa_id: string;
-    due_date: string;
-    amount_cents: string | number;
-    open_cents: string | number;
-    description: string;
-    entity_name: string;
-    contract_id: string;
-    contract_name: string;
-    contract_installment: number | null;
-    installments_count: number | null;
-    planned_account_id: string | null;
-    auto_settle: boolean;
-    late_fee_percent: string | null;
-    interest_month_percent: string | null;
-    early_discount_percent: string | null;
-    tolerance_cents: string | number;
-    match_window_days: number;
-  }>(sql`
-    SELECT t.id, t.caixa_id, a.caixa_id AS account_caixa_id, t.due_date, t.amount_cents, b.open_cents, t.description,
-           e.name AS entity_name, t.contract_id, c.name AS contract_name, t.contract_installment, y.installments_count,
-           t.planned_account_id, c.auto_settle, c.late_fee_percent, c.interest_month_percent, c.early_discount_percent,
-           c.tolerance_cents, c.match_window_days
+  const result = await tx.execute(sql`
+    SELECT t.id, t.due_date, t.amount_cents, b.open_cents, t.description, e.name AS entity_name, t.recurrence_rule_id AS rule_id,
+           t.occurrence, r.installments_total, t.contract_id, c.name AS contract_name, t.planned_account_id, ${TERMS_SQL}
       FROM titles t
-      JOIN contracts c ON c.id = t.contract_id
+      JOIN recurrence_rules r ON r.id = t.recurrence_rule_id
       JOIN title_balances b ON b.title_id = t.id
       JOIN entities e ON e.id = t.entity_id
-      LEFT JOIN contract_cycles y ON y.id = t.contract_cycle_id
+      LEFT JOIN contracts c ON c.id = t.contract_id
       JOIN financial_accounts a ON a.id = ${line.financial_account_id}::uuid
-     WHERE (t.caixa_id = a.caixa_id OR (t.planned_account_id = a.id AND t.planned_transit_account_id IS NOT NULL))
+     WHERE t.caixa_id = a.caixa_id AND (t.planned_account_id IS NULL OR t.planned_account_id = a.id)
        AND t.status IN ('open', 'partial') AND t.archived_at IS NULL AND b.open_cents > 0
        AND t.direction = ${line.amount_cents < 0 ? 'payable' : 'receivable'}
-       AND t.due_date BETWEEN ${from}::date AND ${to}::date`);
+       AND t.due_date BETWEEN ${from}::date AND ${to}::date
+       ${entityId ? sql`AND t.entity_id = ${entityId}` : sql``}`);
   const matchLine = {
     postedOn: line.posted_on,
     amountCents: Number(line.amount_cents),
@@ -642,32 +630,71 @@ async function contractCandidates(tx: Executor, line: LineRow, canRead?: (caixaI
     accountId: line.financial_account_id,
   };
   return result.rows
-    .filter((r) => r.caixa_id === r.account_caixa_id || (canRead?.(r.caixa_id) ?? false))
-    .map((r) =>
-      contractMatch(matchLine, {
-        titleId: r.id,
-        contractId: r.contract_id,
-        contractName: r.contract_name,
-        installment: r.contract_installment,
-        installmentsCount: r.installments_count,
-        description: r.description,
-        entityName: r.entity_name,
-        dueDate: r.due_date,
-        amountCents: Number(r.amount_cents),
-        openCents: Number(r.open_cents),
-        plannedAccountId: r.planned_account_id,
-        autoSettle: r.auto_settle,
-        terms: termsOfRow(r),
-      }),
-    )
+    .map((raw) => {
+      const r = camel<Record<string, unknown>>(raw);
+      return seriesMatch(matchLine, {
+        titleId: String(r.id),
+        ruleId: String(r.ruleId),
+        contractId: (r.contractId as string | null) ?? null,
+        contractName: (r.contractName as string | null) ?? null,
+        occurrence: r.occurrence === null ? null : Number(r.occurrence),
+        occurrencesTotal: r.installmentsTotal === null ? null : Number(r.installmentsTotal),
+        description: String(r.description),
+        entityName: (r.entityName as string | null) ?? null,
+        dueDate: String(r.dueDate),
+        amountCents: Number(r.amountCents),
+        openCents: Number(r.openCents),
+        plannedAccountId: (r.plannedAccountId as string | null) ?? null,
+        terms: termsOf(raw as Parameters<typeof termsOf>[0]),
+      });
+    })
     .filter((c): c is MatchCandidate => c !== null);
 }
 
 /**
+ * "É o pagamento de…?" (spec 034): as ocorrências em aberto das séries da
+ * conta (no cofre, o lançamento manual é o fato) que a regra de reconhecimento
+ * aceita para um lançamento avulso na data e no valor, uma por série, da mais
+ * provável à menos.
+ */
+export async function obligationMatches(
+  ctx: ServiceContext,
+  accountId: string,
+  query: z.output<typeof obligationMatchQuery>,
+): Promise<ObligationMatch[]> {
+  const account = await getAccount(ctx, accountId);
+  const line: LineRow = {
+    id: '',
+    posted_on: query.occurredOn,
+    amount_cents: query.amountCents,
+    description: '',
+    financial_account_id: account.id,
+    card_caixa_id: null,
+  };
+  const matchLine = { postedOn: query.occurredOn, amountCents: query.amountCents, description: '' };
+  const candidates = pickSeriesOccurrences(matchLine, await seriesCandidates(ctx.db, line, query.entityId));
+  return candidates
+    .map((c) => ({ c, score: scoreCandidate(matchLine, c) ?? 0 }))
+    .sort((a, b) => b.score - a.score)
+    .map(({ c }) => ({
+      titleId: c.id,
+      ruleId: c.series!.ruleId,
+      description: c.description,
+      occurrence: c.series!.occurrence,
+      dueDate: c.series!.dueDate,
+      openCents: c.series!.split.amountCents,
+      contractId: c.series!.contractId,
+      contractName: c.series!.contractName,
+      split: c.series!.split,
+    }));
+}
+
+/**
  * Casa as linhas novas do lote: conciliada (um movimento/item claro) ou
- * sugerida (confirmação em lote). Parcela de contrato com "baixar sem
- * confirmação" (spec 033) vira conciliada com a baixa já feita (auto_settled),
- * e o sino avisa uma vez por lote quantas foram baixadas.
+ * sugerida (confirmação em lote). Ocorrência de série com "baixar sem
+ * confirmação" vira conciliada com a baixa já feita (auto_settled); na
+ * fatura, a cobrança esperada com valor exato vira a compra ligada. O sino
+ * avisa uma vez por lote quantas foram baixadas.
  */
 export async function autoMatch(ctx: ServiceContext, tx: Tx, importId: string) {
   const lines = await tx.execute<LineRow>(sql`
@@ -682,9 +709,8 @@ export async function autoMatch(ctx: ServiceContext, tx: Tx, importId: string) {
   let matched = 0;
   let suggested = 0;
   let autoSettled = 0;
-  const canRead = (caixaId: string) => ctx.access.canRead(caixaId);
   for (const line of lines.rows) {
-    const candidates = await candidatesFor(tx, line, 3, canRead);
+    const candidates = await candidatesFor(tx, line, 3);
     const pick = pickMatch(
       { postedOn: line.posted_on, amountCents: Number(line.amount_cents), description: line.description },
       candidates,
@@ -692,11 +718,13 @@ export async function autoMatch(ctx: ServiceContext, tx: Tx, importId: string) {
     );
     if (!pick) continue;
     used.add(pick.candidate.id);
-    if (pick.autoSettle && (await autoSettleLine(ctx, tx, line, pick.candidate.id))) {
+    if (pick.autoSettle && (await autoSettleLine(ctx, tx, line, pick.candidate))) {
       autoSettled += 1;
       matched += 1;
       continue;
     }
+    // A cobrança esperada não tem lançamento para sugerir: a tela mostra "Lançar como cobrança de…".
+    if (pick.candidate.kind === 'card_charge') continue;
     const link =
       pick.candidate.kind === 'movement'
         ? sql`movement_id = ${pick.candidate.id}::uuid`
@@ -716,17 +744,36 @@ export async function autoMatch(ctx: ServiceContext, tx: Tx, importId: string) {
 }
 
 /**
- * A baixa sem confirmação de uma linha (spec 033), num savepoint: se o
- * usuário não escreve na caixa da parcela (ou a baixa falha), a linha fica
- * como sugestão.
+ * A baixa sem confirmação de uma linha, num savepoint: na conta, a baixa
+ * repartida da ocorrência; na fatura, a compra ligada à cobrança esperada. Se
+ * o usuário não escreve na caixa (ou o lançamento falha), a linha fica como
+ * sugestão.
  */
-async function autoSettleLine(ctx: ServiceContext, tx: Tx, line: LineRow, titleId: string): Promise<boolean> {
-  const caixa = await tx.execute<{ caixa_id: string }>(
-    sql`SELECT caixa_id FROM financial_accounts WHERE id = ${line.financial_account_id}::uuid`,
-  );
-  const caixaId = caixa.rows[0]?.caixa_id;
-  if (!caixaId) return false;
+async function autoSettleLine(ctx: ServiceContext, tx: Tx, line: LineRow, candidate: MatchCandidate): Promise<boolean> {
   try {
+    if (candidate.kind === 'card_charge' && line.card_caixa_id && candidate.series) {
+      await tx.transaction(async (sp) => {
+        const created = await insertChargePurchase(ctx, sp, {
+          cardCaixaId: line.card_caixa_id!,
+          ruleId: candidate.series!.ruleId,
+          occurrence: candidate.series!.occurrence!,
+          purchasedOn: line.posted_on,
+          amountCents: Math.abs(Number(line.amount_cents)),
+        });
+        await sp.execute(sql`
+          UPDATE statement_lines SET status = 'matched', matched_at = now(), card_invoice_item_id = ${created.itemId}::uuid,
+                 created_entry = 'purchase', auto_settled = true
+           WHERE id = ${line.id}`);
+        await sp.execute(sql`SET CONSTRAINTS ALL IMMEDIATE`);
+        await sp.execute(sql`SET CONSTRAINTS ALL DEFERRED`);
+      });
+      return true;
+    }
+    const caixa = await tx.execute<{ caixa_id: string }>(
+      sql`SELECT caixa_id FROM financial_accounts WHERE id = ${line.financial_account_id}::uuid`,
+    );
+    const caixaId = caixa.rows[0]?.caixa_id;
+    if (!caixaId) return false;
     await tx.transaction(async (sp) => {
       const settled = await settleFromLine(
         ctx,
@@ -738,7 +785,7 @@ async function autoSettleLine(ctx: ServiceContext, tx: Tx, line: LineRow, titleI
           postedOn: line.posted_on,
           amountCents: Number(line.amount_cents),
         },
-        titleId,
+        candidate.id,
       );
       await sp.execute(sql`
         UPDATE statement_lines SET status = 'matched', matched_at = now(), movement_id = ${settled.movementId}::uuid,
@@ -753,10 +800,46 @@ async function autoSettleLine(ctx: ServiceContext, tx: Tx, line: LineRow, titleI
   }
 }
 
+/**
+ * Sugestões "Lançar como cobrança de <obrigação> de <mês>" das linhas novas da
+ * fatura (spec 034): cada linha com a cobrança esperada que a regra casa, sem
+ * repetir a mesma ocorrência em duas linhas.
+ */
+export async function cardChargeSuggestions(
+  db: Executor,
+  cardCaixaId: string,
+  lines: Pick<StatementLineRow, 'id' | 'postedOn' | 'amountCents' | 'description' | 'status'>[],
+): Promise<Map<string, CardChargeSuggestion>> {
+  const pending = lines.filter((l) => l.status === 'new' && l.amountCents < 0);
+  const out = new Map<string, CardChargeSuggestion>();
+  if (pending.length === 0) return out;
+  const dates = pending.map((l) => l.postedOn).sort();
+  const expected = await expectedCardOccurrences(db, cardCaixaId, addDays(dates[0]!, -76), addDays(dates.at(-1)!, 76));
+  if (expected.length === 0) return out;
+  const byId = new Map(expected.map((e) => [`${e.ruleId}:${e.occurrence}`, e]));
+  const used = new Set<string>();
+  for (const line of pending) {
+    const candidates = expected.map((e) => cardChargeMatch(line, e)).filter((c): c is MatchCandidate => c !== null);
+    const pick = pickMatch(line, candidates, used);
+    if (!pick) continue;
+    used.add(pick.candidate.id);
+    out.set(line.id, toSuggestion(byId.get(pick.candidate.id)!));
+  }
+  return out;
+}
+
 async function notifyAutoSettled(ctx: ServiceContext, tx: Tx, importId: string, count: number) {
-  const result = await tx.execute<{ caixa_id: string; financial_account_id: string; name: string }>(sql`
-    SELECT a.caixa_id, i.financial_account_id, a.name FROM statement_imports i
-      JOIN financial_accounts a ON a.id = i.financial_account_id WHERE i.id = ${importId}`);
+  const result = await tx.execute<{
+    caixa_id: string;
+    financial_account_id: string | null;
+    card_caixa_id: string | null;
+    name: string;
+  }>(sql`
+    SELECT coalesce(a.caixa_id, i.card_caixa_id) AS caixa_id, i.financial_account_id, i.card_caixa_id, coalesce(a.name, k.name) AS name
+      FROM statement_imports i
+      LEFT JOIN financial_accounts a ON a.id = i.financial_account_id
+      LEFT JOIN caixas k ON k.id = i.card_caixa_id
+     WHERE i.id = ${importId}`);
   const imp = result.rows[0];
   if (!imp) return;
   await createNotifications(tx, [
@@ -765,7 +848,12 @@ async function notifyAutoSettled(ctx: ServiceContext, tx: Tx, importId: string, 
       kind: 'system',
       title: t.statements.autoSettledTitle(count),
       body: t.statements.autoSettledBody(imp.name),
-      link: reconciliationLink(imp.caixa_id, imp.financial_account_id, importId),
+      link: importLink({
+        id: importId,
+        caixaId: imp.caixa_id,
+        financialAccountId: imp.financial_account_id,
+        cardCaixaId: imp.card_caixa_id,
+      }),
       caixaId: imp.caixa_id,
       data: { importId, count },
       dedupKey: `auto_settled:${importId}`,
@@ -839,6 +927,14 @@ export async function getImport(ctx: ServiceContext, id: string, withLines = tru
   const summary = toImport(raw);
   ctx.access.assertRead(summary.caixaId);
   const lines = withLines ? await listLines(ctx.db, sql`l.statement_import_id = ${id}`) : [];
+  // Fatura do cartão (spec 034): as linhas novas que são a cobrança esperada de uma obrigação.
+  if (summary.cardCaixaId && lines.length > 0 && !summary.supersededBy) {
+    const charges = await cardChargeSuggestions(ctx.db, summary.cardCaixaId, lines);
+    for (const line of lines) {
+      const charge = charges.get(line.id);
+      if (charge) line.cardCharge = charge;
+    }
+  }
   return { ...summary, canWrite: ctx.access.canWrite(summary.caixaId), lines };
 }
 
@@ -905,13 +1001,13 @@ export async function listLines(
                'description', coalesce(m.description, mt.description, ''), 'amountCents', m.amount_cents, 'entityName', me.name)
              WHEN l.title_id IS NOT NULL THEN json_build_object('kind', 'title', 'date', t.due_date, 'description', t.description,
                'amountCents', CASE t.direction WHEN 'payable' THEN -tb.open_cents ELSE tb.open_cents END, 'entityName', te.name,
-               -- Parcela de contrato (spec 033): o que a repartição precisa.
-               'contractRef', CASE WHEN ct.id IS NOT NULL THEN json_build_object('contractId', ct.id, 'contractName', ct.name,
-                 'installment', t.contract_installment, 'installmentsCount', ty.installments_count, 'dueDate', t.due_date,
+               -- Ocorrência de série (specs 033 e 034): o que a repartição precisa.
+               'seriesRef', CASE WHEN sr.id IS NOT NULL THEN json_build_object('ruleId', sr.id, 'contractId', ct.id, 'contractName', ct.name,
+                 'occurrence', t.occurrence, 'occurrencesTotal', sr.installments_total, 'dueDate', t.due_date,
                  'amountCents', t.amount_cents, 'openCents', tb.open_cents, 'plannedAccountId', t.planned_account_id,
-                 'autoSettle', ct.auto_settle, 'late_fee_percent', ct.late_fee_percent,
-                 'interest_month_percent', ct.interest_month_percent, 'early_discount_percent', ct.early_discount_percent,
-                 'tolerance_cents', ct.tolerance_cents, 'match_window_days', ct.match_window_days) END)
+                 'auto_settle', sr.auto_settle, 'late_fee_percent', sr.late_fee_percent,
+                 'interest_month_percent', sr.interest_month_percent, 'early_discount_percent', sr.early_discount_percent,
+                 'tolerance_cents', sr.tolerance_cents, 'match_window_days', sr.match_window_days) END)
              WHEN l.card_invoice_item_id IS NOT NULL THEN json_build_object('kind', 'card_item', 'date', p.purchased_on,
                'description', p.description, 'amountCents', -ci.amount_cents, 'entityName', pe.name)
            END AS target
@@ -926,8 +1022,8 @@ export async function listLines(
       LEFT JOIN titles t ON t.id = l.title_id
       LEFT JOIN title_balances tb ON tb.title_id = t.id
       LEFT JOIN entities te ON te.id = t.entity_id
+      LEFT JOIN recurrence_rules sr ON sr.id = t.recurrence_rule_id
       LEFT JOIN contracts ct ON ct.id = t.contract_id
-      LEFT JOIN contract_cycles ty ON ty.id = t.contract_cycle_id
       LEFT JOIN card_invoice_items ci ON ci.id = l.card_invoice_item_id
       LEFT JOIN card_purchases p ON p.id = ci.card_purchase_id
       LEFT JOIN entities pe ON pe.id = p.entity_id
@@ -936,48 +1032,45 @@ export async function listLines(
      ORDER BY ${order}${limit}`);
   return result.rows.map((row) => {
     const { lineAccountId, ...r } = camel<StatementLineRow & { lineAccountId: string | null }>(row);
-    const target = r.target as (StatementLineRow['target'] & { amountCents: number | string; contractRef?: ContractRef | null }) | null;
+    const target = r.target as (StatementLineRow['target'] & { amountCents: number | string; seriesRef?: SeriesRef | null }) | null;
     if (!target) return { ...r, target: null };
-    const { contractRef, ...rest } = target;
-    const contract = contractRef && r.status === 'suggested' ? suggestionOf({ ...r, lineAccountId }, contractRef) : null;
-    return { ...r, target: { ...rest, amountCents: Number(target.amountCents), ...(contract ? { contract } : {}) } };
+    const { seriesRef, ...rest } = target;
+    const series = seriesRef && r.status === 'suggested' ? suggestionOf({ ...r, lineAccountId }, seriesRef) : null;
+    return { ...r, target: { ...rest, amountCents: Number(target.amountCents), ...(series ? { series } : {}) } };
   });
 }
 
-type ContractRef = {
-  contractId: string;
-  contractName: string;
-  installment: number | null;
-  installmentsCount: number | null;
+type SeriesRef = Parameters<typeof termsOf>[0] & {
+  ruleId: string;
+  contractId: string | null;
+  contractName: string | null;
+  occurrence: number | null;
+  occurrencesTotal: number | null;
   dueDate: string;
   amountCents: number | string;
   openCents: number | string;
   plannedAccountId: string | null;
-  autoSettle: boolean;
-  late_fee_percent: string | number | null;
-  interest_month_percent: string | number | null;
-  early_discount_percent: string | number | null;
-  tolerance_cents: string | number;
-  match_window_days: string | number;
 };
 
-/** A repartição que a linha sugerida faria na parcela de contrato (spec 033). */
-function suggestionOf(line: StatementLineRow & { lineAccountId?: string | null }, ref: ContractRef): ContractCandidateInfo | null {
+/** A repartição que a linha sugerida faria na ocorrência de série (specs 033 e 034). */
+function suggestionOf(line: StatementLineRow & { lineAccountId?: string | null }, ref: SeriesRef): SeriesCandidateInfo | null {
+  const terms = termsOf(ref);
   const split = splitSettlement(
     Math.abs(line.amountCents),
     { dueDate: ref.dueDate, amountCents: Number(ref.amountCents), openCents: Number(ref.openCents) },
-    termsOfRow(ref),
+    terms,
     line.postedOn,
   );
   if (!split) return null;
   return {
+    ruleId: ref.ruleId,
     contractId: ref.contractId,
     contractName: ref.contractName,
-    installment: ref.installment,
-    installmentsCount: ref.installmentsCount,
+    occurrence: ref.occurrence === null ? null : Number(ref.occurrence),
+    occurrencesTotal: ref.occurrencesTotal === null ? null : Number(ref.occurrencesTotal),
     dueDate: ref.dueDate,
     sameAccount: !!line.lineAccountId && ref.plannedAccountId === line.lineAccountId,
-    autoSettle: ref.autoSettle,
+    autoSettle: terms.autoSettle,
     split,
   };
 }

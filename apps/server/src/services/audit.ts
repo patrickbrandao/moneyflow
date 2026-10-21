@@ -32,6 +32,10 @@ const OWNER_SQL: Record<string, (id: string) => ReturnType<typeof sql>> = {
     SELECT a.caixa_id FROM transfers tr JOIN financial_accounts a ON a.id IN (tr.from_account_id, tr.to_account_id) WHERE tr.id = ${id}`,
   card_invoices: (id) => sql`SELECT card_caixa_id AS caixa_id FROM card_invoices WHERE id = ${id}`,
   card_purchases: (id) => sql`SELECT card_caixa_id AS caixa_id FROM card_purchases WHERE id = ${id}`,
+  // Séries (spec 034): a caixa da série; as cobranças no cartão e os degraus são gravados com record_id = a série.
+  recurrence_rules: (id) => sql`SELECT caixa_id FROM recurrence_rules WHERE id = ${id}`,
+  card_recurring_charges: (id) => sql`SELECT caixa_id FROM recurrence_rules WHERE id = ${id}`,
+  card_recurring_charge_amounts: (id) => sql`SELECT caixa_id FROM recurrence_rules WHERE id = ${id}`,
   card_invoice_items: (id) =>
     sql`SELECT v.card_caixa_id AS caixa_id FROM card_invoice_items i JOIN card_invoices v ON v.id = i.card_invoice_id WHERE i.id = ${id}`,
   statement_imports: (id) => sql`

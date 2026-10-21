@@ -15,10 +15,13 @@ const LATER = '__later__';
  */
 export function SettlementModal({
   title,
+  accountId: initialAccountId,
   onClose,
   onSaved,
 }: {
   title: TitleDetail;
+  /** Conta já escolhida (ex.: "Baixar" nos previstos da tela da conta); omitida = a conta prevista do título. */
+  accountId?: string;
   onClose: () => void;
   onSaved: (title: TitleDetail) => void;
 }) {
@@ -29,11 +32,10 @@ export function SettlementModal({
   const [interest, setInterest] = useState<number | null>(null);
   const [fine, setFine] = useState<number | null>(null);
   const [discount, setDiscount] = useState<number | null>(null);
-  // A baixa vem com a conta prevista (spec 033); de outra caixa, pela conta de passagem com a transferência.
-  const plannedElsewhere = Boolean(title.plannedAccountId && title.plannedAccountCaixaId && title.plannedAccountCaixaId !== title.caixaId);
-  const [accountId, setAccountId] = useState<string>((plannedElsewhere ? title.plannedTransitAccountId : title.plannedAccountId) ?? '');
-  const [useOther, setUseOther] = useState(plannedElsewhere);
-  const [sourceId, setSourceId] = useState(plannedElsewhere ? (title.plannedAccountId ?? '') : '');
+  // A baixa vem na conta prevista (spec 034: sempre uma conta da caixa do título, cofre inclusive).
+  const [accountId, setAccountId] = useState<string>(initialAccountId ?? title.plannedAccountId ?? '');
+  const [useOther, setUseOther] = useState(false);
+  const [sourceId, setSourceId] = useState('');
   const [mirrorAccountId, setMirrorAccountId] = useState<string>(LATER);
   const [notes, setNotes] = useState('');
   const [error, setError] = useState<string | null>(null);

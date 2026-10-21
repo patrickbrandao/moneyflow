@@ -2,34 +2,18 @@ import { z } from 'zod';
 import {
   CONTRACT_DOCUMENT_KINDS,
   CONTRACT_MARKDOWN_MAX_BYTES,
-  CONTRACT_MAX_DUE_OFFSET,
-  CONTRACT_MAX_MONTHS,
-  CONTRACT_PERIODICITIES,
   CONTRACT_STATUSES,
-  installmentsCount,
+  OBLIGATION_KINDS,
   READJUSTMENT_INDEXES,
 } from '../contracts';
 import { ptBR } from '../i18n/pt-BR';
+import { FREQUENCIES } from '../recurrence';
 import { id, isoDate, nonNegativeCents, optionalText, positiveCents, queryBool, requiredText } from './common';
 
-/* Entradas dos contratos (spec 020). */
+/* Entradas dos contratos (specs 020 e 034) e das séries com conta, cartão e ajustes. */
 
 const E = ptBR.contracts.errors;
 const DIRECTIONS = ['receivable', 'payable'] as const;
-
-const durationMonths = z.number().int().min(1).max(CONTRACT_MAX_MONTHS);
-const dueDay = z.number().int().min(1).max(31);
-const dueMonthOffset = z.number().int().min(0).max(CONTRACT_MAX_DUE_OFFSET);
-const periodicity = z.enum(CONTRACT_PERIODICITIES);
-
-export const durationFitsPeriod = (
-  value: { durationMonths?: number; periodicity?: (typeof CONTRACT_PERIODICITIES)[number] },
-  ctx: z.RefinementCtx,
-) => {
-  if (value.durationMonths === undefined || value.periodicity === undefined) return;
-  if (installmentsCount(value.durationMonths, value.periodicity) === null)
-    ctx.addIssue({ code: 'custom', path: ['durationMonths'], message: E.durationNotMultiple });
-};
 
 function percent(max: number) {
   return z
@@ -40,47 +24,127 @@ function percent(max: number) {
     .transform((v) => (v === undefined || v === null || v === 0 ? null : Math.round(v * 10000) / 10000));
 }
 
-/** Configuração livre (muda a qualquer momento, inclusive vigente). */
+/**
+ * Ajustes de reconhecimento do pagamento da série (spec 034): só servem para
+ * reconhecer o valor pago no extrato. A tolerância tem o teto de 10% do valor,
+ * conferido no servidor.
+ */
+export const seriesTermsFields = {
+  matchWindowDays: z.number().int().min(0).max(45),
+  lateFeePercent: percent(20),
+  interestMonthPercent: percent(10),
+  earlyDiscountPercent: percent(50),
+  toleranceCents: nonNegativeCents,
+  autoSettle: z.boolean(),
+};
+
+const termsWithDefaults = {
+  ...seriesTermsFields,
+  matchWindowDays: seriesTermsFields.matchWindowDays.default(15),
+  toleranceCents: seriesTermsFields.toleranceCents.default(0),
+  autoSettle: seriesTermsFields.autoSettle.default(false),
+};
+
+/**
+ * Uma obrigação: a série numa conta (corrente, poupança ou cofre; títulos com
+ * a conta prevista) ou a cobrança esperada num cartão (sem títulos). Calendário
+ * pela primeira data (o dia âncora sai dela), fim = o da vigência por padrão.
+ */
+export const obligationFields = z.object({
+  kind: z.enum(OBLIGATION_KINDS).default('account'),
+  description: requiredText(200),
+  amountCents: positiveCents,
+  frequency: z.enum(FREQUENCIES).default('monthly'),
+  intervalCount: z.number().int().min(1).max(366).default(1),
+  /** Vencimento (ou data esperada da cobrança) da primeira ocorrência. */
+  firstDueDate: isoDate,
+  /** Competência da primeira ocorrência (série na conta); omitida = o mês do primeiro vencimento. */
+  firstCompetenceDate: isoDate.nullish().transform((v) => v ?? null),
+  /** Fim da série; omitido = o fim da vigência do contrato (null = sem fim). */
+  endsOn: isoDate.nullish(),
+  /** Categoria; omitida = a do contrato. */
+  categoryId: id.nullish().transform((v) => v ?? null),
+  /** Conta (série na conta): define a caixa da série. */
+  accountId: id.nullish().transform((v) => v ?? null),
+  /** Cartão e a caixa pagadora (cobrança no cartão; pagadora omitida = a padrão do cartão). */
+  cardCaixaId: id.nullish().transform((v) => v ?? null),
+  payerCaixaId: id.nullish().transform((v) => v ?? null),
+  ...termsWithDefaults,
+});
+
+const obligationRefine = (value: { kind: string; accountId: string | null; cardCaixaId: string | null }, ctx: z.RefinementCtx) => {
+  if (value.kind === 'account' && !value.accountId) ctx.addIssue({ code: 'custom', path: ['accountId'], message: E.obligationAccount });
+  if (value.kind === 'card' && !value.cardCaixaId) ctx.addIssue({ code: 'custom', path: ['cardCaixaId'], message: E.obligationCard });
+};
+
+export const obligationInput = obligationFields.superRefine(obligationRefine);
+
+/**
+ * Série nova fora do formulário do título (POST /api/series): uma obrigação
+ * ligada a um contrato ou solta (aí com a entidade e, na conta, a direção).
+ */
+export const seriesCreateInput = obligationFields
+  .extend({
+    contractId: id.nullish().transform((v) => v ?? null),
+    entityId: id.nullish().transform((v) => v ?? null),
+    direction: z
+      .enum(DIRECTIONS)
+      .nullish()
+      .transform((v) => v ?? null),
+  })
+  .superRefine((value, ctx) => {
+    obligationRefine(value, ctx);
+    if (!value.contractId && !value.entityId) ctx.addIssue({ code: 'custom', path: ['entityId'], message: E.seriesEntity });
+    if (!value.contractId && !value.categoryId) ctx.addIssue({ code: 'custom', path: ['categoryId'], message: E.seriesCategory });
+  });
+
+/**
+ * Edição da série (PATCH /api/series/:id): os ajustes valem na hora; o resto
+ * é "esta e as próximas" a partir de `effectiveOn` (padrão: hoje) — as
+ * ocorrências em aberto sem baixa mudam; na cobrança no cartão, o valor
+ * esperado muda dali em diante. `contractId` liga (ou, com null, desliga) a série.
+ */
+export const seriesUpdateInput = z
+  .object({
+    ...seriesTermsFields,
+    contractId: id.nullable(),
+    effectiveOn: isoDate,
+    description: requiredText(200),
+    amountCents: positiveCents,
+    anchorDay: z.number().int().min(1).max(31),
+    categoryId: id,
+    accountId: id,
+    payerCaixaId: id,
+  })
+  .partial();
+
+/** Séries de uma caixa ou de um contrato; `unlinked` = as soltas (para ligar a um contrato). */
+export const seriesListQuery = z.object({
+  caixaId: id.optional(),
+  contractId: id.optional(),
+  entityId: id.optional(),
+  unlinked: queryBool,
+});
+
+/** Configuração livre do contrato (muda a qualquer momento, inclusive vigente). */
 const settings = {
   name: requiredText(200),
   contractNumber: optionalText(60),
   notes: optionalText(4000),
   autoRenew: z.boolean(),
   noticeDays: z.number().int().min(0).max(365),
-  renewalLeadDays: z.number().int().min(1).max(365),
-  reminderEveryDays: z.number().int().min(1).max(30),
   readjustmentIndex: z.enum(READJUSTMENT_INDEXES),
   readjustmentBaseDate: isoDate.nullish().transform((v) => v ?? null),
   terminationPenaltyText: optionalText(2000),
   terminationPenaltyCents: positiveCents.nullish().transform((v) => v ?? null),
-  /*
-   * Conta das parcelas e encargos (spec 033). A conta pode ser de outra caixa
-   * (a pagadora), e aí a de passagem é obrigatória (da caixa do contrato). Os
-   * encargos só servem para reconhecer o valor pago no extrato.
-   */
-  paymentAccountId: id.nullish().transform((v) => v ?? null),
-  transitAccountId: id.nullish().transform((v) => v ?? null),
-  lateFeePercent: percent(20),
-  interestMonthPercent: percent(10),
-  earlyDiscountPercent: percent(50),
-  /** Diferença aceita além dos encargos; até 10% da parcela (conferido no servidor). */
-  toleranceCents: nonNegativeCents,
-  matchWindowDays: z.number().int().min(0).max(45),
-  /** Baixar sem confirmação (a linha única, na conta prevista, com valor exato ou dentro dos encargos/desconto). */
-  autoSettle: z.boolean(),
 };
 
-/** Condições do ciclo (rascunho; vigente só por aditivo ou renovação). */
-const terms = {
-  startsOn: isoDate,
-  durationMonths,
-  periodicity,
-  totalCents: positiveCents,
-  dueDay,
-  dueMonthOffset,
+const termRefine = (value: { startsOn?: string; endsOn?: string | null }, ctx: z.RefinementCtx) => {
+  if (value.startsOn && value.endsOn && value.endsOn < value.startsOn)
+    ctx.addIssue({ code: 'custom', path: ['endsOn'], message: E.endsBeforeStart });
 };
 
-/** Campos do cadastro (sem a checagem duração × periodicidade, que entra no contractCreateInput). */
+/** Campos do cadastro (sem as checagens cruzadas, que entram no contractCreateInput). */
 export const contractCreateFields = z.object({
   caixaId: id,
   entityId: id,
@@ -89,38 +153,38 @@ export const contractCreateFields = z.object({
   ...settings,
   autoRenew: settings.autoRenew.default(false),
   noticeDays: settings.noticeDays.default(30),
-  renewalLeadDays: settings.renewalLeadDays.default(60),
-  reminderEveryDays: settings.reminderEveryDays.default(7),
   readjustmentIndex: settings.readjustmentIndex.default('none'),
-  toleranceCents: settings.toleranceCents.default(0),
-  matchWindowDays: settings.matchWindowDays.default(15),
-  autoSettle: settings.autoSettle.default(false),
-  ...terms,
+  /** Vigência: início e fim (null = indeterminado). */
+  startsOn: isoDate,
+  endsOn: isoDate.nullish().transform((v) => v ?? null),
   /** Caixa do espelho: omitido = caixa principal da entidade (se houver); null = sem espelho. */
   mirrorCaixaId: id.nullish(),
-  /** Ativar já na criação (gera as parcelas). */
-  activate: z.boolean().default(false),
+  /** As obrigações (séries) do contrato; com obrigações o contrato nasce vigente. */
+  obligations: z.array(obligationInput).max(20).default([]),
+  /** Ativar já na criação; omitido = ativa quando há obrigações. Rascunho não tem obrigações. */
+  activate: z.boolean().optional(),
 });
 
-export const contractCreateInput = contractCreateFields.superRefine(durationFitsPeriod);
+export const contractCreateInput = contractCreateFields.superRefine((value, ctx) => {
+  termRefine(value, ctx);
+  if (value.activate === false && value.obligations.length > 0)
+    ctx.addIssue({ code: 'custom', path: ['obligations'], message: E.draftObligations });
+});
 
+/** Edição: a vigência muda no rascunho (vigente, por renovar ou rescindir). */
 export const contractUpdateInput = z
   .object({
     entityId: id,
     categoryId: id,
     mirrorCaixaId: id.nullable(),
     ...settings,
-    ...terms,
-    /**
-     * Trocando a conta das parcelas (spec 033): true = as parcelas em aberto
-     * que seguem o contrato mudam junto (as com conta própria ficam).
-     */
-    applyAccountToInstallments: z.boolean(),
+    startsOn: isoDate,
+    endsOn: isoDate.nullable(),
   })
   .partial()
-  .superRefine(durationFitsPeriod);
+  .superRefine(termRefine);
 
-/** Pagamentos do contrato (spec 033): um ciclo ou todos. */
+/** Pagamentos do contrato (spec 033): uma vigência ou todas. */
 export const contractPaymentsQuery = z.object({ cycleId: id.optional() });
 
 export const CONTRACT_LIST_STATUSES = [...CONTRACT_STATUSES, 'current'] as const;
@@ -129,9 +193,9 @@ export const contractListQuery = z.object({
   caixaId: id.optional(),
   entityId: id.optional(),
   direction: z.enum(DIRECTIONS).optional(),
-  /** `current` = vigente ou com renovação pendente. */
+  /** `current` = vigente. */
   status: z.enum(CONTRACT_LIST_STATUSES).optional(),
-  /** Termina (fim do ciclo atual) ou tem renovação nos próximos N dias. */
+  /** A vigência termina nos próximos N dias. */
   withinDays: z.coerce.number().int().min(0).max(3650).optional(),
   q: z.string().trim().max(200).optional(),
   archived: queryBool,
@@ -140,36 +204,53 @@ export const contractListQuery = z.object({
 
 export const dryRunQuery = z.object({ dryRun: queryBool });
 
-/** Aditivo: o que muda a partir da data de efeito (pelo menos uma coisa). */
+/** Ligar uma série existente ao contrato (ela passa a ser obrigação dele). */
+export const contractLinkSeriesInput = z.object({ ruleId: id });
+
+/**
+ * Aditivo: o documento, a data de efeito e o que muda nas obrigações
+ * escolhidas, aplicado como "esta e as próximas" a partir da primeira
+ * ocorrência em aberto na data de efeito.
+ */
 export const contractAmendmentInput = z
   .object({
     effectiveOn: isoDate,
-    installmentCents: positiveCents.nullish().transform((v) => v ?? null),
-    remainingTotalCents: positiveCents.nullish().transform((v) => v ?? null),
-    dueDay: dueDay.nullish().transform((v) => v ?? null),
-    dueMonthOffset: dueMonthOffset.nullish().transform((v) => v ?? null),
+    ruleIds: z.array(id).min(1).max(20),
+    /** Novo valor por ocorrência, ou o reajuste em % sobre o valor atual de cada obrigação. */
+    amountCents: positiveCents.nullish().transform((v) => v ?? null),
+    readjustmentPercent: z
+      .number()
+      .min(-100)
+      .max(1000)
+      .nullish()
+      .transform((v) => (v === undefined || v === null || v === 0 ? null : v)),
+    anchorDay: z
+      .number()
+      .int()
+      .min(1)
+      .max(31)
+      .nullish()
+      .transform((v) => v ?? null),
     categoryId: id.nullish().transform((v) => v ?? null),
+    accountId: id.nullish().transform((v) => v ?? null),
     documentId: id.nullish().transform((v) => v ?? null),
     notes: optionalText(2000),
   })
   .superRefine((value, ctx) => {
-    if (value.installmentCents && value.remainingTotalCents)
-      ctx.addIssue({ code: 'custom', path: ['remainingTotalCents'], message: E.amendmentValueEither });
-    if (
-      !value.installmentCents &&
-      !value.remainingTotalCents &&
-      value.dueDay === null &&
-      value.dueMonthOffset === null &&
-      value.categoryId === null
-    )
+    if (value.amountCents && value.readjustmentPercent)
+      ctx.addIssue({ code: 'custom', path: ['readjustmentPercent'], message: E.amendmentValueEither });
+    if (!value.amountCents && !value.readjustmentPercent && value.anchorDay === null && !value.categoryId && !value.accountId)
       ctx.addIssue({ code: 'custom', path: ['effectiveOn'], message: E.amendmentNothing });
   });
 
-/** Rescisão: data de encerramento, ajuste da parcela do mês e o título extra de multa. */
+/** Rescisão: data de encerramento, o valor da última ocorrência (proporcional) e o título avulso de multa. */
 export const contractTerminationInput = z.object({
   terminatedOn: isoDate,
-  /** Novo valor da parcela que cobre a data (proporcional); omitido = mantém. */
-  currentInstallmentCents: positiveCents.nullish().transform((v) => v ?? null),
+  /** Novo valor da última ocorrência de cada obrigação (a que cobre a data); omitidas = mantêm. */
+  lastAmounts: z
+    .array(z.object({ titleId: id, amountCents: positiveCents }))
+    .max(20)
+    .default([]),
   penalty: z
     .object({
       direction: z.enum(DIRECTIONS),
@@ -177,32 +258,16 @@ export const contractTerminationInput = z.object({
       dueDate: isoDate,
       categoryId: id,
       description: optionalText(300),
+      /** Conta prevista da multa (da caixa do contrato). */
+      accountId: id.nullish().transform((v) => v ?? null),
     })
     .nullish()
     .transform((v) => v ?? null),
   notes: optionalText(2000),
 });
 
-/** Renovação (aprovar a tarefa ou "Renovar" manual): o próximo ciclo. */
-export const contractRenewalInput = z
-  .object({
-    durationMonths,
-    periodicity,
-    totalCents: positiveCents,
-    readjustmentPercent: z
-      .number()
-      .min(-100)
-      .max(1000)
-      .nullish()
-      .transform((v) => v ?? null),
-    dueDay,
-    dueMonthOffset,
-    categoryId: id.nullish().transform((v) => v ?? null),
-    notes: optionalText(2000),
-  })
-  .superRefine(durationFitsPeriod);
-
-export const contractDeclineInput = z.object({ notes: optionalText(2000) });
+/** Renovar: estende a vigência (e o fim das obrigações) até a nova data, ou sem fim. */
+export const contractRenewalInput = z.object({ endsOn: isoDate.nullable() });
 
 /* ---------------- documentos ---------------- */
 
@@ -258,6 +323,9 @@ export const contractPanelQuery = z.object({
 });
 
 export type ContractCreateInput = z.input<typeof contractCreateInput>;
+export type ObligationInput = z.input<typeof obligationInput>;
+export type SeriesCreateInput = z.input<typeof seriesCreateInput>;
+export type SeriesUpdateInput = z.input<typeof seriesUpdateInput>;
 export type ContractUpdateInput = z.input<typeof contractUpdateInput>;
 export type ContractAmendmentInput = z.input<typeof contractAmendmentInput>;
 export type ContractTerminationInput = z.input<typeof contractTerminationInput>;

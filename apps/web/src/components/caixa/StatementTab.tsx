@@ -12,10 +12,12 @@ import { DateRangeFilter, useStoredPeriod } from '../DateRangeFilter';
 import { LoadError, Money, SkelRows } from '../domain';
 import { ExportMenu } from '../ExportMenu';
 import { Badge, EmptyRow, EmptyState, useConfirm } from '../ui';
+import { PlannedOccurrences } from './PlannedOccurrences';
 
 /**
  * Extrato por conta: movimentos do período com saldo corrente. Na caixa, escolhe a conta;
- * na tela da conta (`fixedAccountId`), fica nela, sem o seletor.
+ * na tela da conta (`fixedAccountId`), fica nela, sem o seletor, e mostra antes os previstos
+ * da conta (spec 034: as ocorrências em aberto das séries com essa conta).
  */
 export function StatementTab({ caixa, fixedAccountId, onChanged }: { caixa: CaixaDetail; fixedAccountId?: string; onChanged: () => void }) {
   const active = caixa.accounts.filter((a) => !a.archivedAt);
@@ -49,6 +51,17 @@ export function StatementTab({ caixa, fixedAccountId, onChanged }: { caixa: Caix
 
   return (
     <>
+      {fixedAccountId && (
+        <PlannedOccurrences
+          caixaId={caixa.id}
+          accountId={fixedAccountId}
+          canWrite={caixa.canWrite}
+          onChanged={() => {
+            void reload();
+            onChanged();
+          }}
+        />
+      )}
       <div className="mb-3 flex flex-wrap items-center gap-2">
         {!fixedAccountId && (
           <>

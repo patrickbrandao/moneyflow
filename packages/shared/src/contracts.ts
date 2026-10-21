@@ -1,119 +1,76 @@
 import { addDays, addMonths, dayOfMonth, daysInMonth, diffDays, toIso } from './dates';
+import { type Frequency, monthsStep } from './recurrence';
 
 /*
- * Contratos (spec 020): o calendário de um ciclo e as contas das parcelas,
- * puros (sem banco). A API gera os títulos com estas funções, o front mostra a
- * prévia com as mesmas, e os testes unitários as cobrem.
+ * Contratos (specs 020 e 034): o contrato é o documento e o vínculo; as
+ * obrigações são séries recorrentes comuns (spec 005). Aqui ficam as contas
+ * puras (sem banco) da vigência, da rescisão e do reajuste, usadas pela API,
+ * pelo front e pelos testes.
  */
 
 export const CONTRACT_DIRECTIONS = ['receivable', 'payable'] as const;
-export const CONTRACT_STATUSES = ['draft', 'active', 'renewal_pending', 'ended', 'terminated'] as const;
+export const CONTRACT_STATUSES = ['draft', 'active', 'ended', 'terminated'] as const;
+/** Periodicidade dos ciclos de parcelas de antes da F20 (histórico) e da leitura do PDF por IA. */
 export const CONTRACT_PERIODICITIES = ['monthly', 'quarterly', 'semiannual', 'annual', 'single'] as const;
 export const READJUSTMENT_INDEXES = ['none', 'ipca', 'igpm', 'inpc', 'other'] as const;
 export const CONTRACT_DOCUMENT_KINDS = ['contract', 'amendment', 'renewal', 'termination', 'proposal', 'other'] as const;
 export const CONTRACT_DOCUMENT_FORMATS = ['pdf', 'markdown'] as const;
+/** Onde a obrigação vive: uma conta (série de títulos) ou um cartão (cobrança esperada). */
+export const OBLIGATION_KINDS = ['account', 'card'] as const;
 
 export type ContractStatus = (typeof CONTRACT_STATUSES)[number];
 export type ContractPeriodicity = (typeof CONTRACT_PERIODICITIES)[number];
 export type ReadjustmentIndex = (typeof READJUSTMENT_INDEXES)[number];
 export type ContractDocumentKind = (typeof CONTRACT_DOCUMENT_KINDS)[number];
 export type ContractDocumentFormat = (typeof CONTRACT_DOCUMENT_FORMATS)[number];
+export type ObligationKind = (typeof OBLIGATION_KINDS)[number];
 
-/** Limites do cadastro (os mesmos do banco). */
-export const CONTRACT_MAX_MONTHS = 120;
-export const CONTRACT_MAX_DUE_OFFSET = 3;
 /** Markdown enviado ou salvo: até 1 MB em UTF-8. */
 export const CONTRACT_MARKDOWN_MAX_BYTES = 1024 * 1024;
 
-/** Meses de cada período; `single` cobre o ciclo inteiro. */
-export const PERIOD_MONTHS: Record<Exclude<ContractPeriodicity, 'single'>, number> = {
-  monthly: 1,
-  quarterly: 3,
-  semiannual: 6,
-  annual: 12,
-};
-
-export const periodMonths = (periodicity: ContractPeriodicity, durationMonths: number) =>
-  periodicity === 'single' ? durationMonths : PERIOD_MONTHS[periodicity];
+/** Calendário de uma série para a periodicidade lida do PDF (mensal 1, trimestral 3, semestral 6 meses, anual). */
+export function periodicityCalendar(periodicity: ContractPeriodicity): { frequency: Frequency; intervalCount: number } | null {
+  switch (periodicity) {
+    case 'monthly':
+      return { frequency: 'monthly', intervalCount: 1 };
+    case 'quarterly':
+      return { frequency: 'monthly', intervalCount: 3 };
+    case 'semiannual':
+      return { frequency: 'monthly', intervalCount: 6 };
+    case 'annual':
+      return { frequency: 'yearly', intervalCount: 1 };
+    default:
+      return null;
+  }
+}
 
 /**
- * Fim do ciclo: dia anterior ao mesmo dia do mês, `duração` meses depois
- * (01/03/2025 + 12 → 28/02/2026). Se esse dia não existe no mês final, o
- * ciclo vai até o último dia dele (31/01 + 1 → 28/02; o seguinte começa em 01/03).
+ * Fim de uma vigência: dia anterior ao mesmo dia do mês, `meses` depois
+ * (01/03/2025 + 12 → 28/02/2026). Se esse dia não existe no mês final, vai
+ * até o último dia dele (31/01 + 1 → 28/02; a seguinte começa em 01/03).
  */
-export function cycleEnd(startsOn: string, durationMonths: number): string {
-  const same = addMonths(startsOn, durationMonths);
+export function cycleEnd(startsOn: string, months: number): string {
+  const same = addMonths(startsOn, months);
   return dayOfMonth(same) < dayOfMonth(startsOn) ? same : addDays(same, -1);
 }
 
-/** Número de parcelas do ciclo, ou null se a duração não é múltipla do período. */
-export function installmentsCount(durationMonths: number, periodicity: ContractPeriodicity): number | null {
-  if (!Number.isInteger(durationMonths) || durationMonths < 1 || durationMonths > CONTRACT_MAX_MONTHS) return null;
-  if (periodicity === 'single') return 1;
-  const months = PERIOD_MONTHS[periodicity];
-  return durationMonths % months === 0 ? durationMonths / months : null;
+/**
+ * Duração em meses inteiros de uma vigência (início ao fim, inclusive), para
+ * a renovação automática repetir o prazo; no mínimo 1.
+ */
+export function termMonths(startsOn: string, endsOn: string): number {
+  const next = addDays(endsOn, 1);
+  const months = (Number(next.slice(0, 4)) - Number(startsOn.slice(0, 4))) * 12 + Number(next.slice(5, 7)) - Number(startsOn.slice(5, 7));
+  return Math.max(1, dayOfMonth(next) < dayOfMonth(startsOn) ? months - 1 : months);
 }
 
-/** Parcelas iguais; o resto em centavos fica na primeira (como nas compras parceladas do cartão). */
-export function splitTotal(totalCents: number, count: number): number[] {
-  if (count < 1) return [];
-  const base = Math.floor(totalCents / count);
-  const rest = totalCents - base * count;
-  return Array.from({ length: count }, (_, i) => (i === 0 ? base + rest : base));
+/** Fim do período coberto pela ocorrência que começa em `competenceDate` (o dia antes da próxima competência). */
+export function occurrencePeriodEnd(competenceDate: string, rule: { frequency: Frequency; intervalCount: number }): string {
+  if (rule.frequency === 'weekly') return addDays(competenceDate, 7 * rule.intervalCount - 1);
+  return addDays(addMonths(competenceDate, monthsStep(rule)), -1);
 }
 
-/** Vencimento: dia fixo no mês da competência + deslocamento (meses curtos usam o último dia). */
-export function dueDateFor(competenceDate: string, dueDay: number, offsetMonths: number): string {
-  const first = addMonths(`${competenceDate.slice(0, 7)}-01`, offsetMonths);
-  const year = Number(first.slice(0, 4));
-  const month = Number(first.slice(5, 7));
-  return toIso(year, month, Math.min(dueDay, daysInMonth(year, month)));
-}
-
-export type CycleTerms = {
-  startsOn: string;
-  durationMonths: number;
-  periodicity: ContractPeriodicity;
-  totalCents: number;
-  dueDay: number;
-  dueMonthOffset: number;
-};
-
-export type ScheduledInstallment = {
-  /** n de N. */
-  installment: number;
-  /** Primeiro dia do período coberto (a competência). */
-  competenceDate: string;
-  /** Último dia do período coberto. */
-  periodEnd: string;
-  dueDate: string;
-  amountCents: number;
-};
-
-/** Início do período n (1 = primeiro) do ciclo. */
-export const periodStart = (terms: Pick<CycleTerms, 'startsOn' | 'periodicity' | 'durationMonths'>, n: number) =>
-  addMonths(terms.startsOn, (n - 1) * periodMonths(terms.periodicity, terms.durationMonths), dayOfMonth(terms.startsOn));
-
-/** As parcelas do ciclo inteiro. Lança se a duração não for múltipla do período. */
-export function cycleSchedule(terms: CycleTerms): ScheduledInstallment[] {
-  const count = installmentsCount(terms.durationMonths, terms.periodicity);
-  if (count === null) throw new Error('duração não é múltipla do período');
-  const amounts = splitTotal(terms.totalCents, count);
-  const end = cycleEnd(terms.startsOn, terms.durationMonths);
-  return amounts.map((amountCents, i) => {
-    const competenceDate = periodStart(terms, i + 1);
-    const periodEnd = i + 1 === count ? end : addDays(periodStart(terms, i + 2), -1);
-    return {
-      installment: i + 1,
-      competenceDate,
-      periodEnd,
-      dueDate: dueDateFor(competenceDate, terms.dueDay, terms.dueMonthOffset),
-      amountCents,
-    };
-  });
-}
-
-/** Valor proporcional da parcela até a data de encerramento (inclusive), arredondado ao centavo. */
+/** Valor proporcional da ocorrência até a data de encerramento (inclusive), arredondado ao centavo. */
 export function proratedAmount(amountCents: number, competenceDate: string, periodEnd: string, endOn: string): number {
   if (endOn < competenceDate) return 0;
   if (endOn >= periodEnd) return amountCents;
@@ -122,14 +79,11 @@ export function proratedAmount(amountCents: number, competenceDate: string, peri
   return Math.round((amountCents * covered) / total);
 }
 
-/** Reajuste em % sobre o total (62.700,01 = 60.000,01 × 1,045). */
-export const readjustedTotal = (totalCents: number, percent: number) => Math.round(totalCents * (1 + percent / 100));
+/** Reajuste em % sobre um valor (5.000,00 × 1,045 = 5.225,00). */
+export const readjustedTotal = (amountCents: number, percent: number) => Math.round(amountCents * (1 + percent / 100));
 
 /** Último dia para pedir a não renovação ou a rescisão: fim − aviso prévio. */
-export const noticeDeadline = (cycleEndsOn: string, noticeDays: number) => addDays(cycleEndsOn, -noticeDays);
-
-/** Dia em que a tarefa de renovação abre: fim − antecedência. */
-export const renewalOpensOn = (cycleEndsOn: string, leadDays: number) => addDays(cycleEndsOn, -leadDays);
+export const noticeDeadline = (endsOn: string, noticeDays: number) => addDays(endsOn, -noticeDays);
 
 /**
  * Data-base do reajuste no ano de `today` (a informada, ou o aniversário do
@@ -143,35 +97,10 @@ export function readjustmentDateIn(year: number, contractStart: string, baseDate
   return date > contractStart ? date : null;
 }
 
-/**
- * Recalcula as parcelas afetadas por um aditivo: valor novo por parcela
- * (`installmentCents`) ou o total restante dividido entre elas, com o resto
- * na primeira (`remainingTotalCents`); o vencimento segue o dia/deslocamento
- * novos. Devolve só o que muda.
- */
-export function amendInstallments(
-  affected: { id: string; competenceDate: string; amountCents: number; dueDate: string }[],
-  change: { installmentCents?: number | null; remainingTotalCents?: number | null; dueDay?: number | null; dueMonthOffset?: number | null },
-  current: { dueDay: number; dueMonthOffset: number },
-): { id: string; amountCents: number; dueDate: string }[] {
-  const ordered = [...affected].sort((a, b) => a.competenceDate.localeCompare(b.competenceDate));
-  const amounts = change.remainingTotalCents
-    ? splitTotal(change.remainingTotalCents, ordered.length)
-    : ordered.map((row) => change.installmentCents ?? row.amountCents);
-  const dueDay = change.dueDay ?? current.dueDay;
-  const offset = change.dueMonthOffset ?? current.dueMonthOffset;
-  const dueChanged = change.dueDay != null || change.dueMonthOffset != null;
-  return ordered.map((row, i) => ({
-    id: row.id,
-    amountCents: amounts[i]!,
-    dueDate: dueChanged ? dueDateFor(row.competenceDate, dueDay, offset) : row.dueDate,
-  }));
-}
+/** Sufixo " · n/N" das parcelas geradas antes da F20: a ocorrência nova da série não o repete. */
+export const stripInstallmentSuffix = (description: string) => description.replace(/\s+·\s+\d+\/\d+\s*$/, '');
 
-/** "Suporte mensal ACME · 3/12". */
-export const installmentDescription = (contractName: string, n: number, total: number) => `${contractName} · ${n}/${total}`;
-
-/** Rótulo do contrato numa parcela (avisos e listas). */
+/** Rótulo do contrato num título (avisos e listas); n/N só nas parcelas antigas. */
 export const contractInstallmentLabel = (name: string, n: number | null, total: number | null) =>
   n && total ? `${name} (${n}/${total})` : name;
 

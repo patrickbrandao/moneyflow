@@ -114,6 +114,10 @@ export type PurchaseFields = {
   firstInstallment: number;
   refundedPurchaseId?: string | null;
   notes?: string | null;
+  /** Cobrança esperada que a compra atende (spec 034): a série, a ocorrência e o contrato dela. */
+  contractId?: string | null;
+  recurrenceRuleId?: string | null;
+  occurrence?: number | null;
 };
 
 /** Insere o lançamento e as parcelas (itens) nas faturas consecutivas a partir da primeira aberta. */
@@ -150,6 +154,9 @@ export async function insertPurchase(tx: Tx, card: Card, fields: PurchaseFields)
       firstInstallment: fields.firstInstallment,
       refundedPurchaseId: fields.refundedPurchaseId ?? null,
       notes: fields.notes ?? null,
+      contractId: fields.contractId ?? null,
+      recurrenceRuleId: fields.recurrenceRuleId ?? null,
+      occurrence: fields.occurrence ?? null,
     })
     .returning({ id: cardPurchases.id });
   const sign = fields.kind === 'refund' ? -1 : 1;

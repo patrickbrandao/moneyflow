@@ -551,7 +551,7 @@ export async function produceMessages(db: Database, config: Config, clock: SpClo
 /* ---------------- notificações do sino ---------------- */
 
 /** Destinatários por caixa: membros (só editores, se pedido) e os admins ativos. */
-async function recipientsByCaixa(db: Executor, caixaIds: string[], editorsOnly = false): Promise<Map<string, string[]>> {
+export async function recipientsByCaixa(db: Executor, caixaIds: string[], editorsOnly = false): Promise<Map<string, string[]>> {
   const map = new Map<string, string[]>();
   if (caixaIds.length === 0) return map;
   const [members, admins] = await Promise.all([

@@ -49,8 +49,8 @@ describe('registro de tools', () => {
       expect(t.agents.toolCategories[category]).toBeTruthy();
       expect(AGENT_TOOLS.some((tool) => tool.category === category)).toBe(true);
     }
-    // 13 da conciliação, as 5 das receitas (spec 030) e as 3 do lote provisório (spec 031).
-    expect(AGENT_TOOLS.filter((tool) => tool.category === 'reconciliation')).toHaveLength(21);
+    // 13 da conciliação, as 5 das receitas (spec 030), as 3 do lote provisório (spec 031) e a cobrança esperada da fatura (spec 034).
+    expect(AGENT_TOOLS.filter((tool) => tool.category === 'reconciliation')).toHaveLength(22);
     expect(agentTool('send_telegram_message')).toMatchObject({ category: 'messages', suggestedMode: 'ask' });
   });
 
@@ -86,9 +86,11 @@ describe('registro de tools', () => {
         'create_contract',
         'update_contract',
         'activate_contract',
+        'add_contract_obligation',
+        'link_series_to_contract',
         'add_contract_amendment',
         'terminate_contract',
-        'decide_contract_renewal',
+        'renew_contract',
         'get_contract_document',
         'save_contract_markdown',
         'convert_contract_pdf',
@@ -137,8 +139,11 @@ describe('registro de tools', () => {
         'archive_category',
       ].sort(),
     );
-    // Contrato pelo agente: sempre rascunho (o campo activate não existe na tool).
-    expect(Object.keys(toolJsonSchema(agentTool('create_contract')!).properties as object)).not.toContain('activate');
+    // Contrato pelo agente (spec 034): com as obrigações (vigente) ou rascunho sem elas.
+    expect(Object.keys(toolJsonSchema(agentTool('create_contract')!).properties as object)).toEqual(
+      expect.arrayContaining(['obligations', 'startsOn', 'endsOn', 'activate']),
+    );
+    expect(Object.keys(toolJsonSchema(agentTool('create_contract')!).properties as object)).not.toContain('durationMonths');
     // Importação: exatamente um alvo, e o mapeamento salvo ou informado (não os dois).
     const importInput = agentTool('import_statement')!.input;
     const attachmentId = '0192d8e4-0000-7000-8000-000000000001';

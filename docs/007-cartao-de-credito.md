@@ -36,3 +36,12 @@ Caixa "Nubank PJ" (cartão)
 Caixa "Minha Empresa"
  A pagar: Fatura Nubank 10/2026  1.470,00  → [ver detalhes]
 ```
+
+## Cobrança recorrente esperada (F20, [034](034-contratos-sobre-series.md))
+
+- Uma assinatura ou obrigação de contrato paga no cartão é uma **série na caixa do cartão** com a cobrança esperada (`card_recurring_charges`): calendário, valor (com degraus "dali em diante" de aditivos e reajustes), recebedor, categoria de despesa e a **caixa pagadora**. Não gera título nem compra adiantada: a fatura só tem o que de fato foi cobrado. Pode ser obrigação de um contrato (só "eu pago") ou solta (`POST /api/series`).
+- As ocorrências esperadas são calculadas pelo calendário (não materializadas). A compra que atende uma ocorrência fica ligada a ela (`card_purchases.recurrence_rule_id`, `occurrence` e o contrato da série); no máximo uma compra não estornada por inteiro por ocorrência.
+- **Na importação da fatura**, a linha nova que a regra de reconhecimento casa com uma ocorrência esperada (mesmo mês ou a janela da série, valor exato ou dentro da tolerância, sem encargos) mostra a sugestão **"Lançar como cobrança de <obrigação> de <mês>"**: confirmar cria a compra à vista na pagadora da obrigação, já ligada, e concilia a linha (`POST /api/statement-lines/:id/card-charge`). Com "baixar sem confirmação" na série e o valor exato, a compra é criada na importação (marca de baixa automática).
+- **Compra lançada à mão**: "É cobrança de um contrato?" lista as ocorrências esperadas perto da data e do valor (`GET /api/cards/:id/expected-charges`) e liga a compra (`charge` no `POST /api/cards/:id/purchases`); a gaveta da compra liga ou solta depois (`POST /api/card-purchases/:id/charge-link`).
+- **Não cobrada**: ocorrência cuja fatura esperada (a primeira que fecha na data esperada ou depois) já fechou sem compra ligada aparece como "Não cobrada" nos pagamentos do contrato e gera o aviso do sino `contract_charge_missing`, uma vez por ocorrência.
+- Encerrar ou estender a cobrança é pela série (`POST /api/series/:id/end`); o aditivo do contrato muda o valor esperado a partir da primeira ocorrência na data de efeito.

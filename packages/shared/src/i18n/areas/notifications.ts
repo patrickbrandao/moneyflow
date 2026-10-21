@@ -23,6 +23,7 @@ export const notificationsStrings = {
     contract_ending: 'Contrato: fim da vigência',
     contract_renewal_pending: 'Contrato: renovação pendente',
     contract_readjustment: 'Contrato: reajuste',
+    contract_charge_missing: 'Contrato: cobrança não feita',
     ai_budget_alert: 'Orçamento de IA',
     ai_awaiting_approval: 'Aprovação do agente',
     system: 'Sistema',

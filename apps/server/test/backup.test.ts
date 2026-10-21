@@ -737,6 +737,147 @@ describe('backup: recursos num sistema novo', () => {
     expect((await bApi.get('/api/classification-rules')).some((r: any) => r.pattern === orphan.pattern)).toBe(false);
   });
 
+  it('contratos de arquivo antigo (parcelas por ciclo, conta de passagem, tarefa aberta) viram obrigações em série (spec 034)', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const bApi = client(b, adminB.cookie);
+    const tag = uid();
+    const holder = await bApi.post('/api/entities', { kind: 'company', name: `Titular contratos ${tag}` });
+    const client_ = await bApi.post('/api/entities', { kind: 'company', name: `Cliente ${tag}` });
+    const caixa = await bApi.post('/api/caixas', { name: `Caixa contratos ${tag}`, holderEntityId: holder.id });
+    const account = await bApi.post(`/api/caixas/${caixa.id}/accounts`, {
+      kind: 'checking',
+      name: 'Corrente',
+      openingBalanceCents: 0,
+      openingDate: '2024-01-01',
+    });
+    const income = await bApi.post('/api/categories', { kind: 'income', name: `Receita contratos ${tag}` });
+    const base = await exportJson(h, adminA.cookie, 'categories');
+    const now = '2025-01-01T12:00:00.000Z';
+    const contractId = randomUUID();
+    const cycle1 = randomUUID();
+    const cycle2 = randomUUID();
+    const contract = {
+      id: contractId,
+      caixa_id: caixa.id,
+      entity_id: client_.id,
+      direction: 'receivable',
+      name: `Suporte ${tag}`,
+      category_id: income.id,
+      status: 'renewal_pending',
+      auto_renew: true,
+      notice_days: 30,
+      renewal_lead_days: 60,
+      reminder_every_days: 7,
+      readjustment_index: 'none',
+      created_at: now,
+      updated_at: now,
+      // Colunas da F19 (spec 033): os ajustes vão para a série.
+      payment_account_id: account.id,
+      transit_account_id: null,
+      late_fee_percent: '2.0000',
+      interest_month_percent: null,
+      early_discount_percent: null,
+      tolerance_cents: 300,
+      match_window_days: 20,
+      auto_settle: true,
+    };
+    const cycle = (id: string, seq: number, startsOn: string, durationMonths: number, periodicity: string, total: number) => ({
+      id,
+      contract_id: contractId,
+      seq,
+      starts_on: startsOn,
+      duration_months: durationMonths,
+      periodicity,
+      total_cents: total,
+      due_day: 10,
+      due_month_offset: 0,
+      created_at: now,
+      updated_at: now,
+    });
+    const parcel = (n: number, due: string, cycleId: string, extra: Record<string, unknown> = {}) => ({
+      id: randomUUID(),
+      caixa_id: caixa.id,
+      direction: 'receivable',
+      entity_id: client_.id,
+      category_id: income.id,
+      description: `Suporte ${tag} · ${n}/3`,
+      competence_date: `${due.slice(0, 7)}-01`,
+      due_date: due,
+      amount_cents: n === 1 ? 10_001 : 10_000,
+      status: 'open',
+      origin: 'contract',
+      contract_id: contractId,
+      contract_cycle_id: cycleId,
+      contract_installment: n,
+      planned_account_id: null,
+      planned_account_custom: false,
+      created_at: now,
+      updated_at: now,
+      ...extra,
+    });
+    const parcels = [
+      parcel(1, '2025-01-10', cycle1),
+      parcel(2, '2025-02-10', cycle1),
+      // A conta de passagem vira a conta prevista.
+      parcel(3, '2025-03-10', cycle1, { planned_transit_account_id: account.id }),
+    ];
+    const single = parcel(1, '2025-04-10', cycle2, { description: `Suporte ${tag} · única`, amount_cents: 50_000 });
+    const file = {
+      ...base,
+      kind: 'full',
+      tables: {
+        contracts: [contract],
+        contract_cycles: [cycle(cycle1, 1, '2025-01-01', 3, 'monthly', 30_001), cycle(cycle2, 2, '2025-04-01', 1, 'single', 50_000)],
+        contract_renewal_tasks: [
+          {
+            id: randomUUID(),
+            contract_id: contractId,
+            contract_cycle_id: cycle2,
+            status: 'open',
+            opened_on: '2025-03-01',
+            due_on: '2025-04-30',
+          },
+        ],
+        titles: [...parcels, single],
+      },
+      references: {},
+    };
+    const report = await importFile(b, adminB.cookie, 'full', file);
+    expect(failures(report)).toEqual([]);
+
+    const detail = await bApi.get(`/api/contracts/${contractId}`);
+    expect(detail).toMatchObject({ status: 'active', startsOn: '2025-01-01', endsOn: '2025-04-30' });
+    expect(detail.renewalTasks.map((k: any) => k.status)).toEqual(['closed']);
+    expect(detail.cycles.map((y: any) => [y.seq, y.endsOn, y.legacy?.periodicity])).toEqual([
+      [2, '2025-04-30', 'single'],
+      [1, '2025-03-31', 'monthly'],
+    ]);
+    // As parcelas mensais viraram uma série (a última ocorrência é o último vencimento), com os ajustes do contrato.
+    expect(detail.obligations).toEqual([
+      expect.objectContaining({
+        kind: 'account',
+        frequency: 'monthly',
+        intervalCount: 1,
+        anchorDay: 10,
+        startsOn: '2025-01-10',
+        endsOn: '2025-03-10',
+        terms: expect.objectContaining({ lateFeePercent: 2, toleranceCents: 300, matchWindowDays: 20, autoSettle: true }),
+      }),
+    ]);
+    const ruleId = detail.obligations[0].id;
+    const titles = await Promise.all(parcels.map((p) => bApi.get(`/api/titles/${p.id}`)));
+    expect(titles.map((x: any) => [x.origin, x.recurrenceRuleId, x.occurrence, x.contractInstallment])).toEqual([
+      ['recurrence', ruleId, 1, 1],
+      ['recurrence', ruleId, 2, 2],
+      ['recurrence', ruleId, 3, 3],
+    ]);
+    expect(titles[2].plannedAccountId).toBe(account.id);
+    // A parcela única virou título avulso ligado ao contrato.
+    expect(detail.extraTitles.map((x: any) => x.titleId)).toEqual([single.id]);
+    expect((await bApi.get(`/api/titles/${single.id}`)).origin).toBe('manual');
+  });
+
   it('caixas exigem o titular; entidades casam pelo documento e conflitos de chave PIX voltam com o motivo', async () => {
     if (skip) return;
     const adminA = await userSession(h, 'admin');
@@ -948,30 +1089,52 @@ describe('backup: JSON completo num sistema novo', () => {
       charges: [{ chargeKind: 'interest', amountCents: 700, categoryId: s.expense.id }],
     });
 
-    // Contratos (spec 020): renovação pendente com aditivo e documentos (markdown com 2 versões e PDF); um rescindido com multa.
+    // Contratos (specs 020 e 034): um vigente com duas obrigações (série na conta com ajustes e cobrança no cartão, com uma
+    // compra ligada), aditivo e documentos (markdown com 2 versões e PDF); um rescindido com multa.
     const contractBase = {
       caixaId: s.caixaA.id,
       entityId: s.holderB.id,
       direction: 'receivable',
       categoryId: s.income.id,
-      durationMonths: 12,
-      periodicity: 'monthly',
-      totalCents: 120_001,
-      dueDay: 10,
-      dueMonthOffset: 1,
-      activate: true,
+      startsOn: '2026-11-01',
+      endsOn: '2027-04-30',
     };
-    // Spec 033: a conta das parcelas (FK de contracts e titles para financial_accounts) entra depois das contas.
     const pending = await admin.post('/api/contracts', {
       ...contractBase,
       name: 'Suporte',
-      startsOn: '2025-11-01',
       autoRenew: true,
-      paymentAccountId: s.accountA.id,
-      lateFeePercent: 2,
+      obligations: [
+        {
+          description: 'Mensalidade',
+          amountCents: 10_000,
+          firstDueDate: '2026-11-10',
+          accountId: s.accountA.id,
+          lateFeePercent: 2,
+          toleranceCents: 500,
+        },
+      ],
     });
-    expect(pending.status).toBe('renewal_pending');
-    await admin.post(`/api/contracts/${pending.id}/amendments`, { effectiveOn: '2026-08-01', installmentCents: 11_000 });
+    expect(pending.status).toBe('active');
+    const ruleId = pending.obligations[0].id;
+    await admin.post(`/api/contracts/${pending.id}/amendments`, { effectiveOn: '2027-02-01', ruleIds: [ruleId], amountCents: 11_000 });
+    const payable = await admin.post('/api/contracts', {
+      ...contractBase,
+      entityId: s.supplier.id,
+      direction: 'payable',
+      categoryId: s.expense.id,
+      name: 'Assinatura',
+      obligations: [{ kind: 'card', description: 'Streaming', amountCents: 2_990, firstDueDate: '2026-11-15', cardCaixaId: card.id }],
+    });
+    const cardRule = payable.obligations[0].id;
+    await admin.post(`/api/contracts/${payable.id}/amendments`, { effectiveOn: '2027-01-01', ruleIds: [cardRule], amountCents: 3_490 });
+    await admin.post(`/api/cards/${card.id}/purchases`, {
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      purchasedOn: '2026-11-15',
+      description: 'Streaming',
+      amountCents: 2_990,
+      charge: { ruleId: cardRule, occurrence: 1 },
+    });
     const upload = (name: string, body: Buffer, mime: string) =>
       h.app.inject({
         method: 'POST',
@@ -982,10 +1145,14 @@ describe('backup: JSON completo num sistema novo', () => {
     const md = (await upload('contrato.md', Buffer.from('# Contrato\nv1\n'), 'text/markdown')).json();
     await admin.post(`/api/contract-documents/${md.id}/versions`, { content: '# Contrato\nv2\n' });
     expect((await upload('contrato.pdf', Buffer.from('%PDF-1.4 contrato'), 'application/pdf')).statusCode).toBe(200);
-    const terminated = await admin.post('/api/contracts', { ...contractBase, name: 'Consultoria', startsOn: '2027-01-01' });
+    const terminated = await admin.post('/api/contracts', {
+      ...contractBase,
+      name: 'Consultoria',
+      obligations: [{ description: 'Hora técnica', amountCents: 20_000, firstDueDate: '2026-11-20', accountId: s.accountA.id }],
+    });
     await admin.post(`/api/contracts/${terminated.id}/terminate`, {
-      terminatedOn: '2027-03-15',
-      penalty: { direction: 'receivable', amountCents: 5_000, dueDate: '2027-04-10', categoryId: s.income.id },
+      terminatedOn: '2027-01-15',
+      penalty: { direction: 'receivable', amountCents: 5_000, dueDate: '2027-02-10', categoryId: s.income.id },
     });
 
     // Extrato importado e um mês fechado.
@@ -1041,25 +1208,24 @@ describe('backup: JSON completo num sistema novo', () => {
       expect(invoiceB.status).toBe(invoiceA.status);
       expect(invoiceB.totalCents).toBe(invoiceA.totalCents);
 
-      // Contratos: mesma situação, ciclos, parcelas, aditivos, tarefas e documentos (com as versões).
-      for (const id of [pending.id, terminated.id]) {
+      // Contratos: mesma situação, vigências, obrigações (com os ajustes e as ocorrências), aditivos e documentos (com as versões).
+      for (const id of [pending.id, payable.id, terminated.id]) {
         const [ca, cb] = await Promise.all([admin.get(`/api/contracts/${id}`), client(b, adminB.cookie).get(`/api/contracts/${id}`)]);
-        const shape = (c: any) => ({
+        const [pa, pb] = await Promise.all([
+          admin.get(`/api/contracts/${id}/payments`),
+          client(b, adminB.cookie).get(`/api/contracts/${id}/payments`),
+        ]);
+        const shape = (c: any, p: any) => ({
           status: c.status,
-          paymentAccountId: c.paymentAccountId,
-          lateFeePercent: c.lateFeePercent,
-          planned: c.cycles.flatMap((y: any) => y.installments.map((i: any) => i.plannedAccountId)),
-          cycles: c.cycles.map((y: any) => ({
-            seq: y.seq,
-            total: y.totalCents,
-            rows: y.installments.map((i: any) => [i.amountCents, i.status]),
-          })),
+          term: [c.startsOn, c.endsOn],
+          obligations: c.obligations.map((o: any) => [o.kind, o.accountId, o.payerCaixaId, o.amountCents, o.endsOn, o.terms]),
+          cycles: c.cycles.map((y: any) => [y.seq, y.startsOn, y.endsOn]),
+          rows: p.rows.map((r: any) => [r.kind, r.occurrence, r.amountCents, r.status, r.plannedAccountId]),
           extra: c.extraTitles.length,
-          amendments: c.amendments.length,
-          tasks: c.renewalTasks.map((k: any) => k.status),
+          amendments: c.amendments.map((a: any) => a.ruleIds.length),
           documents: c.documents.map((d: any) => [d.format, d.currentVersion, d.versionCount]),
         });
-        expect(shape(cb)).toEqual(shape(ca));
+        expect(shape(cb, pb)).toEqual(shape(ca, pa));
       }
 
       // O usuário do sistema de origem entra com a mesma senha.

@@ -242,7 +242,7 @@ export function StatementImportPanel({
                             </button>
                           </td>
                           <td className="rec-wide">
-                            <LinePair line={line} />
+                            <LinePair line={line} onChanged={canWrite ? changed : undefined} />
                           </td>
                           <td className="rec-mid">
                             <LineClassification line={line} />

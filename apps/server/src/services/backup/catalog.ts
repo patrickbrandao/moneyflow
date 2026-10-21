@@ -165,7 +165,12 @@ export const DEFERRED_CLUSTER = new Set([
   'card_invoices',
   'card_invoice_items',
   'card_purchases',
-  // Contratos (spec 020): status ⇄ tarefa aberta, ciclos contíguos, documento ⇄ versão atual e parcelas.
+  // Séries (spec 034): a série no cartão tem a cobrança esperada no COMMIT, e os títulos e as compras ligadas carregam o
+  // contrato da série; a série, a cobrança, os degraus, os títulos e o contrato entram juntos.
+  'recurrence_rules',
+  'card_recurring_charges',
+  'card_recurring_charge_amounts',
+  // Contratos (spec 020): ciclos contíguos, documento ⇄ versão atual e o rascunho sem títulos.
   'contracts',
   'contract_cycles',
   'contract_renewal_tasks',
@@ -195,6 +200,9 @@ export const COMPOSITE_KEYS: Record<string, string[]> = {
   app_settings: ['key'],
   // Provedor por inferência do agente (spec 024): a capacidade é texto.
   ai_agent_inferences: ['agent_id', 'capability'],
+  // Cobrança esperada no cartão (spec 034): uma por série; os degraus do valor por série e ocorrência.
+  card_recurring_charges: ['recurrence_rule_id'],
+  card_recurring_charge_amounts: ['recurrence_rule_id', 'from_occurrence'],
 };
 
 /** Colunas que identificam a linha (id ou a chave composta). */
@@ -261,7 +269,14 @@ export async function loadCatalog(db: Executor): Promise<Catalog> {
   }
   for (const row of fks.rows) {
     const table = catalog.get(row.table_name);
-    const idIndex = row.parent_columns.indexOf('id');
+    // A FK aponta para o id do pai, ou para a chave de uma coluna só de uma tabela sem id (card_recurring_charges).
+    const parentKey = COMPOSITE_KEYS[row.parent];
+    const idIndex =
+      row.parent_columns.indexOf('id') !== -1
+        ? row.parent_columns.indexOf('id')
+        : parentKey?.length === 1
+          ? row.parent_columns.indexOf(parentKey[0]!)
+          : -1;
     if (!table || idIndex === -1) continue;
     table.fks.push({
       table: row.table_name,

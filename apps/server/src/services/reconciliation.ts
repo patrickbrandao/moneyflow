@@ -24,6 +24,7 @@ import {
   type csvMappingInput,
   type csvMappingUpdateInput,
   type LineCreatedEntry,
+  type lineCardChargeInput,
   type lineClassifyInput,
   type lineCreateInput,
   type lineMatchInput,
@@ -39,6 +40,7 @@ import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { notFound, translateDbError, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
+import { insertChargePurchase } from './card-charges';
 import { insertPurchase, loadCard } from './card-core';
 import { assertPurchaseDeletable, deletePurchaseTx } from './cards';
 import { settleFromLine } from './line-settle';
@@ -122,7 +124,7 @@ async function applyMatch(ctx: ServiceContext, tx: Tx, line: Line, ref: z.output
     await setMatched(tx, line.id, { movementId: movement.id });
   } else if (ref.titleId) {
     if (!line.financialAccountId) throw unprocessable(t.errors.lineAccountOnly);
-    // Spec 033: a baixa repartida (parcela de contrato) e, no título de outra caixa, a transferência.
+    // Specs 033 e 034: a baixa repartida pela série (ocorrência de série), na conta da linha.
     const { movementId, createdEntry } = await settleFromLine(ctx, tx, line, ref.titleId);
     await setMatched(tx, line.id, { movementId, createdEntry });
   } else if (ref.cardInvoiceItemId) {
@@ -248,7 +250,7 @@ export async function deleteCreatedEntry(
   const [movement] = await tx.select().from(movements).where(eq(movements.id, line.movementId!));
   if (!movement) throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
   if (line.createdEntry === 'transfer_settlement') {
-    // Spec 033: a perna da transferência na conta da linha → a transferência → a baixa (e a perna do espelho) na conta de passagem.
+    // Histórico da F19 (spec 033): a perna da transferência na conta da linha → a transferência → a baixa na conta de passagem.
     if (!movement.transferId) throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
     const [transfer] = await tx.select().from(transfers).where(eq(transfers.id, movement.transferId));
     if (!transfer?.settlementId) throw unprocessable(t.errors.lineEntryChanged, 'line_entry_changed');
@@ -466,6 +468,29 @@ async function categoryFits(tx: Tx, categoryId: string, line: Line) {
   return row?.kind === (line.cardCaixaId || line.amountCents < 0 ? 'expense' : 'income');
 }
 
+/**
+ * "Lançar como cobrança de <obrigação> de <mês>" (spec 034): a linha nova da
+ * fatura vira a compra à vista ligada à ocorrência esperada (na pagadora da
+ * obrigação, com o contrato), conciliada com ela (created_entry purchase).
+ */
+export async function createChargeFromLine(ctx: ServiceContext, id: string, input: z.output<typeof lineCardChargeInput>) {
+  await withTx(ctx, async (tx) => {
+    const line = await loadLine(ctx, tx, id);
+    if (line.status === 'matched' || line.status === 'ignored') throw unprocessable(t.errors.lineNotPending);
+    if (!line.cardCaixaId) throw unprocessable(t.errors.lineCardOnly);
+    if (line.amountCents >= 0) throw unprocessable(t.errors.lineCreditOnCard);
+    const created = await insertChargePurchase(ctx, tx, {
+      cardCaixaId: line.cardCaixaId,
+      ruleId: input.ruleId,
+      occurrence: input.occurrence,
+      purchasedOn: line.postedOn,
+      amountCents: -line.amountCents,
+    });
+    await setMatched(tx, line.id, { cardInvoiceItemId: created.itemId, createdEntry: 'purchase' });
+  });
+  return lineRow(ctx, id);
+}
+
 /** Candidatos para casar à mão (janela maior que a do casamento automático). */
 export async function lineCandidates(ctx: ServiceContext, id: string): Promise<MatchCandidateRow[]> {
   const [line] = await ctx.db.select().from(statementLines).where(eq(statementLines.id, id));
@@ -479,11 +504,11 @@ export async function lineCandidates(ctx: ServiceContext, id: string): Promise<M
     financial_account_id: line.financialAccountId,
     card_caixa_id: line.cardCaixaId,
   };
-  const candidates = await candidatesFor(ctx.db, raw, 30, (caixaId) => ctx.access.canRead(caixaId));
-  // A parcela achada pela regra do contrato (spec 033) aparece uma vez, com a repartição.
-  const contractIds = new Set(candidates.filter((c) => c.contract).map((c) => c.id));
+  const candidates = await candidatesFor(ctx.db, raw, 30);
+  // A ocorrência achada pela regra da série (specs 033 e 034) aparece uma vez, com a repartição.
+  const seriesIds = new Set(candidates.filter((c) => c.series).map((c) => c.id));
   return candidates
-    .filter((c) => c.contract || c.kind !== 'title' || !contractIds.has(c.id))
+    .filter((c) => c.series || c.kind !== 'title' || !seriesIds.has(c.id))
     .map((c) => ({
       kind: c.kind,
       id: c.id,
@@ -492,7 +517,7 @@ export async function lineCandidates(ctx: ServiceContext, id: string): Promise<M
       description: c.description,
       entityName: c.entityName ?? null,
       score: scoreCandidate({ postedOn: line.postedOn, amountCents: line.amountCents, description: line.description }, c),
-      contract: c.contract ?? null,
+      series: c.series ?? null,
     }))
     .sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
 }

@@ -33,7 +33,9 @@ const ICONS: Record<NotificationKind, ReactNode> = {
   system: <Info className="ic info" />,
   contract_notice_deadline: <FileClock className="ic" />,
   contract_ending: <FileClock className="ic info" />,
+  // Só para o histórico: a renovação virou ação do contrato (spec 034).
   contract_renewal_pending: <Repeat2 className="ic" />,
+  contract_charge_missing: <CreditCard className="ic" />,
   contract_readjustment: <CalendarClock className="ic info" />,
   ai_budget_alert: <Gauge className="ic" />,
   ai_awaiting_approval: <BotMessageSquare className="ic" />,

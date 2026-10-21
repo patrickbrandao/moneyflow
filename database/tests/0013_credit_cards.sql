@@ -15,7 +15,9 @@ SELECT columns_are('card_invoices', ARRAY['id', 'card_caixa_id', 'reference_mont
                                           'notes', 'created_at', 'updated_at']);
 SELECT columns_are('card_purchases', ARRAY['id', 'card_caixa_id', 'kind', 'charge_kind', 'payer_caixa_id', 'entity_id',
                                            'category_id', 'purchased_on', 'description', 'amount_cents', 'installments_total',
-                                           'first_installment', 'refunded_purchase_id', 'notes', 'created_at', 'updated_at']);
+                                           'first_installment', 'refunded_purchase_id', 'notes', 'created_at', 'updated_at',
+                                           -- 0052: a ocorrência da cobrança no cartão que a compra atende
+                                           'contract_id', 'recurrence_rule_id', 'occurrence']);
 SELECT columns_are('card_invoice_items', ARRAY['id', 'card_invoice_id', 'kind', 'card_purchase_id', 'installment_number',
                                                'carried_from_invoice_id', 'payer_caixa_id', 'amount_cents', 'description',
                                                'created_at', 'updated_at']);

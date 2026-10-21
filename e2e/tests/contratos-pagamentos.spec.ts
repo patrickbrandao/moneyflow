@@ -2,11 +2,11 @@ import { expect, test } from '@playwright/test';
 import { loginAsAdmin } from '../support/session';
 
 /*
- * Pagamentos de contrato no extrato (spec 033): o contrato de aluguel é
- * cadastrado pela tela com a conta das parcelas, multa e juros; o OFX com o
- * aluguel pago 10 dias atrasado (com multa e juros) sugere a parcela com a
- * repartição; confirmar a sugestão baixa a parcela e a seção Pagamentos mostra
- * o atraso na tabela e no gráfico. Caixa, conta, titular e fornecedor vêm da API.
+ * Reconhecer o pagamento pela série (specs 033 e 034): o contrato de aluguel é
+ * cadastrado pela tela com a obrigação na corrente e os ajustes (multa e
+ * juros); o OFX com o aluguel pago 10 dias atrasado sugere a ocorrência com a
+ * repartição; confirmar baixa a ocorrência e a guia Pagamentos mostra o atraso
+ * na tabela e no gráfico. Caixa, conta, titular e fornecedor vêm da API.
  */
 
 function ofx(txs: { date: string; cents: number; name: string; fitid: string }[]) {
@@ -27,7 +27,7 @@ ${list}
 </BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`);
 }
 
-test('contrato com conta das parcelas: o pagamento atrasado no extrato vira a baixa com multa e juros e aparece no gráfico', async ({
+test('contrato com a obrigação na conta: o pagamento atrasado no extrato vira a baixa com multa e juros e aparece no gráfico', async ({
   page,
 }) => {
   const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
@@ -50,7 +50,7 @@ test('contrato com conta das parcelas: o pagamento atrasado no extrato vira a ba
     openingDate: '2026-01-01',
   });
 
-  // 1. O contrato pela tela: eu pago, R$ 2.000,00 por mês a partir de julho/2026, dia 10, com a conta das parcelas e os encargos.
+  // 1. O contrato pela tela: eu pago, R$ 2.000,00 por mês de julho/2026 a junho/2027, dia 10, na corrente, com multa e juros.
   const name = `Aluguel sala ${tag}`;
   await page.goto('/contracts?new=1');
   const dialog = page.getByRole('dialog', { name: 'Novo contrato' });
@@ -59,16 +59,25 @@ test('contrato com conta das parcelas: o pagamento atrasado no extrato vira a ba
   await dialog.getByLabel('Contraparte').fill(landlord);
   await dialog.getByRole('option', { name: new RegExp(landlord) }).click();
   await dialog.getByLabel('Nome / objeto').fill(name);
-  await dialog.getByLabel('Categoria').selectOption({ label: expense.name });
-  await dialog.getByLabel('Início').fill('2026-07-01');
-  await dialog.getByLabel('Valor total do ciclo').fill('24.000,00');
-  await dialog.getByLabel('Conta das parcelas').selectOption({ label: account.name });
-  await dialog.getByLabel('Multa por atraso (%)').fill('2');
-  await dialog.getByLabel('Juros de mora (% ao mês)').fill('1');
-  await dialog.getByRole('button', { name: 'Salvar e ativar' }).click();
+  await dialog.getByLabel('Categoria padrão').selectOption({ label: expense.name });
+  await dialog.getByLabel('Início da vigência').fill('2026-07-01');
+  await dialog.getByLabel('Fim da vigência').fill('2027-06-30');
+  const obligation = dialog.getByTestId('obligation-row').first();
+  await obligation.getByTestId('obligation-description').fill('Aluguel');
+  await obligation.getByLabel('Valor').fill('2.000,00');
+  await obligation.getByLabel('Primeiro vencimento').fill('2026-07-10');
+  await obligation.getByTestId('obligation-account').selectOption({ label: `${account.name} · Corrente/pagamento` });
+  const terms = obligation.getByTestId('obligation-terms');
+  await terms.getByRole('button', { name: 'Ajustes de reconhecimento' }).click();
+  await terms.getByLabel('Multa por atraso (%)').fill('2');
+  await terms.getByLabel('Juros de mora (% ao mês)').fill('1');
+  await dialog.getByTestId('contract-create').click();
   await expect(page.getByRole('heading', { name })).toBeVisible();
-  // A conta prevista nas parcelas.
-  await expect(page.locator('table.data tbody tr').first()).toContainText(account.name);
+  const contractId = page.url().match(/contracts\/([0-9a-f-]{36})/)![1];
+  // A obrigação na corrente, com os ajustes.
+  const row = page.getByTestId('contract-obligations').getByTestId('obligation-row').first();
+  await expect(row).toContainText(account.name);
+  await expect(row.getByTestId('obligation-terms-summary')).toContainText('2');
 
   // 2. O extrato com julho pago em 20/07 (10 dias de atraso): R$ 2.000,00 + multa R$ 40,00 + juros R$ 6,67.
   const res = await page.request.post(`/api/statement-imports?accountId=${account.id}&fileName=aluguel-${tag}.ofx`, {
@@ -80,22 +89,21 @@ test('contrato com conta das parcelas: o pagamento atrasado no extrato vira a ba
 
   // 3. A sugestão mostra a parcela e a repartição; confirmar baixa a parcela.
   await page.goto(`/caixas/${caixa.id}/reconciliation?account=${account.id}&import=${imp.id}`);
-  const row = page.getByRole('row').filter({ hasText: 'PIX ALUGUEL SALA' });
-  await expect(row).toContainText('Sugerida');
-  const split = row.getByTestId('contract-split');
-  await expect(split).toContainText(`${name} · 1/12`);
+  const line = page.getByRole('row').filter({ hasText: 'PIX ALUGUEL SALA' });
+  await expect(line).toContainText('Sugerida');
+  const split = line.getByTestId('contract-split');
+  await expect(split).toContainText(name);
   await expect(split).toContainText('10 dia(s) de atraso');
   await expect(split).toContainText('Multa R$ 40,00');
   await expect(split).toContainText('Juros R$ 6,67');
-  await row.getByRole('button', { name: 'Confirmar' }).click();
-  await expect(row).toContainText('Conciliada');
+  await line.getByRole('button', { name: 'Confirmar' }).click();
+  await expect(line).toContainText('Conciliada');
 
   // 4. Pagamentos: a parcela 1 paga com 10 dias de atraso, na tabela e no gráfico.
-  const contract = (await (await page.request.get(`/api/contracts?caixaId=${caixa.id}`)).json())[0];
-  await page.goto(`/contracts/${contract.id}?tab=payments`);
+  await page.goto(`/contracts/${contractId}?tab=payments`);
   const payments = page.getByTestId('contract-payments');
   const first = payments.getByTestId('payment-row').first();
-  await expect(first).toContainText('1/12');
+  await expect(first).toContainText('#1');
   await expect(first.getByTestId('payment-days')).toHaveText('+10 d');
   await expect(first).toContainText('Conciliação');
   await expect(payments.getByTestId('contract-payments-summary')).toContainText('R$ 46,67');

@@ -5,6 +5,7 @@ import { api } from '../../lib/api';
 import { useAction } from '../../lib/hooks';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
 import { Button, Field, Modal } from '../ui';
+import { ChargeChoices, type ChargeRef, chargeKey, useExpectedCharges } from './ChargeLink';
 import { useGeneralCaixas } from './shared';
 
 function PayerSelect({ value, onChange }: { value: string; onChange: (id: string) => void }) {
@@ -42,6 +43,10 @@ export function PurchaseFormModal({
   const [installments, setInstallments] = useState(1);
   const [first, setFirst] = useState(1);
   const [advanced, setAdvanced] = useState(false);
+  // "É cobrança de um contrato?" (spec 034): liga a compra a uma ocorrência esperada no cartão.
+  const [isCharge, setIsCharge] = useState(false);
+  const [charge, setCharge] = useState<ChargeRef | null>(null);
+  const expected = useExpectedCharges(cardCaixaId, purchasedOn, amount, isCharge);
   const [error, setError] = useState<string | null>(null);
   const { run, busy } = useAction();
 
@@ -63,6 +68,7 @@ export function PurchaseFormModal({
       amountCents: amount,
       installmentsTotal: n,
       firstInstallment: Math.min(Math.max(first || 1, 1), n),
+      charge: isCharge ? charge : null,
     };
     const saved = await run(() => api.post<CardPurchaseDetail>(`/api/cards/${cardCaixaId}/purchases`, body), t.card.purchaseCreated);
     if (saved) onSaved(saved);
@@ -113,6 +119,20 @@ export function PurchaseFormModal({
                 onChange={(e) => setInstallments(Number(e.target.value))}
               />
             </Field>
+            <div className="span-all grid gap-2" data-testid="card-charge-question">
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={isCharge}
+                  onChange={(e) => {
+                    setIsCharge(e.target.checked);
+                    if (!e.target.checked) setCharge(null);
+                  }}
+                />
+                {t.contracts.planned.isChargeOf}
+              </label>
+              {isCharge && <ChargeChoices rows={expected} value={charge ? chargeKey(charge) : null} onChange={setCharge} />}
+            </div>
             <div className="span-all">
               <button type="button" className="link inline-flex items-center gap-1 text-[13px]" onClick={() => setAdvanced((a) => !a)}>
                 {advanced ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />} {t.card.advanced}

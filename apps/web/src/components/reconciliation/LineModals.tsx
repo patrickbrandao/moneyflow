@@ -39,6 +39,13 @@ export function MatchModal({ line, onClose, onDone }: { line: StatementLineRow; 
 
   async function submit() {
     if (!chosen) return;
+    if (chosen.kind === 'card_charge') {
+      // Cobrança esperada no cartão (spec 034): cria a compra à vista ligada à ocorrência e concilia a linha.
+      const [ruleId, occurrence] = chosen.id.split(':');
+      const body = { ruleId, occurrence: Number(occurrence) };
+      if (await run(() => api.post(`/api/statement-lines/${line.id}/card-charge`, body), t.contracts.planned.chargeCreated)) onDone();
+      return;
+    }
     const key = chosen.kind === 'movement' ? 'movementId' : chosen.kind === 'title' ? 'titleId' : 'cardInvoiceItemId';
     if (await run(() => api.post(`/api/statement-lines/${line.id}/match`, { [key]: chosen.id }), s.matched)) onDone();
   }
@@ -53,7 +60,7 @@ export function MatchModal({ line, onClose, onDone }: { line: StatementLineRow; 
         {candidates.data?.length === 0 && <p className="notice info">{s.noCandidates}</p>}
         <div className="rec-cands" role="radiogroup" aria-label={s.candidates}>
           {candidates.data?.map((c) => (
-            <label key={`${c.kind}-${c.id}`} className="rec-radio">
+            <label key={`${c.kind}-${c.id}`} className="rec-radio" data-kind={c.kind}>
               <input type="radio" name="candidate" checked={chosen?.id === c.id} onChange={() => setChosen(c)} />
               <span className="mono w-[84px] text-xs">{formatDate(c.date)}</span>
               <span className="min-w-0 flex-1">
@@ -62,7 +69,7 @@ export function MatchModal({ line, onClose, onDone }: { line: StatementLineRow; 
                   {s.targetKinds[c.kind]}
                   {c.entityName ? ` · ${c.entityName}` : ''}
                 </span>
-                {c.contract && <ContractSplit info={c.contract} />}
+                {c.series && <ContractSplit info={c.series} description={c.description} />}
               </span>
               {c.score !== null && (
                 <Badge mono title={s.score}>

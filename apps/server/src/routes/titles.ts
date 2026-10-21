@@ -1,8 +1,11 @@
 import {
   mirrorAcceptInput,
   mirrorDisputeInput,
+  seriesCreateInput,
   seriesEndInput,
   seriesEndQuery,
+  seriesListQuery,
+  seriesUpdateInput,
   settlementAccountInput,
   settlementCreateInput,
   settlementReverseInput,
@@ -16,6 +19,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 import { param, parse, type Req } from '../http';
 import { overview, search } from '../services/overview';
+import * as series from '../services/series';
 import * as settlements from '../services/settlements';
 import * as titles from '../services/titles';
 import * as transfers from '../services/transfers';
@@ -33,6 +37,13 @@ export async function titleRoutes(app: FastifyInstance) {
   app.post('/api/titles/:id/reopen', (r: Req) => titles.reopenTitle(r.ctx, id(r)));
   app.get('/api/titles/:id/series/end', (r: Req) => titles.previewSeriesEnd(r.ctx, id(r), parse(seriesEndQuery, r.query).endsOn ?? null));
   app.post('/api/titles/:id/series/end', (r: Req) => titles.endSeries(r.ctx, id(r), parse(seriesEndInput, r.body).endsOn));
+  // Séries com conta, cartão e ajustes (spec 034): a obrigação de um contrato ou uma série solta.
+  app.get('/api/series', (r: Req) => series.listSeries(r.ctx, parse(seriesListQuery, r.query)));
+  app.post('/api/series', (r: Req) => series.createSeries(r.ctx, parse(seriesCreateInput, r.body)));
+  app.get('/api/series/:id', (r: Req) => series.getSeries(r.ctx, id(r)));
+  app.patch('/api/series/:id', (r: Req) => series.updateSeries(r.ctx, id(r), parse(seriesUpdateInput, r.body)));
+  app.get('/api/series/:id/end', (r: Req) => series.previewSeriesEndRule(r.ctx, id(r), parse(seriesEndQuery, r.query).endsOn ?? null));
+  app.post('/api/series/:id/end', (r: Req) => series.endSeriesRule(r.ctx, id(r), parse(seriesEndInput, r.body).endsOn));
   app.post('/api/titles/:id/mirror/accept', (r: Req) => titles.acceptMirror(r.ctx, id(r), parse(mirrorAcceptInput, r.body)));
   app.post('/api/titles/:id/mirror/dispute', (r: Req) => titles.disputeMirror(r.ctx, id(r), parse(mirrorDisputeInput, r.body)));
 

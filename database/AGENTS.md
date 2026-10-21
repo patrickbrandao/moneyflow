@@ -13,9 +13,10 @@ Leia antes de trabalhar: [docs/016-banco-de-dados.md](../docs/016-banco-de-dados
 | `docker/initdb/` | Scripts do primeiro boot do volume: banco `<db>_test` e papel `moneyflow_app`. |
 | `migrations/NNNN_nome.sql` | Migrations dbmate, numeradas com 4 dígitos sequenciais. |
 | `tests/NNNN_nome.sql` | Testes pgTAP, um arquivo por área (mesmo número da migration que cria a área). |
+| `migration-tests/NNNN_nome/` | Teste de migração com dados: `fixture.sql` (no schema anterior), `after_up.sql` e `after_down.sql` (pgTAP). Fora do `make test`. |
 | `seeds/dev.sql` | Dados de desenvolvimento, idempotentes. Nunca usados em testes nem em produção. |
 | `schema.sql` | Dump da estrutura atual (gerado por `make dump`, commitado como referência; não edite). |
-| `scripts/` | Utilitários (`new-migration.sh`). |
+| `scripts/` | Utilitários (`new-migration.sh`, `test-migration.sh`). |
 
 ## Comandos (rodar dentro de `database/`)
 
@@ -26,6 +27,7 @@ make rollback            # desfaz a última migration
 make new NAME=create_x   # cria migrations/NNNN_create_x.sql
 make test T=/tests/0003_entities.sql   # rápido: recria <db>_test, migra, testa o down da última, migra de novo e roda só o(s) arquivo(s) dados (caminho no container; vários: T="/tests/a.sql /tests/b.sql")
 make test                # completo: o mesmo, rodando todo o pgTAP (só quando pedido, antes de PR ou de release)
+make test-migration M=0052   # migration com dados: cria <db>_mig, aplica as anteriores, fixture, sobe, confere, desce, confere, sobe e confere
 make dump                # regrava schema.sql
 make seed                # carrega seeds/dev.sql
 make psql                # console no banco de desenvolvimento
@@ -35,7 +37,7 @@ make reset               # APAGA o banco de desenvolvimento e recria do zero
 ## Fluxo para qualquer mudança
 
 1. `make new NAME=...` e escreva o `-- migrate:up` e um `-- migrate:down` que desfaça tudo.
-2. Escreva ou atualize o teste pgTAP da área.
+2. Escreva ou atualize o teste pgTAP da área. Migration que converte dados de produção também ganha o teste de migração com dados (`migration-tests/NNNN_nome/`, `make test-migration M=NNNN`).
 3. Rode o nível rápido: `make test T=/tests/NNNN_area.sql` com o(s) arquivo(s) pgTAP da área tocada precisa passar. Ele ainda recria o banco de testes, aplica todas as migrations e testa o down da última; só não roda todo o pgTAP.
 4. `make dump` (obrigatório quando o schema muda) e commite `schema.sql` junto com a migration e o teste.
 5. Informe ao agente da aplicação o que mudou, para ele regenerar o schema Drizzle (ver 016).

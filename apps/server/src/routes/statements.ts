@@ -9,6 +9,7 @@ import {
   importProvisionalInput,
   importRenameInput,
   importSupersedeInput,
+  lineCardChargeInput,
   lineClassifyInput,
   lineCreateInput,
   lineIdsInput,
@@ -118,6 +119,8 @@ export async function statementRoutes(app: FastifyInstance) {
   app.post('/api/statement-lines/:id/ignore', (r: Req) => rec.setIgnored(r.ctx, id(r), true));
   app.post('/api/statement-lines/:id/unignore', (r: Req) => rec.setIgnored(r.ctx, id(r), false));
   app.post('/api/statement-lines/:id/create', (r: Req) => rec.createFromLine(r.ctx, id(r), parse(lineCreateInput, r.body)));
+  // Fatura do cartão (spec 034): "Lançar como cobrança de <obrigação> de <mês>".
+  app.post('/api/statement-lines/:id/card-charge', (r: Req) => rec.createChargeFromLine(r.ctx, id(r), parse(lineCardChargeInput, r.body)));
   app.patch('/api/statement-lines/:id', (r: Req) => rec.classifyLine(r.ctx, id(r), parse(lineClassifyInput, r.body)));
 
   app.get('/api/csv-mappings', (r: Req) => rec.listMappings(r.ctx, parse(statementTargetQuery, r.query)));

@@ -302,7 +302,7 @@ export const AGENT_TOOLS = [
     category: 'reconciliation',
     title: 'Candidatos da linha do extrato',
     description:
-      'Candidatos para casar uma linha do extrato (movimentos, títulos em aberto e itens de fatura próximos em data e valor), do mais provável ao menos. As parcelas de contrato vêm pela regra do contrato (mesmo mês ou a janela, com multa, juros, desconto ou tolerância, ou baixa parcial; também as de outra caixa cuja conta prevista é a conta da linha), com `contract`: a parcela n/N e a repartição da baixa (principal, multa, juros, desconto, dias de atraso).',
+      'Candidatos para casar uma linha do extrato (movimentos, títulos em aberto e itens de fatura próximos em data e valor), do mais provável ao menos. As ocorrências de séries recorrentes (obrigações de contrato inclusive) vêm pela regra de reconhecimento da série (mesmo mês ou a janela, com multa, juros, desconto ou tolerância, ou baixa parcial), com `series`: a série, o contrato, a ocorrência e a repartição da baixa (principal, multa, juros, desconto, dias de atraso). Na fatura do cartão, kind card_charge é a cobrança esperada de uma obrigação, lançada com create_card_charge_from_line.',
     kind: 'read',
     input: z.object({ lineId: id }),
   }),
@@ -396,7 +396,7 @@ export const AGENT_TOOLS = [
     category: 'titles',
     title: 'Editar título',
     description:
-      'Altera um título em aberto (entidade, categoria, descrição, datas, valor, observações e a conta prevista — conta de outra caixa pede plannedTransitAccountId, a de passagem da caixa do título; na parcela de contrato, ela passa a ter conta própria).',
+      'Altera um título em aberto (entidade, categoria, descrição, datas, valor, observações e a conta prevista — uma conta da caixa do título, corrente, poupança ou cofre). Numa ocorrência de série, scope following leva a mudança às próximas em aberto (inclusive a conta prevista).',
     kind: 'write',
     input: z.object({ titleId: id, changes: titleUpdateInput }),
   }),
@@ -405,13 +405,19 @@ export const AGENT_TOOLS = [
     category: 'titles',
     title: 'Encerrar série recorrente',
     description:
-      'Encerra (ou estende) a série recorrente de um título numa data: as ocorrências que vencem até endsOn continuam; as seguintes em aberto são canceladas (com o espelho), sem apagar. endsOn null = sem fim (reabre as canceladas por um encerramento anterior). Falha se houver ocorrência com baixa depois da data.',
+      'Encerra (ou estende) uma série recorrente numa data: as ocorrências que vencem até endsOn continuam; as seguintes em aberto são canceladas (com o espelho), sem apagar. endsOn null = sem fim (reabre as canceladas por um encerramento anterior). Falha se houver ocorrência com baixa depois da data. Informe uma ocorrência (titleId) ou a série (ruleId; a cobrança esperada no cartão só por ruleId).',
     kind: 'write',
     destructive: true,
-    input: z.object({
-      titleId: id.describe('Qualquer ocorrência da série.'),
-      endsOn: date.nullable().describe('Último vencimento a manter (AAAA-MM-DD); null = sem fim.'),
-    }),
+    input: z
+      .object({
+        titleId: id.optional().describe('Qualquer ocorrência da série.'),
+        ruleId: id.optional().describe('A série (obrigatório na cobrança no cartão, que não tem títulos).'),
+        endsOn: date.nullable().describe('Último vencimento a manter (AAAA-MM-DD); null = sem fim.'),
+      })
+      .refine((v) => (v.titleId ? 1 : 0) + (v.ruleId ? 1 : 0) === 1, {
+        path: ['titleId'],
+        message: 'Informe titleId ou ruleId.',
+      }),
   }),
   define({
     name: 'settle_title',
@@ -462,7 +468,7 @@ export const AGENT_TOOLS = [
     category: 'reconciliation',
     title: 'Conciliar linha do extrato',
     description:
-      'Casa uma linha do extrato com um movimento, um título em aberto (vira baixa) ou um item de fatura. Parcela de contrato: o valor da linha vira a baixa repartida (principal, multa, juros, desconto) e, se a parcela é de outra caixa, a baixa sai na conta de passagem com a transferência a partir da conta da linha. Para várias linhas, use match_statement_lines.',
+      'Casa uma linha do extrato com um movimento, um título em aberto da caixa da conta (vira baixa na conta da linha) ou um item de fatura. Ocorrência de série recorrente: o valor da linha vira a baixa repartida pelos ajustes da série (principal, multa, juros, desconto). Para várias linhas, use match_statement_lines.',
     kind: 'write',
     input: lineMatchItem,
   }),
@@ -513,6 +519,15 @@ export const AGENT_TOOLS = [
     description: 'Linhas ignoradas do extrato voltam a novas.',
     kind: 'write',
     input: z.object({ lineIds }),
+  }),
+  define({
+    name: 'create_card_charge_from_line',
+    category: 'reconciliation',
+    title: 'Lançar cobrança esperada da fatura',
+    description:
+      'Linha nova da fatura do cartão que é a cobrança esperada de uma obrigação (list_line_candidates, kind card_charge, id = <ruleId>:<occurrence>): cria a compra à vista na caixa pagadora da obrigação, ligada à ocorrência e ao contrato, e concilia a linha com ela.',
+    kind: 'write',
+    input: z.object({ lineId: id, ruleId: id, occurrence: z.number().int().min(1) }),
   }),
   define({
     name: 'create_from_statement_line',

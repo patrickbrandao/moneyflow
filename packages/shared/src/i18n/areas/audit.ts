@@ -60,6 +60,8 @@ export const auditStrings = {
     period_closings: 'Fechamentos de mês',
     users: 'Usuários',
     recurrence_rules: 'Regras de recorrência',
+    card_recurring_charges: 'Cobranças esperadas no cartão',
+    card_recurring_charge_amounts: 'Valores das cobranças no cartão',
     nfe_documents: 'NF-e',
     nfe_items: 'Itens de NF-e',
     entity_addresses: 'Endereços de entidade',

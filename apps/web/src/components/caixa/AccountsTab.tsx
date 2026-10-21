@@ -1,6 +1,16 @@
-import { ACCOUNT_KINDS, type AccountRow, type CaixaDetail, formatDate, t, todayIso } from '@moneyflow/shared';
+import {
+  ACCOUNT_KINDS,
+  type AccountRow,
+  type CaixaDetail,
+  formatAccounting,
+  formatDate,
+  formatMonth,
+  type ObligationMatch,
+  t,
+  todayIso,
+} from '@moneyflow/shared';
 import { Archive, ArchiveRestore, FileText, Pencil, Plus, PlusCircle } from 'lucide-react';
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
@@ -8,9 +18,9 @@ import { useAction } from '../../lib/hooks';
 import { accountLink } from '../../lib/links';
 import { useParamState } from '../../lib/params';
 import { Money } from '../domain';
-import { CategorySelect, FormError, ModalActions, MoneyInput } from '../forms';
+import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
 import { ImportRecipesHint } from '../reconciliation/RecipesPanel';
-import { Badge, Button, EmptyRow, Field, Modal, useConfirm } from '../ui';
+import { Badge, Button, EmptyRow, Field, Modal, useConfirm, useDebounced } from '../ui';
 
 type Kind = (typeof ACCOUNT_KINDS)[number];
 
@@ -285,17 +295,32 @@ export function AccountFormModal({
   );
 }
 
-/** Lançamento avulso (ajuste de contagem, rendimento, tarifa): + entra, − sai. */
+/**
+ * Lançamento avulso (ajuste de contagem, rendimento, tarifa): + entra, − sai.
+ * No cofre (spec 034), com entidade, valor e data, procura a ocorrência em
+ * aberto de uma série do cofre que o valor paga e oferece "É o pagamento de
+ * <obrigação> de <mês>?": baixar a ocorrência no lugar do avulso.
+ */
 export function AdjustmentModal({ account, onClose, onSaved }: { account: AccountRow; onClose: () => void; onSaved: () => void }) {
   const [direction, setDirection] = useState<'in' | 'out'>('in');
   const [amount, setAmount] = useState<number | null>(null);
   const [occurredOn, setOccurredOn] = useState(todayIso());
   const [description, setDescription] = useState('');
   const [categoryId, setCategoryId] = useState<string | null>(null);
+  const [entity, setEntity] = useState<EntityOption | null>(null);
   const { run, busy } = useAction();
+  const matches = useObligationMatches(account, entity?.id ?? null, amount ? (direction === 'in' ? amount : -amount) : null, occurredOn);
+  const [loose, setLoose] = useState(false);
+  // Mudou a entidade, o valor ou a data: pergunta de novo.
+  const matchKey = `${entity?.id}|${direction}|${amount}|${occurredOn}`;
+  const [lastKey, setLastKey] = useState(matchKey);
+  if (lastKey !== matchKey) {
+    setLastKey(matchKey);
+    setLoose(false);
+  }
+  const offer = !loose && matches.length > 0 ? matches : [];
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
+  async function saveLoose() {
     if (!amount) return;
     const saved = await run(
       () =>
@@ -304,8 +329,33 @@ export function AdjustmentModal({ account, onClose, onSaved }: { account: Accoun
           amountCents: direction === 'in' ? amount : -amount,
           description,
           categoryId,
+          entityId: entity?.id ?? null,
         }),
       'Lançamento registrado.',
+    );
+    if (saved) onSaved();
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (offer.length > 0) return;
+    await saveLoose();
+  }
+
+  async function settle(match: ObligationMatch) {
+    const { split } = match;
+    const saved = await run(
+      () =>
+        api.post(`/api/titles/${match.titleId}/settlements`, {
+          settledOn: occurredOn,
+          amountCents: split.amountCents,
+          interestCents: split.interestCents,
+          fineCents: split.fineCents,
+          discountCents: split.discountCents,
+          financialAccountId: account.id,
+          notes: description.trim() || undefined,
+        }),
+      t.contracts.planned.settled,
     );
     if (saved) onSaved();
   }
@@ -327,12 +377,15 @@ export function AdjustmentModal({ account, onClose, onSaved }: { account: Accoun
         <Field label={t.common.date}>
           <input type="date" className="field" value={occurredOn} onChange={(e) => setOccurredOn(e.target.value)} required />
         </Field>
+        <Field label={`${t.title.entity} (${t.common.optional})`} className="span-all">
+          <EntityPicker value={entity} onChange={setEntity} ariaLabel={t.title.entity} />
+        </Field>
         <Field label={t.common.description} className="span-all">
           <input
             className="field"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            required
+            required={offer.length === 0}
             placeholder="Rendimento, tarifa, ajuste de contagem…"
           />
         </Field>
@@ -345,17 +398,100 @@ export function AdjustmentModal({ account, onClose, onSaved }: { account: Accoun
             allowEmpty={t.common.none}
           />
         </Field>
+        {offer.length > 0 && (
+          <div
+            className="span-all grid gap-2"
+            data-testid="obligation-match"
+            role="group"
+            aria-label={t.contracts.planned.settleOccurrence}
+          >
+            {offer.map((match) => (
+              <ObligationMatchOffer key={match.titleId} match={match} busy={busy} onSettle={() => void settle(match)} />
+            ))}
+          </div>
+        )}
         <div className="span-all">
           <ModalActions>
             <Button variant="ghost" onClick={onClose}>
               {t.common.cancel}
             </Button>
-            <Button type="submit" disabled={busy || !amount || !description.trim()}>
-              {t.common.save}
-            </Button>
+            {offer.length > 0 ? (
+              <Button
+                variant="ghost"
+                disabled={busy || !amount || !description.trim()}
+                title={description.trim() ? undefined : t.common.description}
+                data-testid="obligation-match-loose"
+                onClick={() => {
+                  setLoose(true);
+                  void saveLoose();
+                }}
+              >
+                {t.contracts.planned.keepLoose}
+              </Button>
+            ) : (
+              <Button type="submit" disabled={busy || !amount || !description.trim()}>
+                {t.common.save}
+              </Button>
+            )}
           </ModalActions>
         </div>
       </form>
     </Modal>
+  );
+}
+
+/** Ocorrências em aberto do cofre que o lançamento pode baixar (só no cofre, com entidade, valor e data). */
+function useObligationMatches(account: AccountRow, entityId: string | null, signedCents: number | null, occurredOn: string) {
+  const [matches, setMatches] = useState<ObligationMatch[]>([]);
+  const query = account.kind === 'cash' && entityId && signedCents && occurredOn ? { entityId, signedCents, occurredOn } : null;
+  const debounced = useDebounced(query ? `${query.entityId}|${query.signedCents}|${query.occurredOn}` : '', 300);
+  useEffect(() => {
+    if (!debounced) {
+      setMatches([]);
+      return;
+    }
+    const [entity, cents, date] = debounced.split('|');
+    let cancelled = false;
+    api
+      .get<ObligationMatch[]>(`/api/accounts/${account.id}/obligation-matches`, { occurredOn: date, amountCents: cents, entityId: entity })
+      .then((rows) => {
+        if (!cancelled) setMatches(rows);
+      })
+      .catch(() => {
+        // Sem a sugestão, o lançamento avulso segue normal.
+        if (!cancelled) setMatches([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [debounced, account.id]);
+  return query ? matches : [];
+}
+
+function ObligationMatchOffer({ match, busy, onSettle }: { match: ObligationMatch; busy: boolean; onSettle: () => void }) {
+  const S = t.statements.contractSplit;
+  const { split } = match;
+  const what = match.contractName ?? match.description;
+  const extras = [
+    split.fineCents ? `${S.fine} ${formatAccounting(split.fineCents)}` : '',
+    split.interestCents ? `${S.interest} ${formatAccounting(split.interestCents)}` : '',
+    split.discountCents ? `${S.discount} ${formatAccounting(split.discountCents)}` : '',
+  ].filter(Boolean);
+  return (
+    <div className="notice info" data-testid="obligation-match-offer" data-title-id={match.titleId}>
+      <span className="row-title">{t.contracts.planned.isPaymentOf(what, formatMonth(match.dueDate))}</span>
+      <span className="row-sub">
+        {match.contractName ? `${match.description} · ` : ''}
+        {formatDate(match.dueDate)} · {S.kinds[split.kind]} · {S.days(split.days)}
+        <br />
+        {S.principal} {formatAccounting(split.amountCents)}
+        {extras.length > 0 ? ` · ${extras.join(' · ')}` : ''}
+      </span>
+      <div className="mt-2">
+        <Button size="sm" disabled={busy} onClick={onSettle} data-testid="obligation-match-settle">
+          {t.contracts.planned.settleOccurrence}
+        </Button>
+      </div>
+    </div>
   );
 }

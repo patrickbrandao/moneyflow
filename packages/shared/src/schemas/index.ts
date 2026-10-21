@@ -6,6 +6,7 @@ import { ptBR } from '../i18n/pt-BR';
 import { isValidPixKey, normalizePixKey, PIX_KEY_TYPES } from '../pix';
 import { FREQUENCIES } from '../recurrence';
 import { cents, entityFilterFields, id, isoDate, nonNegativeCents, optionalText, positiveCents, queryBool, requiredText } from './common';
+import { seriesTermsFields } from './contracts';
 
 export * from './common';
 export * from './contracts';
@@ -357,6 +358,10 @@ export const titleCreateInput = z.object({
   /** Categoria do lado espelho (tipo oposto). Omitida: escolhida automaticamente. */
   mirrorCategoryId: id.nullish(),
   series: seriesInput.nullish(),
+  /** Conta prevista (spec 034): conta da caixa do título (corrente, poupança ou cofre); na série, vai para cada ocorrência. */
+  plannedAccountId: id.nullish().transform((v) => v ?? null),
+  /** Ajustes de reconhecimento da série (spec 034); omitidos = os padrões (janela 15 dias, sem encargos). */
+  seriesTerms: z.object(seriesTermsFields).partial().nullish(),
   /** Boleto: linha digitável (47/48) ou código de barras (44); gravado como o código de 44 dígitos. */
   boletoBarcode: z
     .string()
@@ -398,12 +403,11 @@ export const titleUpdateInput = z.object({
     .transform((v) => (v ? v : null))
     .optional(),
   /**
-   * Conta prevista (spec 033): checking/savings da caixa do título ou de outra
-   * caixa (com a de passagem, da caixa do título). Vale só para este título e
-   * o deixa com conta própria (trocar a do contrato não o muda).
+   * Conta prevista (specs 033 e 034): conta da caixa do título (corrente,
+   * poupança ou cofre). Em "só esta", a ocorrência fica com conta própria; em
+   * "esta e as próximas", as seguintes em aberto mudam junto.
    */
   plannedAccountId: id.nullable().optional(),
-  plannedTransitAccountId: id.nullable().optional(),
   scope: z.enum(SCOPES).default('this'),
 });
 
@@ -415,6 +419,8 @@ export const titleListQuery = z.object({
   to: isoDate.optional(),
   q: z.string().trim().max(200).optional(),
   entityId: id.optional(),
+  /** Ocorrências previstas numa conta (spec 034: os previstos no Extrato da conta). */
+  plannedAccountId: id.optional(),
   archived: queryBool,
   limit: z.coerce.number().int().min(1).max(1000).default(300),
 });

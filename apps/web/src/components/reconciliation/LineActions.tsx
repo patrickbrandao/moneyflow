@@ -1,5 +1,5 @@
-import { type CardOverview, formatDate, type StatementLineRow, t } from '@moneyflow/shared';
-import { Ban, Check, Link2, Plus, RotateCcw, Sparkles, Tag, Undo2 } from 'lucide-react';
+import { type CardOverview, formatAccounting, formatDate, formatMonth, type StatementLineRow, t } from '@moneyflow/shared';
+import { Ban, Check, CreditCard, Link2, Plus, RotateCcw, Sparkles, Tag, Undo2 } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAction } from '../../lib/hooks';
@@ -19,8 +19,51 @@ function RowAction({ icon, label, onClick, danger }: { icon: ReactNode; label: s
   );
 }
 
-/** Par da linha no app (conciliado ou sugerido). */
-export function LinePair({ line }: { line: StatementLineRow }) {
+const PL = t.contracts.planned;
+
+/** O rótulo "<obrigação> de <mês>" da cobrança esperada no cartão (spec 034). */
+export const chargeWhat = (charge: NonNullable<StatementLineRow['cardCharge']>) => charge.contractName ?? charge.description;
+
+/** "Lançar como cobrança de <obrigação> de <mês>" (spec 034): cria a compra ligada e concilia a linha. */
+export function useLaunchCardCharge(line: StatementLineRow, onChanged?: () => void) {
+  const { run, busy } = useAction();
+  const launch = async () => {
+    const charge = line.cardCharge;
+    if (!charge) return;
+    const body = { ruleId: charge.ruleId, occurrence: charge.occurrence };
+    if (await run(() => api.post<StatementLineRow>(`/api/statement-lines/${line.id}/card-charge`, body), PL.chargeCreated)) onChanged?.();
+  };
+  return { launch, busy };
+}
+
+/** A sugestão de cobrança esperada numa linha nova da fatura; com `onChanged`, vira o botão que lança. */
+function CardChargeHint({ line, onChanged }: { line: StatementLineRow; onChanged?: () => void }) {
+  const { launch, busy } = useLaunchCardCharge(line, onChanged);
+  const charge = line.cardCharge;
+  if (!charge) return null;
+  const label = PL.chargeOf(chargeWhat(charge), formatMonth(charge.dueDate));
+  return (
+    <span className="rec-pair" data-testid="card-charge-suggestion">
+      {onChanged ? (
+        <button type="button" className="link text-left text-[13px]" disabled={busy} onClick={() => void launch()} aria-label={label}>
+          <CreditCard className="mr-1 inline size-3.5" />
+          {label}
+        </button>
+      ) : (
+        <span className="row-title text-[13px]">{label}</span>
+      )}
+      <span className="row-sub">
+        {PL.chargeExpected(formatAccounting(charge.expectedCents))}
+        {charge.entityName ? ` · ${charge.entityName}` : ''}
+        {charge.autoSettle ? ` · ${t.contracts.payment.autoSettle.toLowerCase()}` : ''}
+      </span>
+    </span>
+  );
+}
+
+/** Par da linha no app (conciliado ou sugerido); na fatura, a cobrança esperada que a linha nova atende. */
+export function LinePair({ line, onChanged }: { line: StatementLineRow; onChanged?: () => void }) {
+  if (!line.target && line.cardCharge && line.status === 'new') return <CardChargeHint line={line} onChanged={onChanged} />;
   if (!line.target) return <span className="text-faint text-xs">{s.noPair}</span>;
   return (
     <span className="rec-pair">
@@ -29,7 +72,7 @@ export function LinePair({ line }: { line: StatementLineRow }) {
         {s.targetKinds[line.target.kind]} · {formatDate(line.target.date)}
         {line.target.entityName ? ` · ${line.target.entityName}` : ''}
       </span>
-      {line.target.contract && <ContractSplit info={line.target.contract} />}
+      {line.target.series && <ContractSplit info={line.target.series} description={line.target.description} />}
       {line.autoSettled && <span className="ai-tag">{s.contractSplit.autoSettled}</span>}
     </span>
   );
@@ -77,6 +120,7 @@ export function LineActions({
 }) {
   const [dialog, setDialog] = useState<Dialog>(null);
   const { run } = useAction();
+  const charge = useLaunchCardCharge(line, onChanged);
   const toast = useToast();
 
   async function confirmLine() {
@@ -105,6 +149,13 @@ export function LineActions({
     <>
       <span className="row-actions">
         {line.status === 'suggested' && <RowAction icon={<Check />} label={s.confirmLine} onClick={() => void confirmLine()} />}
+        {line.status === 'new' && line.cardCharge && (
+          <RowAction
+            icon={<CreditCard />}
+            label={PL.chargeOf(chargeWhat(line.cardCharge), formatMonth(line.cardCharge.dueDate))}
+            onClick={() => void charge.launch()}
+          />
+        )}
         {(line.status === 'new' || line.status === 'suggested') && (
           <>
             <RowAction icon={<Link2 />} label={s.matchManual} onClick={() => setDialog('match')} />

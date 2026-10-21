@@ -16,6 +16,7 @@ import type { ServiceContext } from '../context';
 import { AppError, forbidden, notFound, unprocessable } from '../errors';
 import * as caixas from '../services/caixas';
 import { calendarItems } from '../services/calendar';
+import { chargeTarget } from '../services/card-charges';
 import * as cards from '../services/cards';
 import { categoryTree } from '../services/categories';
 import * as entities from '../services/entities';
@@ -27,6 +28,7 @@ import { listDestinations, sendAgentMessage } from '../services/messages';
 import { search } from '../services/overview';
 import * as rec from '../services/reconciliation';
 import * as reports from '../services/reports';
+import * as series from '../services/series';
 import { createSettlement, reverseSettlement } from '../services/settlements';
 import { accountStatement } from '../services/statement';
 import * as statements from '../services/statements';
@@ -65,14 +67,12 @@ const TITLE_FIELDS: PreviewField[] = [
   { key: 'amountCents', label: 'Valor', format: 'money' },
   { key: 'notes', label: 'Observações' },
   { key: 'plannedAccountId', label: 'Conta prevista' },
-  { key: 'plannedTransitAccountId', label: 'Conta de passagem' },
 ];
 
 const TITLE_NAMES = {
   entityId: 'entity',
   categoryId: 'category',
   plannedAccountId: 'account',
-  plannedTransitAccountId: 'account',
 } as const;
 
 const ENTITY_FIELDS: PreviewField[] = [
@@ -117,25 +117,23 @@ const PREVIEW_LINES = 50;
 const moreLines = (total: number) => (total > PREVIEW_LINES ? [`E mais ${total - PREVIEW_LINES} linha(s) não mostradas.`] : []);
 
 /**
- * A baixa que casar a linha com o título faria (spec 033): a repartição
- * (principal, multa, juros, desconto), os dias em relação ao vencimento e, no
- * título de outra caixa, a conta de passagem com a transferência.
+ * A baixa que casar a linha com o título faria (specs 033 e 034): a
+ * repartição (principal, multa, juros, desconto) pelos ajustes da série e os
+ * dias em relação ao vencimento.
  */
 async function settlementPreview(ctx: ServiceContext, lineId: string, titleId: string) {
   const r = await ctx.db.execute<{
     posted_on: string;
     amount_cents: string | number;
-    line_account_id: string | null;
     line_caixa_id: string | null;
     caixa_id: string;
-    contract_id: string | null;
+    recurrence_rule_id: string | null;
     due_date: string;
     title_amount: string | number;
     open_cents: string | number;
-    planned_account_id: string | null;
   }>(sql`
-    SELECT l.posted_on, l.amount_cents, l.financial_account_id AS line_account_id, a.caixa_id AS line_caixa_id,
-           t.caixa_id, t.contract_id, t.due_date, t.amount_cents AS title_amount, b.open_cents, t.planned_account_id
+    SELECT l.posted_on, l.amount_cents, a.caixa_id AS line_caixa_id,
+           t.caixa_id, t.recurrence_rule_id, t.due_date, t.amount_cents AS title_amount, b.open_cents
       FROM statement_lines l
       LEFT JOIN financial_accounts a ON a.id = l.financial_account_id
       JOIN titles t ON t.id = ${titleId}
@@ -143,11 +141,11 @@ async function settlementPreview(ctx: ServiceContext, lineId: string, titleId: s
      WHERE l.id = ${lineId}`);
   const row = r.rows[0];
   if (!row) throw notFound();
-  if (row.caixa_id !== row.line_caixa_id && row.planned_account_id !== row.line_account_id) throw notFound();
+  if (row.caixa_id !== row.line_caixa_id) throw notFound();
   ctx.access.assertWrite(row.caixa_id);
   const split = await lineSplit(
     ctx.db,
-    { id: titleId, contractId: row.contract_id, dueDate: row.due_date, amountCents: Number(row.title_amount) },
+    { id: titleId, recurrenceRuleId: row.recurrence_rule_id, dueDate: row.due_date, amountCents: Number(row.title_amount) },
     Number(row.open_cents),
     { postedOn: row.posted_on, amountCents: Number(row.amount_cents) },
   );
@@ -161,15 +159,14 @@ async function settlementPreview(ctx: ServiceContext, lineId: string, titleId: s
   ];
   const parts = [
     S.kinds[split.kind],
-    ...(row.contract_id ? [S.days(split.days)] : []),
+    ...(row.recurrence_rule_id ? [S.days(split.days)] : []),
     ...(split.fineCents ? [`${S.fine.toLowerCase()} ${brl(split.fineCents)}`] : []),
     ...(split.interestCents ? [`${S.interest.toLowerCase()} ${brl(split.interestCents)}`] : []),
     ...(split.discountCents ? [`${S.discount.toLowerCase()} ${brl(split.discountCents)}`] : []),
   ];
-  const otherCaixa = row.caixa_id !== row.line_caixa_id;
   const warnings = [
-    otherCaixa ? S.otherCaixa : 'O título recebe uma baixa com a data da linha, na conta do extrato.',
-    ...(row.contract_id ? [`Parcela de contrato: ${parts.join(', ')}.`] : []),
+    'O título recebe uma baixa com a data da linha, na conta do extrato.',
+    ...(row.recurrence_rule_id ? [`Ocorrência de série: ${parts.join(', ')}.`] : []),
   ];
   return { rows, warnings, summary: parts.join(', ') };
 }
@@ -210,7 +207,7 @@ const CREATED_ENTRY_LABEL: Record<LineCreatedEntry, string> = {
   adjustment: 'Movimento avulso',
   title: 'Título já baixado (com o espelho)',
   settlement: 'Baixa no título',
-  transfer_settlement: 'Baixa no título de outra caixa (com a transferência)',
+  transfer_settlement: 'Baixa no título de outra caixa (com a transferência, de antes da F20)',
   purchase: 'Compra no cartão',
 };
 const CREATED_ENTRY_OUTCOME: Record<LineCreatedEntry, string> = {
@@ -492,8 +489,12 @@ export const TOOL_HANDLERS: Handlers = {
       const after = await withNames(ctx, i.changes as Record<string, unknown>, TITLE_NAMES);
       const old = await withNames(ctx, before as unknown as Record<string, unknown>, TITLE_NAMES);
       const warnings =
-        i.changes.plannedAccountId !== undefined && before.contractId
-          ? ['A parcela passa a ter conta própria: trocar a conta do contrato não a muda mais.']
+        i.changes.plannedAccountId !== undefined && before.recurrenceRuleId
+          ? [
+              i.changes.scope === 'following'
+                ? 'A conta prevista muda nesta e nas próximas ocorrências em aberto da série.'
+                : 'Só esta ocorrência muda de conta (fica com conta própria).',
+            ]
           : [];
       return { title: 'Editar título', summary: before.description, action: 'update', rows: diffRows(TITLE_FIELDS, after, old), warnings };
     },
@@ -501,8 +502,12 @@ export const TOOL_HANDLERS: Handlers = {
   },
   end_series: {
     preview: async (ctx, i) => {
-      const title = await titles.getTitle(ctx, i.titleId);
-      const plan = await titles.previewSeriesEnd(ctx, i.titleId, i.endsOn);
+      const target = i.titleId
+        ? await titles.getTitle(ctx, i.titleId)
+        : { ...(await series.getSeries(ctx, i.ruleId!)), mirrorTitleId: null };
+      const plan = i.titleId
+        ? await titles.previewSeriesEnd(ctx, i.titleId, i.endsOn)
+        : await series.previewSeriesEndRule(ctx, i.ruleId!, i.endsOn);
       if (plan.blocked.length > 0) {
         const list = plan.blocked.map((o) => `#${o.occurrence} ${formatDate(o.dueDate)}`).join(', ');
         throw unprocessable(t.errors.seriesEndBlocked(list), 'series_end_blocked');
@@ -519,13 +524,13 @@ export const TOOL_HANDLERS: Handlers = {
       if (plan.toReopen.length) rows.push({ label: 'Reabertas', after: listed(plan.toReopen) });
       return {
         title: 'Encerrar série',
-        summary: `${title.description} (${title.entityName})`,
+        summary: `${target.description} (${target.entityName})`,
         action: plan.toCancel.length ? 'delete' : 'update',
         rows,
-        warnings: title.mirrorTitleId && plan.toCancel.length ? ['O espelho de cada ocorrência também é cancelado.'] : [],
+        warnings: target.mirrorTitleId && plan.toCancel.length ? ['O espelho de cada ocorrência também é cancelado.'] : [],
       };
     },
-    run: (ctx, i) => titles.endSeries(ctx, i.titleId, i.endsOn),
+    run: (ctx, i) => (i.titleId ? titles.endSeries(ctx, i.titleId, i.endsOn) : series.endSeriesRule(ctx, i.ruleId!, i.endsOn)),
   },
   settle_title: {
     preview: async (ctx, i) => {
@@ -804,6 +809,31 @@ export const TOOL_HANDLERS: Handlers = {
       };
     },
     run: (ctx, i) => rec.setIgnoredLines(ctx, i.lineIds, false),
+  },
+  create_card_charge_from_line: {
+    preview: async (ctx, i) => {
+      const line = await lineCaixa(ctx, i.lineId);
+      const r = await ctx.db.execute<{ card_caixa_id: string | null }>(
+        sql`SELECT card_caixa_id FROM statement_lines WHERE id = ${i.lineId}`,
+      );
+      const cardId = r.rows[0]?.card_caixa_id;
+      if (!cardId) throw unprocessable(t.errors.lineCardOnly);
+      const target = await chargeTarget(ctx.db, cardId, i.ruleId, i.occurrence);
+      return {
+        title: 'Lançar cobrança esperada',
+        summary: lineLabel(line),
+        action: 'create',
+        rows: [
+          { label: 'Linha', after: lineLabel(line) },
+          { label: 'Cobrança', after: `${target.description} · ocorrência ${i.occurrence} (${formatDate(target.dueDate)})` },
+          { label: 'Caixa pagadora', after: (await nameOf(ctx, 'caixa', target.payerCaixaId)) ?? '' },
+          { label: 'Entidade', after: (await nameOf(ctx, 'entity', target.entityId)) ?? '' },
+          { label: 'Categoria', after: (await nameOf(ctx, 'category', target.categoryId)) ?? '' },
+        ],
+        warnings: ['Cria a compra à vista no cartão, ligada à ocorrência (e ao contrato), e concilia a linha com ela.'],
+      };
+    },
+    run: (ctx, i) => rec.createChargeFromLine(ctx, i.lineId, { ruleId: i.ruleId, occurrence: i.occurrence }),
   },
   create_from_statement_line: {
     preview: async (ctx, i) => {

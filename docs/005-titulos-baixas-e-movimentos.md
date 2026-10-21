@@ -2,8 +2,14 @@
 
 - Cada caixa tem os próprios **títulos** a pagar e a receber: entidade, categoria, competência, vencimento, valor, anotações e anexos.
 - Um título recebe uma ou mais **baixas** (parcial, juros, multa, desconto); cada baixa gera um **movimento** numa conta financeira. O estorno de baixa é uma operação própria.
-- Recorrência e parcelamento por regra (mensal no dia X, semanal, anual, N parcelas). O worker materializa os títulos até 12 meses à frente; editar "esta e as próximas" reescreve os futuros.
-- **Encerrar série** (contrato cancelado, mas ainda restam pagamentos até uma data): na gaveta de uma ocorrência recorrente, "Encerrar série…" escolhe o último vencimento a manter (padrão: o desta ocorrência) e mostra a prévia antes de aplicar (`GET`/`POST /api/titles/:id/series/end`, tool `end_series`).
+- Recorrência e parcelamento por regra (mensal no dia X, semanal, anual, N parcelas). O worker materializa os títulos até 12 meses à frente; editar "esta e as próximas" reescreve os futuros (inclusive a conta prevista).
+- **A série** (spec [034](034-contratos-sobre-series.md)) mora numa caixa — a do título; numa obrigação de contrato, a da conta onde o dinheiro se move — e tem:
+  - a **conta prevista** de cada ocorrência (corrente, poupança ou cofre da caixa da série), copiada da ocorrência mais recente para as novas;
+  - o **contrato** de que é obrigação, opcional ([020](020-contratos.md)): ligar ou desligar leva junto as ocorrências;
+  - os **ajustes de reconhecimento** do pagamento (janela, multa, juros, desconto, tolerância e baixar sem confirmação), usados pela conciliação ([033](033-pagamentos-de-contrato-no-extrato.md)).
+  - Numa caixa de cartão, a série é uma **cobrança esperada** ([007](007-cartao-de-credito.md)): não gera títulos.
+  - Editar a série (`PATCH /api/series/:id`, tool `update_series`): os ajustes valem na hora; descrição, valor, dia, categoria e conta (no cartão, a pagadora) são "esta e as próximas" a partir de uma data (as ocorrências com baixa e as de mês fechado ficam). `GET /api/series/:id` e `GET /api/series` (por caixa, contrato ou as soltas).
+- **Encerrar série** (contrato cancelado, mas ainda restam pagamentos até uma data): na gaveta de uma ocorrência recorrente, "Encerrar série…" escolhe o último vencimento a manter (padrão: o desta ocorrência) e mostra a prévia antes de aplicar (`GET`/`POST /api/titles/:id/series/end`, ou pela série `GET`/`POST /api/series/:id/end` — o único caminho da cobrança no cartão, que não tem títulos —, tool `end_series`).
   - Grava a data em `recurrence_rules.ends_on`. As ocorrências que vencem depois dela e estão em aberto passam a **canceladas**, com o espelho de cada uma; nada é apagado (auditoria e histórico ficam). Canceladas continuam ocupando a vaga da ocorrência, então o worker não as recria nem passa do novo fim.
   - Ocorrência com baixa ativa (parcial ou paga) depois da data **impede** o encerramento: o erro lista as ocorrências (`#n dd/mm/aaaa`) para estorná-las ou escolher uma data a partir do vencimento delas. Baixas estornadas não impedem.
   - **Estender**: escolher uma data mais adiante ou "sem data de fim" reabre as ocorrências canceladas que vencem depois do fim anterior (até a nova data) e materializa o que faltar até o horizonte. Ocorrências canceladas avulsas antes do fim anterior continuam canceladas.

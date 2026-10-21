@@ -1,12 +1,13 @@
-import { type ContractCandidateInfo, formatAccounting, formatMonth, t } from '@moneyflow/shared';
+import { formatAccounting, formatMonth, type SeriesCandidateInfo, t } from '@moneyflow/shared';
 
 const S = t.statements.contractSplit;
 
 /**
- * A parcela de contrato sugerida (spec 033): contrato n/N e o mês, como o
- * valor bateu, os dias em relação ao vencimento e a repartição da baixa.
+ * A ocorrência de série sugerida (specs 033 e 034): o contrato (ou, sem
+ * contrato, a descrição da série), a ocorrência e o mês, como o valor bateu,
+ * os dias em relação ao vencimento e a repartição da baixa.
  */
-export function ContractSplit({ info }: { info: ContractCandidateInfo }) {
+export function ContractSplit({ info, description }: { info: SeriesCandidateInfo; description: string }) {
   const { split } = info;
   const parts = [
     `${S.principal} ${formatAccounting(split.amountCents)}`,
@@ -15,9 +16,9 @@ export function ContractSplit({ info }: { info: ContractCandidateInfo }) {
     ...(split.discountCents ? [`${S.discount} ${formatAccounting(split.discountCents)}`] : []),
   ];
   return (
-    <span className="row-sub" data-testid="contract-split">
-      {S.installment(info.contractName, info.installment, info.installmentsCount, formatMonth(info.dueDate))} · {S.kinds[split.kind]} ·{' '}
-      {S.days(split.days)}
+    <span className="row-sub" data-testid="contract-split" data-series={info.ruleId}>
+      {S.installment(info.contractName ?? description, info.occurrence, info.occurrencesTotal, formatMonth(info.dueDate))} ·{' '}
+      {S.kinds[split.kind]} · {S.days(split.days)}
       <br />
       {parts.join(' · ')}
     </span>

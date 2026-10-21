@@ -1,17 +1,24 @@
-import { cardInvoices, cardPurchases, categories, type Tx, titles } from '@moneyflow/db';
+import { cardInvoices, cardPurchases, categories, type Executor, type Tx, titles } from '@moneyflow/db';
 import {
+  addDays,
+  type CardChargeSuggestion,
   type CardOverview,
   type CardPurchaseDetail,
   type CardPurchaseRow,
   type cardChargeInput,
+  type cardChargeLinkInput,
+  cardChargeMatch,
+  type cardExpectedChargesQuery,
   type cardPurchaseInput,
   type cardPurchaseListQuery,
   type cardPurchaseUpdateInput,
   type cardRefundInput,
+  diffDays,
   type InvoiceDetail,
   type InvoiceLine,
   type InvoicePayerTotal,
   type InvoiceSummary,
+  inSeriesWindow,
   type invoiceAdvanceInput,
   type invoiceCloseInput,
   type invoicePaymentInput,
@@ -25,6 +32,7 @@ import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { notFound, unprocessable } from '../errors';
 import { cardSettings } from './caixas';
+import { chargeTarget, expectedCardOccurrences, toSuggestion } from './card-charges';
 import {
   closeInvoiceTx,
   ensureHorizon,
@@ -171,7 +179,7 @@ const purchaseSql = sql`
          e.name AS entity_name, p.category_id, cat.name AS category_name, coalesce(cat.color_slot, gc.color_slot) AS category_color_slot,
          p.purchased_on, p.description, p.amount_cents, p.installments_total, p.first_installment, p.refunded_purchase_id,
          coalesce((SELECT sum(r.amount_cents) FROM card_purchases r WHERE r.refunded_purchase_id = p.id), 0)::bigint AS refunded_cents,
-         p.notes,
+         p.notes, p.recurrence_rule_id, p.occurrence, p.contract_id, k.name AS contract_name,
          (SELECT count(*)::int FROM card_purchase_attachments a WHERE a.card_purchase_id = p.id) AS attachment_count,
          NOT EXISTS (SELECT 1 FROM card_invoice_items i JOIN card_invoices v ON v.id = i.card_invoice_id
                       WHERE i.card_purchase_id = p.id AND v.closed_at IS NOT NULL) AS editable
@@ -179,7 +187,8 @@ const purchaseSql = sql`
     JOIN caixas pc ON pc.id = p.payer_caixa_id
     JOIN entities e ON e.id = p.entity_id
     JOIN categories cat ON cat.id = p.category_id
-    LEFT JOIN categories gc ON gc.id = cat.parent_id`;
+    LEFT JOIN categories gc ON gc.id = cat.parent_id
+    LEFT JOIN contracts k ON k.id = p.contract_id`;
 
 export async function listPurchases(
   ctx: ServiceContext,
@@ -245,10 +254,52 @@ export async function createPurchase(
       installmentsTotal: input.installmentsTotal,
       firstInstallment: input.firstInstallment,
       notes: input.notes,
+      // "É cobrança de um contrato?" (spec 034): a ocorrência esperada e o contrato da série.
+      ...(input.charge ? await chargeLink(tx, cardId, input.charge) : {}),
     });
     return created.id;
   });
   return getPurchase(ctx, id);
+}
+
+/** Os campos da compra ligada a uma ocorrência esperada (a série precisa ser deste cartão). */
+async function chargeLink(tx: Executor, cardId: string, charge: { ruleId: string; occurrence: number }) {
+  const target = await chargeTarget(tx, cardId, charge.ruleId, charge.occurrence);
+  return { recurrenceRuleId: target.ruleId, occurrence: target.occurrence, contractId: target.contractId };
+}
+
+/** Liga (ou solta) uma compra já lançada a uma ocorrência esperada de cobrança no cartão (spec 034). */
+export async function linkPurchaseCharge(ctx: ServiceContext, id: string, input: z.output<typeof cardChargeLinkInput>) {
+  const current = await getPurchase(ctx, id);
+  ctx.access.assertWrite(current.cardCaixaId);
+  if (current.kind !== 'purchase') throw unprocessable(t.contracts.errors.chargeNotExpected, 'card_purchases_recurrence_check');
+  await withTx(ctx, async (tx) => {
+    const link = input.charge
+      ? await chargeLink(tx, current.cardCaixaId, input.charge)
+      : { recurrenceRuleId: null, occurrence: null, contractId: null };
+    await tx.update(cardPurchases).set(link).where(eq(cardPurchases.id, id));
+  });
+  return getPurchase(ctx, id);
+}
+
+/**
+ * Ocorrências esperadas das cobranças do cartão perto de uma data (e, com o
+ * valor, só as que a regra aceita), ainda sem compra ligada.
+ */
+export async function expectedCharges(
+  ctx: ServiceContext,
+  cardId: string,
+  query: z.output<typeof cardExpectedChargesQuery>,
+): Promise<CardChargeSuggestion[]> {
+  ctx.access.assertRead(cardId);
+  const found = await expectedCardOccurrences(ctx.db, cardId, addDays(query.date, -76), addDays(query.date, 76));
+  const line = { postedOn: query.date, amountCents: -(query.amountCents ?? 0), description: '' };
+  return found
+    .filter((occ) =>
+      query.amountCents ? cardChargeMatch(line, occ) !== null : inSeriesWindow(query.date, occ.dueDate, occ.terms.matchWindowDays),
+    )
+    .sort((a, b) => Math.abs(diffDays(a.dueDate, query.date)) - Math.abs(diffDays(b.dueDate, query.date)))
+    .map(toSuggestion);
 }
 
 /** Estorno: crédito ligado à compra (mesmo recebedor, categoria e pagadora), na fatura aberta da data. */

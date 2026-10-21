@@ -1,4 +1,4 @@
-import { contractLink, formatAccounting, formatDate, formatDateTime, type TitleDetail, t } from '@moneyflow/shared';
+import { contractLink, formatAccounting, formatDate, formatDateTime, type SeriesDto, type TitleDetail, t } from '@moneyflow/shared';
 import {
   Ban,
   CalendarDays,
@@ -26,12 +26,14 @@ import { useAction, useApi } from '../../lib/hooks';
 import { invoiceLink, titleLink } from '../../lib/links';
 import { AttachmentsPanel } from '../attachments/AttachmentsPanel';
 import { AuditHistory } from '../audit/AuditHistory';
+import { SeriesEditModal } from '../contracts/ObligationFormModal';
 import { PlannedAccountButton, PlannedAccountLabel } from '../contracts/PlannedAccount';
 import { CategoryLabel, LoadError, MirrorBadge, Money, TitleStatusBadge } from '../domain';
 import { TitleEntryInfo } from '../entry/TitleEntryInfo';
 import { CategorySelect, ModalActions } from '../forms';
 import { Badge, Button, Field, Modal, Skel, useConfirm } from '../ui';
 import { SeriesEndModal } from './SeriesEndModal';
+import { termsSummary } from './SeriesTermsFields';
 import { ReverseModal, SetAccountModal, SettlementModal } from './SettlementModal';
 import { TitleFormModal } from './TitleFormModal';
 
@@ -47,6 +49,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
     | { kind: 'edit' }
     | { kind: 'accept' }
     | { kind: 'seriesEnd' }
+    | { kind: 'seriesEdit'; series: SeriesDto }
     | { kind: 'dispute' }
     | { kind: 'reverse'; id: string; hasTransfer: boolean }
     | { kind: 'account'; id: string }
@@ -99,6 +102,13 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
     if (!ok) return;
     const next = await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/cancel`), 'Título cancelado.');
     if (next) saved(next);
+  }
+
+  /** "Editar série" (spec 034): carrega a série e abre o modal de edição dela. */
+  async function editSeries() {
+    if (!title?.recurrenceRuleId) return;
+    const series = await run(() => api.get<SeriesDto>(`/api/series/${title.recurrenceRuleId}`));
+    if (series) setModal({ kind: 'seriesEdit', series });
   }
 
   async function reopen() {
@@ -325,12 +335,11 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                 <dd className="mono">{formatDate(title.competenceDate)}</dd>
                 <dt>Origem</dt>
                 <dd>{t.title.origins[title.origin]}</dd>
-                {/* Conta prevista (spec 033): onde o pagamento sai ou o recebimento entra; trocável em aberto. */}
+                {/* Conta prevista (spec 034): conta da caixa do título onde o dinheiro se move; trocável em aberto. */}
                 <dt>{t.contracts.payment.plannedAccount}</dt>
                 <dd data-testid="title-planned-account">
                   <span className="inline-flex items-center gap-1">
-                    <PlannedAccountLabel planned={title} showCustom={Boolean(title.contractId)} />
-                    {title.plannedTransitAccountName && <span className="text-faint">→ {title.plannedTransitAccountName}</span>}
+                    <PlannedAccountLabel planned={title} showCustom={Boolean(title.recurrenceRuleId)} />
                     {title.canWrite && (title.status === 'open' || title.status === 'partial') && (
                       <PlannedAccountButton
                         title={{ ...title, titleId: title.id }}
@@ -342,22 +351,6 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                     )}
                   </span>
                 </dd>
-                {title.rule && (
-                  <>
-                    <dt>{t.title.series}</dt>
-                    <dd>
-                      {t.title.frequencies[title.rule.frequency]}
-                      {title.rule.intervalCount > 1 ? ` (a cada ${title.rule.intervalCount})` : ''}
-                      {title.rule.installmentsTotal ? ` · ${title.rule.installmentsTotal} parcelas` : ''}
-                      {title.rule.endsOn ? ` · ${t.title.endsOn.toLowerCase()} ${formatDate(title.rule.endsOn)}` : ''}
-                      {canEndSeries && (
-                        <Button size="sm" variant="quiet" className="ml-2" onClick={() => setModal({ kind: 'seriesEnd' })}>
-                          <CalendarX /> {t.title.endSeries}
-                        </Button>
-                      )}
-                    </dd>
-                  </>
-                )}
                 {title.notes && (
                   <>
                     <dt>{t.common.notes}</dt>
@@ -366,6 +359,52 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                 )}
               </dl>
             </div>
+
+            {title.rule && (
+              <div className="sec" data-testid="title-series">
+                <p className="eyebrow">{t.contracts.planned.series}</p>
+                <dl className="kv">
+                  <dt>{t.contracts.planned.seriesCalendar}</dt>
+                  <dd>
+                    {t.title.frequencies[title.rule.frequency]}
+                    {title.rule.intervalCount > 1 ? ` (${t.title.every.toLowerCase()} ${title.rule.intervalCount})` : ''}
+                    {title.rule.installmentsTotal ? ` · ${title.rule.installmentsTotal} ${t.title.installments.toLowerCase()}` : ''}
+                    {` · ${formatDate(title.rule.startsOn)}`}
+                    {title.rule.endsOn ? ` · ${t.title.endsOn.toLowerCase()} ${formatDate(title.rule.endsOn)}` : ''}
+                  </dd>
+                  {title.rule.contractId && (
+                    <>
+                      <dt>{t.contracts.contract}</dt>
+                      <dd>
+                        <Link className="link" to={contractLink(title.rule.contractId)} data-testid="title-series-contract">
+                          {title.rule.contractName ?? t.contracts.contract}
+                        </Link>
+                      </dd>
+                    </>
+                  )}
+                  <dt>{t.contracts.payment.plannedAccount}</dt>
+                  <dd>
+                    <PlannedAccountLabel planned={title} showCustom />
+                  </dd>
+                  <dt>{t.contracts.planned.terms}</dt>
+                  <dd className="text-[13px]" data-testid="title-series-terms">
+                    {termsSummary(title.rule.terms)}
+                  </dd>
+                </dl>
+                {title.canWrite && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button size="sm" variant="ghost" onClick={() => void editSeries()} data-testid="title-series-edit">
+                      <Pencil /> {t.contracts.planned.seriesEdit}
+                    </Button>
+                    {canEndSeries && (
+                      <Button size="sm" variant="quiet" onClick={() => setModal({ kind: 'seriesEnd' })}>
+                        <CalendarX /> {t.title.endSeries}
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             {title.mirror && (
               <div className="sec">
@@ -504,6 +543,17 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
         <TitleFormModal caixaId={title.caixaId} direction={title.direction} title={title} onClose={() => setModal(null)} onSaved={saved} />
       )}
       {title && modal?.kind === 'seriesEnd' && <SeriesEndModal title={title} onClose={() => setModal(null)} onSaved={saved} />}
+      {title && modal?.kind === 'seriesEdit' && (
+        <SeriesEditModal
+          series={modal.series}
+          onClose={() => setModal(null)}
+          onSaved={() => {
+            setModal(null);
+            void reload();
+            onChanged();
+          }}
+        />
+      )}
       {title && modal?.kind === 'reverse' && (
         <ReverseModal settlementId={modal.id} hasTransfer={modal.hasTransfer} onClose={() => setModal(null)} onSaved={saved} />
       )}

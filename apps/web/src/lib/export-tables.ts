@@ -145,7 +145,7 @@ export function entitiesTable(rows: EntitySummary[]): ExportTable {
   };
 }
 
-/** Contratos (spec 020): a lista com os filtros da tela. */
+/** Contratos (specs 020 e 034): a lista com os filtros da tela. */
 export function contractsTable(rows: ContractRow[], filter: string): ExportTable {
   const C = t.contracts.columns;
   return {
@@ -160,9 +160,10 @@ export function contractsTable(rows: ContractRow[], filter: string): ExportTable
       { key: 'direction', label: C.direction },
       { key: 'starts', label: t.contracts.fields.startsOn, type: 'date' },
       { key: 'ends', label: t.contracts.fields.endsOn, type: 'date' },
-      { key: 'value', label: C.value, type: 'money' },
+      { key: 'obligations', label: C.obligations },
       { key: 'nextDue', label: C.next, type: 'date' },
-      { key: 'nextAmount', label: t.contracts.fields.installmentCents, type: 'money' },
+      { key: 'nextAmount', label: C.amount, type: 'money' },
+      { key: 'nextDescription', label: t.contracts.obligation.description },
       { key: 'status', label: C.status },
     ],
     rows: rows.map((r) => ({
@@ -171,11 +172,12 @@ export function contractsTable(rows: ContractRow[], filter: string): ExportTable
       entity: r.entityName,
       caixa: r.caixaName,
       direction: t.contracts.directionsShort[r.direction],
-      starts: r.currentCycle?.startsOn ?? null,
-      ends: r.currentCycle?.endsOn ?? null,
-      value: r.currentCycle?.totalCents ?? null,
-      nextDue: r.nextInstallment?.dueDate ?? null,
-      nextAmount: r.nextInstallment?.amountCents ?? null,
+      starts: r.startsOn,
+      ends: r.endsOn,
+      obligations: r.obligationCount,
+      nextDue: r.nextOccurrence?.dueDate ?? null,
+      nextAmount: r.nextOccurrence?.amountCents ?? null,
+      nextDescription: r.nextOccurrence?.description ?? null,
       status: t.contracts.statuses[r.status],
     })),
   };

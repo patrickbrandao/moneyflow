@@ -36,6 +36,11 @@ export const cardPurchaseInput = z
     /** > 1 ao começar a usar o app no meio de um parcelamento. */
     firstInstallment: z.number().int().min(1).max(99).default(1),
     notes: optionalText(),
+    /** "É cobrança de um contrato?" (spec 034): a ocorrência esperada que a compra atende. */
+    charge: z
+      .object({ ruleId: id, occurrence: z.number().int().min(1).max(32767) })
+      .nullish()
+      .transform((v) => v ?? null),
   })
   .refine((v) => v.firstInstallment <= v.installmentsTotal, { path: ['firstInstallment'], message: E.validation })
   .refine((v) => v.amountCents >= v.installmentsTotal - v.firstInstallment + 1, { path: ['amountCents'], message: E.invalidAmount });
@@ -46,6 +51,31 @@ export const cardPurchaseUpdateInput = z.object({
   categoryId: id.optional(),
   entityId: id.optional(),
   payerCaixaId: id.optional(),
+});
+
+/** Ligar (ou, com null, soltar) a compra a uma ocorrência esperada de cobrança no cartão (spec 034). */
+export const cardChargeLinkInput = z.object({
+  charge: z.object({ ruleId: id, occurrence: z.number().int().min(1).max(32767) }).nullable(),
+});
+
+/** Ocorrências esperadas de cobrança no cartão perto de uma data (e, se informado, do valor). */
+export const cardExpectedChargesQuery = z.object({
+  date: isoDate,
+  amountCents: z.coerce.number().int().positive().optional(),
+});
+
+/** "Lançar como cobrança de <obrigação> de <mês>": a linha da fatura vira a compra ligada à ocorrência. */
+export const lineCardChargeInput = z.object({ ruleId: id, occurrence: z.number().int().min(1).max(32767) });
+
+/** "É o pagamento de…?" (spec 034): ocorrências em aberto da conta que o lançamento avulso pode baixar. */
+export const obligationMatchQuery = z.object({
+  occurredOn: isoDate,
+  /** Assinado: + entra, − sai. */
+  amountCents: z.coerce
+    .number()
+    .int()
+    .refine((v) => v !== 0),
+  entityId: id.optional(),
 });
 
 export const cardRefundInput = z.object({
