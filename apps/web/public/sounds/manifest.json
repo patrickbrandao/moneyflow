@@ -1,0 +1,29 @@
+{
+  "default": "bell",
+  "sounds": [
+    {
+      "key": "bell",
+      "name": "Sino",
+      "file": "bell.wav",
+      "license": "Domínio público (CC0): gerado pelo projeto (apps/web/scripts/generate-sounds.mjs)"
+    },
+    {
+      "key": "beep",
+      "name": "Bipe",
+      "file": "beep.wav",
+      "license": "Domínio público (CC0): gerado pelo projeto (apps/web/scripts/generate-sounds.mjs)"
+    },
+    {
+      "key": "chime",
+      "name": "Carrilhão",
+      "file": "chime.wav",
+      "license": "Domínio público (CC0): gerado pelo projeto (apps/web/scripts/generate-sounds.mjs)"
+    },
+    {
+      "key": "digital",
+      "name": "Digital",
+      "file": "digital.wav",
+      "license": "Domínio público (CC0): gerado pelo projeto (apps/web/scripts/generate-sounds.mjs)"
+    }
+  ]
+}

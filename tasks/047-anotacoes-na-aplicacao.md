@@ -1,12 +1,12 @@
 ---
-status: em-andamento
+status: concluida
 tipo: melhoria
 origem: usuario
 autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-10-21
-commit:
+commit: daa692a (parte servidor); parte web e e2e no commit seguinte, feito pela sessão principal
 ---
 
 # Anotações e lembretes na aplicação (F21)
@@ -26,7 +26,7 @@ Designada direto pela sessão principal (spec aprovada pelo usuário em 2026-10-
 
 ## Resolução (executor)
 
-### Parte servidor (concluída; falta a parte web e o e2e)
+### Parte servidor (concluída)
 
 **O que entrou**
 - `pnpm db:pull` com a 0053; o `postpull.mjs` passou a recompor o default "hoje em São Paulo" (`((now() AT TIME ZONE 'America/Sao_Paulo'))::date`), que o drizzle-kit cortava. `notes.entity_id` (gerada) nunca é gravada.
@@ -47,3 +47,30 @@ Designada direto pela sessão principal (spec aprovada pelo usuário em 2026-10-
 - Única mudança em `apps/web`: o ícone `note_reminder` no mapa do sino (`components/shell/Notifications.tsx`), exigido pelo typecheck do `Record<NotificationKind, …>`. O e2e não precisou mudar (a contagem do kit é só da Conciliação).
 
 **Verificação**: `pnpm --filter @moneyflow/server test:local` (suíte de integração toda, 253 testes) e `pnpm verify:quick -- test/notes.test.ts` com typecheck, testes do shared, integração e pgTAP ok; o lint do `verify:quick` falha só pelo `tmp/` não rastreado (configuração Biome aninhada), e o Biome nos arquivos alterados passa.
+
+### Parte web e e2e (concluída)
+
+**O que entrou**
+- Cores `--note-info` (= `--accent-soft`, o azul do acento), `--note-good`, `--note-bad` (laranja), `--note-severe` e `--note-reminder` (cinza) nos dois temas em `styles/tokens.css`, todas com 4,5:1 ou mais sobre o cartão e fora da faixa roxa (conferido no `tema.spec.ts`, que ganhou as cinco); componentes só por `var(--note-<tipo>)`. Textos novos em `t.notes.ui` e `t.notes.alarm` (shared), `t.nav.notes` e `t.palette.newNote`.
+- Sons: `apps/web/public/sounds/manifest.json` (`default` e, por som, chave, nome, arquivo e licença) com `bell`, `beep`, `chime` e `digital` em WAV PCM 16 bits mono de 1 a 2 s, sintetizados por `apps/web/scripts/generate-sounds.mjs` (fora do bundle), domínio público. `components/notes/sounds.ts` lê o manifest (chave ausente cai no padrão) e faz o "Ouvir".
+- Alarme `components/notes/ReminderAlarm.tsx` no `Layout`, entre o tema e os agentes: contador, animação enquanto toca (desligada com `prefers-reduced-motion`), popover com a cor do tipo, título (leva a `/notes?note=`), entidade, horário previsto, adiado até/quantas vezes, não lido em destaque, Dispensar, Adiar 5/10/30, Parar o som, Marcar todos como lidos e o link para `/notes`.
+- Tela `/notes` (`pages/NotesPage.tsx`, menu abaixo de Contratos, atalho `g n`, "Nova anotação" na paleta) com `components/notes/NotesBrowser.tsx` (calendário, filtros e tabela), `NoteCalendar.tsx` (anual com 12 mini-meses e mensal, setas, Hoje, voltar ao ano, legenda, bolinhas por tipo com as contagens no tooltip, sem o texto da nota) e `NoteModal.tsx` (guias Anotação, Lembrete e Escopo; somente leitura sem `canEdit` ou arquivada; arquivar/desarquivar).
+- Entidade: guias Cadastro e Anotações na `EntityPage` (`?tab=notes`, contagem do selo) e o selo `NoteBadgeDot` ao lado do nome na listagem de entidades e no título da ficha.
+- Minha conta → Lembretes (`components/account/ReminderSettingsPanel.tsx`): som padrão com "Ouvir" e segundos padrão.
+- e2e `e2e/tests/anotacoes.spec.ts` (2 testes).
+
+**Decisões**
+- Uma aba toca: a líder é eleita pelo Web Locks (`navigator.locks`, o lock fica com a aba até ela fechar), e o `BroadcastChannel` `moneyflow:reminders` leva a lista, o toque, o parar e o "mudou". Sem Web Locks ou sem `BroadcastChannel`, cada aba é líder e toca (o fallback pedido). A líder sonda a cada 20 s mesmo em segundo plano (é ela que toca); as outras a cada 30 s com a aba visível; todas ao focar. "Já tocado" é a chave disparo + `lastFiredAt` no `localStorage` (o re-disparo de um adiamento toca de novo; outra aba que vire líder não repete).
+- O som para quando nenhum disparo que está tocando continua com `shouldRing` (dispensado, adiado ou lido em qualquer aba), no fim dos segundos, ou por "Parar o som" (deixa não lido). Com vários disparos juntos, toca o som e os segundos do mais recente.
+- Autoplay recusado: o aviso aparece em todas as abas e o próximo clique, em qualquer uma, toca ali pelo tempo que resta.
+- O dia clicado vira o período do `DateRangeFilter` (from = to = dia) e fica destacado; o calendário filtra pela entidade e pelos tipos escolhidos (escopo e autor não entram, como na API). Visão, ano, mês, tipos e a nota aberta ficam na URL; o período é o lembrado por `useStoredPeriod('notes')`.
+- Na guia da entidade, a tabela começa sem período (todas as anotações dela, uma linha por anotação) e sem o calendário; o filtro de período continua disponível.
+- No lembrete, o "Início" é a própria data da anotação (um campo só, editável nas duas guias); "Enviar também no Telegram" fica desabilitado sem destino pessoal (`hasPersonalTelegram`), com a explicação.
+- Sem codificador MP3 nesta máquina (só o `afconvert`, que não gera MP3): todos os sons em `.wav`; a spec 035 foi ajustada ("`.mp3` ou `.wav`").
+- Clicar na linha da tabela abre a anotação; só o link da entidade não propaga o clique.
+
+**Verificação**
+- `pnpm typecheck` (todos os pacotes) e Biome nos arquivos alterados ok; `pnpm test:unit` (178) ok.
+- `pnpm verify:quick`: typecheck, testes do shared, integração e pgTAP ok; o lint falha só pelo `tmp/` não rastreado (configuração Biome aninhada), como na parte servidor.
+- e2e contra os servidores de dev (`E2E_BASE_URL=http://localhost:5174`, com `pnpm dev:worker` e `MESSAGE_INTERVAL_MS=5000`): `anotacoes.spec.ts` (2), `tema.spec.ts` (3), `tags`, `fluxo-principal` e `cnpj-alfanumerico` passam. Telas conferidas por screenshot em claro e escuro, em 1280 px e 390 px.
+- Não verificado: `pnpm verify:full` (build, suíte inteira com Testcontainers e o e2e inteiro na pilha Docker), o som de verdade num navegador (o e2e usa um dublê do `play()`), duas abas reais disputando a liderança e o alarme com `MESSAGE_INTERVAL_MS` padrão (30 s; o teste tem folga de 150 s para isso).

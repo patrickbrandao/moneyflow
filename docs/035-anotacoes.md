@@ -68,21 +68,22 @@ Anotações funcionam como notas, post-its e lembretes presos a um objeto do sis
   - o som do lembrete toca em loop pelos segundos configurados e para sozinho;
   - o popover abre com o disparo e as ações **Dispensar** (para o som e marca como lido) e **Adiar 5 / 10 / 30 min** (para o som e reagenda);
   - parar o som sem agir deixa o disparo não lido.
-- **Chegada do disparo**: não há SSE de notificações; o front sonda `GET /api/note-reminders/firings` (a aba líder, junto da sondagem do sino) e toca os disparos com `shouldRing`.
-- **Várias abas**: uma aba toca (coordenação por `BroadcastChannel`, com a eleição da aba líder); todas mostram o ícone. Dispensar ou adiar numa vale para todas.
-- **Autoplay**: o navegador bloqueia som sem interação prévia. Se o `play()` for recusado, o ícone pisca com o aviso "Clique para ativar o som do alarme" e o próximo clique libera o áudio.
+- **Chegada do disparo**: não há SSE de notificações; o front sonda `GET /api/note-reminders/firings` — a aba líder a cada 20 s, mesmo em segundo plano (é ela que toca), e as outras a cada 30 s com a aba visível e ao focar — e toca os disparos com `shouldRing` ainda não tocados (a chave disparo + último toque fica no `localStorage`, para outra aba que vire líder não repetir).
+- **Várias abas**: uma aba toca. A líder é eleita pelo Web Locks (`navigator.locks`, o lock fica com a aba até ela fechar) e as abas conversam pelo `BroadcastChannel` (a lista de disparos, o toque, o parar e o "mudou" depois de dispensar, adiar ou marcar como lidos); todas mostram o ícone. Dispensar ou adiar numa vale para todas. Sem Web Locks ou sem `BroadcastChannel`, cada aba é líder dela mesma e toca.
+- **Autoplay**: o navegador bloqueia som sem interação prévia. Se o `play()` for recusado, o ícone pisca (em todas as abas) com o aviso "Clique para ativar o som do alarme" e o próximo clique, em qualquer aba, toca o som ali pelo tempo que resta.
 
 ## Sons
-- Ficam em `apps/web/public/sounds/`, em `.mp3` e `.wav` livres de licença, com um `manifest.json` (chave, nome em pt-BR, arquivo).
+- Ficam em `apps/web/public/sounds/`, em `.mp3` ou `.wav` livres de licença, com um `manifest.json` (`default` e, por som, chave, nome em pt-BR, arquivo e licença/origem).
 - Adicionar um som é colocar o arquivo e a linha no manifest; entra no próximo build. O banco guarda só a chave; uma chave que sumiu do manifest cai no som padrão.
-- A primeira entrega traz alguns sons curtos e distintos (por exemplo sino, bipe, carrilhão, digital), gerados ou de fonte com licença registrada no manifest.
+- A primeira entrega traz quatro sons curtos (1 a 2 s) e distintos — sino (`bell`, o padrão), bipe (`beep`), carrilhão (`chime`) e digital (`digital`) —, em `.wav` PCM sintetizados pelo projeto (`apps/web/scripts/generate-sounds.mjs`, fora do bundle), de domínio público. Sem codificador MP3 na máquina da entrega, não há `.mp3`; um som em `.mp3` entra do mesmo jeito, pelo manifest.
 
 ## Tela Anotações
 - **Menu**: "Anotações" no menu principal, logo abaixo de "Contratos", em `/notes` (atalho e "Ir para" da paleta, como os outros).
 - **Visão anual** (inicial):
   - 12 mini-meses do ano, com as setas para voltar e avançar o ano e o botão "Hoje";
   - em cada dia, uma **bolinha** por tipo presente, na cor do tipo (até cinco, sem o texto da nota); o tooltip diz quantas de cada tipo;
-  - clicar no nome do mês abre a visão mensal.
+  - clicar no nome do mês abre a visão mensal;
+  - a visão, o ano e o mês ficam na URL (`view`, `year`, `month`), como os tipos filtrados (`kinds`) e a nota aberta (`note`).
 - **Visão mensal**: a grade do mês com as bolinhas maiores, as setas de mês e a volta para o ano. A nota não aparece dentro do calendário.
 - **Clicar num dia** (nas duas visões) seleciona o dia e filtra a tabela abaixo para ele.
 - **Tabela** abaixo do calendário:
@@ -93,7 +94,7 @@ Anotações funcionam como notas, post-its e lembretes presos a um objeto do sis
 - **Janela da anotação**: guias **Anotação** (tipo, título, entidade, data, corpo), **Lembrete** (só no tipo lembrete: horário, repetição, vigência, som, segundos, Telegram, ativo) e **Escopo** (privada/global, autor e datas de criação e edição).
 
 ## Na entidade
-- **Aba "Anotações"** na tela da entidade: a mesma tabela, presa à entidade, e "Nova anotação" já vinculada a ela.
+- **Aba "Anotações"** na tela da entidade (guias Cadastro e Anotações, `?tab=notes`, com o total do selo): a mesma tabela, presa à entidade, sem o calendário e começando sem período (todas as anotações dela, uma linha por anotação; o filtro de período continua lá), e "Nova anotação" já vinculada a ela.
 - **Selo na listagem de entidades**: uma bolinha ao lado do nome com a cor da anotação mais grave visível ao usuário (grave > ruim > informação > boa > lembrete), com o tooltip das contagens. Só anotações não arquivadas.
 
 ## Agentes e MCP
@@ -131,4 +132,4 @@ As notas, os lembretes e as preferências entram no catálogo do backup ([019](0
   - sino e Telegram (Bot API falsa) com dedup.
 - **pgTAP**: as checagens do vínculo, do tipo e do disparo.
 - **Tools**: prévia, execução, permissão negada e o `/mcp`.
-- **e2e**: criar um lembrete para daqui a um minuto, ver o ícone e o popover, dispensar e adiar; o calendário anual e mensal com as bolinhas, clicar no dia e filtrar a tabela; a aba da entidade.
+- **e2e** (`e2e/tests/anotacoes.spec.ts`): lembretes para o próximo minuto disparados pelo worker, o ícone com o contador e o popover, o autoplay recusado (aviso) e liberado no clique (o `play()` trocado por um dublê), adiar, dispensar e marcar todos; o calendário anual e mensal com as bolinhas, clicar no dia e filtrar a tabela, os chips de tipo, a janela com o lembrete mensal; a aba da entidade e o selo na listagem. As cores dos tipos entram no `tema.spec.ts` (sem roxo, AA no cartão).

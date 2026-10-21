@@ -98,6 +98,7 @@ export const ptBR = {
     reports: 'Relatórios',
     messages: 'Mensagens',
     contracts: 'Contratos',
+    notes: 'Anotações',
   },
 
   palette: {
@@ -114,6 +115,7 @@ export const ptBR = {
     newReceivable: 'Novo título a receber',
     newEntity: 'Nova entidade',
     newContract: 'Novo contrato',
+    newNote: 'Nova anotação',
     newCaixa: 'Nova caixa',
     newTransfer: 'Nova transferência',
     newCategory: 'Nova categoria',

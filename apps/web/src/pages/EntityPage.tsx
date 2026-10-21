@@ -8,7 +8,9 @@ import {
   History,
   Landmark,
   Link2,
+  ListTree,
   MapPin,
+  NotebookPen,
   Paperclip,
   Pencil,
   Plus,
@@ -19,7 +21,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useAgentScreenContext } from '../agents/AgentsProvider';
 import { AttachmentsPanel } from '../components/attachments/AttachmentsPanel';
 import { AuditHistory } from '../components/audit/AuditHistory';
@@ -29,12 +31,15 @@ import { LoadError, PageHead } from '../components/domain';
 import { AddressModal, BankAccountModal, ContactModal, LinkModal, PixKeyModal } from '../components/entity/ChildModals';
 import { EntityFormModal } from '../components/entity/EntityFormModal';
 import { FavoriteStar, TagChip } from '../components/entity/tags';
+import { NoteBadgeDot } from '../components/notes/kinds';
+import { NotesBrowser } from '../components/notes/NotesBrowser';
 import { useCrumbs } from '../components/shell/Layout';
-import { Badge, Button, CopyButton, Panel, Skel, useConfirm } from '../components/ui';
+import { Badge, Button, CopyButton, Panel, Skel, Tabs, useConfirm } from '../components/ui';
 import { api } from '../lib/api';
 import { useUser } from '../lib/auth';
 import { useRegisterCommands } from '../lib/commands';
 import { useAction, useApi } from '../lib/hooks';
+import { useSetParams } from '../lib/params';
 
 type Editing =
   | { kind: 'entity' }
@@ -58,6 +63,10 @@ export function EntityPage() {
   const confirm = useConfirm();
   const { run } = useAction();
   const canEdit = user.canEditRegistry;
+  const [searchParams] = useSearchParams();
+  const setParams = useSetParams();
+  // Guias da ficha: o cadastro e as anotações (spec 035).
+  const tab = searchParams.get('tab') === 'notes' ? 'notes' : 'data';
   useCrumbs(entity ? [{ label: entity.name }] : []);
   useAgentScreenContext(entity ? { title: entity.name, record: { kind: 'entity', id: entity.id, label: entity.name } } : null);
 
@@ -164,6 +173,7 @@ export function EntityPage() {
           <span className="inline-flex items-center gap-2">
             <FavoriteStar entityId={entity.id} favorite={entity.isFavorite} canEdit={canEdit} onChanged={() => void reload()} />
             <span className="min-w-0">{entity.name}</span>
+            <NoteBadgeDot badge={entity.noteBadge} />
           </span>
         }
         sub={
@@ -208,162 +218,176 @@ export function EntityPage() {
         </div>
       </PageHead>
 
-      {entity.notes && <p className="notice info mb-4 whitespace-pre-wrap">{entity.notes}</p>}
+      <Tabs
+        value={tab}
+        onChange={(key) => setParams({ tab: key === 'notes' ? 'notes' : null, note: null, new: null })}
+        items={[
+          { key: 'data', label: t.notes.ui.entityDataTab, icon: <ListTree /> },
+          { key: 'notes', label: t.notes.ui.entityTab, icon: <NotebookPen />, count: entity.noteBadge?.total },
+        ]}
+      />
+      {tab === 'notes' ? (
+        <NotesBrowser entity={{ id: entity.id, name: entity.name }} onChanged={() => void reload()} />
+      ) : (
+        <>
+          {entity.notes && <p className="notice info mb-4 whitespace-pre-wrap">{entity.notes}</p>}
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Panel title={t.entity.pixKeys} icon={<QrCode />} actions={add('pix')}>
-          <Items empty="Nenhuma chave PIX.">
-            {entity.pixKeys.map((key) => (
-              <div key={key.id} className="item">
-                <div className="grow">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge tone="outline">{t.entity.pixKinds[key.keyType]}</Badge>
-                    <span className="mono truncate text-[13px] text-ink">{formatPixKey(key.keyType, key.keyValue)}</span>
-                    {key.isPrimary && (
-                      <Badge tone="accent">
-                        <Star /> {t.common.primary}
-                      </Badge>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Panel title={t.entity.pixKeys} icon={<QrCode />} actions={add('pix')}>
+              <Items empty="Nenhuma chave PIX.">
+                {entity.pixKeys.map((key) => (
+                  <div key={key.id} className="item">
+                    <div className="grow">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge tone="outline">{t.entity.pixKinds[key.keyType]}</Badge>
+                        <span className="mono truncate text-[13px] text-ink">{formatPixKey(key.keyType, key.keyValue)}</span>
+                        {key.isPrimary && (
+                          <Badge tone="accent">
+                            <Star /> {t.common.primary}
+                          </Badge>
+                        )}
+                      </div>
+                      {(key.label || key.bankCode) && (
+                        <div className="text-[12px] text-muted">
+                          {[key.label, key.bankCode && `banco ${key.bankCode}`].filter(Boolean).join(' · ')}
+                        </div>
+                      )}
+                    </div>
+                    <CopyButton text={key.keyValue} />
+                    {actions(() => setEditing({ kind: 'pix', item: key }), 'pix-keys', key.id, 'a chave PIX')}
+                  </div>
+                ))}
+              </Items>
+            </Panel>
+
+            <Panel title={t.entity.contacts} icon={<Contact />} actions={add('contact')}>
+              <Items empty="Nenhum contato.">
+                {entity.contacts.map((c) => (
+                  <div key={c.id} className="item">
+                    <div className="grow">
+                      <div className="flex items-center gap-2 text-[13px] text-ink">
+                        <Badge tone="outline">{t.entity.contactKinds[c.kind]}</Badge>
+                        <span className="truncate">{c.value}</span>
+                        {c.isPrimary && <Badge tone="accent">{t.common.primary}</Badge>}
+                      </div>
+                      {c.label && <div className="text-[12px] text-muted">{c.label}</div>}
+                    </div>
+                    <CopyButton text={c.value} />
+                    {actions(() => setEditing({ kind: 'contact', item: c }), 'contacts', c.id, 'o contato')}
+                  </div>
+                ))}
+              </Items>
+            </Panel>
+
+            <Panel title={t.entity.addresses} icon={<MapPin />} actions={add('address')}>
+              <Items empty="Nenhum endereço.">
+                {entity.addresses.map((a) => (
+                  <div key={a.id} className="item">
+                    <div className="grow text-[13px]">
+                      <div className="text-ink">
+                        {[a.street, a.number].filter(Boolean).join(', ')}
+                        {a.complement && ` — ${a.complement}`}
+                      </div>
+                      <div className="text-muted">
+                        {[a.district, `${a.city}/${a.state}`, a.postalCode && formatCep(a.postalCode)].filter(Boolean).join(' · ')}
+                        {a.label && ` · ${a.label}`}
+                      </div>
+                    </div>
+                    {actions(() => setEditing({ kind: 'address', item: a }), 'addresses', a.id, 'o endereço')}
+                  </div>
+                ))}
+              </Items>
+            </Panel>
+
+            <Panel title={t.entity.bankAccounts} icon={<Landmark />} actions={add('bank')}>
+              <Items empty="Nenhum dado bancário.">
+                {entity.bankAccounts.map((b) => (
+                  <div key={b.id} className="item">
+                    <div className="grow text-[13px]">
+                      <div className="mono text-ink">
+                        {[b.bankCode && `banco ${b.bankCode}`, b.branch && `ag ${b.branch}`, `cc ${b.accountNumber}`]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </div>
+                      <div className="text-muted">
+                        {[t.entity.bankAccountTypes[b.accountType], b.holderName, b.label].filter(Boolean).join(' · ')}
+                      </div>
+                    </div>
+                    {actions(() => setEditing({ kind: 'bank', item: b }), 'bank-accounts', b.id, 'o dado bancário')}
+                  </div>
+                ))}
+              </Items>
+            </Panel>
+
+            <Panel title={t.entity.links} icon={<Link2 />} actions={add('link')}>
+              <Items empty="Nenhum vínculo.">
+                {entity.links.map((l) => (
+                  <div key={l.id} className="item">
+                    <div className="grow text-[13px] text-dim">
+                      {l.direction === 'out' ? t.entity.linkKinds[l.kind] : t.entity.linkKindsInverse[l.kind]}{' '}
+                      <Link className="link" to={`/entities/${l.otherEntityId}`}>
+                        {l.otherEntityName}
+                      </Link>
+                      {l.notes && <div className="text-[12px] text-muted">{l.notes}</div>}
+                    </div>
+                    {canEdit && (
+                      <button
+                        type="button"
+                        className="row-action danger"
+                        title={t.common.remove}
+                        onClick={() => void removeChild('links', l.id, 'o vínculo')}
+                      >
+                        <Trash2 />
+                      </button>
                     )}
                   </div>
-                  {(key.label || key.bankCode) && (
-                    <div className="text-[12px] text-muted">
-                      {[key.label, key.bankCode && `banco ${key.bankCode}`].filter(Boolean).join(' · ')}
+                ))}
+              </Items>
+            </Panel>
+
+            <Panel title={t.entity.caixas} icon={<Wallet />} actions={add('caixa')}>
+              <Items empty="Não é titular de nenhuma caixa.">
+                {entity.caixas.map((c) => (
+                  <div key={c.id} className={`item${c.archivedAt ? ' opacity-60' : ''}`}>
+                    <Wallet className="size-4 text-muted" />
+                    <div className="grow text-[13px]">
+                      {c.visible ? (
+                        <Link className="link" to={`/caixas/${c.id}`}>
+                          {c.name}
+                        </Link>
+                      ) : (
+                        <span className="text-dim" title="Você não tem acesso a esta caixa">
+                          {c.name}
+                        </span>
+                      )}
                     </div>
-                  )}
-                </div>
-                <CopyButton text={key.keyValue} />
-                {actions(() => setEditing({ kind: 'pix', item: key }), 'pix-keys', key.id, 'a chave PIX')}
-              </div>
-            ))}
-          </Items>
-        </Panel>
-
-        <Panel title={t.entity.contacts} icon={<Contact />} actions={add('contact')}>
-          <Items empty="Nenhum contato.">
-            {entity.contacts.map((c) => (
-              <div key={c.id} className="item">
-                <div className="grow">
-                  <div className="flex items-center gap-2 text-[13px] text-ink">
-                    <Badge tone="outline">{t.entity.contactKinds[c.kind]}</Badge>
-                    <span className="truncate">{c.value}</span>
                     {c.isPrimary && <Badge tone="accent">{t.common.primary}</Badge>}
+                    {c.archivedAt && <Badge tone="outline">{t.common.archived}</Badge>}
                   </div>
-                  {c.label && <div className="text-[12px] text-muted">{c.label}</div>}
-                </div>
-                <CopyButton text={c.value} />
-                {actions(() => setEditing({ kind: 'contact', item: c }), 'contacts', c.id, 'o contato')}
-              </div>
-            ))}
-          </Items>
-        </Panel>
+                ))}
+              </Items>
+            </Panel>
 
-        <Panel title={t.entity.addresses} icon={<MapPin />} actions={add('address')}>
-          <Items empty="Nenhum endereço.">
-            {entity.addresses.map((a) => (
-              <div key={a.id} className="item">
-                <div className="grow text-[13px]">
-                  <div className="text-ink">
-                    {[a.street, a.number].filter(Boolean).join(', ')}
-                    {a.complement && ` — ${a.complement}`}
-                  </div>
-                  <div className="text-muted">
-                    {[a.district, `${a.city}/${a.state}`, a.postalCode && formatCep(a.postalCode)].filter(Boolean).join(' · ')}
-                    {a.label && ` · ${a.label}`}
-                  </div>
-                </div>
-                {actions(() => setEditing({ kind: 'address', item: a }), 'addresses', a.id, 'o endereço')}
-              </div>
-            ))}
-          </Items>
-        </Panel>
+            <Panel title={t.attachments.title} icon={<Paperclip />}>
+              <AttachmentsPanel target="entity" targetId={entity.id} canWrite={canEdit} />
+            </Panel>
+          </div>
 
-        <Panel title={t.entity.bankAccounts} icon={<Landmark />} actions={add('bank')}>
-          <Items empty="Nenhum dado bancário.">
-            {entity.bankAccounts.map((b) => (
-              <div key={b.id} className="item">
-                <div className="grow text-[13px]">
-                  <div className="mono text-ink">
-                    {[b.bankCode && `banco ${b.bankCode}`, b.branch && `ag ${b.branch}`, `cc ${b.accountNumber}`]
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </div>
-                  <div className="text-muted">
-                    {[t.entity.bankAccountTypes[b.accountType], b.holderName, b.label].filter(Boolean).join(' · ')}
-                  </div>
-                </div>
-                {actions(() => setEditing({ kind: 'bank', item: b }), 'bank-accounts', b.id, 'o dado bancário')}
-              </div>
-            ))}
-          </Items>
-        </Panel>
-
-        <Panel title={t.entity.links} icon={<Link2 />} actions={add('link')}>
-          <Items empty="Nenhum vínculo.">
-            {entity.links.map((l) => (
-              <div key={l.id} className="item">
-                <div className="grow text-[13px] text-dim">
-                  {l.direction === 'out' ? t.entity.linkKinds[l.kind] : t.entity.linkKindsInverse[l.kind]}{' '}
-                  <Link className="link" to={`/entities/${l.otherEntityId}`}>
-                    {l.otherEntityName}
-                  </Link>
-                  {l.notes && <div className="text-[12px] text-muted">{l.notes}</div>}
-                </div>
-                {canEdit && (
-                  <button
-                    type="button"
-                    className="row-action danger"
-                    title={t.common.remove}
-                    onClick={() => void removeChild('links', l.id, 'o vínculo')}
-                  >
-                    <Trash2 />
-                  </button>
-                )}
-              </div>
-            ))}
-          </Items>
-        </Panel>
-
-        <Panel title={t.entity.caixas} icon={<Wallet />} actions={add('caixa')}>
-          <Items empty="Não é titular de nenhuma caixa.">
-            {entity.caixas.map((c) => (
-              <div key={c.id} className={`item${c.archivedAt ? ' opacity-60' : ''}`}>
-                <Wallet className="size-4 text-muted" />
-                <div className="grow text-[13px]">
-                  {c.visible ? (
-                    <Link className="link" to={`/caixas/${c.id}`}>
-                      {c.name}
-                    </Link>
-                  ) : (
-                    <span className="text-dim" title="Você não tem acesso a esta caixa">
-                      {c.name}
-                    </span>
-                  )}
-                </div>
-                {c.isPrimary && <Badge tone="accent">{t.common.primary}</Badge>}
-                {c.archivedAt && <Badge tone="outline">{t.common.archived}</Badge>}
-              </div>
-            ))}
-          </Items>
-        </Panel>
-
-        <Panel title={t.attachments.title} icon={<Paperclip />}>
-          <AttachmentsPanel target="entity" targetId={entity.id} canWrite={canEdit} />
-        </Panel>
-      </div>
-
-      <div className="mt-6">
-        <Panel
-          title={t.contracts.entityTab}
-          icon={<Handshake />}
-          actions={
-            <Link className="btn btn-quiet btn-sm" to={`/contracts?entity=${entity.id}`}>
-              {t.contracts.title}
-            </Link>
-          }
-        >
-          <ContractsTable rows={contracts.data} empty={t.contracts.entityTabEmpty} showEntity={false} />
-        </Panel>
-      </div>
+          <div className="mt-6">
+            <Panel
+              title={t.contracts.entityTab}
+              icon={<Handshake />}
+              actions={
+                <Link className="btn btn-quiet btn-sm" to={`/contracts?entity=${entity.id}`}>
+                  {t.contracts.title}
+                </Link>
+              }
+            >
+              <ContractsTable rows={contracts.data} empty={t.contracts.entityTabEmpty} showEntity={false} />
+            </Panel>
+          </div>
+        </>
+      )}
 
       {editing?.kind === 'entity' && <EntityFormModal entity={entity} onClose={() => setEditing(null)} onSaved={saved} />}
       {editing?.kind === 'pix' && <PixKeyModal entityId={id} item={editing.item} onClose={() => setEditing(null)} onSaved={saved} />}

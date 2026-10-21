@@ -8,6 +8,7 @@ import { ExportMenu } from '../components/ExportMenu';
 import { EntityFormModal } from '../components/entity/EntityFormModal';
 import { EntityTagsModal } from '../components/entity/EntityTagsModal';
 import { EntityFilterMenu, entityFilterQuery, FavoriteStar, TagChips, useEntityFilterParams } from '../components/entity/tags';
+import { NoteBadgeDot } from '../components/notes/kinds';
 import { Badge, Button, CopyButton, EmptyRow, Tabs, useDebounced } from '../components/ui';
 import { api } from '../lib/api';
 import { useUser } from '../lib/auth';
@@ -170,7 +171,10 @@ export function EntitiesPage() {
                         <UserRound className="size-4 text-muted" />
                       )}
                       <span className="min-w-0">
-                        <span className="row-title">{entity.name}</span>
+                        <span className="row-title">
+                          {entity.name}
+                          <NoteBadgeDot badge={entity.noteBadge} />
+                        </span>
                         {entity.tradeName && <span className="row-sub">{entity.tradeName}</span>}
                       </span>
                     </span>

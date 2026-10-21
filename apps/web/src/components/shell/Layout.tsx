@@ -9,6 +9,7 @@ import { useUser } from '../../lib/auth';
 import { armChord, isChordKey, isTypingTarget, usePalette } from '../../lib/commands';
 import { useStored } from '../../lib/storage';
 import { useTheme } from '../../lib/theme';
+import { ReminderAlarm } from '../notes/ReminderAlarm';
 import { Kbd } from '../ui';
 import { CommandPalette } from './CommandPalette';
 import { Notifications } from './Notifications';
@@ -125,6 +126,8 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
           >
             {theme === 'dark' ? <Sun /> : <Moon />}
           </button>
+          {/* Alarme dos lembretes (spec 035): entre o tema e os agentes. */}
+          <ReminderAlarm />
           <AgentsMenu />
           <Notifications />
         </header>

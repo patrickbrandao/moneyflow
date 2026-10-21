@@ -85,6 +85,14 @@
   --chart-6: #008300;
   --chart-other: #6e717b;
 
+  /* tipos das anotações (spec 035): informação = o acento; AA (4,5:1) sobre
+     o cartão e o fundo; nenhum na faixa roxa. */
+  --note-info: var(--accent-soft);
+  --note-good: #3fae7a;
+  --note-bad: #e08a3c;
+  --note-severe: #e5564e;
+  --note-reminder: #9a9da6;
+
   /* anel difuso de foco/hover e a única sombra "de verdade" (flutuantes) */
   --ring: 0 0 0 4px rgba(255, 255, 255, 0.06);
   --ring-accent: 0 0 0 3px rgba(47, 111, 214, 0.35);
@@ -149,6 +157,12 @@
   --chart-5: #e87ba4;
   --chart-6: #008300;
   --chart-other: #9a9da5;
+
+  --note-info: var(--accent-soft);
+  --note-good: #2b7a52;
+  --note-bad: #ad4f0c;
+  --note-severe: #c42b27;
+  --note-reminder: #62666f;
 
   --ring: 0 0 0 4px rgba(17, 19, 25, 0.05);
   --ring-accent: 0 0 0 3px rgba(29, 90, 190, 0.25);

@@ -29,6 +29,7 @@ import { FlowPage } from './pages/FlowPage';
 import { InvoicePage } from './pages/InvoicePage';
 import { LoginPage } from './pages/LoginPage';
 import { MessagesPage } from './pages/MessagesPage';
+import { NotesPage } from './pages/NotesPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { OverviewPage } from './pages/OverviewPage';
 import { ReconcileRecipesPage } from './pages/ReconcileRecipesPage';
@@ -78,6 +79,7 @@ function Console() {
             <Route path="transfers" element={<TransfersPage />} />
             <Route path="contracts" element={<ContractsPage />} />
             <Route path="contracts/:id" element={<ContractPage />} />
+            <Route path="notes" element={<NotesPage />} />
             <Route path="calendar" element={<CalendarPage />} />
             <Route path="reconcile-recipes" element={<ReconcileRecipesPage />} />
             <Route path="card-invoices/:id" element={<InvoicePage />} />

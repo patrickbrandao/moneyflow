@@ -11,6 +11,7 @@ import {
   History,
   KeyRound,
   LayoutGrid,
+  NotebookPen,
   Send,
   ShieldCheck,
   Tags,
@@ -69,6 +70,8 @@ export const NAVIGATION: NavEntry[][] = [
     { kind: 'link', to: '/transfers', label: t.nav.transfers, icon: <ArrowLeftRight />, shortcut: 'g t' },
     { kind: 'link', to: '/calendar', label: t.nav.calendar, icon: <CalendarDays />, shortcut: 'g a' },
     { kind: 'link', to: '/contracts', label: t.nav.contracts, icon: <Handshake />, shortcut: 'g o' },
+    // Anotações e lembretes (spec 035), logo abaixo de Contratos.
+    { kind: 'link', to: '/notes', label: t.nav.notes, icon: <NotebookPen />, shortcut: 'g n' },
     // Conciliação → Receitas (spec 030); a conciliação em si fica na conta da caixa.
     { kind: 'link', to: '/reconcile-recipes', label: t.agentsUi.recipes.nav, icon: <BookOpenCheck /> },
   ],

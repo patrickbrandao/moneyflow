@@ -6,6 +6,7 @@ import { AgentTasksPanel } from '../components/account/AgentTasksPanel';
 import { AiSettingsPanel } from '../components/account/AiSettingsPanel';
 import { AiUsagePanel } from '../components/account/AiUsagePanel';
 import { ApiTokensPanel } from '../components/account/ApiTokensPanel';
+import { ReminderSettingsPanel } from '../components/account/ReminderSettingsPanel';
 import { TelegramPanel } from '../components/account/TelegramPanel';
 import { RoleBadge } from '../components/domain';
 import { FormError } from '../components/forms';
@@ -14,7 +15,7 @@ import { api } from '../lib/api';
 import { useUser } from '../lib/auth';
 import { useAction } from '../lib/hooks';
 
-/** Minha conta: dados, caixas a que tenho acesso, troca de senha, IA (spec 022), o meu uso de IA (spec 028), tarefas do agente e Telegram (spec 029) e tokens de API. */
+/** Minha conta: dados, caixas a que tenho acesso, troca de senha, IA (spec 022), o meu uso de IA (spec 028), tarefas do agente e Telegram (spec 029), lembretes (spec 035) e tokens de API. */
 export function AccountPage() {
   const user = useUser();
   const [current, setCurrent] = useState('');
@@ -123,6 +124,7 @@ export function AccountPage() {
             </div>
           </form>
         </Panel>
+        <ReminderSettingsPanel />
         <AiSettingsPanel />
         <AiUsagePanel />
         <AgentTasksPanel />

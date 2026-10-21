@@ -4,7 +4,8 @@ import { expect, type Page, test } from '@playwright/test';
  * Cores do console (tarefa 007): o acento é azul nos dois temas, sem nenhum
  * roxo (matiz 250°–320°) no acento, no anel de foco, nos neutros, nas 12
  * cores de categoria/canvas nem no logo; o texto branco sobre o acento mantém AA e as
- * 12 cores --port-N continuam distintas entre si. Só precisa da tela de login.
+ * 12 cores --port-N continuam distintas entre si; as 5 dos tipos de anotação (spec 035)
+ * passam AA no cartão. Só precisa da tela de login.
  */
 
 type Rgb = [number, number, number];
@@ -74,6 +75,8 @@ const distance = (a: Rgb, b: Rgb) => {
 
 const ACCENT = ['--accent', '--accent-hover', '--accent-soft', '--accent-deep', '--accent-tint'];
 const PORTS = Array.from({ length: 12 }, (_, i) => `--port-${i + 1}`);
+/** Tipos das anotações (spec 035). */
+const NOTES = ['--note-info', '--note-good', '--note-bad', '--note-severe', '--note-reminder'];
 const NEUTRALS = [
   '--bg',
   '--bg-sunken',
@@ -108,7 +111,7 @@ async function tokens(page: Page, theme: 'dark' | 'light') {
       const style = win.getComputedStyle(root);
       return Object.fromEntries(names.map((n) => [n, style.getPropertyValue(n)]));
     },
-    { theme, names: [...ACCENT, ...PORTS, ...NEUTRALS, '--on-accent', '--ring-accent', '--info'] },
+    { theme, names: [...ACCENT, ...PORTS, ...NEUTRALS, ...NOTES, '--on-accent', '--ring-accent', '--info'] },
   );
 }
 
@@ -118,7 +121,7 @@ for (const theme of ['dark', 'light'] as const) {
     await expect(page.getByLabel('Usuário ou e-mail')).toBeVisible();
     const t = await tokens(page, theme);
 
-    for (const name of [...ACCENT, ...PORTS, ...NEUTRALS, '--info']) {
+    for (const name of [...ACCENT, ...PORTS, ...NEUTRALS, ...NOTES, '--info']) {
       expect(isPurple(parseColor(t[name]!)), `${name} = ${t[name]} é roxo`).toBe(false);
     }
     expect(
@@ -140,6 +143,13 @@ for (const theme of ['dark', 'light'] as const) {
 
     // estado "info" não se confunde com o acento
     expect(distance(parseColor(t['--info']!), parseColor(t['--accent-soft']!))).toBeGreaterThan(0.08);
+
+    // cores dos tipos de anotação: AA (4,5:1) sobre o cartão e distintas entre si
+    const notes = NOTES.map((n) => parseColor(t[n]!));
+    for (const [i, c] of notes.entries()) {
+      expect(contrast(c, parseColor(t['--bg-elev']!)), `${NOTES[i]} sobre --bg-elev`).toBeGreaterThanOrEqual(4.5);
+      for (let j = i + 1; j < notes.length; j += 1) expect(distance(c, notes[j]!), `${NOTES[i]} × ${NOTES[j]}`).toBeGreaterThan(0.06);
+    }
 
     // 12 cores de categoria distintas duas a duas
     const ports = PORTS.map((n) => parseColor(t[n]!));
