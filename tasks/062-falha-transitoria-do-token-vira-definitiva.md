@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # Uma falha transitória ao ler o token do bot marca a mensagem da outbox como falha definitiva

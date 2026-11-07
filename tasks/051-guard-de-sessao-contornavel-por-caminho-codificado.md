@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # O guard de sessão compara a URL crua e o roteador a decodifica: `/%61pi/...` escapa da autenticação

@@ -6,7 +6,7 @@ autor: principal
 responsavel: dba, app
 prioridade: baixa
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # Postgres de desenvolvimento publicado em todas as interfaces, com o superusuário e a senha padrão

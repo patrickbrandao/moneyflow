@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # Sessão sem expiração por inatividade e cookie sem `Secure` por padrão

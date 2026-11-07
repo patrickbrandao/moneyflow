@@ -6,7 +6,7 @@ autor: principal
 responsavel: dba
 prioridade: baixa
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # As listas de leitores e de segredos blindados na documentação e no schema estão incompletas

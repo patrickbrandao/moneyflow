@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # A escrita aprovada é executada de novo quando a execução do agente é retomada após uma queda

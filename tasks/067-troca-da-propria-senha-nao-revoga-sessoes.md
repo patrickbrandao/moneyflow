@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # O admin que troca a própria senha pela tela de Usuários não encerra as outras sessões

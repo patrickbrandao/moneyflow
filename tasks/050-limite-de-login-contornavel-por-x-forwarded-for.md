@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # Limite de tentativas de login contornável por X-Forwarded-For (`trustProxy: true`)

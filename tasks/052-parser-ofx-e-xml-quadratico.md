@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # Parsers OFX e XML com custo quadrático e sem limite de profundidade (trava a API)

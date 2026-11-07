@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # O escopo da receita (`assertRecipeScope`) não cobre as tools que agem no lote inteiro

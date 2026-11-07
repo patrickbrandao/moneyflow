@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # A dedup do webhook do Telegram fica fora do processamento, que se repete em parte na reentrega

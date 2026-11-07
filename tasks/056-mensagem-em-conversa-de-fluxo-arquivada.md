@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # Conversa de fluxo arquivada aceita mensagem pela API, e o `screenContext` apaga o escopo da receita

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # Eventos de agente vão para destinos de caixa que o usuário da execução não lê

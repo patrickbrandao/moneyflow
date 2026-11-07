@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # Nenhum cabeçalho de segurança (CSP, frame-ancestors/X-Frame-Options) na API nem no SPA

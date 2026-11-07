@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # Resposta e prévias de aprovação seguem para o Telegram depois de desfazer o pareamento ou desligar a entrada

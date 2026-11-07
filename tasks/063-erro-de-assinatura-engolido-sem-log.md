@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # `produceMessages` engole o erro de assinatura sem log, e a contagem é sobrescrita

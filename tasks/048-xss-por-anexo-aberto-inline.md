@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-11-07
-commit:
+commit: 9991a6b
 ---
 
 # XSS armazenado por anexo aberto inline com o Content-Type de quem envia
