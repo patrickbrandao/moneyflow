@@ -46,7 +46,7 @@ import {
 import { executeSecretTool, internalTool } from '../agents/tools-runtime';
 import type { ServiceContext } from '../context';
 import { AppError, findPgError, forbidden, notFound, unprocessable } from '../errors';
-import { assertCanStartRun } from './ai-budgets';
+import { assertCanStartRun, lockRunRate } from './ai-budgets';
 import { chatAttachments, mediaCapabilities, messageAttachmentIds } from './chat-media';
 import { withTx } from './tx';
 import { iso } from './util';
@@ -541,8 +541,12 @@ async function assertAttachments(ctx: ServiceContext, conversationId: string, id
   return ids.map((id) => byId.get(id)!);
 }
 
-/** `origin`: evento gravado com a execução, na mesma transação (ex.: a mensagem veio do Telegram, spec 029). */
-export type SendOptions = { origin?: AiRunEvent };
+/**
+ * `origin`: evento gravado com a execução, na mesma transação (ex.: a mensagem veio do Telegram, spec 029).
+ * `fromUser`: a mensagem veio pela API (`POST /api/conversations/:id/messages`); conversa de fluxo
+ * (`purpose` ≠ `chat`: receita, tarefa agendada, fluxos JSON) só recebe dos chamadores internos (spec 030).
+ */
+export type SendOptions = { origin?: AiRunEvent; fromUser?: boolean };
 
 export async function sendMessage(
   ctx: ServiceContext,
@@ -554,6 +558,10 @@ export async function sendMessage(
   // Sessão finalizada é somente leitura: nenhuma execução nova nela (spec 026).
   if (conversation.purpose === 'chat' && conversation.archived_at) {
     throw new AppError(409, 'session_finished', t.agents.errors.sessionFinished);
+  }
+  // Conversa de fluxo: o escopo (receita) e a trava do lote vivem no `screen_context` dela; pela API, nunca.
+  if (opts.fromUser && conversation.purpose !== 'chat') {
+    throw new AppError(409, 'flow_conversation', t.agents.errors.flowConversation);
   }
   await assertAgentUsable(ctx.db, conversation.agent_id);
   // Limite por minuto e orçamento do mês (spec 028): 429 antes de gravar a mensagem.
@@ -570,6 +578,7 @@ export async function sendMessage(
   ];
   try {
     return await withTx(ctx, async (tx) => {
+      await lockRunRate(tx, ctx.config, ctx.access.actor.id, conversation.purpose !== 'chat');
       if (input.screenContext) {
         await tx.execute(sql`UPDATE ai_conversations SET screen_context = ${JSON.stringify(input.screenContext)}::jsonb WHERE id = ${id}`);
       }
@@ -607,7 +616,7 @@ export async function getRun(ctx: ServiceContext, runId: string): Promise<AiRunD
  * Para uma execução dentro da transação de quem chama: na fila ou esperando
  * confirmação, cancela na hora; rodando, pede ao worker (ele encerra).
  */
-async function stopRun(tx: Executor, runId: string, conversationId: string) {
+export async function stopRun(tx: Executor, runId: string, conversationId: string) {
   const locked = await tx.execute<{ status: string }>(sql`SELECT status FROM ai_runs WHERE id = ${runId} FOR UPDATE`);
   const status = locked.rows[0]?.status;
   if (status === 'running') {

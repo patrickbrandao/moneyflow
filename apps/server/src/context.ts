@@ -19,4 +19,10 @@ export type ServiceContext = {
    * escopo. As tools de conciliação recusam qualquer linha fora dele.
    */
   recipeLineIds?: ReadonlySet<string> | null;
+  /**
+   * Sessão do console que fez a requisição (id = sha256 do token), quando houver. Trocar a
+   * própria senha encerra as outras sessões e mantém esta (tarefa 067); sem ela (/mcp, worker),
+   * todas as sessões do usuário são encerradas.
+   */
+  sessionId?: string | null;
 };

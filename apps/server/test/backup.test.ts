@@ -1,11 +1,27 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pg } from '@moneyflow/db';
 import { formatCnpj } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
-import { strFromU8, unzipSync } from 'fflate';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { alphaCnpj, client, dropFreshDatabases, freshDatabase, type Harness, login, scenario, startApp, uid, userSession } from './helpers';
+import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
+import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { extractDump } from '../src/services/backup/dump';
+import { parseBackupUpload } from '../src/services/backup/import';
+import { backupUnzipLimit, UnzipTooLarge } from '../src/services/backup/unzip';
+import {
+  alphaCnpj,
+  client,
+  dropFreshDatabases,
+  freshDatabase,
+  freshDatabaseUrls,
+  type Harness,
+  login,
+  scenario,
+  startApp,
+  uid,
+  userSession,
+} from './helpers';
 
 /*
  * Backup e restauração (spec 019): exportação com segredos, importação com
@@ -73,6 +89,76 @@ describe('backup: permissões e formato', () => {
     });
     expect(bad.statusCode).toBe(422);
     expect(bad.json().error.message).toMatch(/não é um backup/);
+  });
+});
+
+describe('backup: teto da descompactação (tarefa 055)', () => {
+  const MB = 1024 * 1024;
+  /** Zip com as entradas dadas; `declared` falsifica o tamanho descompactado no cabeçalho local e no diretório central. */
+  function zipOf(entries: Record<string, Uint8Array>, declared?: number) {
+    const zip = Buffer.from(zipSync(entries, { level: 9 }));
+    if (declared !== undefined) {
+      for (let i = 0; i + 4 <= zip.length; i += 1) {
+        const sig = zip.readUInt32LE(i);
+        if (sig === 0x04034b50) zip.writeUInt32LE(declared, i + 22);
+        else if (sig === 0x02014b50) zip.writeUInt32LE(declared, i + 24);
+      }
+    }
+    return zip;
+  }
+  const zeros = (size: number) => new Uint8Array(size);
+  const tooLarge = (fn: () => unknown) => {
+    try {
+      fn();
+    } catch (error) {
+      return error;
+    }
+    throw new Error('não recusou');
+  };
+
+  it('import: o .json acima do teto é recusado, declarado ou contado de verdade', () => {
+    const big = zipOf({ 'moneyflow.json': zeros(8 * MB) });
+    expect(big.length).toBeLessThan(64 * 1024);
+    expect(tooLarge(() => parseBackupUpload(big, 1 * MB))).toBeInstanceOf(UnzipTooLarge);
+    // O tamanho declarado mente (10 bytes): a contagem no inflate pega do mesmo jeito.
+    const liar = zipOf({ 'moneyflow.json': zeros(8 * MB) }, 10);
+    expect(tooLarge(() => parseBackupUpload(liar, 1 * MB))).toMatchObject({ status: 413, code: 'unzipped_too_large' });
+    // Várias entradas com o mesmo sufixo somam no teto.
+    const many = zipOf({ 'a.json': zeros(600 * 1024), 'b.json': zeros(600 * 1024) });
+    expect(tooLarge(() => parseBackupUpload(many, 1 * MB))).toBeInstanceOf(UnzipTooLarge);
+    // Abaixo do teto o zip segue lido normalmente (e o erro é o do conteúdo).
+    const ok = zipOf({ 'moneyflow.json': strToU8('{"nada": 1}') });
+    expect(tooLarge(() => parseBackupUpload(ok, 1 * MB))).toMatchObject({ status: 422, code: 'invalid_backup' });
+    expect(tooLarge(() => parseBackupUpload(Buffer.from('PK\u0003\u0004lixo'), 1 * MB))).toMatchObject({ status: 422 });
+  });
+
+  it('dump: o .dump acima do teto é recusado, declarado ou contado de verdade', () => {
+    const dump = new Uint8Array(8 * MB);
+    dump.set(strToU8('PGDMP'));
+    expect(tooLarge(() => extractDump(zipOf({ 'moneyflow.dump': dump }), 1 * MB))).toBeInstanceOf(UnzipTooLarge);
+    expect(tooLarge(() => extractDump(zipOf({ 'moneyflow.dump': dump }, 10), 1 * MB))).toBeInstanceOf(UnzipTooLarge);
+    const small = dump.subarray(0, 1024);
+    expect(extractDump(zipOf({ 'moneyflow.dump': small, 'manifest.json': strToU8('{"schemaVersion":"1"}') }), 1 * MB)).toMatchObject({
+      manifest: { schemaVersion: '1' },
+    });
+  });
+
+  it('a rota responde 413 com o teto de 4× BACKUP_MAX_UPLOAD_MB', async () => {
+    const small = await startApp({ BACKUP_MAX_UPLOAD_MB: '1' });
+    try {
+      expect(backupUnzipLimit(small.config)).toBe(4 * MB);
+      const admin = await userSession(small, 'admin');
+      const res = await small.app.inject({
+        method: 'POST',
+        url: '/api/backup/import/categories?dryRun=1',
+        payload: zipOf({ 'moneyflow.json': zeros(5 * MB) }, 10),
+        headers: { cookie: admin.cookie, 'content-type': 'application/zip' },
+      });
+      expect(res.statusCode, res.body).toBe(413);
+      expect(res.json().error.code).toBe('unzipped_too_large');
+    } finally {
+      await small.close();
+    }
   });
 });
 
@@ -1066,6 +1152,123 @@ describe('backup: recursos num sistema novo', () => {
     const again = await importFile(b, adminB.cookie, 'entities', file);
     expect(failures(again)).toEqual([]);
     expect(sum(again, 'entity_tag_links').imported).toBe(0);
+  });
+});
+
+describe('backup: dump e restauração pelo dono (tarefa 054)', () => {
+  // pg_dump/pg_restore/psql 18: PG_BIN_DIR (ou MONEYFLOW_TEST_PG_BIN_DIR) ou o PATH; sem eles, o teste não roda.
+  const pgBinDir = process.env.MONEYFLOW_TEST_PG_BIN_DIR ?? process.env.PG_BIN_DIR ?? '';
+  const SECRET_COLUMNS = [
+    ['users', 'password'],
+    ['message_destinations', 'bot_token'],
+    ['ai_providers', 'api_key'],
+  ] as const;
+
+  /** ACLs do schema public (tabelas, colunas, funções e privilégios padrão), em texto ordenado. */
+  async function aclSnapshot(url: string): Promise<string[]> {
+    const db = new pg.Client({ connectionString: url });
+    await db.connect();
+    try {
+      const rows = await db.query<{ line: string }>(`
+        SELECT format('rel %s %s %s %s', c.relname, a.grantee::regrole, a.privilege_type, a.is_grantable) AS line
+          FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+         WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'v', 'm', 'S', 'p')
+        UNION ALL
+        SELECT format('col %s.%s %s %s', c.relname, att.attname, a.grantee::regrole, a.privilege_type)
+          FROM pg_attribute att JOIN pg_class c ON c.oid = att.attrelid
+               CROSS JOIN LATERAL aclexplode(att.attacl) a
+         WHERE c.relnamespace = 'public'::regnamespace AND att.attacl IS NOT NULL
+        UNION ALL
+        SELECT format('fn %s %s %s', p.oid::regprocedure, CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END, a.privilege_type)
+          FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+         WHERE p.pronamespace = 'public'::regnamespace
+        UNION ALL
+        SELECT format('default %s %s %s %s', d.defaclrole::regrole, d.defaclobjtype,
+                      CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END, a.privilege_type)
+          FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a`);
+      return rows.rows.map((r) => r.line).sort();
+    } finally {
+      await db.end();
+    }
+  }
+
+  async function secretColumnsReadable(url: string) {
+    const db = new pg.Client({ connectionString: url });
+    await db.connect();
+    try {
+      const out: Record<string, boolean> = {};
+      for (const [table, column] of SECRET_COLUMNS) {
+        const res = await db.query<{ ok: boolean }>(`SELECT has_column_privilege('moneyflow_app', $1, $2, 'SELECT') AS ok`, [
+          table,
+          column,
+        ]);
+        out[`${table}.${column}`] = res.rows[0]!.ok;
+      }
+      return out;
+    } finally {
+      await db.end();
+    }
+  }
+
+  /** Ida e volta: dump, uma mudança depois dele e a restauração, que desfaz a mudança. */
+  async function roundTrip(migrateAs: 'owner' | 'super') {
+    const urls = await freshDatabaseUrls({ migrateAs });
+    if (!urls) return 'skip' as const;
+    const app = await startApp({ DATABASE_OWNER_URL: urls.owner, PG_BIN_DIR: pgBinDir }, urls.app);
+    try {
+      const admin = await userSession(app, 'admin');
+      const api = client(app, admin.cookie);
+      const status = await api.get('/api/backup/status');
+      if (!status.dumpAvailable) return 'skip' as const;
+      const before = await aclSnapshot(urls.super);
+      const kept = await api.post('/api/categories', { kind: 'expense', name: `Antes ${uid()}`, colorSlot: 3 });
+      const dump = await app.app.inject({ method: 'GET', url: '/api/backup/dump', headers: { cookie: admin.cookie } });
+      expect(dump.statusCode, dump.body).toBe(200);
+      const dropped = await api.post('/api/categories', { kind: 'expense', name: `Depois ${uid()}`, colorSlot: 5 });
+
+      const restored = await app.app.inject({
+        method: 'POST',
+        url: '/api/backup/restore-dump?confirm=RESTAURAR',
+        payload: dump.rawPayload,
+        headers: { cookie: admin.cookie, 'content-type': 'application/zip' },
+      });
+      expect(restored.statusCode, restored.body).toBe(200);
+      expect(restored.json()).toMatchObject({ restored: true });
+
+      const ids = (await api.get('/api/categories')).map((c: { id: string }) => c.id);
+      expect(ids).toContain(kept.id);
+      expect(ids).not.toContain(dropped.id);
+      // A blindagem por coluna sobrevive à restauração (os privilégios padrão não vazam para as tabelas recriadas).
+      expect(await secretColumnsReadable(urls.super)).toEqual({
+        'users.password': false,
+        'message_destinations.bot_token': false,
+        'ai_providers.api_key': false,
+      });
+      expect(await aclSnapshot(urls.super)).toEqual(before);
+      return 'ok' as const;
+    } finally {
+      await app.close();
+    }
+  }
+
+  it('com o dono sem SUPERUSER (moneyflow_owner), restaura e mantém os GRANTs do banco migrado', async (ctx) => {
+    if (!inject('superDatabaseUrl') || !inject('ownerDatabaseUrl')) return ctx.skip();
+    const owner = new pg.Client({ connectionString: inject('ownerDatabaseUrl') });
+    await owner.connect();
+    try {
+      const role = await owner.query<{ rolsuper: boolean; rolcreatedb: boolean }>(
+        'SELECT rolsuper, rolcreatedb FROM pg_roles WHERE rolname = current_user',
+      );
+      expect(role.rows[0]).toEqual({ rolsuper: false, rolcreatedb: false });
+    } finally {
+      await owner.end();
+    }
+    if ((await roundTrip('owner')) === 'skip') ctx.skip();
+  });
+
+  it('com o superusuário na DATABASE_OWNER_URL (banco migrado por ele, como a produção de hoje), também restaura', async (ctx) => {
+    if (!inject('superDatabaseUrl')) return ctx.skip();
+    if ((await roundTrip('super')) === 'skip') ctx.skip();
   });
 });
 

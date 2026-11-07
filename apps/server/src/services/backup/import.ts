@@ -14,7 +14,7 @@ import {
   t,
 } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
-import { strFromU8, unzipSync } from 'fflate';
+import { strFromU8 } from 'fflate';
 import type { ServiceContext } from '../../context';
 import { AppError, findPgError, translateDbError, unprocessable } from '../../errors';
 import { withTx } from '../tx';
@@ -36,6 +36,7 @@ import {
 } from './catalog';
 import { schemaVersion } from './export';
 import { legacyContracts } from './legacy-contracts';
+import { UnzipTooLarge, unzipLimited } from './unzip';
 
 /*
  * Importação com merge (spec 019). Regras:
@@ -83,17 +84,19 @@ type Unit = { nodes: Node[]; deps: Set<Unit>; dependents: Set<Unit>; rank: numbe
 
 class DryRunRollback extends Error {}
 
-/** Lê o arquivo enviado (.json ou .zip com um .json dentro) e valida o cabeçalho. */
-export function parseBackupUpload(body: unknown): BackupFile {
+/**
+ * Lê o arquivo enviado (.json ou .zip com um .json dentro) e valida o cabeçalho. O .zip descompacta
+ * no máximo `maxUnzippedBytes` (`backupUnzipLimit`, tarefa 055): acima disso, 413.
+ */
+export function parseBackupUpload(body: unknown, maxUnzippedBytes: number): BackupFile {
   if (!Buffer.isBuffer(body) || body.length === 0) throw unprocessable(t.backup.errors.invalidFile, 'invalid_backup');
   let text: string;
   if (body[0] === 0x50 && body[1] === 0x4b) {
     let entries: Record<string, Uint8Array>;
     try {
-      entries = unzipSync(new Uint8Array(body.buffer, body.byteOffset, body.length), {
-        filter: (file) => file.name.toLowerCase().endsWith('.json'),
-      });
-    } catch {
+      entries = unzipLimited(body, (name) => name.toLowerCase().endsWith('.json'), maxUnzippedBytes);
+    } catch (error) {
+      if (error instanceof UnzipTooLarge) throw error;
       throw unprocessable(t.backup.errors.invalidFile, 'invalid_backup');
     }
     const name = Object.keys(entries).find((n) => n.endsWith('moneyflow.json')) ?? Object.keys(entries)[0];

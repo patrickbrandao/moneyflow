@@ -3,14 +3,16 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pg } from '@moneyflow/db';
 import { type BackupStatus, type DumpRestoreResult, t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
-import { strFromU8, strToU8, unzipSync, Zip, ZipDeflate, ZipPassThrough } from 'fflate';
+import { strFromU8, strToU8, Zip, ZipDeflate, ZipPassThrough } from 'fflate';
 import type { Config } from '../../config';
 import type { ServiceContext } from '../../context';
 import { AppError, unprocessable } from '../../errors';
 import { resetCatalog } from './catalog';
 import { schemaVersion } from './export';
+import { backupUnzipLimit, UnzipTooLarge, unzipLimited } from './unzip';
 
 /*
  * Dump e restauração do PostgreSQL (spec 019). Rodam com a conexão do DONO do
@@ -18,10 +20,16 @@ import { schemaVersion } from './export';
  * segredos e a restauração recria o schema. As credenciais vão por variáveis
  * de ambiente do processo filho (PGPASSWORD…), nunca na linha de comando.
  *
- * A restauração usa `pg_restore --clean --if-exists --single-transaction`:
- * apaga e recria todos os objetos do dump numa transação só — se algo falhar,
- * nada muda. Exige a mesma versão de schema (o dump recria exatamente os
- * objetos que existem hoje).
+ * A restauração (tarefa 054) gera o SQL com `pg_restore --clean --if-exists
+ * --no-owner` a partir de uma lista SEM as extensões (o dono não é superusuário
+ * e não apaga nem recria a `vector`; elas já existem no banco) e o roda num
+ * `psql --single-transaction` que chama antes `restore_reset_default_privileges()`:
+ * as tabelas recriadas recebem só os GRANTs do dump (sem isso, os privilégios
+ * padrão da 0001 davam ao moneyflow_app a tabela inteira, inclusive
+ * users.password), e os privilégios padrão voltam pelas entradas DEFAULT ACL do
+ * próprio dump. Tudo numa transação: se algo falhar, nada muda. Funciona também
+ * com um superusuário na DATABASE_OWNER_URL (só um aviso no log). Exige a mesma
+ * versão de schema (o dump recria exatamente os objetos que existem hoje).
  */
 
 export const DUMP_FILE = 'moneyflow.dump';
@@ -30,7 +38,7 @@ const DUMP_FORMAT = 'moneyflow-dump';
 
 type Run = { code: number; stdout: string; stderr: string };
 /** Logger da requisição (só o stderr dos utilitários vai para o log; nunca credenciais). */
-export type BackupLog = { error: (obj: object, msg: string) => void };
+export type BackupLog = { error: (obj: object, msg: string) => void; warn?: (obj: object, msg: string) => void };
 
 function pgBin(config: Config, name: string) {
   return config.pgBinDir ? join(config.pgBinDir, name) : name;
@@ -71,6 +79,81 @@ function run(command: string, args: string[], env: NodeJS.ProcessEnv, options: {
   });
 }
 
+/**
+ * `producer | consumer`: a saída de um processo vai para a entrada do outro. Devolve os dois resultados
+ * (só o stderr de cada um; o stdout do consumidor é descartado). Um consumidor que sai antes (erro do
+ * psql) fecha o pipe e o produtor termina com EPIPE — o código dele não é 0, e o erro real fica no
+ * stderr do consumidor.
+ */
+function pipeRun(
+  producer: { command: string; args: string[] },
+  consumer: { command: string; args: string[] },
+  env: NodeJS.ProcessEnv,
+): Promise<{ producer: Run; consumer: Run }> {
+  return new Promise((resolve, reject) => {
+    const from = spawn(producer.command, producer.args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const to = spawn(consumer.command, consumer.args, { env, stdio: ['pipe', 'ignore', 'pipe'] });
+    const results: { producer?: Run; consumer?: Run } = {};
+    const errs = { producer: '', consumer: '' };
+    const collect = (which: 'producer' | 'consumer') => (chunk: Buffer) => {
+      if (errs[which].length < 64 * 1024) errs[which] += chunk.toString('utf8');
+    };
+    from.stderr.on('data', collect('producer'));
+    to.stderr.on('data', collect('consumer'));
+    // EPIPE quando o psql para antes: o erro que importa é o dele.
+    to.stdin.on('error', () => {});
+    from.stdout.pipe(to.stdin);
+    let failed = false;
+    const fail = (error: Error) => {
+      if (failed) return;
+      failed = true;
+      from.kill();
+      to.kill();
+      reject(error);
+    };
+    from.on('error', fail);
+    to.on('error', fail);
+    const done = () => {
+      if (!failed && results.producer && results.consumer) resolve(results as { producer: Run; consumer: Run });
+    };
+    from.on('close', (code) => {
+      results.producer = { code: code ?? 1, stdout: '', stderr: errs.producer };
+      done();
+    });
+    to.on('close', (code) => {
+      results.consumer = { code: code ?? 1, stdout: '', stderr: errs.consumer };
+      done();
+    });
+  });
+}
+
+/** Entradas da lista do pg_restore que tocam as extensões (o dono não as apaga nem recria). */
+const EXTENSION_ENTRY = /^\d+; \d+ \d+ (EXTENSION|COMMENT - EXTENSION) /;
+
+/** A lista do dump (`pg_restore -l`) sem as extensões, para o `-L` da restauração. */
+async function restoreList(config: Config, dumpPath: string): Promise<string> {
+  const out = await run(pgBin(config, 'pg_restore'), ['--list', dumpPath], { PATH: process.env.PATH }, { stdoutLimit: 16 * 1024 * 1024 });
+  if (out.code !== 0) throw unprocessable(t.backup.errors.invalidDump, 'invalid_dump');
+  return out.stdout
+    .split('\n')
+    .filter((line) => !EXTENSION_ENTRY.test(line))
+    .join('\n');
+}
+
+/** A conexão do dono é superusuário? (Só para o aviso: a restauração funciona do mesmo jeito.) */
+async function ownerIsSuperuser(url: string): Promise<boolean | null> {
+  const client = new pg.Client({ connectionString: url, application_name: 'moneyflow-backup' });
+  try {
+    await client.connect();
+    const result = await client.query<{ rolsuper: boolean }>('SELECT rolsuper FROM pg_roles WHERE rolname = current_user');
+    return result.rows[0]?.rolsuper ?? null;
+  } catch {
+    return null;
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
 let pgDumpVersion: { checked: number; version: string | null; error: string | null } | null = null;
 
 /** Disponibilidade do dump: conexão do dono configurada e pg_dump 18+. */
@@ -83,7 +166,11 @@ export async function dumpAvailability(config: Config): Promise<{ version: strin
     const version = /(\d+)(?:\.(\d+))?/.exec(out.stdout)?.[0] ?? null;
     if (out.code !== 0 || !version) result = { version: null, error: t.backup.errors.noPgDump };
     else if (Number(version.split('.')[0]) < 18) result = { version, error: t.backup.errors.oldPgDump(version) };
-    else result = { version, error: null };
+    else {
+      // A restauração roda o SQL do pg_restore no psql (tarefa 054).
+      const psql = await run(pgBin(config, 'psql'), ['--version'], { PATH: process.env.PATH }).catch(() => null);
+      result = psql?.code === 0 ? { version, error: null } : { version, error: t.backup.errors.noPsql };
+    }
   } catch {
     result = { version: null, error: t.backup.errors.noPgDump };
   }
@@ -192,16 +279,19 @@ function writeZip(zipPath: string, manifest: object, dumpPath: string): Promise<
 }
 
 /** Extrai o dump do upload: o .zip do "Gerar dump" ou o arquivo custom do pg_dump direto. */
-function extractDump(body: unknown): { dump: Uint8Array; manifest: { schemaVersion?: string | null; exportedAt?: string } | null } {
+export function extractDump(
+  body: unknown,
+  maxUnzippedBytes: number,
+): { dump: Uint8Array; manifest: { schemaVersion?: string | null; exportedAt?: string } | null } {
   if (!Buffer.isBuffer(body) || body.length < 5) throw unprocessable(t.backup.errors.invalidDump, 'invalid_dump');
   if (body.subarray(0, 5).toString('latin1') === 'PGDMP') return { dump: body, manifest: null };
   if (body[0] !== 0x50 || body[1] !== 0x4b) throw unprocessable(t.backup.errors.invalidDump, 'invalid_dump');
   let entries: Record<string, Uint8Array>;
+  // Só a primeira entrada de cada nome conta para o resultado, mas todas as aceitas somam no teto (tarefa 055).
   try {
-    entries = unzipSync(new Uint8Array(body.buffer, body.byteOffset, body.length), {
-      filter: (file) => file.name.endsWith(DUMP_FILE) || file.name.endsWith(MANIFEST_FILE),
-    });
-  } catch {
+    entries = unzipLimited(body, (name) => name.endsWith(DUMP_FILE) || name.endsWith(MANIFEST_FILE), maxUnzippedBytes);
+  } catch (error) {
+    if (error instanceof UnzipTooLarge) throw error;
     throw unprocessable(t.backup.errors.invalidDump, 'invalid_dump');
   }
   const dumpName = Object.keys(entries).find((n) => n.endsWith(DUMP_FILE));
@@ -244,7 +334,7 @@ export async function restoreDump(ctx: ServiceContext, body: unknown, log: Backu
   ctx.access.assertAdmin();
   await assertAvailable(ctx.config);
   const started = Date.now();
-  const { dump, manifest } = extractDump(body);
+  const { dump, manifest } = extractDump(body, backupUnzipLimit(ctx.config));
   return exclusive(async () => {
     const dir = await mkdtemp(join(tmpdir(), 'moneyflow-restore-'));
     try {
@@ -255,21 +345,35 @@ export async function restoreDump(ctx: ServiceContext, body: unknown, log: Backu
       if ((fromDump ?? '') !== (current ?? '')) {
         throw unprocessable(t.backup.errors.schemaMismatch(fromDump ?? '?', current ?? '?'), 'schema_mismatch');
       }
-      const env: NodeJS.ProcessEnv = { ...pgEnv(ctx.config.ownerDatabaseUrl!), PGOPTIONS: '-c lock_timeout=30s' };
-      const out = await run(
-        pgBin(ctx.config, 'pg_restore'),
-        ['--clean', '--if-exists', '--single-transaction', '--exit-on-error', '--no-owner', `--dbname=${env.PGDATABASE}`, dumpPath],
+      const ownerUrl = ctx.config.ownerDatabaseUrl!;
+      if ((await ownerIsSuperuser(ownerUrl)) === true) {
+        (log.warn ?? log.error)(
+          {},
+          'restauração: a DATABASE_OWNER_URL é superusuário do Postgres; use um papel dono sem SUPERUSER (moneyflow_owner, docs/016)',
+        );
+      }
+      const listPath = join(dir, 'restore.list');
+      await writeFile(listPath, await restoreList(ctx.config, dumpPath), { mode: 0o600 });
+      const env: NodeJS.ProcessEnv = { ...pgEnv(ownerUrl), PGOPTIONS: '-c lock_timeout=30s' };
+      // pg_restore só gera o SQL (sem conexão); o psql o roda numa transação, zerando antes os privilégios padrão.
+      const out = await pipeRun(
+        { command: pgBin(ctx.config, 'pg_restore'), args: ['--clean', '--if-exists', '--no-owner', '-L', listPath, '-f', '-', dumpPath] },
+        {
+          command: pgBin(ctx.config, 'psql'),
+          args: ['-X', '-q', '--single-transaction', '-v', 'ON_ERROR_STOP=1', '-c', 'SELECT restore_reset_default_privileges()', '-f', '-'],
+        },
         env,
       );
-      if (out.code !== 0) {
-        const detail = out.stderr
+      if (out.producer.code !== 0 || out.consumer.code !== 0) {
+        const stderr = [out.consumer.stderr, out.producer.stderr].filter(Boolean).join('\n');
+        const detail = stderr
           .split('\n')
           .filter((line) => /error|erro/i.test(line))
           .slice(0, 3)
           .join(' ')
           .slice(0, 500);
-        log.error({ stderr: out.stderr.slice(0, 4000) }, 'pg_restore falhou');
-        throw unprocessable(t.backup.errors.restoreFailed(detail || out.stderr.slice(0, 300)), 'restore_failed');
+        log.error({ psql: out.consumer.code, pgRestore: out.producer.code, stderr: stderr.slice(0, 4000) }, 'restauração do dump falhou');
+        throw unprocessable(t.backup.errors.restoreFailed(detail || stderr.slice(0, 300)), 'restore_failed');
       }
       resetCatalog();
       // O dump não traz as requisições: o uso que apontava para elas fica sem o vínculo (FK NOT VALID, spec 023).

@@ -139,7 +139,7 @@ export async function nfeEntry(ctx: ServiceContext, file: { name: string; mime: 
     if (!existing) {
       attachmentId = await storeAttachment(tx, ctx, {
         name: file.name || `NFe${nfe.accessKey}.xml`,
-        mime: file.mime && file.mime !== 'application/octet-stream' ? file.mime : 'application/xml',
+        mime: 'application/xml', // nunca o tipo do cliente (tarefa 048)
         content: file.content,
       });
       const [row] = await tx

@@ -32,6 +32,17 @@ export function parseRange(header: string, size: number): { start: number; end: 
   return { start, end };
 }
 
+/**
+ * Tipos que o navegador pode abrir inline sem executar script na origem do console
+ * (tarefa 048). Qualquer outro tipo (HTML, SVG, XHTML, XML…) sai sempre como download.
+ */
+const INLINE_SAFE = /^(image\/(png|jpeg|gif|webp|avif)|application\/pdf|audio\/[a-z0-9.+-]+|video\/(mp4|webm)|text\/plain|text\/markdown)$/;
+
+/** CSP dos downloads que não são PDF: um documento aberto fica numa origem opaca, sem script. */
+const DOWNLOAD_CSP = "sandbox; default-src 'none'; img-src 'self'; media-src 'self'";
+
+export const isInlineSafeMime = (mime: string) => INLINE_SAFE.test(mime);
+
 export async function attachmentRoutes(app: FastifyInstance) {
   app.get('/api/attachments', (r: Req) => attachments.listAttachments(r.ctx, parse(attachmentTargetQuery, r.query)));
   app.post('/api/attachments', { bodyLimit: UPLOAD_BODY_LIMIT, config: { rawUpload: true } }, (r: Req) =>
@@ -43,7 +54,7 @@ export async function attachmentRoutes(app: FastifyInstance) {
   // Range (spec 025): o player busca trechos do áudio; o conteúdo vem inteiro do banco (bytea, até 20 MB).
   app.get('/api/attachments/:id/download', async (r: Req, reply) => {
     const file = await attachments.downloadAttachment(r.ctx, param(r, 'id'));
-    const inline = r.query.inline === '1';
+    const inline = r.query.inline === '1' && isInlineSafeMime(file.mimeType);
     const content = Buffer.from(file.content);
     reply
       .header('content-type', file.mimeType)
@@ -51,6 +62,8 @@ export async function attachmentRoutes(app: FastifyInstance) {
       .header('cache-control', 'private, no-store')
       .header('x-content-type-options', 'nosniff')
       .header('accept-ranges', 'bytes');
+    // O PDF fica sem o sandbox: ele bloqueia o visualizador do navegador numa aba nova.
+    if (file.mimeType !== 'application/pdf') reply.header('content-security-policy', DOWNLOAD_CSP);
     const header = r.headers.range;
     if (!header) return reply.send(content);
     const range = parseRange(header, content.length);

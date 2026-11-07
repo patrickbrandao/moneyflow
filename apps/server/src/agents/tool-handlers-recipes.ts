@@ -31,10 +31,12 @@ async function ownerName(ctx: ServiceContext, caixaId: string | null) {
 
 async function targetNames(ctx: ServiceContext, accountIds: string[], cardIds: string[]) {
   if (accountIds.length + cardIds.length === 0) return 'Nenhuma (todos os lotes da dona)';
-  const r = await ctx.db.execute<{ name: string }>(sql`
-    SELECT name FROM financial_accounts WHERE id = ANY (${`{${accountIds.join(',')}}`}::uuid[])
-    UNION ALL SELECT name FROM caixas WHERE id = ANY (${`{${cardIds.join(',')}}`}::uuid[])`);
-  return r.rows.map((x) => x.name).join(', ');
+  // Nome só das contas e cartões de caixas que o usuário lê (Access); os demais ficam com o id.
+  const r = await ctx.db.execute<{ id: string; name: string; caixa_id: string }>(sql`
+    SELECT id, name, caixa_id FROM financial_accounts WHERE id = ANY (${`{${accountIds.join(',')}}`}::uuid[])
+    UNION ALL SELECT id, name, id AS caixa_id FROM caixas WHERE id = ANY (${`{${cardIds.join(',')}}`}::uuid[])`);
+  const names = new Map(r.rows.filter((x) => ctx.access.canRead(x.caixa_id)).map((x) => [x.id, x.name]));
+  return [...accountIds, ...cardIds].map((id) => names.get(id) ?? id).join(', ');
 }
 
 export const RECIPE_HANDLERS: Handlers<RecipeToolName> = {

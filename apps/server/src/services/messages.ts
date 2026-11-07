@@ -472,7 +472,8 @@ export type ClaimedMessage = { id: string; chatId: string; destinationName: stri
 /**
  * Entrega uma mensagem já reservada (status sending): lê o token pela função
  * do banco, chama a Bot API fora de transação e fecha com mark_sent ou
- * mark_failed (retry_after do 429; 400/401/403/404 = falha permanente).
+ * mark_failed (retry_after do 429; 400/401/403/404 = falha permanente; o
+ * token indisponível só é permanente com P0002/42501 do banco).
  * Falha definitiva gera a notificação message_failed para o dono do destino.
  */
 export async function deliver(
@@ -485,7 +486,11 @@ export async function deliver(
     const result = await db.execute<{ token: string }>(sql`SELECT message_destination_token(${message.id}::uuid) AS token`);
     token = result.rows[0]!.token;
   } catch (error) {
-    const status = await markFailed(db, message.id, 'token unavailable', null, true);
+    // Só destino inativo/arquivado (P0002) ou sem permissão (42501) é definitivo; o resto
+    // (queda de conexão, timeout, deadlock) segue o retry normal da outbox (tarefa 062).
+    const code = findPgError(error)?.code;
+    const permanent = code === '42501' || code === 'P0002';
+    const status = await markFailed(db, message.id, 'token unavailable', null, permanent);
     if (status === 'failed') await notifyFailure(db, message.id, 'token unavailable');
     return { status, error: String((error as Error).message ?? error) };
   }

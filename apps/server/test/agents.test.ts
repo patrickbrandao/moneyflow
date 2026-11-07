@@ -12,6 +12,7 @@ import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type IndexState, indexEmbeddings } from '../src/agents/embeddings';
 import { mcpExposedName } from '../src/agents/mcp-client';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
+import { appendEvent } from '../src/agents/store';
 import { registerInternalTool } from '../src/agents/tools-runtime';
 import { startAgentWorker } from '../src/agents/worker';
 import { translateDbError } from '../src/errors';
@@ -262,6 +263,29 @@ describe('execução do agente', () => {
     expect(audit.rows[0]).toEqual({ actor_kind: 'agent', agent_run_id: sent.run.id, user_id: adminSession.id });
     const final = await admin.get(`/api/conversations/${conversation.id}`);
     expect(final.messages.at(-1).content[0].text).toMatch(/^Pronto:/);
+  });
+
+  it('escrita aprovada já começada antes de uma queda não é repetida na retomada (tarefa 053)', async () => {
+    const conversation = await newSession(admin, agent.id);
+    const name = `Interrompida ${uid()}`;
+    const sent = await chat(admin, conversation.id, `criar entidade ${name}`);
+    await drain();
+    const card = (await admin.get(`/api/conversations/${conversation.id}`)).confirmations[0];
+    await admin.post(`/api/runs/${sent.run.id}/confirmations`, { decision: 'approved' });
+    // O worker reserva, grava o tool_start e cai antes do resultado: a reserva envelhece.
+    const claimed = await h.db.execute<ClaimedRun>(sql`SELECT * FROM ai_run_claim(1, '1 hour')`);
+    expect(claimed.rows[0]!.id).toBe(sent.run.id);
+    await appendEvent(h.db, sent.run.id, { type: 'tool_start', toolUseId: card.toolUseId, name: 'create_entity', title: 'Criar entidade' });
+    await h.db.execute(sql`UPDATE ai_runs SET locked_at = now() - interval '1 hour' WHERE id = ${sent.run.id}`);
+    await drain('10 seconds');
+    expect((await runStatus(sent.run.id)).status).toBe('completed');
+    // O handler não rodou de novo: nada foi criado, e o modelo recebe o aviso de interrupção.
+    expect((await admin.get(`/api/entities?q=${encodeURIComponent(name)}`)).filter((e: any) => e.name === name)).toHaveLength(0);
+    const detail = await admin.get(`/api/conversations/${conversation.id}`);
+    const result = detail.messages.find((m: any) => m.role === 'tool').content[0];
+    expect(result).toMatchObject({ tool_use_id: card.toolUseId, is_error: true });
+    expect(result.content).toMatch(/interrompida/);
+    expect(detail.confirmations[0]).toMatchObject({ toolUseId: card.toolUseId, status: 'approved' });
   });
 
   it('escrita rejeitada: nada é gravado e o modelo recebe a recusa com o motivo', async () => {
@@ -1557,7 +1581,7 @@ describe('IA nos fluxos', () => {
     expect(archived.archivedAt).not.toBeNull();
   });
 
-  it('a finalidade da conversa do fluxo fica na coluna: mandar mensagem com screenContext não a põe na lista (tarefa 013)', async () => {
+  it('a finalidade da conversa do fluxo fica na coluna: mensagem pela API é recusada e ela não entra na lista (tarefas 013 e 056)', async () => {
     const stop = startAgentWorker(h.db, h.config, log, { pollMs: 100, maintenanceMs: 3_600_000 });
     let conversationId: string;
     try {
@@ -1581,13 +1605,14 @@ describe('IA nos fluxos', () => {
     expect(await row()).toMatchObject({ purpose: 'document_reading', screen_context: { fileName: 'nota.pdf' } });
     expect((await row()).screen_context).not.toHaveProperty('purpose');
 
-    // Substituir o screen_context (como o console faz a cada mensagem) não apaga a finalidade.
-    const sent = await admin.post(`/api/conversations/${conversationId}/messages`, {
+    // Mensagem pela API numa conversa de fluxo é recusada (tarefa 056): nem a finalidade nem o screen_context mudam.
+    const sent = await admin.raw('POST', `/api/conversations/${conversationId}/messages`, {
       text: 'e agora?',
       screenContext: { route: '/titulos', title: 'Títulos' },
     });
-    await admin.post(`/api/runs/${sent.run.id}/cancel`);
-    expect(await row()).toMatchObject({ purpose: 'document_reading', screen_context: { route: '/titulos' } });
+    expect(sent.statusCode).toBe(409);
+    expect(sent.json().error.code).toBe('flow_conversation');
+    expect(await row()).toMatchObject({ purpose: 'document_reading', screen_context: { fileName: 'nota.pdf' } });
     for (const archived of ['0', '1']) {
       expect((await admin.get(`/api/conversations?archived=${archived}`)).map((c: any) => c.id)).not.toContain(conversationId);
     }

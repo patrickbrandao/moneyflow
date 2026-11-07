@@ -6,7 +6,7 @@ import { purgeExpiredSessions } from './auth/session';
 import type { Config } from './config';
 import { cardMaintenance } from './services/cards';
 import { contractMaintenance } from './services/contract-worker';
-import { messageTick, recipientsByCaixa } from './services/message-worker';
+import { logMessageTick, messageTick, recipientsByCaixa } from './services/message-worker';
 import { materializeAll } from './services/recurrence';
 
 /**
@@ -52,9 +52,7 @@ export function startWorker(db: Database, config: Config, log: FastifyBaseLogger
     if (sending) return;
     sending = true;
     try {
-      const result = await messageTick(db, config);
-      if (result.queued || result.created || result.reminders || result.sent || result.failed || result.retried)
-        log.info(result, 'worker: mensagens');
+      logMessageTick(log, await messageTick(db, config));
     } catch (error) {
       log.error(error, 'worker: falha no laço de mensagens');
     } finally {

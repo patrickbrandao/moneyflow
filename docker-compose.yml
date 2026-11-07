@@ -39,12 +39,16 @@ x-app: &app
       condition: service_completed_successfully
 
 services:
-  # Aplica as migrations (dbmate, como dono do banco) antes da API e do worker.
+  # Aplica as migrations (dbmate) antes da API e do worker, como o dono do banco SEM superusuário
+  # (moneyflow_owner, criado pelo initdb; tarefa 054). Migration rodada pelo superusuário deixa objetos dele, e a
+  # restauração do dump pelo dono falha. Volume antigo: rode uma vez
+  #   docker compose exec postgres bash /docker-entrypoint-initdb.d/03-owner-role.sh
+  # (idempotente) antes de subir esta versão.
   migrate:
     image: ghcr.io/amacneil/dbmate:2
     command: ["--wait", "--wait-timeout", "60s", "up"]
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-moneyflow}:${POSTGRES_PASSWORD:-moneyflow}@postgres:5432/${POSTGRES_DB:-moneyflow}?sslmode=disable
+      DATABASE_URL: postgres://moneyflow_owner:${OWNER_DB_PASSWORD:-moneyflow_owner}@postgres:5432/${POSTGRES_DB:-moneyflow}?sslmode=disable
       DBMATE_MIGRATIONS_DIR: /db/migrations
       DBMATE_NO_DUMP_SCHEMA: "true"
       DBMATE_STRICT: "true"
@@ -74,12 +78,17 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       SESSION_DAYS: ${SESSION_DAYS:-30}
+      # Ociosidade máxima da sessão em horas (0 desliga; docs/002).
+      SESSION_IDLE_HOURS: ${SESSION_IDLE_HOURS:-72}
       LOOKUP_TIMEOUT_MS: ${LOOKUP_TIMEOUT_MS:-5000}
       LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-10}
+      # Proxies que podem informar o IP do cliente (X-Forwarded-For); vazio = nenhum (docs/002).
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       AI_DOCUMENT_TIMEOUT_MS: ${AI_DOCUMENT_TIMEOUT_MS:-120000}
       # Backup e restauração (spec 019): o dump e a restauração do banco usam a conexão do DONO do banco
-      # (só pg_dump/pg_restore; a aplicação continua como moneyflow_app). Vazia = dump desligado.
-      DATABASE_OWNER_URL: postgres://${POSTGRES_USER:-moneyflow}:${POSTGRES_PASSWORD:-moneyflow}@postgres:5432/${POSTGRES_DB:-moneyflow}?sslmode=disable
+      # (pg_dump/pg_restore/psql; a aplicação continua como moneyflow_app). Vazia = dump desligado. O dono é o
+      # moneyflow_owner, sem SUPERUSER/CREATEROLE/CREATEDB (tarefa 054, docs/016), nunca o superusuário da imagem.
+      DATABASE_OWNER_URL: postgres://moneyflow_owner:${OWNER_DB_PASSWORD:-moneyflow_owner}@postgres:5432/${POSTGRES_DB:-moneyflow}?sslmode=disable
       BACKUP_MAX_UPLOAD_MB: ${BACKUP_MAX_UPLOAD_MB:-512}
     ports:
       - "${APP_PORT:-3000}:3000"

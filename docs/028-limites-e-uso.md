@@ -11,6 +11,7 @@ O uso de IA deixa de ser só medição. Entram orçamentos mensais com aviso e b
 - **Bloqueio em 100%**:
   - Criar execução é recusado (`429`, "Orçamento de IA do mês atingido: <escopo>"). O runner também confere antes de cada chamada ao modelo: se o orçamento estoura no meio da execução, ela termina com status `failed` e o código de erro `budget_exceeded`, guardando o que já foi feito.
   - Nos fluxos, a leitura de documento devolve o mesmo erro, e a conciliação e as tarefas agendadas são puladas; o aviso é a própria notificação `ai_budget_alert`.
+  - **Áudio** (tarefa 059, decisão de 2026-11-07): o upload de áudio na conversa grava o anexo, mas **não enfileira** a transcrição; ela fica registrada como falha da transcrição com o motivo ("Orçamento de IA do mês atingido: <escopo>"), e o "Tentar de novo" a retoma quando houver orçamento. O "Tentar de novo" e a fala nova de uma mensagem (texto→áudio) respondem `429` `budget_exceeded`; a fala já gerada (cache por mensagem e trecho) continua tocando. Vale o orçamento da conversa (`flows` quando `purpose` ≠ `chat`).
   - O **admin fica isento** do bloqueio quando é ele quem aciona; continua recebendo o aviso.
 - **Vários orçamentos** valem juntos: a execução precisa caber em todos os que se aplicam (usuário, agente, fluxos e global). "Fluxo" é toda execução de conversa com `purpose` ≠ `chat`; o uso dos fluxos conta no orçamento `flows` **e** no do usuário que os acionou.
 
@@ -18,6 +19,7 @@ O uso de IA deixa de ser só medição. Entram orçamentos mensais com aviso e b
 - Por usuário, para conter abuso e loops: `AI_RUNS_PER_MINUTE` (padrão 10) para as sessões e `AI_FLOW_RUNS_PER_MINUTE` (padrão 30) para os fluxos.
 - Os dois podem ser mudados na tela e gravados em `app_settings` (`ai.runs_per_minute`, `ai.flow_runs_per_minute`); **o banco vence a variável**.
 - O excesso é recusado com `429` e `retry-after`.
+- **Exato com pedidos simultâneos** (tarefa 060): a contagem que vale é feita na transação que insere a execução, depois de um advisory lock por usuário e tipo (sessões ou fluxos), pelo `lockRunRate` de `services/ai-budgets.ts`; todo ponto que cria execução passa por ele (`sendMessage`, `insertReconcileSession` — play das receitas, fila do import e conciliação genérica — e os disparos das tarefas agendadas). O `assertCanStartRun` antes de preparar a execução continua como checagem rápida.
 - Vale também para o admin e para o Telegram ([029](029-fluxos-autonomos.md)).
 
 ## Painel de uso (guia Uso, /admin/ai)

@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
@@ -29,6 +29,7 @@ import { telegramRoutes } from './routes/telegram';
 import { titleRoutes } from './routes/titles';
 import { userRoutes } from './routes/users';
 import { visionRoutes } from './routes/vision';
+import { registerSecurityHeaders, spaCsp } from './security-headers';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -51,7 +52,9 @@ export async function buildApp({
 }): Promise<FastifyInstance> {
   const app = Fastify({
     logger: logger === true ? { level: config.logLevel, redact: ['req.headers.cookie', 'req.headers.authorization'] } : logger,
-    trustProxy: true,
+    // Só os proxies de TRUSTED_PROXIES informam o IP do cliente (X-Forwarded-For); sem eles, o IP é o da
+    // conexão. Nunca `true`: o cliente forjaria o IP e contornaria o limite de login (tarefa 050).
+    trustProxy: config.trustedProxies.length > 0 ? config.trustedProxies : false,
     bodyLimit: 1024 * 1024,
   });
   app.decorate('db', db);
@@ -86,6 +89,11 @@ export async function buildApp({
   await app.register(cookie);
   await app.register(rateLimit, { global: false });
 
+  // Cabeçalhos de segurança em toda resposta e a CSP no HTML do SPA (tarefa 065, docs/001).
+  const webDist = config.webDist ? resolve(config.webDist) : null;
+  const indexHtml = webDist && existsSync(join(webDist, 'index.html')) ? readFileSync(join(webDist, 'index.html'), 'utf8') : null;
+  registerSecurityHeaders(app, indexHtml === null ? null : spaCsp(indexHtml));
+
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof AppError) {
       if (error.headers) reply.headers(error.headers);
@@ -105,17 +113,23 @@ export async function buildApp({
     return reply.status(500).send({ error: { code: 'internal', message: t.errors.generic } });
   });
 
-  // Sessão: toda rota /api (menos as públicas) exige cookie válido de usuário ativo.
+  // Sessão: toda rota /api (menos as públicas) exige cookie válido de usuário ativo. Decide pelo padrão
+  // da rota que o roteador já resolveu (decodificado: `/%61pi/...` e a request-target absoluta casam a
+  // mesma rota), e também pela URL crua, para que um /api/... inexistente siga respondendo 401 sem
+  // cookie (tarefa 051).
   app.addHook('onRequest', async (request) => {
-    const path = request.url.split('?')[0]!;
+    const raw = request.url.split('?')[0]!;
+    const route = request.routeOptions.url;
+    const path = route ?? raw;
+    const isApi = path.startsWith('/api/') || raw.startsWith('/api/');
     // O webhook do Telegram (spec 029) não tem sessão: autentica pelo segredo do cabeçalho.
-    if (!path.startsWith('/api/') || PUBLIC.has(path) || path.startsWith('/api/telegram/webhook/')) return;
+    if (!isApi || PUBLIC.has(path) || path.startsWith('/api/telegram/webhook/')) return;
     const token = request.cookies[SESSION_COOKIE];
-    const session = token ? await resolveSession(db, token) : null;
+    const session = token ? await resolveSession(db, token, config.sessionIdleHours) : null;
     if (!session) throw new AppError(401, 'unauthenticated', t.auth.unauthenticated);
     request.actor = session.actor;
     request.sessionId = session.sessionId;
-    request.ctx = { db, config, access: await loadAccess(db, session.actor) };
+    request.ctx = { db, config, access: await loadAccess(db, session.actor), sessionId: session.sessionId };
   });
 
   app.get('/api/health', { logLevel: 'warn' }, async () => {
@@ -142,8 +156,7 @@ export async function buildApp({
   await app.register(noteRoutes);
 
   // Em produção a API serve o SPA compilado (imagem única).
-  const webDist = config.webDist ? resolve(config.webDist) : null;
-  if (webDist && existsSync(join(webDist, 'index.html'))) {
+  if (webDist && indexHtml !== null) {
     await app.register(fastifyStatic, {
       root: webDist,
       wildcard: false,

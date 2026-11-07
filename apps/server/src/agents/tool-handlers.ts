@@ -172,26 +172,37 @@ async function settlementPreview(ctx: ServiceContext, lineId: string, titleId: s
   return { rows, warnings, summary: parts.join(', ') };
 }
 
-/** Texto do alvo de um casamento (título, movimento ou item de fatura), para a prévia. */
+/**
+ * Texto do alvo de um casamento (título, movimento ou item de fatura), para a prévia.
+ * Só descreve o alvo de uma caixa que o usuário lê (Access); o de outra fica só com o id.
+ */
 async function matchTargetLabel(
   ctx: ServiceContext,
   ref: { movementId?: string | null; titleId?: string | null; cardInvoiceItemId?: string | null },
 ) {
   if (ref.titleId) {
-    const r = await ctx.db.execute<{ description: string; amount_cents: number; due_date: string; entity_name: string }>(sql`
-      SELECT t.description, t.amount_cents, t.due_date, e.name AS entity_name
+    const r = await ctx.db.execute<{
+      description: string;
+      amount_cents: number;
+      due_date: string;
+      entity_name: string;
+      caixa_id: string;
+    }>(sql`
+      SELECT t.description, t.amount_cents, t.due_date, e.name AS entity_name, t.caixa_id
         FROM titles t JOIN entities e ON e.id = t.entity_id WHERE t.id = ${ref.titleId}`);
     const row = r.rows[0];
-    return row
+    return row && ctx.access.canRead(row.caixa_id)
       ? `Título: ${row.description} (${row.entity_name}) · venc. ${row.due_date} · ${brl(row.amount_cents)}`
       : `Título ${ref.titleId}`;
   }
   if (ref.movementId) {
-    const r = await ctx.db.execute<{ description: string | null; amount_cents: number; occurred_on: string }>(
-      sql`SELECT description, amount_cents, occurred_on FROM movements WHERE id = ${ref.movementId}`,
-    );
+    const r = await ctx.db.execute<{ description: string | null; amount_cents: number; occurred_on: string; caixa_id: string }>(sql`
+      SELECT m.description, m.amount_cents, m.occurred_on, a.caixa_id
+        FROM movements m JOIN financial_accounts a ON a.id = m.financial_account_id WHERE m.id = ${ref.movementId}`);
     const row = r.rows[0];
-    return row ? `Movimento: ${row.occurred_on} · ${row.description ?? '—'} · ${brl(row.amount_cents)}` : `Movimento ${ref.movementId}`;
+    return row && ctx.access.canRead(row.caixa_id)
+      ? `Movimento: ${row.occurred_on} · ${row.description ?? '—'} · ${brl(row.amount_cents)}`
+      : `Movimento ${ref.movementId}`;
   }
   if (ref.cardInvoiceItemId) return `Item de fatura ${ref.cardInvoiceItemId}`;
   return '—';

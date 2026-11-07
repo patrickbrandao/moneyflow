@@ -102,7 +102,10 @@ export async function agentRoutes(app: FastifyInstance) {
       durationMs: r.query.durationMs,
     }),
   );
-  app.post('/api/conversations/:id/messages', (r: Req) => conversations.sendMessage(r.ctx, id(r), parse(messageSendInput, r.body)));
+  // Só a sessão de chat recebe mensagem por aqui; conversa de fluxo responde 409 (spec 030).
+  app.post('/api/conversations/:id/messages', (r: Req) =>
+    conversations.sendMessage(r.ctx, id(r), parse(messageSendInput, r.body), { fromUser: true }),
+  );
   // Modo áudio (spec 025): gera (ou devolve o já gerado) o áudio da mensagem.
   app.post('/api/conversations/:id/messages/:messageId/speech', (r: Req) => chatMedia.messageSpeech(r.ctx, id(r), param(r, 'messageId')));
   // Derivados de um anexo (transcrição, descrição) e o "tentar de novo" da transcrição.

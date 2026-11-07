@@ -16,6 +16,7 @@ A conversa com cada agente passa a ser um **fio contínuo por usuário e agente*
   - ficam em somente leitura, com o histórico, os anexos, o uso e o id visíveis;
   - não voltam a ser ativas;
   - para continuar a partir de uma delas, **bifurcar**: o fork cria a sessão nova, que vira a ativa, e finaliza a ativa anterior. A cópia segue a regra de corte de [011](011-agentes-de-ia.md).
+- **Conversas de fluxo** (`purpose` ≠ `chat`: conciliação, receitas, tarefas agendadas, leitura de documento e os demais fluxos) não recebem mensagem pela API: `POST /api/conversations/:id/messages` responde 409 `flow_conversation`; só os serviços internos escrevem nelas ([030](030-receitas-de-conciliacao.md), tarefa 056).
 - **Título**: o título automático e o renomear continuam por sessão. O "fixar" sai, porque a lista agora é por agente.
 - **Excluir** uma sessão finalizada continua possível, com a mesma regra de [011](011-agentes-de-ia.md): apaga mensagens, execuções e eventos, e o uso fica. A ativa precisa ser finalizada antes.
 - **Busca**: cobre todas as sessões do usuário, e o resultado abre a sessão (ativa ou finalizada).

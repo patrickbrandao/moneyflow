@@ -209,6 +209,60 @@ describe('anexos', () => {
     await admin.del(`/api/attachments/${attachment.id}?target=title&targetId=${title.id}`);
     expect((await admin.get(`/api/attachments?target=title&targetId=${title.id}`)).map((a: any) => a.id)).not.toContain(attachment.id);
   });
+
+  it('tipos que executam script nunca abrem inline; todo download fora o PDF leva CSP sandbox (tarefa 048)', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    // Um editor de qualquer caixa anexa à entidade (cadastro global), que o admin abre.
+    const editor = await userSession(h);
+    await admin.put(`/api/users/${editor.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'editor' }] });
+    const upload = async (fileName: string, mime: string, content: string | Buffer) => {
+      const res = await h.app.inject({
+        method: 'POST',
+        url: `/api/attachments?target=entity&targetId=${s.supplier.id}&fileName=${encodeURIComponent(fileName)}`,
+        payload: content,
+        headers: { cookie: editor.cookie, 'content-type': mime },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      return res.json().id as string;
+    };
+    const download = (id: string) =>
+      h.app.inject({ method: 'GET', url: `/api/attachments/${id}/download?inline=1`, headers: { cookie: adminSession.cookie } });
+    const script = '<script>fetch("/api/backup/full")</script>';
+    for (const [fileName, mime] of [
+      ['x.html', 'text/html'],
+      ['x.svg', 'image/svg+xml'],
+      ['x.xhtml', 'application/xhtml+xml'],
+    ] as const) {
+      const file = await download(await upload(fileName, mime, script));
+      expect(file.statusCode).toBe(200);
+      expect(file.headers['content-disposition']).toMatch(/^attachment;/);
+      expect(file.headers['content-security-policy']).toContain('sandbox');
+      expect(file.headers['x-content-type-options']).toBe('nosniff');
+    }
+    // As prévias seguem inline: imagem, áudio e markdown com o sandbox; o PDF sem ele.
+    for (const [fileName, mime] of [
+      ['foto.png', 'image/png'],
+      ['nota.mp3', 'audio/mpeg'],
+      ['texto.md', 'text/markdown'],
+      ['texto.txt', 'text/plain'],
+    ] as const) {
+      const file = await download(await upload(fileName, mime, 'conteúdo'));
+      expect(file.headers['content-disposition']).toMatch(/^inline;/);
+      expect(file.headers['content-security-policy']).toContain('sandbox');
+    }
+    const pdf = await download(await upload('doc.pdf', 'application/pdf', '%PDF-1.4 teste'));
+    expect(pdf.headers['content-disposition']).toMatch(/^inline;/);
+    expect(pdf.headers['content-security-policy']).toBeUndefined();
+    // Sem inline=1, tudo sai como download.
+    const plain = await h.app.inject({
+      method: 'GET',
+      url: `/api/attachments/${await upload('foto2.png', 'image/png', 'x')}/download`,
+      headers: { cookie: adminSession.cookie },
+    });
+    expect(plain.headers['content-disposition']).toMatch(/^attachment;/);
+  });
 });
 
 describe('entrada de títulos (spec 010)', () => {
@@ -276,7 +330,8 @@ describe('entrada de títulos (spec 010)', () => {
         method: 'POST',
         url: '/api/title-entry/nfe?fileName=nfe.xml',
         payload: fixture('nfe-exemplo.xml'),
-        headers: { cookie: session.cookie, 'content-type': 'text/xml' },
+        // O tipo do cliente não vale: o XML é gravado sempre como application/xml (tarefa 048).
+        headers: { cookie: session.cookie, 'content-type': 'text/html' },
       });
     const res = await send();
     expect(res.statusCode, res.body).toBe(200);
@@ -286,6 +341,10 @@ describe('entrada de títulos (spec 010)', () => {
     expect(nfe.duplicates).toHaveLength(2);
     const detail = await admin.get(`/api/nfe/${nfe.nfeDocumentId}`);
     expect(detail.items).toHaveLength(3);
+    const xml = await h.db.execute<{ mime_type: string }>(
+      sql`SELECT a.mime_type FROM attachments a JOIN nfe_documents d ON d.xml_attachment_id = a.id WHERE d.id = ${nfe.nfeDocumentId}`,
+    );
+    expect(xml.rows[0]?.mime_type).toBe('application/xml');
     expect((await send()).json()).toMatchObject({ nfeDocumentId: nfe.nfeDocumentId, alreadyImported: true });
     const title = await admin.post('/api/titles', {
       caixaId: s.caixaA.id,

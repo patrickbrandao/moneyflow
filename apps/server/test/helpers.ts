@@ -6,7 +6,7 @@ import { inject } from 'vitest';
 import { buildApp } from '../src/app';
 import { type Config, loadConfig } from '../src/config';
 import { insertUser } from '../src/services/users';
-import { migrate } from './migrate';
+import { createOwnedDatabase, migrate, withDatabase } from './migrate';
 
 export type Harness = { app: FastifyInstance; db: Database; config: Config; close: () => Promise<void> };
 
@@ -48,29 +48,49 @@ export function alphaCnpj(): string {
 
 /**
  * Um banco novo e vazio no mesmo servidor, migrado do zero (testes de backup:
- * importar num sistema limpo). Devolve a conexão como moneyflow_app, ou null
- * sem a conexão do dono (MONEYFLOW_TEST_OWNER_URL no modo de banco externo).
+ * importar num sistema limpo, ida e volta do dump). Criado como no initdb
+ * (tarefa 054): pelo superusuário, com dono moneyflow_owner e as extensões, e
+ * migrado pelo dono. Com `migrateAs: 'super'`, o arranjo antigo (e o da
+ * produção de hoje): o banco do superusuário, migrado por ele. Devolve as
+ * conexões como moneyflow_app (`app`), do dono das migrations (`owner`) e do
+ * superusuário (`super`), ou null sem a conexão do dono
+ * (MONEYFLOW_TEST_OWNER_URL no modo de banco externo).
  */
 const freshNames: string[] = [];
 
-export async function freshDatabase(): Promise<string | null> {
+export async function freshDatabaseUrls(
+  options: { migrateAs?: 'owner' | 'super' } = {},
+): Promise<{ app: string; owner: string; super: string } | null> {
   const owner = inject('ownerDatabaseUrl');
   if (!owner) return null;
+  // Sem o superusuário (banco externo sem MONEYFLOW_TEST_SUPER_URL), a conexão do dono cria os bancos.
+  const superUrl = inject('superDatabaseUrl') || owner;
   const name = `moneyflow_bk_${uid().replace(/-/g, '')}`;
-  const admin = new pg.Client({ connectionString: owner });
-  await admin.connect();
-  try {
-    await admin.query(`CREATE DATABASE ${name}`);
-    freshNames.push(name);
-  } finally {
-    await admin.end();
+  const byOwnerRole = superUrl !== owner && options.migrateAs !== 'super';
+  if (byOwnerRole) {
+    await createOwnedDatabase(superUrl, name);
+  } else {
+    const admin = new pg.Client({ connectionString: superUrl });
+    await admin.connect();
+    try {
+      await admin.query(`CREATE DATABASE ${name}`);
+    } finally {
+      await admin.end();
+    }
   }
-  const ownerUrl = new URL(owner);
-  ownerUrl.pathname = `/${name}`;
-  await migrate(ownerUrl.toString());
-  const appUrl = new URL(inject('databaseUrl'));
-  appUrl.pathname = `/${name}`;
-  return appUrl.toString();
+  freshNames.push(name);
+  const urls = {
+    app: withDatabase(inject('databaseUrl'), name),
+    owner: withDatabase(byOwnerRole ? owner : superUrl, name),
+    super: withDatabase(superUrl, name),
+  };
+  await migrate(urls.owner);
+  return urls;
+}
+
+/** Um banco novo e migrado (veja freshDatabaseUrls): a conexão como moneyflow_app, ou null. */
+export async function freshDatabase(): Promise<string | null> {
+  return (await freshDatabaseUrls())?.app ?? null;
 }
 
 /**
@@ -81,7 +101,7 @@ export async function freshDatabase(): Promise<string | null> {
 export async function dropFreshDatabases() {
   const owner = inject('ownerDatabaseUrl');
   if (!owner || freshNames.length === 0) return;
-  const admin = new pg.Client({ connectionString: owner });
+  const admin = new pg.Client({ connectionString: inject('superDatabaseUrl') || owner });
   await admin.connect();
   try {
     for (const name of freshNames.splice(0)) await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);

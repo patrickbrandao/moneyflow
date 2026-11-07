@@ -4,6 +4,28 @@ Tarefas de revisão e correção pedidas entre agentes e achados do usuário. Fo
 
 | Nº | Tarefa | Status | Tipo | Responsável | Origem |
 |---|---|---|---|---|---|
+| 048 | [XSS armazenado por anexo aberto inline com o Content-Type de quem envia](048-xss-por-anexo-aberto-inline.md) | concluida | bug | app | agente |
+| 049 | [Eventos de agente vão para destinos de caixa que o usuário não lê](049-eventos-de-agente-para-destinos-de-caixa-alheia.md) | concluida | bug | app | agente |
+| 050 | [Limite de login contornável por X-Forwarded-For](050-limite-de-login-contornavel-por-x-forwarded-for.md) | concluida | bug | app | agente |
+| 051 | [Guard de sessão contornável por caminho codificado (`/%61pi/...`)](051-guard-de-sessao-contornavel-por-caminho-codificado.md) | concluida | bug | app | agente |
+| 052 | [Parsers OFX e XML quadráticos, sem limite de profundidade](052-parser-ofx-e-xml-quadratico.md) | concluida | bug | app | agente |
+| 053 | [Escrita aprovada repetida na retomada da execução do agente](053-escrita-aprovada-repetida-na-retomada.md) | concluida | bug | app | agente |
+| 054 | [Dono do banco do dump e da restauração é superusuário](054-dono-do-banco-e-superusuario.md) (dba e depois app) | concluida | banco | dba, app | agente |
+| 055 | [Zip bomb nos uploads de backup e de dump](055-zip-bomb-no-upload-de-backup.md) | concluida | bug | app | agente |
+| 056 | [Conversa de fluxo arquivada aceita mensagem e perde o escopo da receita](056-mensagem-em-conversa-de-fluxo-arquivada.md) | concluida | bug | app | agente |
+| 057 | [Escopo da receita não cobre as tools de lote inteiro](057-escopo-da-receita-sem-tools-de-lote.md) | concluida | debito-tecnico | app | agente |
+| 058 | [Prévias das tools leem movimento e contas sem Access](058-previas-de-tools-leem-sem-access.md) | concluida | bug | app | agente |
+| 059 | [Texto→áudio e transcrição fora do orçamento](059-audio-fora-do-orcamento.md) | concluida | bug | app | agente |
+| 060 | [Limite de execuções por minuto sem trava (TOCTOU)](060-limite-por-minuto-sem-trava.md) | concluida | debito-tecnico | app | agente |
+| 061 | [Telegram recebe a resposta depois de desfazer o pareamento](061-telegram-responde-apos-desfazer-pareamento.md) | concluida | bug | app | agente |
+| 062 | [Falha transitória do token vira falha definitiva na outbox](062-falha-transitoria-do-token-vira-definitiva.md) | concluida | bug | app | agente |
+| 063 | [Erro de assinatura engolido sem log em `produceMessages`](063-erro-de-assinatura-engolido-sem-log.md) | concluida | bug | app | agente |
+| 064 | [Dedup do webhook do Telegram fora do processamento](064-dedup-do-webhook-fora-da-transacao.md) | concluida | bug | app | agente |
+| 065 | [Cabeçalhos de segurança ausentes (CSP, X-Frame-Options)](065-cabecalhos-de-seguranca-ausentes.md) | concluida | debito-tecnico | app | agente |
+| 066 | [Sessão sem expiração por inatividade e cookie sem Secure por padrão](066-sessao-sem-expiracao-por-inatividade.md) | concluida | melhoria | app | agente |
+| 067 | [Troca da própria senha pelo admin não revoga as outras sessões](067-troca-da-propria-senha-nao-revoga-sessoes.md) | concluida | bug | app | agente |
+| 068 | [Postgres de desenvolvimento exposto na rede com a senha padrão](068-postgres-de-desenvolvimento-exposto-na-rede.md) | concluida | banco | dba, app | agente |
+| 069 | [Listas de leitores de segredo incompletas na documentação](069-listas-de-leitores-de-segredo-incompletas.md) | concluida | banco | dba | agente |
 | 046 | [Anotações e lembretes no banco (F21)](046-anotacoes-no-banco.md) | concluida | banco | dba | usuario |
 | 047 | [Anotações e lembretes na aplicação (F21)](047-anotacoes-na-aplicacao.md) (depois da 046) | concluida | melhoria | app | usuario |
 | 045 | [Corrigir a data do estorno de uma baixa, com auditoria](045-corrigir-data-do-estorno.md) | aberta | melhoria | — | usuario |

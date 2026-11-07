@@ -118,8 +118,13 @@ export async function updateUser(ctx: ServiceContext, id: string, input: z.outpu
     if (input.role !== undefined) patch.role = input.role;
     if (input.isActive !== undefined) patch.isActive = input.isActive;
     if (Object.keys(patch).length > 0) await tx.update(users).set(patch).where(eq(users.id, id));
-    // Trocar a senha encerra as sessões do usuário (desativar já faz isso por trigger).
-    if (input.password !== undefined && !self) await tx.delete(sessions).where(eq(sessions.userId, id));
+    // Trocar a senha encerra as sessões do usuário (desativar já faz isso por trigger). Na própria
+    // conta, fica só a sessão que fez a troca, como em changeOwnPassword (tarefa 067); sem sessão
+    // (/mcp, agente fora do console), encerra todas.
+    if (input.password !== undefined) {
+      const keep = self && ctx.sessionId ? ne(sessions.id, ctx.sessionId) : undefined;
+      await tx.delete(sessions).where(keep ? and(eq(sessions.userId, id), keep) : eq(sessions.userId, id));
+    }
   });
   return getUser(ctx, id);
 }

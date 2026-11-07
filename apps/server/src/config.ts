@@ -5,6 +5,8 @@ export type Config = {
   port: number;
   cookieSecure: boolean;
   sessionDays: number;
+  /** Ociosidade máxima da sessão, em horas (SESSION_IDLE_HOURS, padrão 72; 0 desliga): sem uso nesse tempo, a sessão cai (tarefa 066). */
+  sessionIdleHours: number;
   webDist: string | null;
   admin: { username: string; email: string; password: string } | null;
   workerIntervalMs: number;
@@ -16,6 +18,12 @@ export type Config = {
   logLevel: string;
   /** Tentativas de login por minuto por IP. */
   loginRateLimit: number;
+  /**
+   * Proxies reversos que podem informar o IP do cliente pelo X-Forwarded-For (TRUSTED_PROXIES:
+   * IPs, CIDRs ou loopback/linklocal/uniquelocal, separados por vírgula). Vazio = não confiar em
+   * nenhum: o IP é o da conexão (tarefa 050).
+   */
+  trustedProxies: string[];
   /** Worker fecha sozinho as faturas de cartão na data de fechamento (padrão: só sugere; fechamento manual). */
   cardAutoClose: boolean;
   /** URL base da Bot API do Telegram (troque por um mock nos testes). */
@@ -59,6 +67,25 @@ export type Config = {
   backupMaxUploadBytes: number;
 };
 
+function sessionIdleHours(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 72;
+  const hours = Number(raw);
+  if (!Number.isInteger(hours) || hours < 0)
+    throw new Error('SESSION_IDLE_HOURS precisa ser um inteiro >= 0 (0 desliga; veja .env.example).');
+  return hours;
+}
+
+/**
+ * Aviso do boot (tarefa 066): a URL pública do console em HTTPS com o cookie de sessão sem `Secure`
+ * (COOKIE_SECURE=false) deixa o cookie ir em texto claro se alguém abrir o endereço em HTTP.
+ */
+export function insecureCookieWarning(config: Pick<Config, 'cookieSecure' | 'publicUrl' | 'publicBaseUrl'>): string | null {
+  if (config.cookieSecure) return null;
+  const https = [config.publicBaseUrl, config.publicUrl].find((url) => url?.toLowerCase().startsWith('https://'));
+  if (!https) return null;
+  return `COOKIE_SECURE=false com a URL pública em HTTPS (${https}): o cookie de sessão sai sem Secure. Defina COOKIE_SECURE=true atrás de HTTPS.`;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const databaseUrl = env.DATABASE_URL;
   if (!databaseUrl) throw new Error('DATABASE_URL não definida (conexão como moneyflow_app).');
@@ -75,6 +102,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: Number(env.PORT ?? 3001),
     cookieSecure: env.COOKIE_SECURE === 'true',
     sessionDays: Number(env.SESSION_DAYS ?? 30),
+    sessionIdleHours: sessionIdleHours(env.SESSION_IDLE_HOURS),
     webDist: env.WEB_DIST ?? null,
     admin,
     workerIntervalMs: Number(env.WORKER_INTERVAL_MS ?? 60 * 60 * 1000),
@@ -86,6 +114,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     brasilApiBase: (env.BRASILAPI_BASE || 'https://brasilapi.com.br').replace(/\/+$/, ''),
     logLevel: env.LOG_LEVEL ?? 'info',
     loginRateLimit: Number(env.LOGIN_RATE_LIMIT ?? 10),
+    trustedProxies: (env.TRUSTED_PROXIES ?? '')
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
     cardAutoClose: env.CARD_AUTO_CLOSE === 'true',
     telegramApiBase: (env.TELEGRAM_API_BASE || 'https://api.telegram.org').replace(/\/+$/, ''),
     telegramTimeoutMs: Number(env.TELEGRAM_TIMEOUT_MS ?? 10_000),

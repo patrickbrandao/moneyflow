@@ -10,7 +10,7 @@ Leia antes de trabalhar: [docs/016-banco-de-dados.md](../docs/016-banco-de-dados
 |---|---|
 | `docker-compose.yml` | Serviço `postgres` (PostgreSQL 18 + pgvector + pgTAP) e `dbmate` (profile `tools`). |
 | `docker/Dockerfile` | Imagem `pgvector/pgvector:pg18` com pgTAP e `pg_prove`. |
-| `docker/initdb/` | Scripts do primeiro boot do volume: banco `<db>_test` e papel `moneyflow_app`. |
+| `docker/initdb/` | Scripts do primeiro boot do volume: banco `<db>_test`, papel `moneyflow_app` e o dono `moneyflow_owner` (`03-owner-role.sh`, idempotente: `make owner` converte um volume antigo). |
 | `migrations/NNNN_nome.sql` | Migrations dbmate, numeradas com 4 dígitos sequenciais. |
 | `tests/NNNN_nome.sql` | Testes pgTAP, um arquivo por área (mesmo número da migration que cria a área). |
 | `migration-tests/NNNN_nome/` | Teste de migração com dados: `fixture.sql` (no schema anterior), `after_up.sql` e `after_down.sql` (pgTAP). Fora do `make test`. |
@@ -21,7 +21,8 @@ Leia antes de trabalhar: [docs/016-banco-de-dados.md](../docs/016-banco-de-dados
 ## Comandos (rodar dentro de `database/`)
 
 ```bash
-make up                  # sobe o Postgres (cria .env a partir de .env.example)
+make up                  # sobe o Postgres só no loopback (cria .env a partir de .env.example; MONEYFLOW_DB_BIND=0.0.0.0 expõe)
+make owner               # garante o dono moneyflow_owner em <db> e <db>_test (volume antigo: passa a posse; idempotente)
 make migrate             # aplica migrations pendentes no banco de desenvolvimento
 make rollback            # desfaz a última migration
 make new NAME=create_x   # cria migrations/NNNN_create_x.sql
@@ -65,7 +66,8 @@ Nunca edite uma migration que já está na branch `main`; crie uma nova. Antes d
 
 ## Segurança
 
-- As migrations rodam com o dono do banco. A aplicação conecta como `moneyflow_app`, que só tem DML (sem DDL) e recebe os GRANTs nas migrations.
+- O dono do banco é o papel `moneyflow_owner` (`LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB`, senha `OWNER_DB_PASSWORD`), dono do banco, do schema `public` e de todos os objetos das migrations. As migrations rodam com ele (o serviço `dbmate` daqui conecta como ele), e ele faz o dump e a restauração do backup. O superusuário da imagem (`POSTGRES_USER`) só administra o cluster: cria bancos (`make test` e `make reset` recriam o banco com ele, já com o dono), papéis e as extensões `vector` (não é trusted), `pg_trgm` e `citext`, que ficam dele. Por isso o dono nunca apaga nem recria extensões, a 0001 só as encontra (`IF NOT EXISTS`) e o seu down não roda sem o superusuário. Nunca rode migrations como superusuário: o objeto criado fica dele e a restauração pelo dono falha. Testes pgTAP que conferem privilégios padrão criam os objetos com `SET LOCAL ROLE moneyflow_owner`.
+- A aplicação conecta como `moneyflow_app`, que só tem DML (sem DDL) e recebe os GRANTs nas migrations.
 - `users.password` é texto puro por decisão do produto. `moneyflow_app` **não** tem SELECT nessa coluna: a senha só é lida pelas funções `SECURITY DEFINER` `auth_login(login, password)` e `admin_reveal_password(target_user_id, actor_user_id)`. Nunca dê acesso direto à coluna nem a exponha em views.
-- Mesma blindagem (INSERT/UPDATE sim, SELECT não, leitura só por função `SECURITY DEFINER`, fora do `audit_log` pela lista `secrets` de `audit_row()`) para `message_destinations.bot_token`, `ai_providers.api_key`, `mcp_servers.secret_headers` e `user_api_tokens.token_hash`. Coluna nova nessas tabelas precisa de `GRANT SELECT` explícito; segredo novo entra na lista `secrets` de `audit_row()`. Cada segredo tem um leitor `admin_*(id, ator)` (admin ativo, senão `42501`) para o export de backup; segredo novo também ganha o seu.
+- Mesma blindagem (INSERT/UPDATE sim, SELECT não, leitura só por função `SECURITY DEFINER`, fora do `audit_log` pela lista `secrets` de `audit_row()`) para `message_destinations.bot_token`, `message_destinations.webhook_secret_hash`, `telegram_pairing_codes.code_hash`, `ai_providers.api_key`, `mcp_servers.secret_headers` e `user_api_tokens.token_hash`. Coluna nova nessas tabelas precisa de `GRANT SELECT` explícito; segredo novo entra na lista `secrets` de `audit_row()`. Cada segredo que vai ao backup tem um leitor `admin_*(id, ator)` (admin ativo, senão `42501`); segredo novo exportado também ganha o seu. O `code_hash` não vai ao backup e não tem leitor de admin. Os leitores de `ai_providers.api_key` ficam listados no comentário da coluna (`tests/0054_ai_provider_api_key_readers.sql` confere).
 - Credenciais locais vêm do `.env` (veja `.env.example`); nunca commite o `.env`.

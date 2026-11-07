@@ -24,7 +24,7 @@ import { type Access, type Actor, loadAccess } from '../authz/access';
 import type { Config } from '../config';
 import type { ServiceContext } from '../context';
 import { AppError, forbidden, notFound, translateDbError, unprocessable } from '../errors';
-import { assertCanStartRun, assertRunRate, exceededBudget } from './ai-budgets';
+import { assertCanStartRun, exceededBudget, lockRunRate } from './ai-budgets';
 import { assertNotSuperseded, getImport } from './statements';
 import { withTx } from './tx';
 import { iso } from './util';
@@ -452,8 +452,11 @@ async function recipeValues(
  */
 export async function insertReconcileSession(
   tx: Executor,
+  config: Config,
   p: { userId: string; agentId: string; title: string; screenContext: Record<string, unknown>; text: string },
 ): Promise<{ conversationId: string; runId: string }> {
+  // Limite por minuto dos fluxos com o lock do usuário, na mesma transação do INSERT (tarefa 060).
+  await lockRunRate(tx, config, p.userId, true);
   const conversation = await tx.execute<{ id: string }>(sql`
     INSERT INTO ai_conversations (user_id, agent_id, title, title_source, screen_context, archived_at, purpose)
     VALUES (${p.userId}, ${p.agentId}, ${p.title.slice(0, 200)}, 'user', ${JSON.stringify(p.screenContext)}::jsonb, now(), 'reconcile_statement')
@@ -522,7 +525,7 @@ export async function runRecipe(
 
   const created = await withTx(ctx, async (tx) => {
     if (await lockImport(tx, importId)) throw new AppError(409, 'run_active', t.agents.recipes.busy);
-    const session = await insertReconcileSession(tx, {
+    const session = await insertReconcileSession(tx, ctx.config, {
       userId: ctx.access.actor.id,
       agentId: recipe.agent_id,
       title: t.agents.recipes.conversation(recipe.name, info.file_name),
@@ -616,7 +619,7 @@ async function startClaimed(tx: Tx, config: Config, row: ClaimRow): Promise<'sta
     return 'skipped';
   }
   try {
-    await assertRunRate(tx, config, row.user_id, true);
+    await lockRunRate(tx, config, row.user_id, true);
   } catch (error) {
     if (error instanceof AppError && error.status === 429) {
       await closeRun(tx, row.recipe_run_id, 'skipped', 'rate_limited');
@@ -632,7 +635,7 @@ async function startClaimed(tx: Tx, config: Config, row: ClaimRow): Promise<'sta
     const agent = await tx.execute<{ name: string }>(sql`SELECT name FROM ai_agents WHERE id = ${row.agent_id}`);
     const values = await recipeValues(tx, access, agent.rows[0]?.name ?? '', info, scope.length);
     await tx.transaction(async (sp) => {
-      const session = await insertReconcileSession(sp, {
+      const session = await insertReconcileSession(sp, config, {
         userId: row.user_id,
         agentId: row.agent_id,
         title: t.agents.recipes.conversation(row.recipe_name, info.file_name),

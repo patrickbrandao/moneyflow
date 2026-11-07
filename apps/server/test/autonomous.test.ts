@@ -20,6 +20,7 @@ import {
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { drainTranscriptions } from '../src/agents/transcriptions';
 import { tasksTick } from '../src/services/agent-tasks';
+import { handleUpdate } from '../src/services/telegram-inbound';
 import { client, type Harness, scenario, startApp, TINY_PNG, uid, userSession } from './helpers';
 
 /*
@@ -282,6 +283,27 @@ describe('tarefas agendadas', () => {
     expect((await runOf(again.runId)).user_id).toBe(owner.id);
     await drain();
     expect((await client(h, (await userSession(h)).cookie).raw('POST', `/api/account/agent-tasks/${task.id}/run`)).statusCode).toBe(404);
+  });
+
+  it('a sessão da tarefa não recebe mensagem pela API (409, tarefa 056)', async () => {
+    const owner = await userSession(h);
+    const me = client(h, owner.cookie);
+    const task = await me.post('/api/account/agent-tasks', {
+      agentId: askAgent.id,
+      name: `Sessão ${uid()}`,
+      instruction: 'Olá',
+      schedule: { kind: 'daily', time: '06:00' },
+      isActive: false,
+    });
+    const started = await me.post(`/api/account/agent-tasks/${task.id}/run`);
+    await drain();
+    const sent = await me.raw('POST', `/api/conversations/${started.conversationId}/messages`, { text: 'Mais uma.' });
+    expect(sent.statusCode).toBe(409);
+    expect(sent.json().error.code).toBe('flow_conversation');
+    const runs = await h.db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM ai_runs WHERE conversation_id = ${started.conversationId}`,
+    );
+    expect(runs.rows[0]!.n).toBe(1);
   });
 
   it('a escrita em ask deixa a execução aguardando e o sino avisa (ai_awaiting_approval); aprovar conclui', async () => {
@@ -713,6 +735,85 @@ describe('Telegram de entrada', () => {
     await hook(destination.id, voiceUpdate(chat, lost, audio.length));
     expect(said(chat).at(-1)).toContain('O agente não transcreve áudio');
     expect((await api.get(`/api/agents/${askAgent.id}/thread`)).session?.messages.length ?? 0).toBe(before);
+  });
+
+  it('entrada desligada ou pareamento desfeito: nada da execução vai ao chat; desfazer para a execução daquele chat (tarefa 061)', async () => {
+    const other = chat + 61;
+    await pair(other);
+    const toChat = () => tg.calls.filter((c) => String(c.body.chat_id) === String(other)).length;
+    const pendingCard = async (entity: string) => {
+      await hook(destination.id, textUpdate(other, `criar entidade ${entity}`));
+      await drain();
+      const card = tg.messagesTo(other).at(-1)!;
+      expect(String(card.body.text)).toContain('<b>Aprovar?</b>');
+      const confirmationId = buttonData(card, 'Aprovar')!.slice(3);
+      const row = await h.db.execute<{ run_id: string }>(sql`SELECT run_id FROM ai_tool_confirmations WHERE id = ${confirmationId}`);
+      return row.rows[0]!.run_id;
+    };
+    const entityCount = async (entity: string) => (await h.db.execute(sql`SELECT 1 FROM entities WHERE name = ${entity}`)).rows.length;
+
+    // Entrada desligada com a execução esperando: aprovada pelo console, conclui, mas nada vai ao chat.
+    const approved = `Entidade 061 ${uid()}`;
+    const firstRun = await pendingCard(approved);
+    await api.patch(`/api/message-destinations/${destination.id}`, { inboundEnabled: false });
+    const beforeApproval = toChat();
+    await api.post(`/api/runs/${firstRun}/confirmations`, { decision: 'approved' });
+    await drain();
+    expect((await runOf(firstRun)).status).toBe('completed');
+    expect(await entityCount(approved)).toBe(1);
+    expect(toChat()).toBe(beforeApproval);
+    await api.patch(`/api/message-destinations/${destination.id}`, { inboundEnabled: true, inboundAgentId: askAgent.id });
+
+    // Pareamento desfeito: a execução daquele chat para na hora e nada mais vai ao chat.
+    const dropped = `Entidade 061 desfeita ${uid()}`;
+    const secondRun = await pendingCard(dropped);
+    const link = (await api.get('/api/account/telegram')).links.find((l: any) => !l.revokedAt && l.chatId === String(other));
+    const beforeRevoke = toChat();
+    await api.del(`/api/account/telegram/links/${link.id}`);
+    expect((await runOf(secondRun)).status).toBe('canceled');
+    // Aprovar depois pelo console não decide nada: a execução já está cancelada.
+    expect(await api.post(`/api/runs/${secondRun}/confirmations`, { decision: 'approved' })).toMatchObject({
+      decided: 0,
+      runStatus: 'canceled',
+    });
+    await drain();
+    expect(toChat()).toBe(beforeRevoke);
+    expect(await entityCount(dropped)).toBe(0);
+    // O pareamento do outro chat do mesmo usuário segue valendo.
+    await hook(destination.id, textUpdate(chat, '/agente'));
+    expect(said(chat).at(-1)).toContain(askAgent.name);
+  });
+
+  it('erro no processamento desfaz a marca do update_id; a reentrega processa uma vez e a seguinte é ignorada (tarefa 064)', async () => {
+    let fail = true;
+    const failing = new Proxy(h.db, {
+      get(target, prop) {
+        if (prop === 'transaction' && fail) {
+          return () => {
+            fail = false;
+            return Promise.reject(new Error('falha simulada no meio do processamento'));
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const text = `Reentrega ${uid()}`;
+    const update = textUpdate(chat, text);
+    await expect(handleUpdate({ ...deps(), db: failing }, destination.id, update)).rejects.toThrow('falha simulada');
+    const marks = async () =>
+      (
+        await h.db.execute<{ n: number }>(sql`
+          SELECT count(*)::int AS n FROM telegram_updates_seen WHERE destination_id = ${destination.id} AND update_id = ${update.update_id}`)
+      ).rows[0]!.n;
+    expect(await marks()).toBe(0);
+    expect((await hook(destination.id, update)).statusCode).toBe(200);
+    expect(await marks()).toBe(1);
+    expect((await hook(destination.id, update)).statusCode).toBe(200);
+    const thread = await api.get(`/api/agents/${askAgent.id}/thread`);
+    const sent = thread.session.messages.filter((m: any) => m.role === 'user' && m.content.some((b: any) => b.text === text));
+    expect(sent).toHaveLength(1);
+    await drain();
   });
 
   it('desfazer o pareamento; desativar o destino desliga a entrada no mesmo UPDATE e chama deleteWebhook', async () => {

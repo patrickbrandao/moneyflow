@@ -1,4 +1,4 @@
-import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
+import { createServer, type IncomingHttpHeaders, request, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { AGENT_TOOLS, t } from '@moneyflow/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -158,6 +158,31 @@ describe('consulta de CNPJ', () => {
 
   it('exige sessão', async () => {
     expect((await h.app.inject({ method: 'GET', url: `/api/lookup/cnpj/${CNPJ}` })).statusCode).toBe(401);
+  });
+
+  it('exige sessão mesmo com o caminho codificado ou a request-target absoluta (tarefa 051)', async () => {
+    for (const url of [`/%61pi/lookup/cnpj/${CNPJ}`, `/api/lookup/%63npj/${CNPJ}`, `/api/%6cookup/cep/01001000`]) {
+      expect((await h.app.inject({ method: 'GET', url })).statusCode, url).toBe(401);
+    }
+    // A request-target absoluta (`GET http://x/api/...`) só chega crua por um socket de verdade.
+    const address = await h.app.listen({ port: 0, host: '127.0.0.1' });
+    const { port } = new URL(address);
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = request({ host: '127.0.0.1', port, method: 'GET', path: `http://x/api/lookup/cnpj/${CNPJ}` }, (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    expect(status).toBe(401);
+    expect(seen).toEqual([]);
+    // Com o cookie, o caminho codificado continua atendido; um /api inexistente segue 401 sem cookie e 404 com ele.
+    const ok = await h.app.inject({ method: 'GET', url: `/%61pi/lookup/cnpj/${CNPJ}`, headers: { cookie } });
+    expect(ok.statusCode).toBe(200);
+    expect((await h.app.inject({ method: 'GET', url: '/api/nao-existe' })).statusCode).toBe(401);
+    expect((await h.app.inject({ method: 'GET', url: '/api/nao-existe', headers: { cookie } })).statusCode).toBe(404);
+    expect((await h.app.inject({ method: 'GET', url: '/api/health' })).statusCode).toBe(200);
   });
 });
 

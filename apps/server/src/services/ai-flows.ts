@@ -286,7 +286,7 @@ export async function reconcileImportWithAi(
   // A checagem (lock do lote + ai_reconcile_import_busy) e a criação da execução na mesma transação (spec 030).
   const created = await withTx(ctx, async (tx) => {
     if (await lockImport(tx, importId)) return null;
-    return insertReconcileSession(tx, {
+    return insertReconcileSession(tx, ctx.config, {
       userId: ctx.access.actor.id,
       agentId,
       title: t.agents.flows.reconcileConversation(detail.fileName),

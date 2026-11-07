@@ -27,9 +27,12 @@ SELECT is_strict('is_valid_cnpj', ARRAY['text']);
 SELECT ok(has_function_privilege('moneyflow_app', 'is_valid_cpf(text)', 'EXECUTE'), 'app executa is_valid_cpf');
 SELECT ok(has_function_privilege('moneyflow_app', 'is_valid_cnpj(text)', 'EXECUTE'), 'app executa is_valid_cnpj');
 
--- Privilégios padrão: uma tabela e uma função novas herdam os GRANTs para o app.
+-- Privilégios padrão: uma tabela e uma função novas, criadas pelo dono (quem roda as migrations, tarefa 054), herdam
+-- os GRANTs para o app.
+SET LOCAL ROLE moneyflow_owner;
 CREATE TABLE __t_default_privs (id serial PRIMARY KEY, updated_at timestamptz NOT NULL DEFAULT now());
 CREATE FUNCTION __t_fn() RETURNS int LANGUAGE sql AS 'SELECT 1';
+RESET ROLE;
 SELECT table_privs_are('__t_default_privs', 'moneyflow_app', ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
                        'tabela nova: DML para moneyflow_app (sem TRUNCATE/REFERENCES/TRIGGER)');
 SELECT sequence_privs_are('__t_default_privs_id_seq', 'moneyflow_app', ARRAY['USAGE'],

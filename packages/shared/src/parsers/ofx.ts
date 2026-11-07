@@ -5,7 +5,7 @@
  * juntas): cada um tem conta, saldo, período e transações próprios.
  */
 import { isIsoDate } from '../dates';
-import { decodeXmlEntities, findAll, findFirst, type XmlNode } from './xml';
+import { decodeXmlEntities, findAll, findFirst, OpenStack, XML_MAX_NODES, XML_TOO_MANY_NODES, type XmlNode } from './xml';
 
 export type OfxTransaction = {
   fitid: string | null;
@@ -74,7 +74,8 @@ export function decodeStatementFile(bytes: Uint8Array): string {
  */
 function parseOfxTree(body: string): XmlNode {
   const root: XmlNode = { name: '#document', attrs: {}, children: [], text: '' };
-  const stack: XmlNode[] = [root];
+  const stack = new OpenStack(root);
+  let nodes = 0;
   const re = /<([^>]*)>([^<]*)/g;
   for (const m of body.matchAll(re)) {
     const tag = m[1]!.trim();
@@ -82,14 +83,16 @@ function parseOfxTree(body: string): XmlNode {
     if (!tag || tag.startsWith('?') || tag.startsWith('!')) continue;
     if (tag.startsWith('/')) {
       const name = tag.slice(1).trim().toUpperCase();
-      const idx = stack.map((n) => n.name).lastIndexOf(name);
-      if (idx > 0) stack.length = idx;
+      stack.close(name);
       continue;
     }
     const selfClosing = tag.endsWith('/');
     const name = (selfClosing ? tag.slice(0, -1) : tag).split(/\s/)[0]!.toUpperCase();
     const node: XmlNode = { name, attrs: {}, children: [], text: '' };
-    stack[stack.length - 1]!.children.push(node);
+    // Limites da árvore (tarefa 052): profundidade e número de elementos, como no parseXml.
+    nodes += 1;
+    if (nodes > XML_MAX_NODES) throw new Error(XML_TOO_MANY_NODES);
+    stack.top().children.push(node);
     if (text.trim()) node.text = decodeXmlEntities(text.trim());
     else if (!selfClosing) stack.push(node);
   }

@@ -1164,3 +1164,53 @@ describe('categorias e regras', () => {
     }
   });
 });
+
+describe('prévias pelo Access (tarefa 058)', () => {
+  it('o alvo do casamento e as contas da receita de outra caixa não aparecem na prévia', async () => {
+    const editorSession = await userSession(h);
+    await admin.post(`/api/caixas/${s.caixaA.id}/members`, { userId: editorSession.id, role: 'editor' });
+    const account = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'checking',
+      name: `Prévia ${uid()}`,
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/statement-imports?accountId=${account.id}&fileName=extrato.ofx`,
+      payload: fixture('extrato-ofx2.ofx'),
+      headers: { cookie: editorSession.cookie, 'content-type': 'application/x-ofx' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    const line = res.json().lines[0];
+    const description = `Segredo B ${uid()}`;
+    const foreign = await admin.post(`/api/accounts/${s.accountB.id}/adjustments`, {
+      occurredOn: '2026-02-01',
+      amountCents: -4_321,
+      description,
+      categoryId: s.expense.id,
+    });
+    const own = await admin.post(`/api/accounts/${account.id}/adjustments`, {
+      occurredOn: '2026-02-02',
+      amountCents: -1_234,
+      description: 'Visível A',
+      categoryId: s.expense.id,
+    });
+
+    const hidden = await call(editorSession, 'match_statement_line', { lineId: line.id, movementId: foreign.id }, { approve: false });
+    expect(rowsOf(hidden.preview)['Casar com']).toBe(`Movimento ${foreign.id}`);
+    expect(JSON.stringify(hidden.preview)).not.toContain(description);
+    expect(JSON.stringify(hidden.preview)).not.toContain('43,21');
+    const shown = await call(editorSession, 'match_statement_line', { lineId: line.id, movementId: own.id }, { approve: false });
+    expect(rowsOf(shown.preview)['Casar com']).toContain('Visível A');
+
+    const recipe = await call(
+      editorSession,
+      'create_reconcile_recipe',
+      { caixaId: s.caixaA.id, agentId: agent.id, name: 'Prévia', instruction: 'x', accountIds: [account.id, s.accountB.id] },
+      { approve: false },
+    );
+    expect(rowsOf(recipe.preview).Contas).toBe(`${account.name}, ${s.accountB.id}`);
+    expect(JSON.stringify(recipe.preview)).not.toContain(s.accountB.name);
+  });
+});

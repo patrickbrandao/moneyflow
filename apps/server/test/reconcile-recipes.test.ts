@@ -211,6 +211,72 @@ describe('receitas de conciliação', () => {
     expect(state.recipeName).toBe('Débitos');
   });
 
+  it('na execução da receita as tools de lote e de receita são recusadas; a sessão dela não recebe mensagem pela API (057, 056)', async () => {
+    const { s, editor, api } = await setup();
+    const recipe = await api.post('/api/reconcile-recipes', {
+      caixaId: s.caixaA.id,
+      agentId: agent.id,
+      name: 'Escopo',
+      instruction: 'Concilie {{lote.arquivo}}.',
+      accountIds: [s.accountA.id],
+    });
+    const imp = await importAs(editor, s.accountA.id);
+    await drain();
+    const before = await api.get(`/api/statement-imports/${imp.id}`);
+    const line = before.lines.find((l: any) => l.status === 'new')!;
+    const started = await api.post(`/api/statement-imports/${imp.id}/recipes/${recipe.id}/run`, { lineIds: [line.id] });
+
+    llm.queue = [
+      {
+        toolCalls: [
+          { name: 'set_statement_import_provisional', input: { importId: imp.id, provisional: true } },
+          { name: 'set_statement_import_balance', input: { importId: imp.id, mode: 'clear' } },
+          { name: 'supersede_statement_import', input: { importId: imp.id } },
+          { name: 'run_reconcile_recipe', input: { recipeId: recipe.id, statementImportId: imp.id } },
+          { name: 'archive_reconcile_recipe', input: { recipeId: recipe.id } },
+        ],
+      },
+      { text: 'Não deu.' },
+    ];
+    await drain();
+    const tools = await h.db.execute<{ content: unknown }>(sql`
+      SELECT content FROM ai_messages WHERE conversation_id = ${started.conversationId} AND role = 'tool' ORDER BY seq`);
+    const results = tools.rows.flatMap((r) => r.content as any[]).filter((b) => b.type === 'tool_result');
+    expect(results).toHaveLength(5);
+    for (const result of results) {
+      expect(result.is_error).toBe(true);
+      expect(JSON.stringify(result)).toContain(t.agents.recipes.toolOutOfScope);
+    }
+    const after = await api.get(`/api/statement-imports/${imp.id}`);
+    expect(after.provisional).toBe(false);
+    expect(after.bankBalanceCents).toBe(before.bankBalanceCents);
+    expect((await api.get(`/api/reconcile-recipes?caixaId=${s.caixaA.id}`)).some((r: any) => r.id === recipe.id)).toBe(true);
+    await recipesTick(h.db, h.config, log);
+
+    // 056: a sessão da receita (já arquivada) não recebe mensagem pela API; o escopo fica intacto.
+    const context = await h.db.execute<{ screen_context: unknown }>(
+      sql`SELECT screen_context FROM ai_conversations WHERE id = ${started.conversationId}`,
+    );
+    const runs = async () =>
+      Number(
+        (await h.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM ai_runs WHERE conversation_id = ${started.conversationId}`))
+          .rows[0]!.n,
+      );
+    const runCount = await runs();
+    const sent = await api.raw('POST', `/api/conversations/${started.conversationId}/messages`, {
+      text: 'Agora concilie tudo.',
+      screenContext: { route: '/x' },
+    });
+    expect(sent.statusCode).toBe(409);
+    expect(sent.json().error.code).toBe('flow_conversation');
+    expect(await runs()).toBe(runCount);
+    const unchanged = await h.db.execute<{ screen_context: unknown }>(
+      sql`SELECT screen_context FROM ai_conversations WHERE id = ${started.conversationId}`,
+    );
+    expect(unchanged.rows[0]!.screen_context).toEqual(context.rows[0]!.screen_context);
+    expect(unchanged.rows[0]!.screen_context).toMatchObject({ recipeId: recipe.id, lineIds: [line.id] });
+  });
+
   it('ao importar: duas receitas em sequência, a segunda só com as linhas que sobraram', async () => {
     const { s, editor, api } = await setup();
     await api.patch(`/api/accounts/${s.accountA.id}`, { aiAutoReconcile: true });

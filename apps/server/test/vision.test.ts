@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { type Executor, userColumns, users } from '@moneyflow/db';
 import { addDays, isoWeekday, todayIso } from '@moneyflow/shared';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { consumeOutbox, emitAgentEvent, produceMessages, produceNotifications } from '../src/services/message-worker';
+import { TOOL_HANDLERS } from '../src/agents/tool-handlers';
+import { type Actor, loadAccess } from '../src/authz/access';
+import { consumeOutbox, emitAgentEvent, logMessageTick, produceMessages, produceNotifications } from '../src/services/message-worker';
+import { deliver } from '../src/services/messages';
 import { client, type Harness, scenario, startApp, uid, userSession } from './helpers';
 
 /*
@@ -377,6 +381,93 @@ describe('mensagens (spec 013)', () => {
     expect(await admin.del(`/api/message-destinations/${dest.id}`)).toEqual({ deleted: false, archived: true });
   });
 
+  it('token indisponível: erro transitório volta à fila; P0002/42501 do banco falham de vez (tarefa 062)', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const dest = await admin.post('/api/message-destinations', { name: `Token ${uid()}`, botToken: TOKEN, chatId: '62' });
+    telegram.mode = '429';
+    const queued = await admin.post(`/api/message-destinations/${dest.id}/test`);
+    expect(queued.status).toBe('pending');
+    telegram.mode = 'ok';
+    const claim = async () => {
+      const row = await h.db.execute<{ id: string; payload: any }>(
+        sql`SELECT id, payload FROM message_outbox_claim_one(${queued.messageId}::uuid)`,
+      );
+      expect(row.rows).toHaveLength(1);
+      return { id: row.rows[0]!.id, chatId: '62', destinationName: dest.name, payload: row.rows[0]!.payload };
+    };
+    // Executor dublê: a leitura do token (a 1ª consulta do deliver) lança; o resto vai ao banco.
+    const flaky = (error: unknown): Executor => {
+      let first = true;
+      return {
+        execute: (query: unknown) => {
+          if (first) {
+            first = false;
+            return Promise.reject(error);
+          }
+          return h.db.execute(query as never);
+        },
+      } as unknown as Executor;
+    };
+    const failedBell = async () =>
+      (
+        await h.db.execute<{ n: number }>(
+          sql`SELECT count(*)::int AS n FROM notifications WHERE dedup_key = ${`message_failed:${queued.messageId}`}`,
+        )
+      ).rows[0]!.n;
+    const status = async () =>
+      (await h.db.execute<{ status: string }>(sql`SELECT status FROM message_outbox WHERE id = ${queued.messageId}`)).rows[0]!.status;
+
+    const transient = await deliver(flaky(new Error('Connection terminated unexpectedly')), h.config, await claim());
+    expect(transient.status).toBe('pending');
+    expect(await status()).toBe('pending');
+    expect(await failedBell()).toBe(0);
+
+    const inactive = Object.assign(new Error('message_destination_token: destino inativo'), { code: 'P0002', severity: 'ERROR' });
+    const permanent = await deliver(flaky(inactive), h.config, await claim());
+    expect(permanent.status).toBe('failed');
+    expect(await status()).toBe('failed');
+    expect(await failedBell()).toBe(1);
+  });
+
+  it('assinatura que falha ao gerar é logada e contada à parte das falhas de envio (tarefa 063)', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    // Uma caixa legível no escopo (sem caixa, a assinatura nem consulta os vencimentos).
+    await scenario(h, admin);
+    const dest = await admin.post('/api/message-destinations', { name: `Falha ${uid()}`, botToken: TOKEN, chatId: '63' });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, {
+      eventKind: 'due_reminder',
+      params: { days_before: [0], send_at: '00:00' },
+    });
+    const sub = await h.db.execute<{ id: string }>(
+      sql`SELECT id FROM message_subscriptions WHERE destination_id = ${dest.id} AND event_kind = 'due_reminder'`,
+    );
+    // Data inválida no relógio: gerar os vencimentos falha nesta assinatura (as outras seguem).
+    const produced = await produceMessages(h.db, h.config, { date: 'data-invalida', time: '23:59', weekday: 1 });
+    expect(produced.subscriptionsFailed).toBeGreaterThanOrEqual(1);
+    expect(produced.subscriptionErrors).toContainEqual({
+      subscriptionId: sub.rows[0]!.id,
+      eventKind: 'due_reminder',
+      error: expect.stringContaining('data inválida'),
+    });
+    expect(produced).not.toHaveProperty('failed');
+    // O laço junta produção e consumo sem sobrescrever; o worker loga cada assinatura que falhou.
+    const result = { ...produced, created: 0, reminders: 0, sent: 0, failed: 2, retried: 0 };
+    const logged: { level: string; obj: any; msg: string }[] = [];
+    const fakeLog = {
+      info: (obj: any, msg: string) => logged.push({ level: 'info', obj, msg }),
+      warn: (obj: any, msg: string) => logged.push({ level: 'warn', obj, msg }),
+    };
+    logMessageTick(fakeLog, result);
+    expect(logged.find((l) => l.level === 'info')!.obj).toMatchObject({ failed: 2, subscriptionsFailed: produced.subscriptionsFailed });
+    expect(logged.find((l) => l.level === 'info')!.obj).not.toHaveProperty('subscriptionErrors');
+    expect(logged.filter((l) => l.level === 'warn').map((l) => l.obj)).toContainEqual(
+      expect.objectContaining({ subscriptionId: sub.rows[0]!.id, eventKind: 'due_reminder' }),
+    );
+    await admin.del(`/api/message-destinations/${dest.id}/subscriptions/due_reminder`);
+  });
+
   it('produtor: vencimentos D-N e resumo diário com dedup; consumidor envia com HTML escapado e PIX copiável', async () => {
     const admin = client(h, (await userSession(h, 'admin')).cookie);
     const s = await scenario(h, admin);
@@ -471,6 +562,80 @@ describe('mensagens (spec 013)', () => {
     // Mesmo texto, outro evento da execução (seq diferente): outro aviso.
     expect((await emit(7)).queued).toBe(1);
     expect(await counts()).toEqual({ outbox: 2, bell: 2 });
+  });
+
+  it('evento de agente: o destino de caixa só recebe de quem lê a caixa dona dele (tarefa 049)', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const member = await userSession(h);
+    await admin.put(`/api/users/${member.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'editor' }] });
+    const outsider = await userSession(h);
+    const dest = await admin.post('/api/message-destinations', {
+      name: `Grupo ${s.tag}`,
+      ownerKind: 'caixa',
+      ownerCaixaId: s.caixaA.id,
+      botToken: TOKEN,
+      chatId: '-100049',
+    });
+    for (const eventKind of ['agent_completed', 'agent_message', 'ai_awaiting_approval']) {
+      await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, { eventKind, params: {} });
+    }
+    // O destino pessoal de quem não lê a caixa continua recebendo.
+    const personal = await client(h, outsider.cookie).post('/api/message-destinations', {
+      name: `Pessoal ${uid()}`,
+      botToken: TOKEN,
+      chatId: '49',
+    });
+    await client(h, outsider.cookie).put(`/api/message-destinations/${personal.id}/subscriptions`, {
+      eventKind: 'agent_completed',
+      params: {},
+    });
+    const queuedFor = async (destinationId: string, runId: string) =>
+      (
+        await h.db.execute<{ n: number }>(
+          sql`SELECT count(*)::int AS n FROM message_outbox WHERE destination_id = ${destinationId} AND agent_run_id = ${runId}`,
+        )
+      ).rows[0]!.n;
+    const emit = async (
+      userId: string,
+      kind: 'agent_completed' | 'agent_message' | 'ai_awaiting_approval',
+      caixaId: string | null = null,
+    ) => {
+      const runId = randomUUID();
+      await emitAgentEvent(h.db, {
+        kind,
+        userId,
+        agentRunId: runId,
+        eventKey: `run:${runId}:seq:1`,
+        text: 'Resumo financeiro',
+        caixaId,
+        config: h.config,
+      });
+      return runId;
+    };
+    for (const kind of ['agent_completed', 'agent_message'] as const) {
+      expect(await queuedFor(dest.id, await emit(outsider.id, kind))).toBe(0);
+      expect(await queuedFor(dest.id, await emit(member.id, kind))).toBe(1);
+      expect(await queuedFor(dest.id, await emit(adminSession.id, kind))).toBe(1);
+    }
+    const outsiderRun = await emit(outsider.id, 'agent_completed');
+    expect(await queuedFor(personal.id, outsiderRun)).toBe(1);
+    expect(await queuedFor(dest.id, outsiderRun)).toBe(0);
+    // Com caixa no evento (aprovação da conciliação): vai ao destino da caixa do lote, nunca ao de outra caixa.
+    expect(await queuedFor(dest.id, await emit(member.id, 'ai_awaiting_approval', s.caixaA.id))).toBe(1);
+    expect(await queuedFor(dest.id, await emit(adminSession.id, 'ai_awaiting_approval', s.caixaB.id))).toBe(0);
+    expect(await queuedFor(dest.id, await emit(outsider.id, 'ai_awaiting_approval', s.caixaA.id))).toBe(0);
+    // A tool notify_user (também a do /mcp) passa pelo mesmo caminho.
+    const notify = async (userId: string) => {
+      const [actor] = await h.db.select(userColumns).from(users).where(eq(users.id, userId));
+      const ctx = { db: h.db, access: await loadAccess(h.db, actor as Actor), config: h.config };
+      const toolUseId = `tu-${uid()}`;
+      await TOOL_HANDLERS.notify_user.run(ctx, { title: 'Oi', text: 'Texto livre' }, { runId: null, toolUseId } as never);
+      return queuedFor(dest.id, `mcp-${toolUseId}`);
+    };
+    expect(await notify(outsider.id)).toBe(0);
+    expect(await notify(member.id)).toBe(1);
   });
 });
 

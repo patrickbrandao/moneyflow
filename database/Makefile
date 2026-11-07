@@ -8,7 +8,7 @@ POSTGRES_DB ?= moneyflow
 PSQL := $(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER)
 T ?= /tests
 
-.PHONY: env up down logs psql migrate rollback status new test test-migration dump seed reset
+.PHONY: env up down logs psql owner migrate rollback status new test test-migration dump seed reset
 
 env:            ## cria .env a partir do exemplo, se faltar
 	@test -f .env || cp .env.example .env
@@ -25,20 +25,28 @@ logs:
 psql:           ## console interativo no banco de desenvolvimento
 	$(COMPOSE) exec postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB)
 
-migrate: up     ## aplica as migrations pendentes no banco de desenvolvimento
+# Dono do banco sem superusuário (docs/016): idempotente; num volume antigo cria o moneyflow_owner e lhe passa a posse.
+owner: up       ## garante o papel moneyflow_owner como dono de <db> e <db>_test
+	$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/03-owner-role.sh
+
+# As migrations rodam como moneyflow_owner (DATABASE_URL do serviço dbmate); criar e apagar bancos fica com o
+# superusuário, porque o dono não tem CREATEDB.
+migrate: owner  ## aplica as migrations pendentes no banco de desenvolvimento
 	$(DBMATE) up
 
-rollback: up    ## desfaz a última migration no banco de desenvolvimento
+rollback: owner ## desfaz a última migration no banco de desenvolvimento
 	$(DBMATE) rollback
 
-status: up
+status: owner
 	$(DBMATE) status
 
 new:            ## make new NAME=create_users
 	@./scripts/new-migration.sh $(NAME)
 
-test: up        ## recria o banco de testes, migra e roda pgTAP (make test T=/tests/0003_entities.sql)
-	$(DBMATE) -e TEST_DATABASE_URL drop
+test: owner     ## recria o banco de testes, migra e roda pgTAP (make test T=/tests/0003_entities.sql)
+	$(PSQL) -d postgres -c 'DROP DATABASE IF EXISTS "$(POSTGRES_DB)_test" WITH (FORCE)' \
+	  -c 'CREATE DATABASE "$(POSTGRES_DB)_test" OWNER moneyflow_owner'
+	$(COMPOSE) exec -T -e OWNER_DBS=$(POSTGRES_DB)_test postgres bash /docker-entrypoint-initdb.d/03-owner-role.sh
 	$(DBMATE) -e TEST_DATABASE_URL up
 	$(DBMATE) -e TEST_DATABASE_URL rollback
 	$(DBMATE) -e TEST_DATABASE_URL up
@@ -54,6 +62,8 @@ dump: migrate   ## regrava schema.sql (estrutura atual, commitado como referênc
 seed: migrate   ## carrega dados de desenvolvimento
 	$(PSQL) -d $(POSTGRES_DB) < seeds/dev.sql
 
-reset: up       ## APAGA o banco de desenvolvimento e recria do zero
-	$(DBMATE) drop
+reset: owner    ## APAGA o banco de desenvolvimento e recria do zero
+	$(PSQL) -d postgres -c 'DROP DATABASE IF EXISTS "$(POSTGRES_DB)" WITH (FORCE)' \
+	  -c 'CREATE DATABASE "$(POSTGRES_DB)" OWNER moneyflow_owner'
+	$(COMPOSE) exec -T -e OWNER_DBS=$(POSTGRES_DB) postgres bash /docker-entrypoint-initdb.d/03-owner-role.sh
 	$(DBMATE) up

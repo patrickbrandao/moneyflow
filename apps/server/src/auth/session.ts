@@ -26,14 +26,19 @@ export async function createSession(db: Database, userId: string, days: number, 
   return { token, expiresAt };
 }
 
-/** Usuário ativo dono do token, ou null. Atualiza last_seen_at no máximo a cada 5 min. */
-export async function resolveSession(db: Database, token: string): Promise<{ actor: Actor; sessionId: string } | null> {
+/**
+ * Usuário ativo dono do token, ou null. Atualiza last_seen_at no máximo a cada 5 min. Com
+ * `idleHours` > 0, a sessão sem uso há mais que isso não vale mais (SESSION_IDLE_HOURS, tarefa 066);
+ * o passo de 5 min do last_seen_at basta para uma ociosidade medida em horas.
+ */
+export async function resolveSession(db: Database, token: string, idleHours = 0): Promise<{ actor: Actor; sessionId: string } | null> {
   const id = hashToken(token);
+  const idle = idleHours > 0 ? gt(sessions.lastSeenAt, sql`now() - make_interval(hours => ${idleHours}::int)`) : undefined;
   const [row] = await db
     .select({ ...userColumns, lastSeenAt: sessions.lastSeenAt })
     .from(sessions)
     .innerJoin(users, eq(users.id, sessions.userId))
-    .where(and(eq(sessions.id, id), gt(sessions.expiresAt, sql`now()`), eq(users.isActive, true)))
+    .where(and(eq(sessions.id, id), gt(sessions.expiresAt, sql`now()`), idle, eq(users.isActive, true)))
     .limit(1);
   if (!row) return null;
   if (Date.now() - new Date(row.lastSeenAt).getTime() > 5 * 60_000) {

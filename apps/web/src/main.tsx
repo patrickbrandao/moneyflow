@@ -1,3 +1,5 @@
+// CSP sem unsafe-eval (tarefa 065): o Zod sem o JIT, antes de qualquer schema do shared.
+import '@moneyflow/shared/zod-jitless';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';

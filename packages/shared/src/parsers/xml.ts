@@ -24,14 +24,59 @@ export function decodeXmlEntities(text: string): string {
   });
 }
 
+/**
+ * Limites da árvore (tarefa 052): OFX e NF-e reais não passam de uma dúzia de níveis nem de algumas
+ * dezenas de milhares de elementos. Acima disso o arquivo é recusado, para que um corpo montado
+ * (milhões de aberturas ou fechamentos sem par) não prenda a CPU nem estoure a pilha.
+ */
+export const XML_MAX_DEPTH = 64;
+export const XML_MAX_NODES = 500_000;
+export const XML_TOO_DEEP = `Arquivo inválido: aninhamento acima de ${XML_MAX_DEPTH} níveis.`;
+export const XML_TOO_MANY_NODES = `Arquivo inválido: mais de ${XML_MAX_NODES.toLocaleString('pt-BR')} elementos.`;
+
+/**
+ * Pilha dos elementos abertos com a contagem por nome (tarefa 052): o fechamento sem par é recusado
+ * em O(1) pela contagem, e o com par procura de trás para frente, sem alocar, numa pilha que nunca
+ * passa de `XML_MAX_DEPTH` + 1 (a posição 0 é a raiz sintética).
+ */
+export class OpenStack {
+  readonly nodes: XmlNode[];
+  private readonly open = new Map<string, number>();
+  constructor(root: XmlNode) {
+    this.nodes = [root];
+  }
+  top(): XmlNode {
+    return this.nodes[this.nodes.length - 1]!;
+  }
+  /** Empilha o elemento aberto, recusando a árvore funda demais. */
+  push(node: XmlNode): void {
+    if (this.nodes.length > XML_MAX_DEPTH) throw new Error(XML_TOO_DEEP);
+    this.nodes.push(node);
+    this.open.set(node.name, (this.open.get(node.name) ?? 0) + 1);
+  }
+  /** Fecha até o último elemento aberto com o nome dado; sem par, não faz nada. */
+  close(name: string): void {
+    if (!this.open.get(name)) return;
+    let idx = this.nodes.length - 1;
+    while (idx > 0 && this.nodes[idx]!.name !== name) idx -= 1;
+    if (idx <= 0) return;
+    for (let i = this.nodes.length - 1; i >= idx; i -= 1) {
+      const n = this.nodes[i]!.name;
+      this.open.set(n, this.open.get(n)! - 1);
+    }
+    this.nodes.length = idx;
+  }
+}
+
 const ATTR = /([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
 
 /** Lê o documento e devolve o elemento raiz. Lança Error em pt-BR se não houver elemento. */
 export function parseXml(text: string): XmlNode {
   const root: XmlNode = { name: '#document', attrs: {}, children: [], text: '' };
-  const stack: XmlNode[] = [root];
+  const stack = new OpenStack(root);
   let i = 0;
-  const top = () => stack[stack.length - 1]!;
+  let nodes = 0;
+  const top = () => stack.top();
 
   while (i < text.length) {
     const lt = text.indexOf('<', i);
@@ -67,8 +112,7 @@ export function parseXml(text: string): XmlNode {
       const end = text.indexOf('>', lt);
       const name = stripPrefix(text.slice(lt + 2, end < 0 ? text.length : end).trim());
       // Tolerante: fecha até o elemento correspondente; fechamento sem abertura é ignorado.
-      const idx = stack.map((n) => n.name).lastIndexOf(name);
-      if (idx > 0) stack.length = idx;
+      stack.close(name);
       i = end < 0 ? text.length : end + 1;
     } else {
       // Abertura: procura o '>' fora de aspas.
@@ -97,6 +141,8 @@ export function parseXml(text: string): XmlNode {
         if (key === 'xmlns' || key.startsWith('xmlns:')) continue;
         node.attrs[stripPrefix(key)] = decodeXmlEntities(m[2] ?? m[3] ?? '');
       }
+      nodes += 1;
+      if (nodes > XML_MAX_NODES) throw new Error(XML_TOO_MANY_NODES);
       top().children.push(node);
       if (!selfClosing) stack.push(node);
       i = j + 1;

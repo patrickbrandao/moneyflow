@@ -2,7 +2,7 @@ import { createDb, createPool } from '@moneyflow/db';
 import pino from 'pino';
 import { buildApp } from './app';
 import { ensureInitialAdmin } from './auth/bootstrap';
-import { loadConfig } from './config';
+import { insecureCookieWarning, loadConfig } from './config';
 import { startWorker } from './worker';
 
 /*
@@ -30,6 +30,8 @@ async function main() {
   if (mode !== 'api') throw new Error(`Modo desconhecido: ${mode} (use api ou worker)`);
 
   const app = await buildApp({ db, config });
+  const cookieWarning = insecureCookieWarning(config);
+  if (cookieWarning) app.log.warn(cookieWarning);
   await ensureInitialAdmin(db, config, app.log);
   const shutdown = async () => {
     await app.close();

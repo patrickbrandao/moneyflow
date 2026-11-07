@@ -11,9 +11,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-moneyflow}
       POSTGRES_DB: ${POSTGRES_DB:-moneyflow}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:-moneyflow_app}
+      # Dono do banco, sem superusuário (docker/initdb/03-owner-role.sh): migrations e dump/restauração do backup.
+      OWNER_DB_PASSWORD: ${OWNER_DB_PASSWORD:-moneyflow_owner}
       TZ: America/Sao_Paulo
+    # Só no loopback (tarefa 068): o superusuário tem senha conhecida. Para expor na rede, MONEYFLOW_DB_BIND=0.0.0.0.
     ports:
-      - "${MONEYFLOW_DB_PORT:-5432}:5432"
+      - "${MONEYFLOW_DB_BIND:-127.0.0.1}:${MONEYFLOW_DB_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql
       - ./tests:/tests:ro
@@ -33,8 +36,9 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-moneyflow}:${POSTGRES_PASSWORD:-moneyflow}@postgres:5432/${POSTGRES_DB:-moneyflow}?sslmode=disable
-      TEST_DATABASE_URL: postgres://${POSTGRES_USER:-moneyflow}:${POSTGRES_PASSWORD:-moneyflow}@postgres:5432/${POSTGRES_DB:-moneyflow}_test?sslmode=disable
+      # Como o dono (moneyflow_owner), nunca o superusuário: os objetos ficam dele e a restauração do dump os recria.
+      DATABASE_URL: postgres://moneyflow_owner:${OWNER_DB_PASSWORD:-moneyflow_owner}@postgres:5432/${POSTGRES_DB:-moneyflow}?sslmode=disable
+      TEST_DATABASE_URL: postgres://moneyflow_owner:${OWNER_DB_PASSWORD:-moneyflow_owner}@postgres:5432/${POSTGRES_DB:-moneyflow}_test?sslmode=disable
       DBMATE_MIGRATIONS_DIR: /db/migrations
       DBMATE_NO_DUMP_SCHEMA: "true"
       DBMATE_STRICT: "true"

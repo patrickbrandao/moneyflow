@@ -24,6 +24,8 @@ let llm: FakeLlm;
 let admin: ReturnType<typeof client>;
 let owner: ReturnType<typeof client>;
 let ownerSession: Awaited<ReturnType<typeof userSession>>;
+let adminSession: Awaited<ReturnType<typeof userSession>>;
+let openaiId: string;
 /** Agente com todas as inferências (OpenAI compatível falso). */
 let audioAgent: any;
 /** Agente só com texto e visão (Anthropic compatível): não converte áudio. */
@@ -32,12 +34,12 @@ const created = { agents: [] as string[], providers: [] as string[] };
 
 const deps = () => ({ db: h.db, config: h.config, log });
 
-async function upload(conversationId: string, fileName: string, mime: string, payload: Buffer, query = '') {
+async function upload(conversationId: string, fileName: string, mime: string, payload: Buffer, query = '', cookie?: string) {
   return h.app.inject({
     method: 'POST',
     url: `/api/conversations/${conversationId}/attachments?fileName=${encodeURIComponent(fileName)}${query}`,
     payload,
-    headers: { cookie: ownerSession.cookie, 'content-type': mime },
+    headers: { cookie: cookie ?? ownerSession.cookie, 'content-type': mime },
   });
 }
 
@@ -54,7 +56,8 @@ const chatCall = (marker: string) =>
 beforeAll(async () => {
   llm = await startFakeLlm(0, '127.0.0.1');
   h = await startApp({ AI_TRANSCRIPTION_TIMEOUT_MS: '2500', AI_REQUEST_BACKOFF_MS: '0' });
-  admin = client(h, (await userSession(h, 'admin')).cookie);
+  adminSession = await userSession(h, 'admin');
+  admin = client(h, adminSession.cookie);
   ownerSession = await userSession(h, 'user');
   owner = client(h, ownerSession.cookie);
   const openai = await admin.post('/api/admin/ai/providers', {
@@ -78,6 +81,7 @@ beforeAll(async () => {
     defaultModels: { text: 'claude-sonnet-5-5' },
   });
   created.providers.push(openai.id, claude.id);
+  openaiId = openai.id;
   const base = { systemPrompt: 'Você ajuda nos testes de mídia.', params: { max_tokens: 1000, max_tool_iterations: 2 }, isActive: true };
   audioAgent = await admin.post('/api/admin/ai/agents', {
     ...base,
@@ -366,5 +370,72 @@ describe('anexos: PDF, Range e admin', () => {
     }
     const { translateDbError } = await import('../src/errors');
     expect(translateDbError(error)?.message).toContain('só um áudio tem duração');
+  });
+});
+
+describe('orçamento estourado (spec 028, tarefa 059)', () => {
+  it('o áudio novo grava o anexo sem transcrever; "tentar de novo" e fala nova dão 429; o cache toca; o admin passa', async () => {
+    const userSessionB = await userSession(h, 'user');
+    const user = client(h, userSessionB.cookie);
+    const conversation = await newSession(user, audioAgent.id);
+    llm.queue.push({ text: 'Resposta falada.' });
+    await user.post(`/api/conversations/${conversation.id}/messages`, { text: 'fale algo' });
+    await runOnce();
+    const detail = await user.get(`/api/conversations/${conversation.id}`);
+    const answer = detail.messages.find((m: any) => m.role === 'assistant');
+    const question = detail.messages.find((m: any) => m.role === 'user');
+    const cached = await user.post(`/api/conversations/${conversation.id}/messages/${answer.id}/speech`);
+
+    // Orçamento do usuário (e o do próprio admin) estourado: US$ 2 de uso contra US$ 1.
+    await admin.post('/api/admin/ai/prices', {
+      providerId: openaiId,
+      model: 'fake-gpt',
+      inputPricePerMillion: 2,
+      outputPricePerMillion: 2,
+    });
+    const budgets: string[] = [];
+    for (const userId of [userSessionB.id, adminSession.id]) {
+      await h.db.execute(sql`
+        INSERT INTO ai_usage (provider_id, model, user_id, agent_id, purpose, input_tokens)
+        VALUES (${openaiId}, 'fake-gpt', ${userId}, ${audioAgent.id}, 'chat', 1000000)`);
+      budgets.push((await admin.post('/api/admin/ai/budgets', { scope: 'user', userId, monthlyLimit: 1 })).id);
+    }
+    let attachmentId = '';
+    try {
+      const calls = (path: string) => llm.calls.filter((c) => c.path === path).length;
+      const transcriptions = calls('/v1/audio/transcriptions');
+      const speeches = calls('/v1/audio/speech');
+
+      const res = await upload(conversation.id, 'caro.mp3', 'audio/mpeg', Buffer.from('mp3-caro'), '', userSessionB.cookie);
+      expect(res.statusCode, res.body).toBe(200);
+      const attachment = res.json();
+      attachmentId = attachment.id;
+      expect(attachment.transcription).toMatchObject({ status: 'failed', model: 'fake-whisper' });
+      expect(attachment.transcription.error).toContain('Orçamento de IA do mês atingido');
+      await drainTranscriptions(deps());
+      expect(calls('/v1/audio/transcriptions')).toBe(transcriptions);
+
+      const retry = await user.raw('POST', `/api/attachments/${attachment.id}/transcribe`);
+      expect(retry.statusCode).toBe(429);
+      expect(retry.json().error.code).toBe('budget_exceeded');
+
+      // O áudio já gerado continua tocando; fala nova é recusada.
+      expect(await user.post(`/api/conversations/${conversation.id}/messages/${answer.id}/speech`)).toEqual(cached);
+      const speech = await user.raw('POST', `/api/conversations/${conversation.id}/messages/${question.id}/speech`);
+      expect(speech.statusCode).toBe(429);
+      expect(speech.json().error.code).toBe('budget_exceeded');
+      expect(calls('/v1/audio/speech')).toBe(speeches);
+
+      // O admin é isento: o upload dele enfileira a transcrição.
+      const adminConversation = await newSession(admin, audioAgent.id);
+      const mine = await upload(adminConversation.id, 'admin.mp3', 'audio/mpeg', Buffer.from('mp3-admin'), '', adminSession.cookie);
+      expect(mine.json().transcription).toMatchObject({ status: 'pending' });
+    } finally {
+      for (const id of budgets) await admin.del(`/api/admin/ai/budgets/${id}`);
+    }
+    // Com orçamento de novo, o "tentar de novo" retoma a transcrição registrada como falha.
+    expect(await user.post(`/api/attachments/${attachmentId}/transcribe`)).toMatchObject({ status: 'pending', error: null });
+    await drainTranscriptions(deps());
+    expect((await user.get(`/api/attachments/${attachmentId}/derivatives`))[0]).toMatchObject({ status: 'done' });
   });
 });

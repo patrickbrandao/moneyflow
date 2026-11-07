@@ -6,8 +6,10 @@ import { DATABASE_DIR, migrate } from './migrate';
 declare module 'vitest' {
   export interface ProvidedContext {
     databaseUrl: string;
-    /** Conexão do dono (cria bancos novos para os testes de backup); vazia sem ela. */
+    /** Conexão do dono sem SUPERUSER (moneyflow_owner: migrations, dump e restauração); vazia sem ela. */
     ownerDatabaseUrl: string;
+    /** Conexão do superusuário (cria os bancos novos dos testes de backup, tarefa 054); vazia = usa a do dono. */
+    superDatabaseUrl: string;
   }
 }
 
@@ -18,12 +20,14 @@ export async function setup(project: TestProject) {
   if (external) {
     project.provide('databaseUrl', external);
     project.provide('ownerDatabaseUrl', process.env.MONEYFLOW_TEST_OWNER_URL ?? '');
+    project.provide('superDatabaseUrl', process.env.MONEYFLOW_TEST_SUPER_URL ?? '');
     return;
   }
   if (process.env.MONEYFLOW_TEST_DB === 'local') {
-    const { ownerUrl, appUrl } = await prepareLocalDatabase();
+    const { superUrl, ownerUrl, appUrl } = await prepareLocalDatabase();
     project.provide('databaseUrl', appUrl);
     project.provide('ownerDatabaseUrl', ownerUrl);
+    project.provide('superDatabaseUrl', superUrl);
     return;
   }
   const image = await GenericContainer.fromDockerfile(DATABASE_DIR, 'docker/Dockerfile')
@@ -35,6 +39,7 @@ export async function setup(project: TestProject) {
       POSTGRES_PASSWORD: 'moneyflow',
       POSTGRES_DB: 'moneyflow',
       APP_DB_PASSWORD: 'moneyflow_app',
+      OWNER_DB_PASSWORD: 'moneyflow_owner',
       TZ: 'America/Sao_Paulo',
     })
     .withExposedPorts(5432)
@@ -44,9 +49,11 @@ export async function setup(project: TestProject) {
     .start();
   const host = container.getHost();
   const port = container.getMappedPort(5432);
-  await migrate(`postgres://moneyflow:moneyflow@${host}:${port}/moneyflow`);
+  // As migrations rodam como o dono sem SUPERUSER, criado pelo initdb da imagem (tarefa 054).
+  await migrate(`postgres://moneyflow_owner:moneyflow_owner@${host}:${port}/moneyflow`);
   project.provide('databaseUrl', `postgres://moneyflow_app:moneyflow_app@${host}:${port}/moneyflow`);
-  project.provide('ownerDatabaseUrl', `postgres://moneyflow:moneyflow@${host}:${port}/moneyflow`);
+  project.provide('ownerDatabaseUrl', `postgres://moneyflow_owner:moneyflow_owner@${host}:${port}/moneyflow?sslmode=disable`);
+  project.provide('superDatabaseUrl', `postgres://moneyflow:moneyflow@${host}:${port}/moneyflow`);
 }
 
 export async function teardown() {

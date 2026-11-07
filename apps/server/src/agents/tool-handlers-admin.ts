@@ -43,6 +43,7 @@ import * as audit from '../services/audit';
 import { backupStatus, createDumpZip } from '../services/backup/dump';
 import { backupStamp, exportFullZip, exportResource } from '../services/backup/export';
 import { importBackup, parseBackupUpload } from '../services/backup/import';
+import { backupUnzipLimit } from '../services/backup/unzip';
 import * as caixas from '../services/caixas';
 import * as entityTags from '../services/entity-tags';
 import * as messages from '../services/messages';
@@ -310,7 +311,7 @@ const reportForModel = (report: ImportReport) => ({
 async function importFrom(ctx: ServiceContext, attachmentId: string, dryRun: boolean) {
   ctx.access.assertAdmin();
   const file = await toolAttachment(ctx, attachmentId);
-  const backup = parseBackupUpload(file.content);
+  const backup = parseBackupUpload(file.content, backupUnzipLimit(ctx.config));
   return importBackup(ctx, backup, backup.kind, dryRun);
 }
 

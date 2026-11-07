@@ -386,6 +386,38 @@ describe('limite de execuções por minuto', () => {
   });
 });
 
+describe('limite por minuto com trava (tarefa 060)', () => {
+  it('pedidos simultâneos para agentes diferentes, com limite 2: dois passam e um recebe 429', async () => {
+    const user = await userSession(h);
+    const api = client(h, user.cookie);
+    const agents = [agent];
+    for (let i = 0; i < 2; i += 1) {
+      agents.push(
+        await admin.post('/api/admin/ai/agents', {
+          name: `Agente F14 trava ${i} ${uid()}`,
+          systemPrompt: 'Testes do limite por minuto.',
+          defaultProviderId: provider.id,
+          model: MODEL,
+          params: { max_tokens: 2000, max_tool_iterations: 2 },
+          isActive: true,
+        }),
+      );
+    }
+    await admin.put('/api/admin/settings/ai.runs_per_minute', { value: 2 });
+    try {
+      const results = await Promise.all(agents.map((a, i) => api.raw('POST', `/api/agents/${a.id}/messages`, { text: `simultâneo ${i}` })));
+      expect(results.map((r) => r.statusCode).sort()).toEqual([200, 200, 429]);
+      expect(results.find((r) => r.statusCode === 429)!.json().error.code).toBe('rate_limited');
+      const runs = await h.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM ai_runs WHERE user_id = ${user.id}`);
+      expect(runs.rows[0]!.n).toBe(2);
+    } finally {
+      await admin.del('/api/admin/settings/ai.runs_per_minute');
+      await drain();
+      for (const a of agents.slice(1)) await admin.patch(`/api/admin/ai/agents/${a.id}`, { isActive: false });
+    }
+  });
+});
+
 describe('painel de uso', () => {
   it('por dia, por modelo (com saúde), por finalidade e as conversas mais caras, com filtros; só admin', async () => {
     const user = await userSession(h);

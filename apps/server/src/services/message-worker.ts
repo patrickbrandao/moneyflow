@@ -30,7 +30,7 @@ import {
   weekStart,
 } from '@moneyflow/shared';
 import { eq, sql } from 'drizzle-orm';
-import { type Actor, loadAccess } from '../authz/access';
+import { type Access, type Actor, loadAccess } from '../authz/access';
 import type { Config } from '../config';
 import { type BudgetAlert, budgetAlerts } from './ai-budgets';
 import { contractMessages, contractNotifications } from './contract-worker';
@@ -529,7 +529,7 @@ export async function produceMessages(db: Database, config: Config, clock: SpClo
   const scopes = new Map<string, Promise<string[]>>();
   let budget: Promise<{ alerts: BudgetAlert[]; admins: Set<string> }> | null = null;
   let queued = 0;
-  let failed = 0;
+  const subscriptionErrors: SubscriptionError[] = [];
   for (const sub of await activeSubscriptions(db)) {
     try {
       if (sub.event_kind === 'ai_budget_alert') {
@@ -542,11 +542,30 @@ export async function produceMessages(db: Database, config: Config, clock: SpClo
       const caixaIds = await applyFilter(db, await scopes.get(sub.destination_id)!, sub.caixa_filter);
       const items = await eventsFor(db, config, sub, caixaIds, clock);
       queued += await enqueue(db, sub.destination_id, sub.id, sub.event_kind, items);
-    } catch {
-      failed += 1;
+    } catch (error) {
+      // Uma assinatura que falha não para as outras; o worker loga cada uma (tarefa 063).
+      subscriptionErrors.push({
+        subscriptionId: sub.id,
+        eventKind: sub.event_kind,
+        error: String((error as Error)?.message ?? error).slice(0, 500),
+      });
     }
   }
-  return { queued, failed };
+  return { queued, subscriptionsFailed: subscriptionErrors.length, subscriptionErrors };
+}
+
+export type SubscriptionError = { subscriptionId: string; eventKind: string; error: string };
+
+type TickLog = { info: (obj: object, msg: string) => void; warn: (obj: object, msg: string) => void };
+
+/**
+ * Log de uma passada do laço de mensagens (worker.ts): o resumo quando algo
+ * aconteceu e um aviso por assinatura que falhou ao gerar as mensagens.
+ */
+export function logMessageTick(log: TickLog, result: { subscriptionErrors: SubscriptionError[] } & Record<string, unknown>) {
+  const { subscriptionErrors, ...summary } = result;
+  for (const error of subscriptionErrors) log.warn(error, 'worker: assinatura de mensagem falhou');
+  if (Object.values(summary).some((value) => typeof value === 'number' && value > 0)) log.info(summary, 'worker: mensagens');
 }
 
 /* ---------------- notificações do sino ---------------- */
@@ -771,7 +790,8 @@ export async function consumeOutbox(db: Database, config: Config, opts: { batch?
 /**
  * Evento de agente (spec 011/013): notifica o usuário no sino e enfileira a
  * mensagem para os destinos que assinam o evento e que esse usuário vê
- * (pessoais dele e das caixas que ele lê). Chamado pelas execuções de agente
+ * (pessoais dele e os de caixa cuja caixa dona ele lê; com caixa no evento,
+ * ela também precisa ser a do destino ou um cartão dela). Chamado pelas execuções de agente
  * na F4; o worker consome a fila como qualquer outra mensagem.
  *
  * `eventKey` identifica o evento de forma determinística (`run:<runId>:seq:<seq>`
@@ -808,14 +828,25 @@ export async function emitAgentEvent(
     },
   ]);
   const subs = await activeSubscriptions(db, [event.kind]);
+  // Destino de caixa só recebe o evento se o usuário da execução lê a caixa dona dele (tarefa 049).
+  let actorAccess: Access | null | undefined;
+  const readsCaixa = async (caixaId: string) => {
+    if (actorAccess === undefined) {
+      const [actor] = await db.select(userColumns).from(users).where(eq(users.id, event.userId));
+      actorAccess = actor?.isActive ? await loadAccess(db, actor as Actor) : null;
+    }
+    return actorAccess?.canRead(caixaId) ?? false;
+  };
   let queued = 0;
   for (const sub of subs) {
-    const scope = await destinationScope(db, sub);
     const personal = sub.owner_user_id === event.userId;
-    // A aprovação pendente sem caixa (tarefa agendada) é do usuário: só os destinos pessoais dele.
-    const sharedCaixa =
-      sub.owner_caixa_id !== null &&
-      (event.caixaId ? scope.includes(event.caixaId) : event.kind !== 'ai_awaiting_approval' && scope.length > 0);
+    let sharedCaixa = false;
+    if (!personal && sub.owner_caixa_id !== null && (await readsCaixa(sub.owner_caixa_id))) {
+      const scope = await destinationScope(db, sub);
+      // A aprovação pendente sem caixa (tarefa agendada) é do usuário: só os destinos pessoais dele.
+      // Sem caixa no evento, o `caixa_filter` da assinatura não se aplica (só restringiria aos cartões da caixa).
+      sharedCaixa = event.caixaId ? scope.includes(event.caixaId) : event.kind !== 'ai_awaiting_approval' && scope.length > 0;
+    }
     if (!personal && !sharedCaixa) continue;
     queued += await enqueue(
       db,

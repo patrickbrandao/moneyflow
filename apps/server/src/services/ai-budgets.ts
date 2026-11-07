@@ -214,7 +214,22 @@ export async function assertRunRate(db: Executor, config: Config, userId: string
   throw new AppError(429, 'rate_limited', t.agents.errors.rateLimited(limit, seconds), undefined, { 'retry-after': String(seconds) });
 }
 
-/** As duas checagens de uma execução nova: limite por minuto e orçamento. */
+/**
+ * O limite por minuto na transação que cria a execução (tarefa 060): advisory
+ * lock por usuário e tipo (sessões ou fluxos) e a contagem depois dele, então
+ * pedidos simultâneos não passam juntos. Todo INSERT em ai_runs passa por aqui
+ * (sendMessage, insertReconcileSession e os disparos das tarefas).
+ */
+export async function lockRunRate(tx: Executor, config: Config, userId: string, isFlow: boolean) {
+  const key = `ai_run_rate:${userId}:${isFlow ? 'flow' : 'chat'}`;
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
+  await assertRunRate(tx, config, userId, isFlow);
+}
+
+/**
+ * As duas checagens de uma execução nova, antes de preparar o resto: limite por
+ * minuto e orçamento. A contagem que vale é a de `lockRunRate`, na transação do INSERT.
+ */
 export async function assertCanStartRun(ctx: ServiceContext, agentId: string, isFlow: boolean) {
   await assertRunRate(ctx.db, ctx.config, ctx.access.actor.id, isFlow);
   await assertBudget(ctx, agentId, isFlow);

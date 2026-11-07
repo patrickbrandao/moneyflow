@@ -196,11 +196,29 @@ function inputLineIds(input: unknown): string[] {
 }
 
 /**
+ * Tools que agem no lote inteiro, em outro lote ou nas receitas: recusadas numa
+ * execução de receita (spec 030). Tool nova de lote ou de receita entra aqui.
+ */
+export const RECIPE_DENIED_TOOLS: ReadonlySet<string> = new Set([
+  'set_statement_import_provisional',
+  'supersede_statement_import',
+  'resolve_superseded_lines',
+  'set_statement_import_balance',
+  'create_reconcile_recipe',
+  'update_reconcile_recipe',
+  'archive_reconcile_recipe',
+  'run_reconcile_recipe',
+]);
+
+/**
  * Escopo da receita de conciliação (spec 030), garantido no servidor: numa
- * execução de receita, as tools de conciliação recusam as linhas fora dele.
+ * execução de receita, as tools de lote e de receita são recusadas e as de
+ * conciliação recusam as linhas fora dele.
  */
 export function assertRecipeScope(ctx: ServiceContext, def: AgentToolDef, input: unknown) {
-  if (!ctx.recipeLineIds || def.category !== 'reconciliation') return;
+  if (!ctx.recipeLineIds) return;
+  if (RECIPE_DENIED_TOOLS.has(def.name)) throw unprocessable(t.agents.recipes.toolOutOfScope, 'tool_out_of_scope');
+  if (def.category !== 'reconciliation') return;
   if (inputLineIds(input).some((lineId) => !ctx.recipeLineIds!.has(lineId))) {
     throw unprocessable(t.agents.recipes.outOfScope, 'line_out_of_scope');
   }

@@ -19,6 +19,13 @@ SET client_min_messages = warning;
 SET row_security = off;
 
 --
+-- Name: public; Type: SCHEMA; Schema: -; Owner: -
+--
+
+-- *not* creating schema, since initdb creates it
+
+
+--
 -- Name: citext; Type: EXTENSION; Schema: -; Owner: -
 --
 
@@ -8610,6 +8617,53 @@ COMMENT ON FUNCTION public.report_entity_totals(p_caixa_ids uuid[], p_from date,
 
 
 --
+-- Name: restore_reset_default_privileges(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.restore_reset_default_privileges() RETURNS void
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog'
+    AS $$
+DECLARE
+  me    oid := (SELECT oid FROM pg_roles WHERE rolname = current_user);
+  r     record;
+  g     record;
+  kw    text;
+  scope text;
+BEGIN
+  FOR r IN SELECT defaclnamespace, defaclobjtype, defaclacl FROM pg_default_acl WHERE defaclrole = me LOOP
+    kw := CASE r.defaclobjtype WHEN 'r' THEN 'TABLES' WHEN 'S' THEN 'SEQUENCES' WHEN 'f' THEN 'FUNCTIONS'
+                               WHEN 'T' THEN 'TYPES' WHEN 'n' THEN 'SCHEMAS' WHEN 'L' THEN 'LARGE OBJECTS' END;
+    scope := CASE WHEN r.defaclnamespace = 0 THEN '' ELSE format('IN SCHEMA %I', r.defaclnamespace::regnamespace) END;
+    FOR g IN SELECT DISTINCT grantee FROM aclexplode(r.defaclacl) WHERE grantee <> me LOOP
+      EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I %s REVOKE ALL ON %s FROM %s', current_user, scope, kw,
+                     CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(g.grantee::regrole::text) END);
+    END LOOP;
+    IF r.defaclnamespace = 0 THEN
+      -- Entrada global: volta ao padrão embutido (o dono com tudo; PUBLIC executa funções e usa tipos).
+      EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT ALL ON %s TO %I', current_user, kw, current_user);
+      IF r.defaclobjtype = 'f' THEN
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT EXECUTE ON FUNCTIONS TO PUBLIC', current_user);
+      ELSIF r.defaclobjtype = 'T' THEN
+        EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I GRANT USAGE ON TYPES TO PUBLIC', current_user);
+      END IF;
+    END IF;
+  END LOOP;
+  IF EXISTS (SELECT FROM pg_default_acl WHERE defaclrole = me) THEN
+    RAISE EXCEPTION 'restore_reset_default_privileges: privilégios padrão de % não zerados', current_user;
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION restore_reset_default_privileges(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.restore_reset_default_privileges() IS 'Restauração do dump (spec 019, tarefa 054): zera os privilégios padrão do papel que chama (o dono) neste banco. Chame só na mesma transação do restore, antes dele (psql --single-transaction com o SQL do pg_restore): os objetos recriados recebem só os GRANTs do dump e os privilégios padrão voltam pelas entradas DEFAULT ACL do dump.';
+
+
+--
 -- Name: set_updated_at(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -9539,7 +9593,7 @@ $$;
 -- Name: FUNCTION telegram_update_seen(p_destination_id uuid, p_update_id bigint); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.telegram_update_seen(p_destination_id uuid, p_update_id bigint) IS 'Marca o update_id do destino como recebido. Devolve false na primeira vez (processe) e true se já tinha sido visto (ignore). Chame na mesma transação que processa a atualização, para uma falha não marcar o que não foi feito.';
+COMMENT ON FUNCTION public.telegram_update_seen(p_destination_id uuid, p_update_id bigint) IS 'Marca o update_id do destino como recebido. Devolve false na primeira vez (processe) e true se já tinha sido visto (ignore). Modelo "marca antes, desfaz no erro" (spec 029, tarefa 064): a aplicação chama em autocommit antes de processar, sem a marca na transação do processamento (que baixa arquivos e responde pela Bot API), e apaga a linha de telegram_updates_seen se o processamento falhar, para o Telegram reentregar. Uma reentrega depois de erro no meio pode repetir parte do já gravado; se o processo cair entre a marca e o fim, o update se perde.';
 
 
 --
@@ -10585,7 +10639,7 @@ COMMENT ON COLUMN public.ai_providers.base_url IS 'URL base da API (nulo = a ofi
 -- Name: COLUMN ai_providers.api_key; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.ai_providers.api_key IS 'SEGREDO: chave da API. moneyflow_app grava mas NÃO lê esta coluna; leitura só por ai_run_provider_credentials, ai_capability_credentials, ai_embedding_credentials e admin_ai_provider_api_key. Nula só com base_url (servidor local sem chave). Nunca vai para o audit_log, respostas da API, logs ou tools de agente. Na edição, campo vazio mantém a atual.';
+COMMENT ON COLUMN public.ai_providers.api_key IS 'SEGREDO: chave da API. moneyflow_app grava mas NÃO lê esta coluna; leitura só por ai_run_provider_credentials, ai_capability_credentials, ai_embedding_credentials, ai_transcription_credentials e admin_ai_provider_api_key. Nula só com base_url (servidor local sem chave). Nunca vai para o audit_log, respostas da API, logs ou tools de agente. Na edição, campo vazio mantém a atual.';
 
 
 --

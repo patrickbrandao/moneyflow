@@ -33,7 +33,7 @@ import {
 } from '../integrations/telegram';
 import { publicBaseUrl } from './ai-requests';
 import { mediaCapabilities, uploadChatAttachment } from './chat-media';
-import { activeSessionId, cancelRun, decideConfirmations, ensureActiveSession, finishSession, sendToAgent } from './conversations';
+import { activeSessionId, cancelRun, decideConfirmations, ensureActiveSession, finishSession, sendToAgent, stopRun } from './conversations';
 import { botOptions, inboundToken } from './messages';
 import { withTx } from './tx';
 import { iso } from './util';
@@ -42,8 +42,13 @@ import { iso } from './util';
  * Telegram de entrada (spec 029).
  *  - Webhook (sem sessão): o segredo do cabeçalho confere por
  *    telegram_webhook_authenticate; o update_id é marcado por
- *    telegram_update_seen (repetido = ignorado; se o processamento falhar, a
- *    marca sai e o Telegram reentrega).
+ *    telegram_update_seen (repetido = ignorado). Marca antes, desfaz no erro:
+ *    a marca vai em autocommit, porque o processamento baixa arquivos e
+ *    responde pela Bot API (nada disso cabe numa transação); se ele lançar, a
+ *    marca sai e o Telegram reentrega. Na reentrega, um anexo gravado antes do
+ *    erro fica órfão e é gravado de novo; a mensagem não entra duas vezes
+ *    (run_active). Se o processo cair no meio, o update se perde (spec 029,
+ *    tarefa 064).
  *  - Pareamento: Minha conta → Telegram gera um código de 8 caracteres (10
  *    min, uso único; só o hash no banco) e `/start <código>` no chat privado
  *    liga o chat ao usuário (telegram_pairing_consume). Só chats privados.
@@ -193,15 +198,29 @@ export async function createPairingCode(ctx: ServiceContext, destinationId: stri
   }
 }
 
-/** Desfaz um pareamento (o meu; o admin, qualquer um). Irreversível. */
+/**
+ * Desfaz um pareamento (o meu; o admin, qualquer um). Irreversível. Na mesma
+ * transação, pede o parar das execuções ativas que vieram desse chat (evento
+ * telegram/origin do destino e do chat, do usuário do pareamento; tarefa 061).
+ */
 export async function revokeLink(ctx: ServiceContext, linkId: string) {
-  const result = await ctx.db.execute<{ user_id: string; revoked_at: unknown }>(
-    sql`SELECT user_id, revoked_at FROM telegram_links WHERE id = ${linkId}`,
+  const result = await ctx.db.execute<{ user_id: string; destination_id: string; chat_id: string; revoked_at: unknown }>(
+    sql`SELECT user_id, destination_id, chat_id::text AS chat_id, revoked_at FROM telegram_links WHERE id = ${linkId}`,
   );
   const row = result.rows[0];
   if (!row || (row.user_id !== ctx.access.actor.id && !ctx.access.isAdmin)) throw notFound();
   if (!row.revoked_at) {
-    await withTx(ctx, (tx) => tx.execute(sql`UPDATE telegram_links SET revoked_at = now() WHERE id = ${linkId} AND revoked_at IS NULL`));
+    await withTx(ctx, async (tx) => {
+      await tx.execute(sql`UPDATE telegram_links SET revoked_at = now() WHERE id = ${linkId} AND revoked_at IS NULL`);
+      const runs = await tx.execute<{ id: string; conversation_id: string }>(sql`
+        SELECT r.id, r.conversation_id FROM ai_runs r
+         WHERE r.user_id = ${row.user_id} AND r.status IN ('queued', 'running', 'awaiting_confirmation')
+           AND EXISTS (SELECT 1 FROM ai_run_events e
+                        WHERE e.run_id = r.id AND e.event_type = 'telegram' AND e.payload ->> 'action' = 'origin'
+                          AND e.payload ->> 'destinationId' = ${row.destination_id} AND e.payload ->> 'chatId' = ${row.chat_id})
+         ORDER BY r.id`);
+      for (const run of runs.rows) await stopRun(tx, run.id, run.conversation_id);
+    });
   }
   const links = await ctx.db.execute<LinkRow>(sql`${LINK_SELECT} WHERE l.id = ${linkId}`);
   return linkDto(links.rows[0]!);
@@ -218,7 +237,9 @@ export async function authenticateWebhook(db: Executor, destinationId: string, s
 
 /**
  * Processa uma atualização do webhook. Repetida (mesmo update_id) é ignorada;
- * se o processamento falhar, a marca é desfeita para o Telegram reentregar.
+ * se o processamento falhar, a marca é desfeita para o Telegram reentregar
+ * (marca antes, desfaz no erro: o COMMENT de telegram_update_seen ainda fala
+ * em "mesma transação" e será alinhado pelo dba; spec 029, tarefa 064).
  */
 export async function handleUpdate(deps: InboundDeps, destinationId: string, update: TelegramUpdate): Promise<'ok' | 'duplicate'> {
   const { db } = deps;
@@ -600,15 +621,41 @@ export async function telegramOrigin(db: Executor, runId: string): Promise<Teleg
   return payload?.destinationId && payload.chatId ? { destinationId: payload.destinationId, chatId: payload.chatId } : null;
 }
 
-/** "digitando…" a cada 4 s enquanto a execução roda; devolve a função que para. */
-export async function startTyping(db: Executor, config: Config, origin: TelegramOrigin): Promise<() => void> {
+/**
+ * O chat de origem ainda pode receber a execução do usuário: o pareamento
+ * (destino, chat, usuário) continua ativo e a entrada do destino, ligada
+ * (tarefa 061). Desfeito o pareamento ou desligada a entrada, nada mais vai
+ * ao chat — nem a resposta, nem os cartões de aprovação, nem o "digitando…".
+ */
+export async function originLive(db: Executor, origin: TelegramOrigin, userId: string): Promise<boolean> {
+  if (!/^[1-9][0-9]{0,18}$/.test(origin.chatId)) return false;
+  const result = await db.execute<{ ok: boolean }>(sql`
+    SELECT EXISTS (
+      SELECT 1 FROM telegram_links l JOIN message_destinations d ON d.id = l.destination_id
+       WHERE l.destination_id = ${origin.destinationId} AND l.chat_id = ${origin.chatId}::bigint AND l.user_id = ${userId}
+         AND l.revoked_at IS NULL AND d.inbound_enabled AND d.is_active AND d.archived_at IS NULL) AS ok`);
+  return Boolean(result.rows[0]?.ok);
+}
+
+/** "digitando…" a cada 4 s enquanto a execução roda e o chat segue pareado; devolve a função que para. */
+export async function startTyping(db: Executor, config: Config, origin: TelegramOrigin, userId: string): Promise<() => void> {
+  if (!(await originLive(db, origin, userId))) return () => {};
   const token = await inboundToken(db, origin.destinationId);
   if (!token) return () => {};
   const opts = botOptions(config);
-  const tick = () => void sendChatAction(opts, token, origin.chatId).catch(() => null);
-  tick();
-  const timer = setInterval(tick, 4_000);
-  return () => clearInterval(timer);
+  let stopped = false;
+  const stop = () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+  const tick = async () => {
+    if (stopped) return;
+    if (!(await originLive(db, origin, userId).catch(() => false))) return stop();
+    if (!stopped) await sendChatAction(opts, token, origin.chatId).catch(() => null);
+  };
+  const timer = setInterval(() => void tick(), 4_000);
+  void sendChatAction(opts, token, origin.chatId).catch(() => null);
+  return stop;
 }
 
 /** Prévia resumida de uma confirmação para o chat (título, resumo, linhas e avisos). */
@@ -636,6 +683,7 @@ export async function deliverRunToTelegram(deps: InboundDeps, runId: string) {
   if (!origin) return;
   const run = await loadRun(db, runId);
   if (!run) return;
+  if (!(await originLive(db, origin, run.user_id))) return;
   const token = await inboundToken(db, origin.destinationId);
   if (!token) return;
   const b = bot(deps, token);

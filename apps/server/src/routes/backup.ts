@@ -9,6 +9,7 @@ import type { Req } from '../http';
 import { backupStatus, createDumpZip, restoreDump } from '../services/backup/dump';
 import { exportFullZip, exportResource, backupStamp as stamp } from '../services/backup/export';
 import { importBackup, parseBackupUpload } from '../services/backup/import';
+import { backupUnzipLimit } from '../services/backup/unzip';
 import { contentDisposition } from './attachments';
 
 /** Gera um arquivo temporário com `produce` e o devolve como download, apagando-o no fim. */
@@ -78,7 +79,7 @@ export async function backupRoutes(app: FastifyInstance) {
     const kind = request.params.kind as BackupKind;
     if (!isBackupKind(kind)) throw notFound();
     const dryRun = request.query.dryRun === '1' || request.query.dryRun === 'true';
-    const file = parseBackupUpload(request.body);
+    const file = parseBackupUpload(request.body, backupUnzipLimit(request.ctx.config));
     const report = await importBackup(request.ctx, file, kind, dryRun);
     request.log.info(
       { kind, dryRun, by: request.ctx.access.actor.username, issues: report.issueCount },

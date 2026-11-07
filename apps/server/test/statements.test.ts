@@ -182,6 +182,23 @@ describe('extratos e conciliação (spec 009)', () => {
     expect(after.lines.find((l: any) => l.fitid === 'OFX2-0006')).toMatchObject({ status: 'new' });
   });
 
+  it('OFX montado (aninhamento profundo e fechamentos sem par) é recusado com 422 e rápido (tarefa 052)', async () => {
+    const viewer = await userSession(h);
+    const evil = Buffer.from(`<OFX>${'<A>'.repeat(3_300_000)}${'</B>'.repeat(2_600_000)}`);
+    const start = performance.now();
+    const res = await upload(viewer.cookie, '/api/statements/inspect?fileName=x.ofx', evil);
+    expect(performance.now() - start).toBeLessThan(3000);
+    expect(res.statusCode, res.body).toBe(422);
+    expect(res.json().error).toMatchObject({ code: 'statement_format', message: expect.stringContaining('aninhamento') });
+    const nfe = await h.app.inject({
+      method: 'POST',
+      url: '/api/title-entry/nfe?fileName=x.xml',
+      payload: Buffer.from(`${'<a>'.repeat(3_300_000)}`),
+      headers: { cookie: (await userSession(h, 'admin')).cookie, 'content-type': 'application/xml' },
+    });
+    expect(nfe.statusCode, nfe.body).toBe(422);
+  });
+
   it('importa CSV com mapeamento salvo por conta', async () => {
     const adminSession = await userSession(h, 'admin');
     const admin = client(h, adminSession.cookie);

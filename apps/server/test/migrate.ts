@@ -28,3 +28,36 @@ export async function migrate(ownerUrl: string) {
     await client.end();
   }
 }
+
+/** O papel dono do banco, sem SUPERUSER (tarefa 054): roda as migrations e o dump/restauração. */
+export const OWNER_ROLE = 'moneyflow_owner';
+
+export function withDatabase(url: string, name: string): string {
+  const u = new URL(url);
+  u.pathname = `/${name}`;
+  return u.toString();
+}
+
+/**
+ * Cria o banco `name` pelo superusuário como faz o initdb (database/docker/initdb/03-owner-role.sh):
+ * dono `moneyflow_owner`, schema public dele e as extensões criadas pelo superusuário (a `vector`
+ * não é trusted). As migrations rodam depois como o dono. Opções de CREATE DATABASE (TEMPLATE…) em `extra`.
+ */
+export async function createOwnedDatabase(superUrl: string, name: string, extra = '') {
+  const admin = new pg.Client({ connectionString: superUrl });
+  await admin.connect();
+  try {
+    await admin.query(`CREATE DATABASE ${name} OWNER ${OWNER_ROLE} ${extra}`);
+  } finally {
+    await admin.end();
+  }
+  if (extra.includes('TEMPLATE')) return;
+  const db = new pg.Client({ connectionString: withDatabase(superUrl, name) });
+  await db.connect();
+  try {
+    await db.query(`ALTER SCHEMA public OWNER TO ${OWNER_ROLE}`);
+    for (const ext of ['vector', 'pg_trgm', 'citext']) await db.query(`CREATE EXTENSION IF NOT EXISTS ${ext}`);
+  } finally {
+    await db.end();
+  }
+}

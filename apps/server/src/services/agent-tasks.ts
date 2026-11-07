@@ -16,7 +16,7 @@ import { appendEvent, insertMessage } from '../agents/store';
 import type { Config } from '../config';
 import type { ServiceContext } from '../context';
 import { AppError, findPgError, forbidden, notFound, translateDbError, unprocessable } from '../errors';
-import { assertRunRate, exceededBudget } from './ai-budgets';
+import { exceededBudget, lockRunRate } from './ai-budgets';
 import { withTx } from './tx';
 import { iso } from './util';
 
@@ -234,7 +234,7 @@ async function startClaimed(tx: Tx, config: Config, row: ClaimRow): Promise<'sta
     return 'skipped';
   }
   try {
-    await assertRunRate(tx, config, row.user_id, true);
+    await lockRunRate(tx, config, row.user_id, true);
   } catch (error) {
     if (error instanceof AppError && error.status === 429) {
       await closeTaskRun(tx, row.task_run_id, 'skipped', 'rate_limited');

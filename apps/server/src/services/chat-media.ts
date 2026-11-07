@@ -20,6 +20,7 @@ import { speak } from '../agents/llm';
 import { pdfPageCount } from '../agents/pdf-text';
 import type { ServiceContext } from '../context';
 import { findPgError, forbidden, notFound, unprocessable } from '../errors';
+import { assertBudget, exceededBudget } from './ai-budgets';
 import { assertReadable, assertUpload, storeAttachment } from './attachments';
 import { assertReadsImages, loadConversation } from './conversations';
 import { withTx } from './tx';
@@ -155,9 +156,21 @@ async function enqueueTranscription(tx: Tx | Executor, attachmentId: string, pro
 }
 
 /**
+ * Com o orçamento estourado (spec 028), a transcrição nem entra na fila: fica
+ * registrada como falha com o motivo, e o "tentar de novo" a retoma quando houver orçamento.
+ */
+async function failTranscription(tx: Tx, attachmentId: string, providerId: string, model: string, conversationId: string, error: string) {
+  await tx.execute(sql`
+    INSERT INTO ai_attachment_derivatives (attachment_id, kind, provider_id, model, conversation_id, status, error)
+    VALUES (${attachmentId}, 'transcription', ${providerId}, ${model}, ${conversationId}, 'failed', ${error.slice(0, 4000)})
+    ON CONFLICT ON CONSTRAINT ai_attachment_derivatives_key DO NOTHING`);
+}
+
+/**
  * Upload de um anexo da conversa: tipo normalizado (a extensão vale quando o
  * navegador não informa), páginas do PDF e duração do áudio gravadas no
- * anexo, e a transcrição enfileirada quando o agente converte áudio.
+ * anexo, e a transcrição enfileirada quando o agente converte áudio (com o
+ * orçamento estourado, o anexo é gravado e a transcrição fica como falha).
  */
 export async function uploadChatAttachment(
   ctx: ServiceContext,
@@ -172,10 +185,24 @@ export async function uploadChatAttachment(
   const durationMs = audio ? (parseDurationMs(file.durationMs) ?? (mime === 'audio/wav' ? wavDurationMs(content) : null)) : null;
   const pageCount = isPdfMime(mime) ? await pdfPageCount(content) : null;
   const transcriber = audio ? await inferenceCredentials(ctx.db, conversation.agent_id, 'transcription', ctx.access.actor.id) : null;
+  const overBudget = transcriber?.model
+    ? await exceededBudget(ctx.db, ctx.access.actor, conversation.agent_id, conversation.purpose !== 'chat')
+    : null;
 
   const attachmentId = await withTx(ctx, async (tx) => {
     const id = await storeAttachment(tx, ctx, { name: file.name, mime, content, durationMs, pageCount });
-    if (transcriber?.model) await enqueueTranscription(tx, id, transcriber.providerId, transcriber.model, conversationId);
+    if (transcriber?.model && overBudget) {
+      await failTranscription(
+        tx,
+        id,
+        transcriber.providerId,
+        transcriber.model,
+        conversationId,
+        t.agents.errors.budgetExceeded(overBudget),
+      );
+    } else if (transcriber?.model) {
+      await enqueueTranscription(tx, id, transcriber.providerId, transcriber.model, conversationId);
+    }
     return id;
   });
   return (await chatAttachments(ctx.db, [attachmentId]))[0]!;
@@ -243,6 +270,8 @@ export async function retryTranscription(ctx: ServiceContext, attachmentId: stri
   if (!isAudioMime(file.rows[0].mime_type)) throw unprocessable(t.agents.errors.notAudio, 'not_audio');
   const creds = await inferenceCredentials(ctx.db, conversation.agent_id, 'transcription', ctx.access.actor.id);
   if (!creds?.model) throw unprocessable(t.agents.errors.agentNoTranscription, 'agent_no_transcription');
+  // Orçamento estourado (spec 028): 429 budget_exceeded, nada volta à fila.
+  await assertBudget(ctx, conversation.agent_id, conversation.purpose !== 'chat');
   const model = creds.model;
   return withTx(ctx, async (tx) => {
     const queued = await enqueueTranscription(tx, attachmentId, creds.providerId, model, conversationId);
@@ -293,6 +322,8 @@ export async function messageSpeech(ctx: ServiceContext, conversationId: string,
       continue;
     }
     if (readOnly) throw forbidden(t.agents.errors.readOnly);
+    // Fala nova é custo (spec 028): com o orçamento estourado, 429; o que já foi gerado continua tocando.
+    await assertBudget(ctx, conversation.agent_id, conversation.purpose !== 'chat');
     const audio = await speak(
       creds,
       model,

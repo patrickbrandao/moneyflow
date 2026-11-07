@@ -84,7 +84,7 @@ type ConversationRow = {
  */
 export async function processRun(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
   const origin = await telegramOrigin(deps.db, claimed.id).catch(() => null);
-  const stopTyping = origin ? await startTyping(deps.db, deps.config, origin).catch(() => () => {}) : () => {};
+  const stopTyping = origin ? await startTyping(deps.db, deps.config, origin, claimed.user_id).catch(() => () => {}) : () => {};
   try {
     await runLoop(deps, claimed);
   } finally {
@@ -479,7 +479,8 @@ async function resolvePending(
     return 'awaiting';
   }
 
-  // Escritas sem confirmação que já tinham começado antes de uma queda não são repetidas.
+  // Escritas (aprovadas ou sem confirmação) que já tinham começado antes de uma queda não são repetidas:
+  // o tool_start é gravado logo antes da execução, e o resultado só depois de todas (tarefa 053).
   const started = await db.execute<{ tool_use_id: string }>(sql`
     SELECT payload ->> 'toolUseId' AS tool_use_id FROM ai_run_events WHERE run_id = ${runId} AND event_type = 'tool_start'`);
   const alreadyStarted = new Set(started.rows.map((r) => r.tool_use_id));
@@ -504,7 +505,7 @@ async function resolvePending(
       const ready = prepared.get(use.id);
       outcome = ready ?? errorOutcome(t.agents.errors.secretNeedsConsole);
       announce = !ready;
-    } else if (!confirmation && tool.write && alreadyStarted.has(use.id))
+    } else if (tool.write && alreadyStarted.has(use.id))
       outcome = errorOutcome('A execução foi interrompida durante esta ação; confira o resultado antes de repetir.');
     else {
       await appendEvent(db, runId, { type: 'tool_start', toolUseId: use.id, name: use.name, title: tool.title });
