@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: alta
 criada: 2026-11-21
 commit:
@@ -86,4 +86,13 @@ Nada foi executado. O comportamento do formulário foi lido no código (`TitleFo
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: com `scope = 'following'`, o `updateTitle` copiava para as seguintes todo campo presente no corpo (valor e notas inclusive) e o formulário manda o corpo inteiro. Os dois testes novos falham no código anterior (o reajuste da 7ª em diante voltava a 1.000 e as notas eram trocadas).
+
 ## Resolução (executor)
+
+- `apps/server/src/services/titles.ts`: o "esta e as próximas" do `updateTitle` passou para `applyToFollowing`. Só o que mudou em relação à ocorrência editada (descrição, categoria, valor, observações, entidade sem espelho e a conta prevista) vai para as seguintes da mesma caixa em aberto; as de mês fechado (na caixa do título ou na do espelho, por `closedMonths` de `series.ts`) ficam, como no "Editar série". Um vencimento noutro dia (dia do mês; na semanal, o dia da semana) muda a âncora da regra e move as seguintes para `occurrenceDueDate` com o dia novo, levando o espelho junto (`syncMirror`); no mesmo dia (outro mês, por exemplo), só esta muda. Mudar o dia exige escrita na caixa da série. A edição pega a trava da série (`MATERIALIZE_LOCK`) antes dos títulos, na ordem do worker e do "Editar série".
+- `apps/web/src/components/titles/TitleFormModal.tsx` e `packages/shared/src/i18n/pt-BR.ts` (`title.scopeFollowingHint`): com "Este e os próximos", a dica diz o que vai para as seguintes.
+- `docs/005-titulos-baixas-e-movimentos.md`: a regra do "esta e as próximas" do formulário.
+- Decisão: não deleguei ao `planSeriesChange` (a solução 2): ele trabalha só no lado original e não trata notas nem entidade, e a edição pelo lado espelho precisa continuar mudando só as ocorrências daquela caixa. A regra ficou a mesma (só o que mudou, puladas por baixa e mês fechado, a trava e o dia da série). O formulário continua mandando o corpo inteiro; o servidor compara.
+- Testes: `apps/server/test/titles.test.ts`, `describe('esta e as próximas no formulário do título (tarefa 075)')` — trocar só a categoria preserva o reajuste e as notas das seguintes, e as notas novas vão quando mudam; valor e dia novos vão para as seguintes em aberto, sem a de mês fechado nem a com baixa, com o espelho junto, a âncora da regra e a próxima ocorrência materializada no dia novo.
+- Verificação: `pnpm verify:quick` (nível rápido).

@@ -261,6 +261,108 @@ describe('séries (recorrência e parcelamento)', () => {
   });
 });
 
+describe('esta e as próximas no formulário do título (tarefa 075)', () => {
+  type Row = { id: string; occurrence: number; amountCents: number; categoryId: string; notes: string | null; dueDate: string };
+  const seriesOf = async (c: ReturnType<typeof client>, caixaId: string, ruleId: string) =>
+    ((await c.get(`/api/titles?caixaId=${caixaId}&limit=1000`)) as (Row & { recurrenceRuleId: string })[])
+      .filter((t) => t.recurrenceRuleId === ruleId)
+      .sort((a, b) => a.occurrence - b.occurrence);
+  /** O corpo que o formulário manda: todos os campos, mudados ou não. */
+  const formBody = (t: Row & { description: string; competenceDate: string; entityId: string }, change: Record<string, unknown>) => ({
+    description: t.description,
+    categoryId: t.categoryId,
+    amountCents: t.amountCents,
+    dueDate: t.dueDate,
+    competenceDate: t.competenceDate,
+    notes: t.notes,
+    entityId: t.entityId,
+    scope: 'following',
+    ...change,
+  });
+
+  it('só o que mudou vai para as seguintes; o reajuste e as notas delas ficam', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const first = await admin.post('/api/titles', {
+      ...base(s),
+      entityId: s.supplier.id,
+      mirrorCaixaId: null,
+      description: 'Aluguel',
+      dueDate: today,
+      competenceDate: today,
+      amountCents: 100_000,
+      // Com fim: os testes seguintes do arquivo contam o que o worker cria.
+      series: { kind: 'recurrence', frequency: 'monthly', endsOn: addMonths(today, 12) },
+    });
+    const ruleId = first.recurrenceRuleId;
+    const all = await seriesOf(admin, s.caixaA.id, ruleId);
+    expect(all).toHaveLength(13);
+    // Reajuste a partir da 7ª e uma nota própria na 5ª.
+    await admin.patch(`/api/series/${ruleId}`, { amountCents: 110_000, effectiveOn: all[6]!.dueDate });
+    await admin.patch(`/api/titles/${all[4]!.id}`, { notes: 'nota da 5ª', scope: 'this' });
+
+    // Na 3ª, troca só a categoria com "Este e os próximos" (corpo completo do formulário).
+    const other = await admin.post('/api/categories', { kind: 'expense', name: `Moradia ${s.tag}`, colorSlot: 2 });
+    const third = await admin.get(`/api/titles/${all[2]!.id}`);
+    await admin.patch(`/api/titles/${third.id}`, formBody(third, { categoryId: other.id }));
+    const after = await seriesOf(admin, s.caixaA.id, ruleId);
+    expect(after.slice(2).every((t) => t.categoryId === other.id)).toBe(true);
+    expect(after.slice(0, 2).every((t) => t.categoryId === s.expense.id)).toBe(true);
+    expect(after.map((t) => t.amountCents)).toEqual([...Array(6).fill(100_000), ...Array(7).fill(110_000)]);
+    expect(after[4]!.notes).toBe('nota da 5ª');
+
+    // Mudar as notas com "Este e os próximos" leva as notas novas.
+    const fourth = await admin.get(`/api/titles/${after[3]!.id}`);
+    await admin.patch(`/api/titles/${fourth.id}`, formBody(fourth, { notes: 'reajuste combinado' }));
+    const notes = (await seriesOf(admin, s.caixaA.id, ruleId)).map((t) => t.notes);
+    expect(notes.slice(3).every((n) => n === 'reajuste combinado')).toBe(true);
+    expect(notes.slice(0, 3).every((n) => n === null)).toBe(true);
+  });
+
+  it('valor e dia novos vão para as seguintes em aberto, sem as de mês fechado nem as com baixa', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const start = `${addMonths(todayIso(), -3).slice(0, 7)}-10`;
+    const first = await admin.post('/api/titles', {
+      ...base(s),
+      description: 'Condomínio',
+      dueDate: start,
+      competenceDate: start,
+      amountCents: 50_000,
+      series: { kind: 'recurrence', frequency: 'monthly' },
+    });
+    expect(first.mirror).not.toBeNull();
+    const ruleId = first.recurrenceRuleId;
+    const all = await seriesOf(admin, s.caixaA.id, ruleId);
+    // A 3ª fica num mês fechado; a 5ª tem baixa.
+    await admin.post(`/api/caixas/${s.caixaA.id}/closings`, { month: `${all[2]!.dueDate.slice(0, 7)}-01`, force: true });
+    await admin.post(`/api/titles/${all[4]!.id}/settlements`, { settledOn: todayIso(), amountCents: 1_000, financialAccountId: null });
+
+    const second = await admin.get(`/api/titles/${all[1]!.id}`);
+    await admin.patch(`/api/titles/${second.id}`, formBody(second, { amountCents: 55_000, dueDate: `${second.dueDate.slice(0, 7)}-20` }));
+    const after = await seriesOf(admin, s.caixaA.id, ruleId);
+    const day = (t: Row) => t.dueDate.slice(8);
+    expect(after[0]).toMatchObject({ amountCents: 50_000, dueDate: start });
+    expect(after[1]).toMatchObject({ amountCents: 55_000 });
+    expect(day(after[1]!)).toBe('20');
+    // Mês fechado e baixa: ficam como estavam.
+    expect(after[2]).toMatchObject({ amountCents: 50_000, dueDate: all[2]!.dueDate });
+    expect(after[4]).toMatchObject({ amountCents: 50_000, dueDate: all[4]!.dueDate });
+    const moved = after.filter((_, i) => i === 3 || i >= 5);
+    expect(moved.every((t) => t.amountCents === 55_000 && day(t) === '20')).toBe(true);
+    // O espelho acompanha, e a série passa a vencer no dia 20 (as novas ocorrências também).
+    const mirrors = await seriesOf(admin, s.caixaB.id, ruleId);
+    expect(mirrors.map((m) => [m.amountCents, m.dueDate])).toEqual(after.map((t) => [t.amountCents, t.dueDate]));
+    expect((await admin.get(`/api/series/${ruleId}`)).anchorDay).toBe(20);
+    await materializeAll(h.db, addMonths(todayIso(), 14));
+    const last = (await seriesOf(admin, s.caixaA.id, ruleId)).at(-1)!;
+    expect(day(last)).toBe('20');
+    // Termina na última: os testes seguintes do arquivo contam o que o worker cria.
+    await admin.post(`/api/series/${ruleId}/end`, { endsOn: last.dueDate });
+  });
+});
+
 describe('encerrar série (spec 005)', () => {
   type Row = { id: string; occurrence: number; status: string; recurrenceRuleId: string; dueDate: string };
   const seriesOf = async (c: ReturnType<typeof client>, caixaId: string, ruleId: string) =>

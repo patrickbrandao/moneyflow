@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -60,4 +60,13 @@ Nada foi executado. Supõe que mudar o vencimento da fatura é sempre pela tela 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `updateTitle` não olhava `cardInvoiceId` e o `canReschedule` do calendário valia para o título de fatura.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/titles.ts`: `updateTitle` recusa mudar valor, vencimento ou competência de título de fatura (422 `card_invoice_title_locked`, `t.errors.cardInvoiceTitleLocked`); o corpo com os mesmos valores (o do formulário) continua passando.
+- `apps/server/src/services/calendar.ts`: `canReschedule` falso para o título de fatura (o `isMovable` do calendário já depende dele).
+- `apps/web/src/components/titles/TitleFormModal.tsx`: a competência também fica só leitura no título de fatura.
+- `docs/007-cartao-de-credito.md` e `docs/012-calendario.md`: a trava.
+- Teste: `apps/server/test/operation.test.ts`, no `describe('calendário (spec 012)')`, "o título de fatura não se arrasta nem muda de vencimento pelo PATCH (tarefa 132)" (os dois lados sem `canReschedule`, 422 no vencimento, no valor e na competência, descrição editável).
+- Verificação: `pnpm verify:quick` (nível rápido).

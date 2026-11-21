@@ -395,4 +395,51 @@ describe('calendário (spec 012)', () => {
     expect(days.map((d: any) => d.projectedCents)).toEqual([100_000, 130_000, 130_000]);
     expect((await admin.raw('GET', `/api/calendar?from=2030-01-01&to=2035-01-01`)).statusCode).toBe(422);
   });
+
+  it('o título de fatura não se arrasta nem muda de vencimento pelo PATCH (tarefa 132)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const issuer = await admin.post('/api/entities', { kind: 'company', name: `Emissor ${s.tag}` });
+    const card = await admin.post('/api/caixas', {
+      name: `Cartão ${s.tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: s.caixaA.id,
+      creditLimitCents: 500_000,
+      closingDay: 3,
+      dueDay: 10,
+      cardLast4: '4321',
+    });
+    await admin.post(`/api/cards/${card.id}/purchases`, {
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      purchasedOn: '2026-09-12',
+      description: 'Material',
+      amountCents: 10_000,
+    });
+    const oct = (await admin.get(`/api/cards/${card.id}`)).invoices.find((i: any) => i.referenceMonth === '2026-10-01');
+    const closed = await admin.post(`/api/card-invoices/${oct.id}/close`, {});
+    const payerTitle = closed.titles.find((tr: any) => tr.caixaId === s.caixaA.id);
+    const cardTitle = closed.titles.find((tr: any) => tr.caixaId === card.id);
+
+    const items = await admin.get(`/api/calendar?from=2026-10-01&to=2026-10-31&caixaIds=${s.caixaA.id},${card.id}`);
+    const invoiceItems = items.filter((i: any) => i.titleId === payerTitle.id || i.titleId === cardTitle.id);
+    expect(invoiceItems).toHaveLength(2);
+    expect(invoiceItems.every((i: any) => i.canWrite && !i.canReschedule)).toBe(true);
+
+    for (const body of [{ dueDate: '2026-10-15' }, { amountCents: 9_000 }, { competenceDate: '2026-11-01' }]) {
+      const res = await admin.raw('PATCH', `/api/titles/${payerTitle.id}`, body);
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error.code).toBe('card_invoice_title_locked');
+    }
+    await admin.raw('PATCH', `/api/titles/${cardTitle.id}`, { dueDate: '2026-10-15' }).then((r) => expect(r.statusCode).toBe(422));
+    // O resto continua editável, e o corpo do formulário (valor e datas iguais) passa.
+    const edited = await admin.patch(`/api/titles/${payerTitle.id}`, {
+      description: 'Fatura do cartão',
+      dueDate: payerTitle.dueDate,
+      competenceDate: payerTitle.competenceDate,
+    });
+    expect(edited).toMatchObject({ description: 'Fatura do cartão', dueDate: oct.dueDate });
+    expect((await admin.get(`/api/titles/${cardTitle.id}`)).dueDate).toBe(oct.dueDate);
+  });
 });

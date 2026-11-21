@@ -438,6 +438,8 @@ export const ptBR = {
     endsOn: 'Termina em',
     scopeThis: 'Só este',
     scopeFollowing: 'Este e os próximos',
+    scopeFollowingHint:
+      'Só o que você mudar aqui vai para os próximos em aberto e sem baixa (os de mês fechado ficam). Um vencimento noutro dia muda o dia da série; o valor e as observações de cada um ficam se você não os mudar.',
     endSeries: 'Encerrar série…',
     endSeriesTitle: 'Encerrar ou estender a série',
     endSeriesHint:
