@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addMonths, diffDays, formatDate, isIsoDate, isoWeekday, parseDateBR, todayIso } from '../src/dates';
+import { addMonths, diffDays, formatDate, isIsoDate, isoWeekday, localDateOf, parseDateBR, todayIso } from '../src/dates';
 import { formatAccounting, formatBRL, formatSignedBRL, parseBRL } from '../src/money';
 import { occurrenceCompetenceDate, occurrenceDueDate, pendingOccurrences, type RecurrenceRule } from '../src/recurrence';
 
@@ -44,6 +44,13 @@ describe('datas', () => {
   it('hoje é no fuso de São Paulo', () => {
     // 02:00 UTC de 11/10 ainda é 10/10 em São Paulo (UTC−3)
     expect(todayIso(new Date('2026-10-11T02:00:00Z'))).toBe('2026-10-10');
+  });
+  it('a data de um instante é a de São Paulo, não a do ISO em UTC (tarefa 178)', () => {
+    // NF-e emitida às 22h30 de 31/10 (−03:00): a API devolve 01:30Z de 01/11.
+    expect(localDateOf('2026-11-01T01:30:00.000Z')).toBe('2026-10-31');
+    expect(localDateOf('2026-10-31T22:30:00-03:00')).toBe('2026-10-31');
+    expect(localDateOf(new Date('2026-11-01T03:00:00Z'))).toBe('2026-11-01');
+    expect(localDateOf('não é data')).toBe('');
   });
   it('dia da semana ISO e diferença', () => {
     expect(isoWeekday('2026-10-12')).toBe(1);

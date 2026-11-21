@@ -5,6 +5,7 @@ import {
   type EntityReportData,
   formatDate,
   type ProjectionReportData,
+  projectionExport,
   type ReportBasis,
   t,
   todayIso,
@@ -27,7 +28,7 @@ import {
 import { PeriodPicker } from '../components/PeriodPicker';
 import { CategoryReport, categoryExport } from '../components/reports/CategoryReport';
 import { EntityReport, entityExport } from '../components/reports/EntityReport';
-import { ProjectionReport, projectionExport } from '../components/reports/ProjectionReport';
+import { ProjectionReport } from '../components/reports/ProjectionReport';
 import { Skel, Tabs } from '../components/ui';
 import { useApi } from '../lib/hooks';
 import { useSetParams } from '../lib/params';

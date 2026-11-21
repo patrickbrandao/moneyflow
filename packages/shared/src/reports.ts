@@ -1,4 +1,6 @@
-import type { CategoryTotalLine, EntityTotalLine } from './types';
+import { type ExportTable, exportFileName } from './export';
+import { ptBR as t } from './i18n/pt-BR';
+import type { CategoryTotalLine, EntityTotalLine, ProjectionLine, ProjectionReportData } from './types';
 
 /*
  * Montagem dos relatórios a partir das linhas do banco (spec 014): árvore
@@ -200,4 +202,58 @@ export function buildEntityRows(lines: EntityTotalLine[], scope: ReportScope): E
   return [...rows.values()].sort(
     (a, b) => b.outflowCents + b.inflowCents - (a.outflowCents + a.inflowCents) || a.entityName.localeCompare(b.entityName),
   );
+}
+
+/* ---------------- fluxo projetado ---------------- */
+
+export type ProjectionMetric = { key: keyof ProjectionLine; label: string; sign?: 1 | -1; bold?: boolean };
+
+/**
+ * As linhas do fluxo projetado. A pagar e vencidos a pagar vêm positivos da
+ * API e são saídas (`sign: -1`): aparecem negativos na tela e na exportação
+ * (spec 014), para que saldo + agendado + a receber + a pagar = projetado.
+ */
+export const PROJECTION_METRICS: ProjectionMetric[] = [
+  { key: 'balanceTodayCents', label: t.reports.balanceToday },
+  { key: 'scheduledMovementsCents', label: t.reports.scheduled },
+  { key: 'receivableCents', label: t.reports.receivable },
+  { key: 'payableCents', label: t.reports.payable, sign: -1 },
+  { key: 'overdueReceivableCents', label: t.reports.overdueReceivable },
+  { key: 'overduePayableCents', label: t.reports.overduePayable, sign: -1 },
+  { key: 'projectedCents', label: t.reports.projected, bold: true },
+];
+
+/** O valor de uma linha do fluxo projetado com o sinal da tela (as saídas negativas). */
+export const projectionValue = (line: ProjectionLine | undefined, metric: ProjectionMetric): number => {
+  const raw = Number(line?.[metric.key] ?? 0);
+  // `|| 0`: o zero de uma saída não vira −0 (o CSV escreveria "-0,00").
+  return metric.sign === -1 ? -raw || 0 : raw;
+};
+
+/**
+ * Exportação do fluxo projetado (CSV/PDF) com os mesmos sinais da tela (tarefa
+ * 179): o PDF desenha a pagar entre parênteses, em vermelho escuro, e o CSV
+ * leva o número negativo para a planilha somar.
+ */
+export function projectionExport(data: ProjectionReportData, subtitle: string[]): ExportTable {
+  return {
+    fileName: exportFileName('fluxo-projetado', data.today),
+    title: t.reports.tabs.projection!,
+    subtitle,
+    columns: [
+      { key: 'caixa', label: t.reports.caixas },
+      { key: 'account', label: t.reports.account },
+      { key: 'horizon', label: t.reports.horizonDays, type: 'int' },
+      { key: 'until', label: t.reports.until, type: 'date' },
+      ...PROJECTION_METRICS.map((m) => ({ key: m.key, label: m.label, type: 'money' as const })),
+    ],
+    rows: data.lines.map((l) => ({
+      caixa: l.caixaName,
+      account: l.accountName ?? '',
+      horizon: l.horizonDays,
+      until: l.until,
+      ...Object.fromEntries(PROJECTION_METRICS.map((m) => [m.key, projectionValue(l, m)])),
+    })),
+    boldRows: data.lines.flatMap((l, i) => (l.financialAccountId ? [] : [i])),
+  };
 }

@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -64,5 +64,9 @@ Hoje a função de exportação não tem teste. Mover `projectionExport` (pura) 
 Nada foi executado. Supus que a API devolve `payableCents` e `overduePayableCents` positivos, como diz o comentário de `:78`.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: a tela invertia o sinal de "A pagar" e "Vencidos a pagar" (`sign: -1`), e `projectionExport` exportava o valor cru.
 
 ## Resolução (executor)
+As métricas do fluxo projetado e a exportação foram para o shared (`packages/shared/src/reports.ts`: `PROJECTION_METRICS`, `projectionValue` e `projectionExport`), e a tela (`ProjectionReport.tsx`) e a exportação usam o mesmo `projectionValue`: no PDF, a pagar e vencidos a pagar saem entre parênteses e em vermelho escuro; no CSV, negativos, e saldo + agendado + a receber + a pagar = projetado. O zero de uma saída não vira −0. A spec 014 já dizia isso; o código passou a seguir.
+
+Testes: `packages/shared/test/projection.test.ts` (sinais exportados, a soma das colunas igual ao projetado, colunas de dinheiro e destaque da linha da caixa). Verificação: `pnpm verify:quick`.

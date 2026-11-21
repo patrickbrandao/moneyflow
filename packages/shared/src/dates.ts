@@ -86,6 +86,16 @@ export function parseDateBR(value: string): string | null {
   return isIsoDate(iso) ? iso : null;
 }
 
+/**
+ * Instante (ISO com hora, como um timestamptz que a API devolve em UTC) → a
+ * data 'YYYY-MM-DD' dele em São Paulo; '' se inválido. Cortar o ISO em UTC
+ * (`slice(0, 10)`) põe o que aconteceu depois das 21h no dia seguinte (tarefa 178).
+ */
+export function localDateOf(value: string | Date): string {
+  const date = typeof value === 'string' ? new Date(value) : value;
+  return Number.isNaN(date.getTime()) ? '' : todayIso(date);
+}
+
 /** Instante (ISO com hora) → 'dd/mm/aaaa hh:mm' em São Paulo. */
 export function formatDateTime(value: string | Date | null | undefined): string {
   if (!value) return '';
