@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: em-andamento
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -89,4 +89,36 @@ Nada foi executado. A conclusão sobre o plano vem da forma da visão (LATERAL c
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado: `title_balances` soma as baixas de todo título por um LATERAL, e `open_cents > 0` só é avaliado depois dele. `caixa_daily_balances` e `report_cash_projection` filtravam só por `open_cents > 0`, sem `status`. As invariantes do banco são imediatas:
+- `titles_validate_status` no INSERT/UPDATE do título;
+- `settlements_refresh_title_status` em cada baixa, estorno ou exclusão;
+- `titles_cancel_settled_check`.
+
+Por elas, aberto = nenhuma baixa ativa, pago = baixado igual ao valor e cancelado = nenhuma baixa ativa. Então `open_cents > 0` ⇔ `status IN ('open','partial')`.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+Migration `database/migrations/0057_balance_queries.sql` (grupo dos saldos); teste `database/tests/0057_balance_queries.sql`.
+
+- `title_balances`: só o parcial soma as baixas ativas (a subconsulta fica só no ramo `partial`). Aberto vale o valor inteiro, pago vale o valor baixado e cancelado vale 0, pelo status. Colunas e tipos não mudam.
+  - Com isso, todo filtro `open_cents > 0` deixa de consultar `settlements` para cada título pago ou cancelado, mesmo antes da mudança da aplicação.
+  - O teste compara a visão com a soma direta das baixas ativas para título aberto, parcial com estorno, pago depois de um estorno, cancelado com baixa estornada e mudança de valor (parcial → pago → parcial).
+- `caixa_daily_balances`: o previsto passa a filtrar `b.status IN ('open', 'partial') AND b.due_date <= p_to` (indexável por `titles_caixa_id_status_due_date_idx`), além de `open_cents > 0`. Mesmo resultado (o teste tem pago, cancelado, arquivado e vencido).
+- `report_cash_projection`: `open_items` com `b.status IN ('open', 'partial') AND b.due_date <= hoje + maior horizonte`.
+- Decisão: não materializar `titles.settled_cents` (passo 2). A visão pelo status já elimina as consultas dos títulos pagos, sem coluna nova nem escrita a mais. Fica para se o volume de parciais pedir.
+- `docs/016` (Saldos) atualizada.
+
+### Pendente na aplicação
+
+1. Acrescentar `AND tb.status IN ('open', 'partial')` nas consultas sobre `title_balances` que buscam saldo em aberto ou vencido:
+   - `apps/server/src/services/caixas.ts:48-51`: as quatro subconsultas de `summarySql`. Nas de a pagar e a receber, o filtro troca a leitura de todos os títulos da caixa pelo índice `titles_caixa_id_status_due_date_idx`.
+   - `titles.ts:115-120`: situações `unpaid` e `overdue`.
+   - `message-worker.ts:727-728`: resumo diário.
+2. Em `contracts.ts:183`, trocar `x.status <> 'canceled'` por `x.status IN ('open', 'partial')`, se o LATERAL da próxima ocorrência quer mesmo só as em aberto.
+3. Conferir que `rg "open_cents > 0" apps/server/src` não acha consulta sem o status.
+4. Teste em `apps/server/test/titles.test.ts`: os totais de `GET /api/caixas` e `GET /api/overview` com títulos pagos, parciais, cancelados, arquivados e com baixa estornada.
+5. Esta parte não precisa de `db:pull` (as colunas não mudam); o da 0057 vale para as outras tarefas do grupo.

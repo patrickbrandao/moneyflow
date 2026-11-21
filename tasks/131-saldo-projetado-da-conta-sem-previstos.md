@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: em-andamento
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -60,4 +60,38 @@ Nada foi executado. Ocorrências sem conta prevista continuam fora da projeção
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado: `account_daily_balances(conta, de, até)` só somava movimentos e devolvia `(day, balance_cents)`. Desde a 0052, `titles.planned_account_id` (com o índice `titles_planned_account_open_idx`) tem o dado para projetar por conta.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+Migration `database/migrations/0057_balance_queries.sql` (grupo dos saldos); teste `database/tests/0057_balance_queries.sql`.
+
+- `account_daily_balances(conta, de, até, hoje DEFAULT hoje em America/Sao_Paulo)` devolve `(day, balance_cents, scheduled_cents, projected_cents)`:
+  - `balance_cents` = o realizado, como antes. O nome foi mantido para a chamada atual da aplicação continuar valendo.
+  - `scheduled_cents` = a partir de hoje, o saldo aberto acumulado dos títulos não arquivados, `open`/`partial`, com `planned_account_id = conta` (+ receber, − pagar). Os vencidos entram em hoje e os de fatura aberta ficam fora, como na caixa. Antes de hoje, 0.
+  - `projected_cents` = balance + scheduled, nulo antes da abertura.
+- A versão de três argumentos saiu (DROP + CREATE). A chamada com três argumentos resolve para a nova pelo padrão de `p_today`; `p_today` nulo dá `22023`.
+- Títulos sem conta prevista continuam só no previsto da caixa.
+- Testes:
+  - previsto dos títulos com a conta prevista (pago, cancelado, arquivado, sem conta e o do cofre fora; vencido em hoje);
+  - previsto anterior ao período entrando no primeiro dia;
+  - cofre;
+  - nulo antes da abertura;
+  - chamada com três argumentos;
+  - conta inexistente;
+  - `22023`;
+  - privilégios.
+- `tests/0017_calendar.sql` ajustado à assinatura nova. `docs/016` (Calendário) atualizada.
+
+### Pendente na aplicação
+
+1. `pnpm db:pull`, se o schema gerado lista as funções.
+2. `apps/server/src/services/calendar.ts:53-64` (`dailyBalances` com `accountId`):
+   - Consultar `SELECT day, balance_cents, scheduled_cents, projected_cents FROM account_daily_balances(${accountId}::uuid, ${from}::date, ${to}::date, ${todayIso()}::date)`.
+   - Mapear `realizedCents = balance_cents`, `scheduledCents = scheduled_cents` e `projectedCents = projected_cents`.
+3. Teste em `apps/server/test/operation.test.ts` (`describe('calendário (spec 012)')`): conta com saldo 1.000 e uma ocorrência prevista nela de 300 vencendo em 10 dias. O dia do vencimento cai para 700, e `scheduledCents` = −300 a partir dele.
+4. `docs/012`: o projetado por conta vem dos títulos com a conta prevista; os sem conta prevista só entram no da caixa.

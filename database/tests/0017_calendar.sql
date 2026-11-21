@@ -8,7 +8,7 @@ LANGUAGE plpgsql AS $$ BEGIN SET CONSTRAINTS ALL IMMEDIATE; SET CONSTRAINTS ALL 
 
 -- Estrutura
 SELECT has_function('calendar_items', ARRAY['uuid[]', 'date', 'date', 'date']);
-SELECT has_function('account_daily_balances', ARRAY['uuid', 'date', 'date']);
+SELECT has_function('account_daily_balances', ARRAY['uuid', 'date', 'date', 'date']);
 SELECT has_function('caixa_daily_balances', ARRAY['uuid', 'date', 'date', 'date']);
 
 -- Dados base -------------------------------------------------------------------------------------------
@@ -154,10 +154,10 @@ SELECT throws_ok($$SELECT * FROM caixa_daily_balances('00000000-0000-7000-8000-0
 
 -- Privilégios
 SELECT ok(has_function_privilege('moneyflow_app', f, 'EXECUTE'), 'app executa ' || f)
-  FROM unnest(ARRAY['calendar_items(uuid[], date, date, date)', 'account_daily_balances(uuid, date, date)',
+  FROM unnest(ARRAY['calendar_items(uuid[], date, date, date)', 'account_daily_balances(uuid, date, date, date)',
                     'caixa_daily_balances(uuid, date, date, date)']) f;
 SELECT ok(NOT has_function_privilege('public', f, 'EXECUTE'), 'PUBLIC não executa ' || f)
-  FROM unnest(ARRAY['calendar_items(uuid[], date, date, date)', 'account_daily_balances(uuid, date, date)',
+  FROM unnest(ARRAY['calendar_items(uuid[], date, date, date)', 'account_daily_balances(uuid, date, date, date)',
                     'caixa_daily_balances(uuid, date, date, date)']) f;
 SET LOCAL ROLE moneyflow_app;
 SELECT lives_ok($$SELECT * FROM calendar_items(ARRAY['00000000-0000-7000-8000-0000000c0001'::uuid], '2026-10-01', '2026-10-31')$$,

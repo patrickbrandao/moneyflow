@@ -3,8 +3,8 @@
 --
 
 
--- Dumped from database version 18.6 (Debian 18.6-1.pgdg12+2)
--- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg12+2)
+-- Dumped from database version 18.7 (Debian 18.7-1.pgdg12+2)
+-- Dumped by pg_dump version 18.7 (Debian 18.7-1.pgdg12+2)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -68,16 +68,19 @@ COMMENT ON EXTENSION vector IS 'vector data type and ivfflat and hnsw access met
 
 
 --
--- Name: account_daily_balances(uuid, date, date); Type: FUNCTION; Schema: public; Owner: -
+-- Name: account_daily_balances(uuid, date, date, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.account_daily_balances(p_account_id uuid, p_from date, p_to date) RETURNS TABLE(day date, balance_cents bigint)
+CREATE FUNCTION public.account_daily_balances(p_account_id uuid, p_from date, p_to date, p_today date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date) RETURNS TABLE(day date, balance_cents bigint, scheduled_cents bigint, projected_cents bigint)
     LANGUAGE plpgsql STABLE
     AS $$
 BEGIN
   IF p_from IS NULL OR p_to IS NULL OR p_to < p_from OR p_to - p_from > 1100 THEN
     RAISE EXCEPTION 'account_daily_balances: invalid period % .. % (max 1100 days)', p_from, p_to
       USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_today IS NULL THEN
+    RAISE EXCEPTION 'account_daily_balances: today must be set' USING ERRCODE = 'invalid_parameter_value';
   END IF;
 
   RETURN QUERY
@@ -92,24 +95,50 @@ BEGIN
       FROM movements m
      WHERE m.financial_account_id = p_account_id AND m.occurred_on BETWEEN p_from AND p_to
      GROUP BY m.occurred_on
+  ),
+  -- Previsto: saldo aberto dos títulos com esta conta prevista (vencidos contam a partir de hoje), como na caixa.
+  pending_daily AS (
+    SELECT greatest(b.due_date, p_today) AS d,
+           sum(CASE b.direction WHEN 'receivable' THEN b.open_cents ELSE -b.open_cents END) AS delta
+      FROM titles t
+      JOIN title_balances b ON b.title_id = t.id
+      LEFT JOIN card_invoices v ON v.id = t.card_invoice_id
+     WHERE t.planned_account_id = p_account_id AND t.status IN ('open', 'partial') AND t.due_date <= p_to
+       AND t.archived_at IS NULL AND b.open_cents > 0
+       AND greatest(t.due_date, p_today) <= p_to
+       AND (v.id IS NULL OR v.closed_at IS NOT NULL)
+     GROUP BY 1
+  ),
+  pending_before AS (
+    SELECT coalesce(sum(p.delta), 0) AS cents FROM pending_daily p WHERE p.d < p_from
+  ),
+  series AS (
+    SELECT g.d::date AS day,
+           CASE WHEN g.d < acc.opening_date THEN NULL
+                ELSE acc.opening_balance_cents + acc.before_cents + sum(coalesce(daily.delta, 0)) OVER w END AS realized,
+           pending_before.cents + sum(coalesce(pd.delta, 0)) OVER w AS scheduled
+      FROM acc
+      CROSS JOIN generate_series(p_from, p_to, interval '1 day') g (d)
+      CROSS JOIN pending_before
+      LEFT JOIN daily ON daily.d = g.d::date
+      LEFT JOIN pending_daily pd ON pd.d = g.d::date
+    WINDOW w AS (ORDER BY g.d)
   )
-  SELECT g.d::date,
-         CASE WHEN g.d < acc.opening_date THEN NULL
-              ELSE (acc.opening_balance_cents + acc.before_cents
-                    + sum(coalesce(daily.delta, 0)) OVER (ORDER BY g.d))::bigint END
-    FROM acc
-    CROSS JOIN generate_series(p_from, p_to, interval '1 day') g (d)
-    LEFT JOIN daily ON daily.d = g.d::date
-   ORDER BY 1;
+  SELECT s.day,
+         s.realized::bigint,
+         (CASE WHEN s.day < p_today THEN 0 ELSE s.scheduled END)::bigint,
+         (s.realized + CASE WHEN s.day < p_today THEN 0 ELSE s.scheduled END)::bigint
+    FROM series s
+   ORDER BY s.day;
 END
 $$;
 
 
 --
--- Name: FUNCTION account_daily_balances(p_account_id uuid, p_from date, p_to date); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION account_daily_balances(p_account_id uuid, p_from date, p_to date, p_today date); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.account_daily_balances(p_account_id uuid, p_from date, p_to date) IS 'Saldo da conta no fim de cada dia do período (saldo inicial + movimentos até o dia, inclusive os datados no futuro); NULL antes da abertura; nenhuma linha se a conta não existe. Até 1100 dias (erro 22023).';
+COMMENT ON FUNCTION public.account_daily_balances(p_account_id uuid, p_from date, p_to date, p_today date) IS 'Por dia: balance_cents = saldo realizado da conta no fim do dia (saldo inicial + movimentos até o dia, inclusive os datados no futuro); scheduled_cents = a partir de p_today (padrão = hoje em America/Sao_Paulo), saldo aberto acumulado dos títulos não arquivados com esta conta prevista (planned_account_id; + receber, − pagar; vencidos entram em p_today), 0 antes de p_today; projected_cents = balance + scheduled (tarefa 131). balance e projected NULL antes da abertura; nenhuma linha se a conta não existe. Títulos sem conta prevista só entram no previsto da caixa (caixa_daily_balances). Até 1100 dias (erro 22023).';
 
 
 --
@@ -4502,7 +4531,8 @@ BEGIN
       FROM title_balances b
       JOIN titles t ON t.id = b.title_id
       LEFT JOIN card_invoices v ON v.id = t.card_invoice_id
-     WHERE b.caixa_id = p_caixa_id AND b.open_cents > 0 AND b.archived_at IS NULL
+     WHERE b.caixa_id = p_caixa_id AND b.status IN ('open', 'partial') AND b.due_date <= p_to
+       AND b.open_cents > 0 AND b.archived_at IS NULL
        AND greatest(b.due_date, p_today) <= p_to
        AND (v.id IS NULL OR v.closed_at IS NOT NULL)
      GROUP BY 1
@@ -8303,29 +8333,33 @@ $$;
 CREATE FUNCTION public.report_cash_projection(p_caixa_ids uuid[], p_today date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date, p_horizons integer[] DEFAULT '{30,60,90}'::integer[], p_entity_ids uuid[] DEFAULT NULL::uuid[]) RETURNS TABLE(caixa_id uuid, financial_account_id uuid, horizon_days integer, until date, balance_today_cents bigint, scheduled_movements_cents bigint, overdue_receivable_cents bigint, overdue_payable_cents bigint, receivable_cents bigint, payable_cents bigint, projected_cents bigint)
     LANGUAGE plpgsql STABLE
     AS $$
+DECLARE
+  v_last date;
 BEGIN
   IF p_today IS NULL OR p_horizons IS NULL OR cardinality(p_horizons) = 0
      OR EXISTS (SELECT 1 FROM unnest(p_horizons) h WHERE h IS NULL OR h < 1 OR h > 1100) THEN
     RAISE EXCEPTION 'report_cash_projection: horizons must be 1..1100 days and today must be set'
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
+  v_last := p_today + (SELECT max(h) FROM unnest(p_horizons) h);
 
   RETURN QUERY
   WITH hz AS (
     SELECT DISTINCT h AS days, p_today + h AS until FROM unnest(p_horizons) h
   ),
-  accs AS (
-    SELECT a.id, a.caixa_id, a.opening_date, a.opening_balance_cents
+  -- Por conta, uma vez: saldo no fim de hoje.
+  accs AS MATERIALIZED (
+    SELECT a.id, a.caixa_id, a.opening_date, a.opening_balance_cents,
+           (CASE WHEN a.opening_date <= p_today THEN a.opening_balance_cents ELSE 0 END
+            + coalesce((SELECT sum(m.amount_cents) FROM movements m
+                         WHERE m.financial_account_id = a.id AND m.occurred_on <= p_today), 0))::bigint AS today_cents
       FROM financial_accounts a
       JOIN caixas c ON c.id = a.caixa_id AND c.kind = 'general'
      WHERE a.caixa_id = ANY (p_caixa_ids)
   ),
-  -- Por conta: saldo no fim de hoje e o que já está lançado com data futura (até o horizonte).
+  -- Por conta e horizonte: o que já está lançado com data futura (até o horizonte).
   acc_rows AS (
-    SELECT accs.caixa_id, accs.id AS account_id, hz.days, hz.until,
-           (CASE WHEN accs.opening_date <= p_today THEN accs.opening_balance_cents ELSE 0 END
-            + coalesce((SELECT sum(m.amount_cents) FROM movements m
-                         WHERE m.financial_account_id = accs.id AND m.occurred_on <= p_today), 0))::bigint AS today_cents,
+    SELECT accs.caixa_id, accs.id AS account_id, hz.days, hz.until, accs.today_cents,
            (CASE WHEN p_entity_ids IS NULL AND accs.opening_date > p_today AND accs.opening_date <= hz.until
                  THEN accs.opening_balance_cents ELSE 0 END
             + coalesce((SELECT sum(m.amount_cents) FROM movements m
@@ -8342,7 +8376,8 @@ BEGIN
       FROM title_balances b
       JOIN titles t ON t.id = b.title_id
       LEFT JOIN card_invoices v ON v.id = t.card_invoice_id
-     WHERE b.caixa_id = ANY (p_caixa_ids) AND b.open_cents > 0 AND b.archived_at IS NULL
+     WHERE b.caixa_id = ANY (p_caixa_ids) AND b.status IN ('open', 'partial') AND b.due_date <= v_last
+       AND b.open_cents > 0 AND b.archived_at IS NULL
        AND (v.id IS NULL OR v.closed_at IS NOT NULL)
        AND (p_entity_ids IS NULL OR (t.origin <> 'card_invoice' AND t.entity_id = ANY (p_entity_ids)))
     UNION ALL
@@ -13281,34 +13316,41 @@ COMMENT ON COLUMN public.titles.planned_account_custom IS 'A ocorrência escolhe
 --
 
 CREATE VIEW public.title_balances WITH (security_invoker='true') AS
- SELECT t.id AS title_id,
-    t.caixa_id,
-    t.direction,
-    t.status,
-    t.entity_id,
-    t.category_id,
-    t.description,
-    t.competence_date,
-    t.due_date,
-    t.amount_cents,
-    (COALESCE(s.settled_cents, (0)::numeric))::bigint AS settled_cents,
+ SELECT id AS title_id,
+    caixa_id,
+    direction,
+    status,
+    entity_id,
+    category_id,
+    description,
+    competence_date,
+    due_date,
+    amount_cents,
     (
-        CASE
-            WHEN (t.status = 'canceled'::text) THEN (0)::numeric
-            ELSE ((t.amount_cents)::numeric - COALESCE(s.settled_cents, (0)::numeric))
+        CASE status
+            WHEN 'paid'::text THEN (amount_cents)::numeric
+            WHEN 'partial'::text THEN ( SELECT COALESCE(sum(x.amount_cents), (0)::numeric) AS "coalesce"
+               FROM public.settlements x
+              WHERE ((x.title_id = t.id) AND (x.reversed_at IS NULL)))
+            ELSE (0)::numeric
+        END)::bigint AS settled_cents,
+    (
+        CASE status
+            WHEN 'open'::text THEN (amount_cents)::numeric
+            WHEN 'partial'::text THEN ((amount_cents)::numeric - ( SELECT COALESCE(sum(x.amount_cents), (0)::numeric) AS "coalesce"
+               FROM public.settlements x
+              WHERE ((x.title_id = t.id) AND (x.reversed_at IS NULL))))
+            ELSE (0)::numeric
         END)::bigint AS open_cents,
-    t.archived_at
-   FROM (public.titles t
-     LEFT JOIN LATERAL ( SELECT sum(x.amount_cents) AS settled_cents
-           FROM public.settlements x
-          WHERE ((x.title_id = t.id) AND (x.reversed_at IS NULL))) s ON (true));
+    archived_at
+   FROM public.titles t;
 
 
 --
 -- Name: VIEW title_balances; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.title_balances IS 'Títulos com principal baixado (baixas ativas) e saldo aberto (amount − baixado; 0 se cancelado). Títulos em aberto: open_cents > 0.';
+COMMENT ON VIEW public.title_balances IS 'Títulos com principal baixado (baixas ativas) e saldo aberto (amount − baixado; 0 se cancelado). Títulos em aberto: open_cents > 0, o mesmo que status IN (''open'', ''partial''): filtre também pelo status, que é indexável (titles_caixa_id_status_due_date_idx). Só o parcial soma as baixas; aberto, pago e cancelado saem do status (invariantes de titles_validate_status e settlements_refresh_title_status; tarefa 093).';
 
 
 --
@@ -14786,9 +14828,15 @@ CREATE VIEW public.financial_account_balances WITH (security_invoker='true') AS
     a.opening_balance_cents,
     (COALESCE(m.movements_cents, (0)::numeric))::bigint AS movements_cents,
     (((a.opening_balance_cents)::numeric + COALESCE(m.movements_cents, (0)::numeric)))::bigint AS balance_cents,
-    a.archived_at
+    a.archived_at,
+    (((
+        CASE
+            WHEN (a.opening_date <= ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date) THEN a.opening_balance_cents
+            ELSE (0)::bigint
+        END)::numeric + COALESCE(m.today_cents, (0)::numeric)))::bigint AS balance_today_cents
    FROM (public.financial_accounts a
-     LEFT JOIN LATERAL ( SELECT sum(x.amount_cents) AS movements_cents
+     LEFT JOIN LATERAL ( SELECT sum(x.amount_cents) AS movements_cents,
+            sum(x.amount_cents) FILTER (WHERE (x.occurred_on <= ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date)) AS today_cents
            FROM public.movements x
           WHERE (x.financial_account_id = a.id)) m ON (true));
 
@@ -14797,7 +14845,7 @@ CREATE VIEW public.financial_account_balances WITH (security_invoker='true') AS
 -- Name: VIEW financial_account_balances; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.financial_account_balances IS 'Saldo de cada conta: opening_balance_cents + soma de todos os movimentos (inclusive datados no futuro). Saldo numa data: financial_account_balance_at(conta, data).';
+COMMENT ON VIEW public.financial_account_balances IS 'Saldo de cada conta: balance_cents = opening_balance_cents + soma de todos os movimentos (inclusive datados no futuro); balance_today_cents = o saldo no fim de hoje em America/Sao_Paulo (o saldo inicial só se a conta já abriu, mais os movimentos até hoje; tarefa 130), o "saldo atual" das telas. balance_cents − balance_today_cents = o que já está lançado com data futura. Saldo numa data: financial_account_balance_at(conta, data).';
 
 
 --
@@ -15765,22 +15813,36 @@ CREATE VIEW public.statement_import_balances WITH (security_invoker='true') AS
     i.period_end,
     i.bank_balance_on,
     i.bank_balance_cents,
-        CASE
-            WHEN ((i.financial_account_id IS NOT NULL) AND (i.bank_balance_on IS NOT NULL)) THEN public.financial_account_balance_at(i.financial_account_id, i.bank_balance_on)
-            ELSE NULL::bigint
-        END AS app_balance_cents,
-        CASE
-            WHEN ((i.financial_account_id IS NOT NULL) AND (i.bank_balance_on IS NOT NULL)) THEN (i.bank_balance_cents - public.financial_account_balance_at(i.financial_account_id, i.bank_balance_on))
-            ELSE NULL::bigint
-        END AS difference_cents,
+    x.app AS app_balance_cents,
+    (i.bank_balance_cents - x.app) AS difference_cents,
     (COALESCE(c.lines, (0)::bigint))::integer AS lines,
     (COALESCE(c.matched, (0)::bigint))::integer AS matched_lines,
     (COALESCE(c.suggested, (0)::bigint))::integer AS suggested_lines,
     (COALESCE(c.new, (0)::bigint))::integer AS new_lines,
     (COALESCE(c.ignored, (0)::bigint))::integer AS ignored_lines,
     i.provisional,
-    (i.superseded_by_import_id IS NOT NULL) AS superseded
-   FROM (public.statement_imports i
+    (i.superseded_by_import_id IS NOT NULL) AS superseded,
+        CASE
+            WHEN (x.app IS NOT NULL) THEN ( SELECT (
+                    CASE
+                        WHEN (pv.bank_balance_on >= a.opening_date) THEN (((i.bank_balance_cents - pv.bank_balance_cents))::numeric - COALESCE(( SELECT sum(m.amount_cents) AS sum
+                           FROM public.movements m
+                          WHERE ((m.financial_account_id = i.financial_account_id) AND (m.occurred_on > pv.bank_balance_on) AND (m.occurred_on <= i.bank_balance_on))), (0)::numeric))
+                        ELSE NULL::numeric
+                    END)::bigint AS int8
+               FROM (( SELECT p.bank_balance_on,
+                        p.bank_balance_cents
+                       FROM public.statement_imports p
+                      WHERE ((p.financial_account_id = i.financial_account_id) AND (p.bank_balance_on IS NOT NULL) AND (p.superseded_by_import_id IS NULL) AND (ROW(p.bank_balance_on, p.created_at) < ROW(i.bank_balance_on, i.created_at)))
+                      ORDER BY p.bank_balance_on DESC, p.created_at DESC
+                     LIMIT 1) pv
+                 JOIN public.financial_accounts a ON ((a.id = i.financial_account_id))))
+            ELSE NULL::bigint
+        END AS interval_difference_cents
+   FROM ((public.statement_imports i
+     LEFT JOIN LATERAL ( SELECT public.financial_account_balance_at(i.financial_account_id, i.bank_balance_on) AS app
+          WHERE ((i.financial_account_id IS NOT NULL) AND (i.bank_balance_on IS NOT NULL))
+         OFFSET 0) x ON (true))
      LEFT JOIN LATERAL ( SELECT count(*) AS lines,
             count(*) FILTER (WHERE (l.status = 'matched'::text)) AS matched,
             count(*) FILTER (WHERE (l.status = 'suggested'::text)) AS suggested,
@@ -15794,7 +15856,7 @@ CREATE VIEW public.statement_import_balances WITH (security_invoker='true') AS
 -- Name: VIEW statement_import_balances; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.statement_import_balances IS 'Por lote: saldo informado pelo banco × saldo do app na mesma data (difference_cents = banco − app; 0 = sem divergência) e contagem de linhas por status (lines inclui as superseded). Saldo só para contas (não para cartão). provisional e superseded (spec 031): a aplicação tira os substituídos da divergência e do "lote anterior".';
+COMMENT ON VIEW public.statement_import_balances IS 'Por lote: saldo informado pelo banco × saldo do app na mesma data (difference_cents = banco − app; 0 = sem divergência), calculado uma vez por lote, e contagem de linhas por status (lines inclui as superseded). Saldo só para contas (não para cartão). interval_difference_cents (tarefa 092) = difference_cents menos a do lote anterior com saldo da mesma conta, não substituído, na ordem (bank_balance_on, created_at); nula sem lote anterior ou com ele antes da abertura. provisional e superseded (spec 031): a aplicação tira os substituídos da divergência (o "lote anterior" já os exclui).';
 
 
 --
@@ -18533,7 +18595,7 @@ CREATE INDEX movements_entity_id_idx ON public.movements USING btree (entity_id)
 -- Name: movements_financial_account_id_occurred_on_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX movements_financial_account_id_occurred_on_idx ON public.movements USING btree (financial_account_id, occurred_on);
+CREATE INDEX movements_financial_account_id_occurred_on_idx ON public.movements USING btree (financial_account_id, occurred_on) INCLUDE (amount_cents);
 
 
 --
