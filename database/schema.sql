@@ -5223,10 +5223,10 @@ $$;
 
 
 --
--- Name: classification_rule_for(uuid, uuid, text, bigint); Type: FUNCTION; Schema: public; Owner: -
+-- Name: classification_rule_for(uuid, uuid, text, bigint, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint) RETURNS uuid
+CREATE FUNCTION public.classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint, p_description_normalized text DEFAULT NULL::text) RETURNS uuid
     LANGUAGE plpgsql STABLE
     AS $$
 DECLARE
@@ -5244,12 +5244,15 @@ BEGIN
               THEN r.financial_account_id = p_financial_account_id
               ELSE r.caixa_id = p_card_caixa_id AND r.financial_account_id IS NULL END
      AND (r.direction IS NULL OR r.direction = CASE WHEN p_amount_cents > 0 THEN 'in' ELSE 'out' END)
-     AND CASE r.match_kind
+     AND coalesce(CASE r.match_kind
            WHEN 'exact'       THEN lower(btrim(p_description)) = lower(btrim(r.pattern))
+                                   OR lower(btrim(p_description_normalized)) = lower(btrim(r.pattern))
            WHEN 'starts_with' THEN starts_with(lower(btrim(p_description)), lower(btrim(r.pattern)))
+                                   OR starts_with(lower(btrim(p_description_normalized)), lower(btrim(r.pattern)))
            WHEN 'contains'    THEN strpos(lower(p_description), lower(btrim(r.pattern))) > 0
+                                   OR strpos(lower(p_description_normalized), lower(btrim(r.pattern))) > 0
            WHEN 'regex'       THEN p_description ~* r.pattern
-         END
+         END, false)
    ORDER BY r.priority,
             array_position(ARRAY['exact', 'starts_with', 'contains', 'regex'], r.match_kind),
             length(r.pattern) DESC,
@@ -5261,10 +5264,10 @@ $$;
 
 
 --
--- Name: FUNCTION classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint, p_description_normalized text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint) IS 'Regra ativa do alvo da linha (a conta, ou o cartão; exatamente um) que classifica a descrição (sinal de p_amount_cents = direção): menor prioridade, exact > starts_with > contains > regex, padrão mais longo. NULL se nenhuma casa. Para o cartão, passe a caixa do cartão e o valor da linha (compra −).';
+COMMENT ON FUNCTION public.classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint, p_description_normalized text) IS 'Regra ativa do alvo da linha (a conta, ou o cartão; exatamente um) que classifica a descrição (sinal de p_amount_cents = direção): menor prioridade, exact > starts_with > contains > regex, padrão mais longo. NULL se nenhuma casa. Para o cartão, passe a caixa do cartão e o valor da linha (compra −). p_description_normalized (opcional, tarefa 076): a descrição pelo normalizeDescription do shared; exact, starts_with e contains casam com a crua ou com a normalizada (a regra aprendida guarda o padrão normalizado), regex só com a crua.';
 
 
 --

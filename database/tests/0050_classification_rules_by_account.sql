@@ -36,9 +36,9 @@ SELECT has_index('classification_rules', i)
 SELECT ok(indexdef ~ 'UNIQUE' AND indexdef ~ '\(caixa_id, financial_account_id, match_kind, lower\(pattern\), direction\) NULLS NOT DISTINCT'
           AND indexdef ~ 'archived_at IS NULL', 'unicidade das ativas por conta (cartão com conta nula)')
   FROM pg_indexes WHERE indexname = 'classification_rules_pattern_key';
-SELECT has_function('classification_rule_for', ARRAY['uuid', 'uuid', 'text', 'bigint']);
+SELECT has_function('classification_rule_for', ARRAY['uuid', 'uuid', 'text', 'bigint', 'text']);
 SELECT hasnt_function('classification_rule_for', ARRAY['uuid', 'text', 'bigint'], 'a versão por caixa saiu');
-SELECT function_privs_are('classification_rule_for', ARRAY['uuid', 'uuid', 'text', 'bigint'], 'moneyflow_app', ARRAY['EXECUTE']);
+SELECT function_privs_are('classification_rule_for', ARRAY['uuid', 'uuid', 'text', 'bigint', 'text'], 'moneyflow_app', ARRAY['EXECUTE']);
 SELECT function_privs_are('classification_rules_split_by_target', ARRAY[]::text[], 'moneyflow_app', ARRAY[]::text[]);
 SELECT has_trigger('classification_rules', 'classification_rules_validate_target');
 SELECT has_trigger('financial_accounts', 'financial_accounts_validate_rules');
