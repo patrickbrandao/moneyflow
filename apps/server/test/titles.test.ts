@@ -68,6 +68,60 @@ describe('espelhamento (spec 006)', () => {
     await author.post(`/api/titles/${title.mirror.id}/mirror/accept`, {}, 404);
   });
 
+  it('pelo espelho, só quem edita também o original exclui, arquiva, cancela ou encerra a série (tarefa 079)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const authorUser = await userSession(h);
+    const otherUser = await userSession(h);
+    await admin.put(`/api/users/${authorUser.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'editor' }] });
+    await admin.put(`/api/users/${otherUser.id}/memberships`, { memberships: [{ caixaId: s.caixaB.id, role: 'editor' }] });
+    const author = client(h, authorUser.cookie);
+    const other = client(h, otherUser.cookie);
+
+    // Título avulso: o editor só da caixa B não exclui, cancela, reabre nem restaura o par.
+    const single = await author.post('/api/titles', base(s));
+    const mirrorId = single.mirror.id;
+    const denied = async (method: 'POST' | 'DELETE', url: string) => {
+      const res = await other.raw(method, url, {});
+      expect(res.statusCode, url).toBe(403);
+      expect(res.json().error.message).toMatch(/original/);
+    };
+    await denied('DELETE', `/api/titles/${mirrorId}`);
+    await denied('POST', `/api/titles/${mirrorId}/cancel`);
+    await denied('POST', `/api/titles/${mirrorId}/restore`);
+    await admin.post(`/api/titles/${single.id}/cancel`);
+    await denied('POST', `/api/titles/${mirrorId}/reopen`);
+    await admin.post(`/api/titles/${single.id}/reopen`);
+    expect(await admin.get(`/api/titles/${single.id}`)).toMatchObject({ status: 'open', archivedAt: null });
+    // Aceitar e contestar continuam com ele.
+    expect((await other.post(`/api/titles/${mirrorId}/mirror/dispute`, { reason: 'não reconheço' })).mirrorStatus).toBe('disputed');
+
+    // Série: nem "só esta" nem "este e os próximos" pelo espelho.
+    const today = todayIso();
+    const first = await author.post('/api/titles', {
+      ...base(s),
+      dueDate: today,
+      competenceDate: today,
+      series: { kind: 'recurrence', frequency: 'monthly', endsOn: addMonths(today, 5) },
+    });
+    const ruleId = first.recurrenceRuleId;
+    const inCaixa = async (caixaId: string) =>
+      ((await admin.get(`/api/titles?caixaId=${caixaId}&limit=1000`)) as { id: string; recurrenceRuleId: string; occurrence: number }[])
+        .filter((t) => t.recurrenceRuleId === ruleId)
+        .sort((a, b) => a.occurrence - b.occurrence);
+    const mirrors = await inCaixa(s.caixaB.id);
+    expect(mirrors).toHaveLength(6);
+    await denied('DELETE', `/api/titles/${mirrors[2]!.id}?scope=following`);
+    await denied('DELETE', `/api/titles/${mirrors[2]!.id}?scope=this`);
+    expect(await inCaixa(s.caixaA.id)).toHaveLength(6);
+    expect((await admin.get(`/api/series/${ruleId}`)).endsOn).toBe(addMonths(today, 5));
+
+    // Quem escreve nas duas caixas continua podendo.
+    await admin.del(`/api/titles/${mirrors[2]!.id}?scope=following`);
+    expect(await inCaixa(s.caixaA.id)).toHaveLength(2);
+    expect(await inCaixa(s.caixaB.id)).toHaveLength(2);
+  });
+
   it('dispensa o espelho com mirrorCaixaId = null', async () => {
     const admin = client(h, (await userSession(h, 'admin')).cookie);
     const s = await scenario(h, admin);

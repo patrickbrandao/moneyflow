@@ -174,6 +174,8 @@ export const ptBR = {
     mirrorSameCaixa: 'A caixa do espelho não pode ser a caixa do título.',
     mirrorNotPending: 'Este título não é um espelho aguardando aceite.',
     mirrorEditOriginal: 'Valor e vencimento de um espelho mudam pelo título original.',
+    mirrorPairOriginal:
+      'O título original é de outra caixa: pelo espelho, só quem edita também a caixa do original exclui, arquiva, cancela ou mexe na série. Conteste o espelho para avisar o autor.',
     mirrorEntityLocked: 'Título espelhado não troca de entidade.',
     accountOtherCaixa: 'A conta escolhida não é desta caixa.',
     accountRequiredForTransfer: 'Para pagar com a conta de outra caixa, escolha também a conta desta caixa que recebe a transferência.',

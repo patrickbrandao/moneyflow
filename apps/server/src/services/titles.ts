@@ -28,7 +28,7 @@ import {
 import { and, desc, eq, gt, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
-import { notFound, unprocessable } from '../errors';
+import { forbidden, notFound, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
 import { assertPlannedAccount, PLANNED_JOINS, PLANNED_SELECT, plannedOf } from './planned-account';
 import { clearStatementSuggestions } from './reconciliation-guards';
@@ -515,11 +515,22 @@ async function syncMirror(
   await tx.update(titles).set(patch).where(eq(titles.id, mirror.id));
 }
 
+/**
+ * O par é do lado original (specs 005 e 006): pelo espelho, excluir, arquivar,
+ * restaurar, cancelar, reabrir ou mexer na série pede escrita também na caixa
+ * do original; sem ela, o editor do espelho aceita ou contesta (tarefa 079).
+ */
+function assertPairOwner(ctx: ServiceContext, title: typeof titles.$inferSelect) {
+  if (title.mirrorStatus === null || !title.mirrorTitleId || !title.counterpartyCaixaId) return;
+  if (!ctx.access.canWrite(title.counterpartyCaixaId)) throw forbidden(strings.errors.mirrorPairOriginal);
+}
+
 /** Cancela o título e o espelho (um débito cancelado vale para os dois lados). */
 export async function cancelTitle(ctx: ServiceContext, id: string): Promise<TitleDetail> {
   await withTx(ctx, async (tx) => {
     const title = await loadTitle(tx, id, true);
     ctx.access.assertWrite(title.caixaId);
+    assertPairOwner(ctx, title);
     const ids = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
     await tx.update(titles).set({ status: 'canceled' }).where(inArray(titles.id, ids));
   });
@@ -530,6 +541,7 @@ export async function reopenTitle(ctx: ServiceContext, id: string): Promise<Titl
   await withTx(ctx, async (tx) => {
     const title = await loadTitle(tx, id, true);
     ctx.access.assertWrite(title.caixaId);
+    assertPairOwner(ctx, title);
     if (title.status !== 'canceled') return;
     const ids = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
     await tx
@@ -550,6 +562,7 @@ export async function deleteTitle(ctx: ServiceContext, id: string, scope: 'this'
   const title = await loadTitle(ctx.db, id);
   ctx.access.assertWrite(title.caixaId);
   if (title.cardInvoiceId) throw unprocessable(strings.errors.cardInvoiceTitleLocked);
+  assertPairOwner(ctx, title);
   const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
 
   if (title.recurrenceRuleId && title.occurrence) {
@@ -577,6 +590,7 @@ export async function archiveTitle(ctx: ServiceContext, id: string): Promise<Tit
   const title = await loadTitle(ctx.db, id);
   ctx.access.assertWrite(title.caixaId);
   if (title.cardInvoiceId) throw unprocessable(strings.errors.cardInvoiceTitleLocked);
+  assertPairOwner(ctx, title);
   const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
   await withTx(ctx, (tx) =>
     tx
@@ -590,6 +604,7 @@ export async function archiveTitle(ctx: ServiceContext, id: string): Promise<Tit
 export async function restoreTitle(ctx: ServiceContext, id: string): Promise<TitleDetail> {
   const title = await loadTitle(ctx.db, id);
   ctx.access.assertWrite(title.caixaId);
+  assertPairOwner(ctx, title);
   const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
   await withTx(ctx, (tx) => tx.update(titles).set({ archivedAt: null }).where(inArray(titles.id, pair)));
   return getTitle(ctx, id);
@@ -703,6 +718,8 @@ export async function endSeries(ctx: ServiceContext, titleId: string, endsOn: st
 }
 
 async function endSeriesFrom(tx: Tx, ruleId: string, occurrence: number, dueDate: string) {
+  // Mesma chave do worker e do "Encerrar série": nada materializa a série enquanto ela muda.
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${ruleId}))`);
   const [rule] = await tx.select().from(recurrenceRules).where(eq(recurrenceRules.id, ruleId)).for('update');
   if (!rule) throw notFound();
   const doomed = await tx

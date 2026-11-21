@@ -988,6 +988,11 @@ describe('títulos e baixas', () => {
     });
     const mirrorId = pair.mirrorTitleId;
     expect((await admin.get(`/api/titles/${mirrorId}`)).mirrorStatus).toBe('pending');
+    // Pelo espelho, quem edita só a caixa B não arquiva o par (tarefa 079; excluir e cancelar em titles.test.ts).
+    const editorBSession = await userSession(h);
+    await admin.post(`/api/caixas/${s.caixaB.id}/members`, { userId: editorBSession.id, role: 'editor' });
+    expect((await call(editorBSession, 'archive_title', { titleId: mirrorId })).error).toMatch(/caixa do original/);
+    expect((await admin.get(`/api/titles/${pair.id}`)).archivedAt).toBeNull();
     const disputed = await approved(adminSession, 'dispute_mirror', { titleId: mirrorId, reason: 'não reconheço' });
     expect(rowsOf(disputed.preview)).toMatchObject({ Espelho: 'Aguardando aceite → Contestado', Motivo: 'não reconheço' });
     expect(disputed.value.mirrorStatus).toBe('disputed');
@@ -1019,7 +1024,8 @@ describe('títulos e baixas', () => {
     for (const name of ['cancel_title', 'archive_title', 'delete_title']) {
       expect((await call(viewerSession, name, { titleId: other.id })).error, name).toBe('Você só tem leitura nesta caixa.');
     }
-  });
+    // Uma dúzia de conversas com o agente: folga sobre os 30 s padrão.
+  }, 90_000);
 });
 
 describe('categorias e regras', () => {
