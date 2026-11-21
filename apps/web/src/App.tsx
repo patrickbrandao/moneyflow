@@ -1,9 +1,10 @@
 import { t } from '@moneyflow/shared';
 import { ArrowLeftRight, Building2, LogOut, Moon, UserRound, Wallet } from 'lucide-react';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { Route, Routes, useNavigate } from 'react-router-dom';
 import { AgentsProvider } from './agents/AgentsProvider';
 import { Layout } from './components/shell/Layout';
+import { SessionExpiredDialog } from './components/shell/SessionExpiredDialog';
 import { ToastProvider } from './components/Toast';
 import { ConfirmProvider } from './components/ui';
 import { BRAND } from './config/brand';
@@ -38,11 +39,20 @@ import { TransfersPage } from './pages/TransfersPage';
 import { UsersPage } from './pages/UsersPage';
 
 export default function App() {
-  const { user, ready, notice } = useAuth();
+  const { user, ready, expired } = useAuth();
+  const navigate = useNavigate();
 
   useEffect(() => {
     document.title = BRAND.name;
   }, []);
+
+  // Outro usuário entrou pela janela da sessão expirada: o console recomeça (key) na página inicial.
+  const lastUserId = useRef<string | null>(null);
+  useEffect(() => {
+    if (!user) return;
+    if (lastUserId.current && lastUserId.current !== user.id) navigate('/', { replace: true });
+    lastUserId.current = user.id;
+  }, [user, navigate]);
 
   if (!ready) {
     return (
@@ -54,7 +64,17 @@ export default function App() {
 
   return (
     <ToastProvider>
-      <ConfirmProvider>{user ? <Console /> : <LoginPage notice={notice} />}</ConfirmProvider>
+      <ConfirmProvider>
+        {user ? (
+          <>
+            {/* A sessão que cai não desmonta o console (tarefa 119): a janela de login fica por cima. */}
+            <Console key={user.id} />
+            {expired && <SessionExpiredDialog />}
+          </>
+        ) : (
+          <LoginPage />
+        )}
+      </ConfirmProvider>
     </ToastProvider>
   );
 }

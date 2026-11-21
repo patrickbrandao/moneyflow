@@ -5,6 +5,7 @@ import {
   type CardOverview,
   type CardPurchaseDetail,
   type CardPurchaseRow,
+  type CardPurchaseTotals,
   type cardChargeInput,
   type cardChargeLinkInput,
   cardChargeMatch,
@@ -195,6 +196,15 @@ export async function listPurchases(
   cardId: string,
   query: z.output<typeof cardPurchaseListQuery>,
 ): Promise<CardPurchaseRow[]> {
+  // O id desempata: a mesma consulta com um limite maior ("Carregar mais") devolve as mesmas primeiras linhas.
+  const result = await ctx.db.execute(
+    sql`${purchaseSql} WHERE ${purchaseListWhere(ctx, cardId, query)} ORDER BY p.purchased_on DESC, p.created_at DESC, p.id DESC LIMIT ${query.limit}`,
+  );
+  return result.rows.map((r) => camel<CardPurchaseRow>(r));
+}
+
+/** O filtro das compras do cartão (sobre `p` e `e`), o mesmo na lista e nos totais. */
+function purchaseListWhere(ctx: ServiceContext, cardId: string, query: z.output<typeof cardPurchaseListQuery>) {
   ctx.access.assertRead(cardId);
   const where = [sql`p.card_caixa_id = ${cardId}`];
   if (query.from) where.push(sql`p.purchased_on >= ${query.from}::date`);
@@ -202,10 +212,25 @@ export async function listPurchases(
   if (query.payerCaixaId) where.push(sql`p.payer_caixa_id = ${query.payerCaixaId}`);
   if (query.kind) where.push(sql`p.kind = ${query.kind}`);
   if (query.q) where.push(sql`(p.description ILIKE ${`%${query.q}%`} OR e.name ILIKE ${`%${query.q}%`})`);
-  const result = await ctx.db.execute(
-    sql`${purchaseSql} WHERE ${sql.join(where, sql` AND `)} ORDER BY p.purchased_on DESC, p.created_at DESC LIMIT ${query.limit}`,
-  );
-  return result.rows.map((r) => camel<CardPurchaseRow>(r));
+  return sql.join(where, sql` AND `);
+}
+
+/**
+ * Quantidade e total (estornos negativos, como no rodapé) do filtro inteiro das
+ * compras, sem o limite (tarefa 116).
+ */
+export async function purchaseTotals(
+  ctx: ServiceContext,
+  cardId: string,
+  query: z.output<typeof cardPurchaseListQuery>,
+): Promise<CardPurchaseTotals> {
+  const result = await ctx.db.execute(sql`
+    SELECT count(*)::int AS count,
+           coalesce(sum(CASE WHEN p.kind = 'refund' THEN -p.amount_cents ELSE p.amount_cents END), 0)::bigint AS total_cents
+      FROM card_purchases p
+      JOIN entities e ON e.id = p.entity_id
+     WHERE ${purchaseListWhere(ctx, cardId, query)}`);
+  return camel<CardPurchaseTotals>(result.rows[0]!);
 }
 
 export async function getPurchase(ctx: ServiceContext, id: string): Promise<CardPurchaseDetail> {

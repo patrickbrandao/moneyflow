@@ -7,7 +7,7 @@ import { api } from '../../lib/api';
 import { isChordKey, isTypingTarget, useRegisterCommands } from '../../lib/commands';
 import { useTheme } from '../../lib/theme';
 import { useToast } from '../Toast';
-import { EmptyState, useConfirm } from '../ui';
+import { EmptyState, useConfirm, useEscapeLayer } from '../ui';
 import { EdgeHoverContext, flowEdgeTypes } from './edges';
 import { FlowDrawer, type FlowSelection } from './FlowDrawer';
 import { buildGraph, EDGE_COLOR, EDGE_KINDS, type FlowMode, type FlowNode, GRID, highlightIds, type MoneyEdge, positionRef } from './graph';
@@ -24,6 +24,8 @@ type Props = {
   onReset: () => void;
   /** Filtro de entidades (tags e favoritas): destaca sem esconder; null = sem filtro. */
   match?: ((node: FlowNodeDto) => boolean) | null;
+  /** O grafo ainda é o do filtro anterior e o novo está a caminho: esmaecido, sem desmontar o palco. */
+  stale?: boolean;
 };
 
 /**
@@ -40,7 +42,7 @@ export function MoneyFlowCanvas(props: Props) {
   );
 }
 
-function Canvas({ data, mode, onReset, match = null }: Props) {
+function Canvas({ data, mode, onReset, match = null, stale = false }: Props) {
   const toast = useToast();
   const confirm = useConfirm();
   const [theme] = useTheme();
@@ -231,10 +233,6 @@ function Canvas({ data, mode, onReset, match = null }: Props) {
 
   useEffect(() => {
     const down = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setSelection(null);
-        return;
-      }
       if (isTypingTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey || isChordKey(event)) return;
       if (event.key === 'f') {
         event.preventDefault();
@@ -245,12 +243,15 @@ function Canvas({ data, mode, onReset, match = null }: Props) {
     return () => document.removeEventListener('keydown', down);
   }, [fitView]);
 
+  // Esc solta a seleção (e fecha a gaveta das linhas) quando ela é a camada de cima.
+  useEscapeLayer(selection !== null, () => setSelection(null));
+
   const hoverValue = useMemo(() => ({ hovered }), [hovered]);
   const empty = built.edges.length === 0;
 
   return (
     <EdgeHoverContext.Provider value={hoverValue}>
-      <div className="stage-wrap">
+      <div className="stage-wrap" aria-busy={stale || undefined} style={stale ? { opacity: 0.6 } : undefined}>
         <ReactFlow<FlowNode, MoneyEdge>
           nodes={viewNodes}
           edges={viewEdges}

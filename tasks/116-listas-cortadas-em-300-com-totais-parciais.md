@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -65,5 +65,13 @@ O total "em aberto" de uma aba de títulos fica menor que o real, sem que ningu�
 Nada foi executado. Não conferi se algum usuário de produção já passa de 300 num período. A conclusão vale pelo código.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `TitlesTab` e `PurchasesTab` pediam o padrão de 300 e somavam no rodapé só as linhas recebidas; `EntitiesPage` pedia `limit=300`, `TransfersPage` o padrão de 300 e `PlannedOccurrences` `limit=100`, todas sem aviso. A ordem do servidor não tinha desempate único (títulos e compras no mesmo dia e `created_at`).
 
 ## Resolução (executor)
+Servidor, mudanças localizadas: o filtro de `listTitles` virou `titleListWhere` (o mesmo na lista e nos totais) e `titleTotals` devolve `{ count, amountCents, openCents }` do filtro inteiro em `GET /api/titles/totals` (mesmos parâmetros, o limite é ignorado); nas compras, `purchaseListWhere` e `purchaseTotals` em `GET /api/cards/:id/purchases/totals` (`{ count, totalCents }`, estorno negativo como no rodapé). As listagens de títulos, compras, transferências e entidades ganharam o id como último critério da ordem, para que a mesma consulta com um limite maior devolva as mesmas primeiras linhas. `entityListQuery` passou a aceitar até 1000 (era 500), para a sonda de +1. Tipos `TitleTotals` e `CardPurchaseTotals` em `packages/shared/src/types.ts`.
+
+Tela: `useListLimit` (`apps/web/src/lib/hooks.ts`) controla 300 linhas por vez, "Carregar mais" soma 300 até 900 e volta ao início quando o filtro muda; `ListCutNotice` (`components/domain.tsx`) mostra "Mostrando N de M" ou "Mostrando os primeiros N", o botão e, no teto, "Refine o filtro para ver o restante". Títulos e compras: rodapé com os totais do servidor (esqueleto enquanto chegam) e o aviso quando a lista é menor que o total; enquanto a lista maior chega, as linhas atuais ficam (`keepPrevious`). Entidades, transferências e Previstos da conta: pedem uma linha a mais e avisam. Os Previstos já vinham ordenados pelo vencimento do servidor; tirei a ordenação no cliente.
+
+Decisão: "Carregar mais" refaz a consulta com um limite maior (até 900) em vez de cursor, para não mexer mais na consulta de títulos (outra frente mexe nos serviços de títulos e baixas); acima disso a tela pede para refinar o filtro. Spec 004 (nova regra "Listagens que cortam no servidor") e a linha dela no `docs/INDEX.md` atualizadas.
+
+Testes: `apps/server/test/titles.test.ts` → "listagem cortada e os totais do filtro (tarefa 116)" e `apps/server/test/cards.test.ts` → "compras cortadas e os totais do filtro (tarefa 116)" (totais do filtro com mais linhas que o limite, o limite maior repete as primeiras, filtro de período e de status nos totais, 404 sem acesso). e2e em `e2e/tests/respostas.spec.ts` (305 títulos: "Mostrando 300 de 305.", rodapé "305 títulos" com a soma, "Carregar mais" mostra os 305; não rodado aqui). Verificação: `pnpm verify:quick`.

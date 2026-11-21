@@ -69,6 +69,38 @@ export function LoadError({ error, onRetry }: { error: ApiError | Error; onRetry
   );
 }
 
+/**
+ * Aviso de lista cortada no servidor (tarefa 116): "Mostrando N de M" (com o
+ * total do filtro) ou "Mostrando os primeiros N" (sem ele), e "Carregar mais"
+ * até o teto, depois do qual pede para refinar o filtro.
+ */
+export function ListCutNotice({
+  shown,
+  total,
+  canMore,
+  loading,
+  onMore,
+}: {
+  shown: number;
+  total: number | null;
+  canMore: boolean;
+  loading?: boolean;
+  onMore: () => void;
+}) {
+  return (
+    <div className="notice mt-3 flex flex-wrap items-center justify-between gap-2" data-testid="list-cut">
+      <span>
+        {total === null ? t.common.shownFirst(shown) : t.common.shownOf(shown, total)} {canMore ? null : t.common.refineToSeeMore}
+      </span>
+      {canMore && (
+        <Button size="sm" variant="ghost" disabled={loading} onClick={onMore}>
+          {loading ? t.common.loading : t.common.loadMore}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 /** Linhas-esqueleto de uma tabela que está carregando. */
 export function SkelRows({ cols, rows = 4 }: { cols: number; rows?: number }) {
   return (

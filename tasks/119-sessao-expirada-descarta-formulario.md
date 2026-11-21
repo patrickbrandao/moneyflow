@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -66,5 +66,9 @@ e2e novo (por exemplo `sessao.spec.ts`): preencher o formulário do título, apa
 Nada foi executado. O tempo até cair (até 60 s) depende da sondagem do sino. Os lembretes (`ReminderAlarm`, fora desta área) também sondam e podem antecipar o 401.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `request()` chamava o handler em todo 401 e o `AuthProvider` zerava o usuário, o que trocava o `Console` pelo `LoginPage` e desmontava os formulários; o sino sondava a cada 60 s; `upload()` e `downloadFile()` não chamavam o handler.
 
 ## Resolução (executor)
+Sessão expirada separada de deslogado. `apps/web/src/lib/api.ts`: no 401 (fora das rotas da própria sessão: login, logout, me), `recoverSession` chama o handler, que devolve uma promessa resolvida depois do login de novo; se o mesmo usuário entrar, o pedido é repetido (o 401 sai da checagem da sessão, antes de qualquer rota, então nada foi gravado); senão falha com `ApiError` `session_expired`. `upload()` e `downloadFile()` usam o mesmo caminho. `apps/web/src/lib/auth.tsx`: `expired` no contexto, os pedidos à espera numa fila, `login` resolve a fila (repetir se for o mesmo usuário) e `logout` a encerra; o aviso `notice` do login saiu (o console não cai mais por 401). `App.tsx`: o `Console` fica montado (com `key` pelo usuário, para recomeçar limpo se entrar outro, voltando a `/`) e a `SessionExpiredDialog` nova (`components/shell/SessionExpiredDialog.tsx`) abre por cima de tudo, com o usuário preenchido, "Entrar" e "Sair"; não fecha no Esc (camada da tarefa 115) nem no clique fora. `usePolling` não dispara enquanto a sessão está caída (sino, lembretes). `useAction` não mostra toast do `session_expired` (a janela já explica). Textos em `t.auth.expiredDialog`. Spec 002 (nova regra) e a linha dela no `docs/INDEX.md` atualizadas.
+
+Testes: e2e novo `e2e/tests/sessao.spec.ts` (não rodado aqui): usuário novo preenche "Nova entidade", o admin troca a senha dele por outro contexto, o "Salvar" abre a janela da sessão com o formulário intacto, o Esc não fecha nada, e o login com a senha nova repete o salvar e abre a ficha da entidade. Verificação: `pnpm verify:quick`.

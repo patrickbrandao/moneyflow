@@ -151,22 +151,28 @@ export function ImportModal({
   const [replaceIds, setReplaceIds] = useState<Set<string> | null>(null);
   const replacing = replaceIds ?? new Set(overlapping.map((p) => p.id));
 
+  // Só a inspeção do último arquivo escolhido vale (tarefa 118): trocado o arquivo antes
+  // do resumo, a resposta do anterior não pinta o resumo nem o mapeamento do novo.
+  const pickSeq = useRef(0);
   async function pick(next: File) {
+    const mine = ++pickSeq.current;
     setFile(next);
     setInspect(null);
+    setBuffer(null);
     setOwnBalance(false);
     setBankBalance(null);
     setError(null);
     setBusy(true);
     try {
       const [result, bytes] = await Promise.all([upload<StatementInspect>('/api/statements/inspect', next, target), next.arrayBuffer()]);
+      if (mine !== pickSeq.current) return;
       setInspect(result);
       setOfxPosition(result.ofx ? (result.ofx.selected ?? result.ofx.suggested) : null);
       setBuffer(bytes);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (mine === pickSeq.current) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(false);
+      if (mine === pickSeq.current) setBusy(false);
     }
   }
 
@@ -499,12 +505,15 @@ function CsvMapper({
   };
   const [form, setForm] = useState<MappingForm>(fresh);
 
-  // Com mapeamentos salvos, começa pelo padrão (ou o primeiro).
+  // Com mapeamentos salvos, começa pelo padrão (ou o primeiro). Só na primeira chegada da lista
+  // (tarefa 118): salvar ou excluir recarrega a lista, e o formulário não troca sozinho de mapeamento.
+  const started = useRef(false);
   useEffect(() => {
     const list = mappings.data;
-    if (!list || list.length === 0) return;
-    const chosen = list.find((m) => m.isDefault) ?? list[0]!;
-    load(chosen);
+    if (started.current || !list) return;
+    started.current = true;
+    const chosen = list.find((m) => m.isDefault) ?? list[0];
+    if (chosen) load(chosen);
   }, [mappings.data]);
 
   const text = useMemo(() => decode(buffer, form.encoding), [buffer, form.encoding]);

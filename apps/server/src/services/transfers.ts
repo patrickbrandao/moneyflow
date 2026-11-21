@@ -33,7 +33,7 @@ export async function listTransfers(ctx: ServiceContext, query: z.output<typeof 
   if (query.from) where.push(sql`tr.transferred_on >= ${query.from}::date`);
   if (query.to) where.push(sql`tr.transferred_on <= ${query.to}::date`);
   const result = await ctx.db.execute(
-    sql`${selectSql} WHERE ${sql.join(where, sql` AND `)} ORDER BY tr.transferred_on DESC, tr.created_at DESC LIMIT ${query.limit}`,
+    sql`${selectSql} WHERE ${sql.join(where, sql` AND `)} ORDER BY tr.transferred_on DESC, tr.created_at DESC, tr.id DESC LIMIT ${query.limit}`,
   );
   return result.rows.map(toRow);
 }

@@ -1,6 +1,6 @@
 import { AUDIT_TABLES, type AuditEntry, formatDateTime, t, type UserRow } from '@moneyflow/shared';
 import { ChevronDown, ChevronRight, History, ShieldAlert } from 'lucide-react';
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { ActionBadge, ActorLabel, AuditDiff, columnLabel, tableLabel } from '../components/audit/AuditHistory';
 import { LoadError, PageHead, SkelRows } from '../components/domain';
 import { Button, CopyButton, cx, EmptyRow, EmptyState } from '../components/ui';
@@ -46,18 +46,23 @@ function AuditLog() {
   const key = JSON.stringify(filters);
   const filtered = Object.values(filters).some(Boolean);
 
+  // Só a última carga pedida vale (tarefa 118): sem filtro a consulta é mais lenta, e a
+  // resposta dela chegando depois da do filtro novo não pode substituir a tabela.
+  const seq = useRef(0);
   const load = useCallback(
     async (before: string | null) => {
+      const mine = ++seq.current;
       setLoading(true);
       try {
         const rows = await api.get<AuditEntry[]>('/api/audit', { ...JSON.parse(key), before, limit: PAGE });
+        if (mine !== seq.current) return;
         setEntries((current) => (before && current ? [...current, ...rows] : rows));
         setDone(rows.length < PAGE);
         setError(null);
       } catch (err) {
-        setError(err instanceof ApiError ? err : new ApiError(0, 'unknown', String(err)));
+        if (mine === seq.current) setError(err instanceof ApiError ? err : new ApiError(0, 'unknown', String(err)));
       } finally {
-        setLoading(false);
+        if (mine === seq.current) setLoading(false);
       }
     },
     [key],

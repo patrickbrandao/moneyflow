@@ -26,40 +26,37 @@ import { AccountSelect, calendarText, useObligationOptions } from './ObligationF
 const kindOf = (direction: 'receivable' | 'payable') => (direction === 'payable' ? 'expense' : 'income');
 const C = t.contracts;
 
-/** Pede a prévia (dryRun) sempre que o corpo muda; erros de validação viram mensagem. */
+/**
+ * Pede a prévia (dryRun) sempre que o corpo muda; erros de validação viram mensagem.
+ * A prévia guarda o corpo que a gerou e só aparece enquanto ele for o da tela
+ * (tarefa 117): mudado um campo, `preview` volta a null até a prévia nova
+ * chegar, e o botão de aplicar (que exige a prévia) fica desligado; o Enter no
+ * campo também não aplica, porque a submissão implícita respeita o botão desligado.
+ */
 function usePreview<P>(path: string, body: unknown, enabled: boolean) {
-  const [preview, setPreview] = useState<P | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const key = JSON.stringify(body);
+  const [result, setResult] = useState<{ key: string; preview: P | null; error: string | null } | null>(null);
+  const json = JSON.stringify(body);
+  const key = `${path}\n${json}`;
   useEffect(() => {
-    if (!enabled) {
-      setPreview(null);
-      setError(null);
-      return;
-    }
+    if (!enabled) return;
     let cancelled = false;
     const timer = setTimeout(() => {
       api
-        .post<ContractActionResult<P>>(`${path}?dryRun=1`, JSON.parse(key))
-        .then((result) => {
-          if (!cancelled) {
-            setPreview(result.preview);
-            setError(null);
-          }
+        .post<ContractActionResult<P>>(`${path}?dryRun=1`, JSON.parse(json))
+        .then((r) => {
+          if (!cancelled) setResult({ key, preview: r.preview, error: null });
         })
         .catch((err) => {
-          if (!cancelled) {
-            setPreview(null);
-            setError(err instanceof ApiError ? err.message : String(err));
-          }
+          if (!cancelled) setResult({ key, preview: null, error: err instanceof ApiError ? err.message : String(err) });
         });
     }, 300);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [path, key, enabled]);
-  return { preview, error };
+  }, [path, json, key, enabled]);
+  const fresh = enabled && result?.key === key ? result : null;
+  return { preview: fresh?.preview ?? null, error: fresh?.error ?? null };
 }
 
 const pctOf = (text: string) => {
@@ -134,6 +131,7 @@ export function AmendmentModal({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (!preview) return;
     const result = await run(
       () => api.post<ContractActionResult<AmendmentPreview>>(`/api/contracts/${contract.id}/amendments`, body),
       (r) => A.applied(r.preview.affected.length + r.preview.cardFrom.length),
@@ -351,6 +349,7 @@ export function TerminationModal({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (!preview) return;
     const result = await run(
       () => api.post<ContractActionResult<TerminationPreview>>(`/api/contracts/${contract.id}/terminate`, body),
       R.done,
@@ -513,6 +512,7 @@ export function RenewalModal({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (!preview) return;
     const result = await run(() => api.post<ContractActionResult<RenewalPreview>>(`/api/contracts/${contract.id}/renew`, body), R.done);
     if (result?.contract) onSaved(result.contract);
   }

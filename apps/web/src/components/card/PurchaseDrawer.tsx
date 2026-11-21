@@ -1,13 +1,13 @@
 import { type CardPurchaseDetail, contractLink, formatAccounting, formatDate, t, todayIso } from '@moneyflow/shared';
 import { Handshake, Link2, Pencil, Trash2, Undo2, Unlink, X } from 'lucide-react';
-import { type FormEvent, useEffect, useState } from 'react';
+import { type FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
 import { entityLink, invoiceLink } from '../../lib/links';
 import { CategoryLabel, LoadError, Money } from '../domain';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
-import { Badge, Button, Field, Modal, Skel, useConfirm } from '../ui';
+import { Badge, Button, Field, Modal, Skel, useConfirm, useEscapeLayer } from '../ui';
 import { ChargeLinkModal } from './ChargeLink';
 import { PayerSelect } from './PurchaseFormModal';
 import { monthLabel } from './shared';
@@ -19,13 +19,7 @@ export function PurchaseDrawer({ purchaseId, onClose, onChanged }: { purchaseId:
   const confirm = useConfirm();
   const { run } = useAction();
 
-  useEffect(() => {
-    const down = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !modal) onClose();
-    };
-    document.addEventListener('keydown', down);
-    return () => document.removeEventListener('keydown', down);
-  }, [onClose, modal]);
+  useEscapeLayer(true, onClose);
 
   const saved = (next: CardPurchaseDetail) => {
     setData(next);

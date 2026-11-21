@@ -3,7 +3,7 @@ import { Building2, Plus, Search, Star, Tags, UserRound } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { recordDragProps } from '../agents/records';
-import { LoadError, PageHead, SkelRows } from '../components/domain';
+import { ListCutNotice, LoadError, PageHead, SkelRows } from '../components/domain';
 import { ExportMenu } from '../components/ExportMenu';
 import { EntityFormModal } from '../components/entity/EntityFormModal';
 import { EntityTagsModal } from '../components/entity/EntityTagsModal';
@@ -14,7 +14,7 @@ import { api } from '../lib/api';
 import { useUser } from '../lib/auth';
 import { useRegisterCommands } from '../lib/commands';
 import { entitiesTable } from '../lib/export-tables';
-import { useApi } from '../lib/hooks';
+import { useApi, useListLimit } from '../lib/hooks';
 import { useParamState } from '../lib/params';
 
 const TABS = ['favorites', 'all', ...ENTITY_KINDS] as const;
@@ -37,13 +37,25 @@ export function EntitiesPage() {
   const [q, setQ] = useState('');
   const query = useDebounced(q, 250);
   const searching = query.trim() !== '';
-  const qs = new URLSearchParams({ limit: '300', ...entityFilterQuery(filter, false) });
+  const qs = new URLSearchParams(entityFilterQuery(filter, false));
   if (searching) qs.set('q', query.trim());
   if (tab === 'person' || tab === 'company') qs.set('kind', tab);
   // A busca procura em todas: na aba Favoritas, com texto, as favoritas só vêm primeiro.
   if (tab === 'favorites' && !searching) qs.set('favorites', '1');
   if (archived) qs.set('archived', '1');
-  const { data, error, reload, setData } = useApi<EntitySummary[]>(`/api/entities?${qs}`);
+  // A lista corta no servidor (tarefa 116): pede uma linha a mais para saber se há mais e avisa.
+  const list = useListLimit(qs.toString());
+  const listQs = new URLSearchParams(qs);
+  listQs.set('limit', String(list.limit + 1));
+  const {
+    data: probe,
+    error,
+    reload,
+    setData,
+    loading,
+  } = useApi<EntitySummary[]>(`/api/entities?${listQs}`, { keepPrevious: list.growing });
+  const cut = Boolean(probe && probe.length > list.limit);
+  const data = probe && cut ? probe.slice(0, list.limit) : probe;
   const cols = 6;
   const markFavorite = (id: string, favorite: boolean) => {
     if (tab === 'favorites' && !searching && !favorite) void reload();
@@ -203,6 +215,7 @@ export function EntitiesPage() {
           </table>
         </div>
       )}
+      {data && cut && <ListCutNotice shown={data.length} total={null} canMore={list.canMore} loading={loading} onMore={list.more} />}
       {managing && <EntityTagsModal onClose={() => setManaging(false)} onChanged={() => void reload()} />}
       {isNew && (
         <EntityFormModal

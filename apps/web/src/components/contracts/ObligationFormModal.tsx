@@ -819,9 +819,12 @@ export function SeriesRuleEndModal({
   const [endsOn, setEndsOn] = useState(series.endsOn ?? todayIso());
   const target = noEnd ? null : endsOn || null;
   const ready = noEnd || Boolean(endsOn);
-  const { data: preview, error } = useApi<SeriesEndPreview>(
-    ready ? `/api/series/${series.id}/end${target ? `?endsOn=${target}` : ''}` : null,
-  );
+  // A prévia é a da data na tela (tarefa 117): trocada a data, o botão desliga até a nova chegar.
+  const {
+    data: preview,
+    error,
+    loading,
+  } = useApi<SeriesEndPreview>(ready ? `/api/series/${series.id}/end${target ? `?endsOn=${target}` : ''}` : null);
   const { run, busy } = useAction();
 
   async function submit() {
@@ -858,6 +861,7 @@ export function SeriesRuleEndModal({
         </p>
         <div className="mt-3 grid gap-2 text-[13px]">
           {error && <div className="alert warn">{error.message}</div>}
+          {ready && loading && !error && <p className="text-faint">{t.common.loading}</p>}
           {preview && preview.toCancel.length > 0 && (
             <div>
               <strong className="text-ink">{t.title.endSeriesCancelCount(preview.toCancel.length)}</strong>

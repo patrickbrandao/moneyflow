@@ -215,3 +215,35 @@ describe('cartão de crédito (spec 007)', () => {
     expect(nov.totalCents).toBe(100_000 - 200_000);
   });
 });
+
+describe('compras cortadas e os totais do filtro (tarefa 116)', () => {
+  it('os totais contam o filtro inteiro, com o estorno negativo, e o limite maior repete as primeiras', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await cardScenario(admin);
+    const buy = (purchasedOn: string, amountCents: number) =>
+      admin.post(`/api/cards/${s.card.id}/purchases`, {
+        entityId: s.store.id,
+        categoryId: s.expense.id,
+        purchasedOn,
+        description: `Compra ${amountCents}`,
+        amountCents,
+      });
+    const first = await buy('2026-09-05', 10_000);
+    await buy('2026-09-05', 20_000);
+    await buy('2026-09-06', 30_000);
+    await admin.post(`/api/card-purchases/${first.id}/refund`, { amountCents: 4_000, refundedOn: '2026-09-07' });
+
+    const page = await admin.get(`/api/cards/${s.card.id}/purchases?limit=2`);
+    expect(page).toHaveLength(2);
+    const totals = await admin.get(`/api/cards/${s.card.id}/purchases/totals?limit=2`);
+    expect(totals).toEqual({ count: 4, totalCents: 10_000 + 20_000 + 30_000 - 4_000 });
+    const more = await admin.get(`/api/cards/${s.card.id}/purchases?limit=3`);
+    expect(more.slice(0, 2).map((r: { id: string }) => r.id)).toEqual(page.map((r: { id: string }) => r.id));
+
+    // O filtro vale nos totais: só as compras do dia 5.
+    const day = await admin.get(`/api/cards/${s.card.id}/purchases/totals?from=2026-09-05&to=2026-09-05`);
+    expect(day).toEqual({ count: 2, totalCents: 30_000 });
+    const outsider = client(h, (await userSession(h)).cookie);
+    await outsider.get(`/api/cards/${s.card.id}/purchases/totals`, 404);
+  });
+});

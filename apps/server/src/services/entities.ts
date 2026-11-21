@@ -83,7 +83,7 @@ export async function listEntities(
   const result = await ctx.db.execute(sql`
     SELECT ${summarySelect(ctx.access)} FROM entities e
      WHERE ${sql.join(conditions, sql` AND `)}
-     ORDER BY ${order} LIMIT ${query.limit}`);
+     ORDER BY ${order}, e.id LIMIT ${query.limit}`);
   return result.rows.map(toSummary);
 }
 

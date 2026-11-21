@@ -1,4 +1,4 @@
-import { type CaixaDetail, formatDate, type TitleRow, t } from '@moneyflow/shared';
+import { type CaixaDetail, formatDate, type TitleRow, type TitleTotals, t } from '@moneyflow/shared';
 import { CircleDollarSign, Paperclip, Plus, Search } from 'lucide-react';
 import { useState } from 'react';
 import '../../styles/attachments.css';
@@ -6,12 +6,12 @@ import { recordDragProps } from '../../agents/records';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { titlesTable } from '../../lib/export-tables';
-import { useApi } from '../../lib/hooks';
+import { useApi, useListLimit } from '../../lib/hooks';
 import { useParamState, useSetParams } from '../../lib/params';
 import { DateRangeFilter, useStoredPeriod } from '../DateRangeFilter';
-import { CategoryLabel, LoadError, MirrorBadge, Money, SkelRows, TitleStatusBadge } from '../domain';
+import { CategoryLabel, ListCutNotice, LoadError, MirrorBadge, Money, SkelRows, TitleStatusBadge } from '../domain';
 import { ExportMenu } from '../ExportMenu';
-import { Badge, Button, cx, EmptyRow, Tabs, useDebounced } from '../ui';
+import { Badge, Button, cx, EmptyRow, Skel, Tabs, useDebounced } from '../ui';
 import { TitleDrawer } from './TitleDrawer';
 import { TitleFormModal } from './TitleFormModal';
 
@@ -52,10 +52,17 @@ export function TitlesTab({
   if (from) params.set('from', from);
   if (to) params.set('to', to);
   if (archived) params.set('archived', '1');
-  const { data, error, reload } = useApi<TitleRow[]>(`/api/titles?${params}`);
+  // A lista corta no servidor (tarefa 116): o rodapé vem dos totais do filtro inteiro, e
+  // "Mostrando N de M" com "Carregar mais" avisa quando há mais títulos do que os mostrados.
+  const list = useListLimit(params.toString());
+  const listParams = new URLSearchParams(params);
+  listParams.set('limit', String(list.limit));
+  const { data, error, reload, loading } = useApi<TitleRow[]>(`/api/titles?${listParams}`, { keepPrevious: list.growing });
+  const totals = useApi<TitleTotals>(`/api/titles/totals?${params}`);
 
   const changed = () => {
     void reload();
+    void totals.reload();
     onChanged();
   };
 
@@ -67,10 +74,7 @@ export function TitlesTab({
     [caixa.canWrite, caixa.id, direction],
   );
 
-  const totals = (data ?? []).reduce((acc, row) => ({ amount: acc.amount + row.amountCents, open: acc.open + row.openCents }), {
-    amount: 0,
-    open: 0,
-  });
+  const count = totals.data?.count ?? null;
 
   return (
     <>
@@ -204,21 +208,18 @@ export function TitlesTab({
             {data && data.length > 0 && (
               <tfoot>
                 <tr>
-                  <td colSpan={3}>
-                    {data.length} título{data.length === 1 ? '' : 's'}
-                  </td>
-                  <td className="num">
-                    <Money cents={totals.amount} />
-                  </td>
-                  <td className="num">
-                    <Money cents={totals.open} />
-                  </td>
+                  <td colSpan={3}>{count === null ? <Skel h={14} w={80} /> : `${count} título${count === 1 ? '' : 's'}`}</td>
+                  <td className="num">{totals.data ? <Money cents={totals.data.amountCents} /> : <Skel h={14} w={80} />}</td>
+                  <td className="num">{totals.data ? <Money cents={totals.data.openCents} /> : <Skel h={14} w={80} />}</td>
                   <td colSpan={2} />
                 </tr>
               </tfoot>
             )}
           </table>
         </div>
+      )}
+      {data && count !== null && data.length < count && (
+        <ListCutNotice shown={data.length} total={count} canMore={list.canMore} loading={loading} onMore={list.more} />
       )}
 
       {titleId && <TitleDrawer key={titleId} titleId={titleId} onClose={() => setTitleId(null)} onChanged={changed} />}

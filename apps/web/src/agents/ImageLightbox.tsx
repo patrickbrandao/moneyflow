@@ -2,6 +2,7 @@ import { t } from '@moneyflow/shared';
 import { ChevronLeft, ChevronRight, Download, X } from 'lucide-react';
 import { type ReactNode, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { useEscapeLayer } from '../components/ui';
 import { attachmentUrl } from '../lib/upload';
 
 const u = t.agentsUi.media;
@@ -34,12 +35,7 @@ export function MediaDialog({
     const previous = document.activeElement as HTMLElement | null;
     card.current?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        onClose();
-        return;
-      }
-      handler.current?.(event);
+      if (event.key !== 'Escape') handler.current?.(event);
     };
     document.addEventListener('keydown', onKey);
     return () => {
@@ -47,6 +43,8 @@ export function MediaDialog({
       previous?.focus?.();
     };
   }, [onClose]);
+  // Esc pela pilha de camadas: fecha só a prévia, não a janela de onde ela abriu.
+  useEscapeLayer(true, onClose);
 
   return createPortal(
     <>

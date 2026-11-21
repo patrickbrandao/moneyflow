@@ -1,16 +1,16 @@
-import { type CardPurchaseRow, formatDate, t } from '@moneyflow/shared';
+import { type CardPurchaseRow, type CardPurchaseTotals, formatDate, t } from '@moneyflow/shared';
 import { Paperclip, Plus, Search } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { purchasesTable } from '../../lib/export-tables';
-import { useApi } from '../../lib/hooks';
+import { useApi, useListLimit } from '../../lib/hooks';
 import { entityLink } from '../../lib/links';
 import { useParamState } from '../../lib/params';
 import { DateRangeFilter, useStoredPeriod } from '../DateRangeFilter';
-import { CategoryLabel, LoadError, Money, SkelRows } from '../domain';
+import { CategoryLabel, ListCutNotice, LoadError, Money, SkelRows } from '../domain';
 import { ExportMenu } from '../ExportMenu';
-import { Badge, Button, cx, EmptyRow, useDebounced } from '../ui';
+import { Badge, Button, cx, EmptyRow, Skel, useDebounced } from '../ui';
 import { PurchaseDrawer } from './PurchaseDrawer';
 import { useGeneralCaixas, useReloadOn } from './shared';
 
@@ -46,11 +46,22 @@ export function PurchasesTab({
   if (payer) params.set('payerCaixaId', payer);
   if (kind) params.set('kind', kind);
   if (query.trim()) params.set('q', query.trim());
-  const { data, error, reload } = useApi<CardPurchaseRow[]>(`/api/cards/${cardCaixaId}/purchases?${params}`);
-  useReloadOn(version, reload);
+  // A lista corta no servidor (tarefa 116): o rodapé vem dos totais do filtro inteiro, e
+  // "Mostrando N de M" com "Carregar mais" avisa quando há mais compras do que as mostradas.
+  const list = useListLimit(`${cardCaixaId}?${params}`);
+  const listParams = new URLSearchParams(params);
+  listParams.set('limit', String(list.limit));
+  const { data, error, reload, loading } = useApi<CardPurchaseRow[]>(`/api/cards/${cardCaixaId}/purchases?${listParams}`, {
+    keepPrevious: list.growing,
+  });
+  const totals = useApi<CardPurchaseTotals>(`/api/cards/${cardCaixaId}/purchases/totals?${params}`);
+  const reloadAll = async () => {
+    await Promise.all([reload(), totals.reload()]);
+  };
+  useReloadOn(version, reloadAll);
 
   const signed = (row: CardPurchaseRow) => (row.kind === 'refund' ? -row.amountCents : row.amountCents);
-  const total = (data ?? []).reduce((sum, row) => sum + signed(row), 0);
+  const count = totals.data?.count ?? null;
 
   return (
     <>
@@ -173,17 +184,16 @@ export function PurchasesTab({
             {data && data.length > 0 && (
               <tfoot>
                 <tr>
-                  <td colSpan={5}>
-                    {data.length} lançamento{data.length === 1 ? '' : 's'}
-                  </td>
-                  <td className="num">
-                    <Money cents={total} />
-                  </td>
+                  <td colSpan={5}>{count === null ? <Skel h={14} w={80} /> : `${count} lançamento${count === 1 ? '' : 's'}`}</td>
+                  <td className="num">{totals.data ? <Money cents={totals.data.totalCents} /> : <Skel h={14} w={80} />}</td>
                 </tr>
               </tfoot>
             )}
           </table>
         </div>
+      )}
+      {data && count !== null && data.length < count && (
+        <ListCutNotice shown={data.length} total={count} canMore={list.canMore} loading={loading} onMore={list.more} />
       )}
 
       {purchaseId && (
@@ -192,7 +202,7 @@ export function PurchasesTab({
           purchaseId={purchaseId}
           onClose={() => setPurchaseId(null)}
           onChanged={() => {
-            void reload();
+            void reloadAll();
             onChanged();
           }}
         />

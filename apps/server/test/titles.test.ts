@@ -367,3 +367,48 @@ describe('encerrar série (spec 005)', () => {
     await viewer.post(`/api/titles/${monthly.id}/series/end`, { endsOn: '2026-12-15' }, 403);
   });
 });
+
+describe('listagem cortada e os totais do filtro (tarefa 116)', () => {
+  it('os totais contam o filtro inteiro, e o limite maior repete as mesmas primeiras linhas', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    // Cinco títulos no mesmo vencimento (o desempate é pelo id) e um sexto pago, fora do "em aberto".
+    const amounts = [10_000, 20_000, 30_000, 40_000, 50_000];
+    for (const [i, amountCents] of amounts.entries()) {
+      await admin.post('/api/titles', { ...base(s), description: `Corte ${i}`, amountCents, mirrorCaixaId: null });
+    }
+    const paid = await admin.post('/api/titles', { ...base(s), description: 'Corte pago', amountCents: 7_000, mirrorCaixaId: null });
+    await admin.post(`/api/titles/${paid.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 7_000,
+      financialAccountId: s.accountA.id,
+    });
+    const partial = await admin.post('/api/titles', { ...base(s), description: 'Corte parcial', amountCents: 9_000, mirrorCaixaId: null });
+    await admin.post(`/api/titles/${partial.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 4_000,
+      financialAccountId: s.accountA.id,
+    });
+
+    const filter = `caixaId=${s.caixaA.id}&direction=payable&status=unpaid`;
+    const firstPage = await admin.get(`/api/titles?${filter}&limit=2`);
+    expect(firstPage).toHaveLength(2);
+    const totals = await admin.get(`/api/titles/totals?${filter}&limit=2`);
+    // O limite não conta nos totais: os 5 + o parcial; o pago fica de fora pelo filtro.
+    expect(totals).toEqual({ count: 6, amountCents: 150_000 + 9_000, openCents: 150_000 + 5_000 });
+
+    // "Carregar mais" pede a mesma consulta com um limite maior: as primeiras linhas são as mesmas.
+    const more = await admin.get(`/api/titles?${filter}&limit=4`);
+    expect(more.slice(0, 2).map((r: { id: string }) => r.id)).toEqual(firstPage.map((r: { id: string }) => r.id));
+    const all = await admin.get(`/api/titles?${filter}&limit=10`);
+    expect(new Set(all.map((r: { id: string }) => r.id)).size).toBe(6);
+
+    // Todos os status: entra o pago.
+    const everything = await admin.get(`/api/titles/totals?caixaId=${s.caixaA.id}&direction=payable`);
+    expect(everything.count).toBe(7);
+
+    // Sem acesso à caixa, os totais respondem 404, como a lista.
+    const outsider = client(h, (await userSession(h)).cookie);
+    await outsider.get(`/api/titles/totals?caixaId=${s.caixaA.id}`, 404);
+  });
+});

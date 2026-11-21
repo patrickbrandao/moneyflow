@@ -28,6 +28,7 @@ export async function titleRoutes(app: FastifyInstance) {
   const id = (r: Req) => param(r, 'id');
 
   app.get('/api/titles', (r: Req) => titles.listTitles(r.ctx, parse(titleListQuery, r.query)));
+  app.get('/api/titles/totals', (r: Req) => titles.titleTotals(r.ctx, parse(titleListQuery, r.query)));
   app.post('/api/titles', (r: Req) => titles.createTitle(r.ctx, parse(titleCreateInput, r.body)));
   app.get('/api/titles/:id', (r: Req) => titles.getTitle(r.ctx, id(r)));
   app.patch('/api/titles/:id', (r: Req) => titles.updateTitle(r.ctx, id(r), parse(titleUpdateInput, r.body)));

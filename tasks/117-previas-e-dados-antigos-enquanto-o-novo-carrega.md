@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -138,5 +138,11 @@ Em rede lenta ou com um servidor ocupado, qualquer pessoa que troque um filtro, 
 Nada foi executado. O efeito com rede lenta foi deduzido do código; a janela do problema nos modais de contrato é de 300 ms mais a latência do `dryRun`. Não conferi se o servidor rejeita uma conta de outra pagadora no adiantamento da fatura; pela regra das contas por caixa, provavelmente rejeita.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `useApi` mantinha o `data` do caminho anterior até a resposta nova; o `usePreview` dos modais de contrato não limpava a prévia ao mudar o corpo e o botão ligava por `!preview`; `useObligationMatches` (cofre) mostrava a oferta do valor anterior durante o debounce. O `AccountSelect` da fatura escolhia a conta da lista da pagadora anterior.
 
 ## Resolução (executor)
+`useApi` (`apps/web/src/lib/hooks.ts`) guarda o dado junto com o caminho de onde veio: com o caminho trocado, `data` (e `error`) voltam a `undefined` até a resposta nova, e `loading` fica verdadeiro também enquanto o dado não é do caminho atual (e falso com o caminho nulo). Cada busca tem um número e a anterior é abortada (`AbortController`, `api.get` aceita `signal`): vale a última pedida, mesmo no mesmo caminho. Opção `keepPrevious` mantém o dado anterior com `stale: true`; usada só no canvas (`FlowPage`/`MoneyFlowCanvas`, esmaecido, para não perder o enquadramento) e nas listas ao "Carregar mais" (tarefa 116). Com isso: o "Aplicar" do `SeriesEndModal` e do `SeriesRuleEndModal` desliga até a prévia da data nova (com "Carregando…"); as caixas do mês da tela da conta mostram esqueleto ao trocar de conta; a exportação dos relatórios fica desligada enquanto o filtro novo carrega; o `AccountSelect` só escolhe a conta padrão com a lista da pagadora atual; os gráficos do Resumo e os totais do calendário mostram esqueleto/"—".
+
+`usePreview` (`ContractActionModals.tsx`) guarda o corpo que gerou a prévia e só a devolve enquanto ele for o da tela: mudado um campo, o botão de aditivo, rescisão e renovação desliga, e o Enter não aplica (a submissão implícita respeita o botão desligado; o `submit` também confere a prévia). Na rescisão, o proporcional sugerido (`lastAmounts`) é refeito a partir da prévia da data enviada. `useObligationMatches` (`AccountsTab.tsx`) guarda a chave da resposta e só oferece a baixa quando ela é a do valor, entidade e data na tela.
+
+Testes: o web não tem unitários; o hook se apoia no typecheck e no e2e novo `e2e/tests/respostas.spec.ts` → "Encerrar série: trocada a data, "Aplicar" espera a prévia nova" (resposta atrasada com `page.route`; não rodado aqui). Verificação: `pnpm verify:quick`.

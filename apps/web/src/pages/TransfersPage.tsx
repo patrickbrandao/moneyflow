@@ -2,14 +2,14 @@ import { type AccountRow, type CaixaSummary, formatAccounting, formatDate, type 
 import { ArrowRight, Plus, Trash2 } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { LoadError, Money, PageHead, SkelRows } from '../components/domain';
+import { ListCutNotice, LoadError, Money, PageHead, SkelRows } from '../components/domain';
 import { FormError, ModalActions, MoneyInput } from '../components/forms';
 import { Badge, Button, EmptyRow, Field, Modal, useConfirm } from '../components/ui';
 import { canWriteCaixa } from '../lib/access';
 import { api } from '../lib/api';
 import { useUser } from '../lib/auth';
 import { useRegisterCommands } from '../lib/commands';
-import { useAction, useApi } from '../lib/hooks';
+import { useAction, useApi, useListLimit } from '../lib/hooks';
 import { useParamState } from '../lib/params';
 
 /** Transferências entre contas (spec 005): par de movimentos que soma zero; não é receita nem despesa. */
@@ -18,7 +18,13 @@ export function TransfersPage() {
   const [isNew, setNew] = useParamState('new');
   const [caixaId, setCaixaId] = useParamState('caixa');
   const caixas = useApi<CaixaSummary[]>('/api/caixas');
-  const { data, error, reload } = useApi<TransferRow[]>(`/api/transfers${caixaId ? `?caixaId=${caixaId}` : ''}`);
+  // A lista corta no servidor (tarefa 116): pede uma linha a mais para saber se há mais e avisa.
+  const list = useListLimit(caixaId ?? '');
+  const listQs = new URLSearchParams({ limit: String(list.limit + 1) });
+  if (caixaId) listQs.set('caixaId', caixaId);
+  const { data: probe, error, reload, loading } = useApi<TransferRow[]>(`/api/transfers?${listQs}`, { keepPrevious: list.growing });
+  const cut = Boolean(probe && probe.length > list.limit);
+  const data = probe && cut ? probe.slice(0, list.limit) : probe;
   const confirm = useConfirm();
   const { run } = useAction();
 
@@ -122,6 +128,7 @@ export function TransfersPage() {
           </table>
         </div>
       )}
+      {data && cut && <ListCutNotice shown={data.length} total={null} canMore={list.canMore} loading={loading} onMore={list.more} />}
       {isNew && (
         <TransferModal
           onClose={() => setNew(null)}

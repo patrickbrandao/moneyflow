@@ -17,7 +17,7 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAgentScreenContext } from '../../agents/AgentsProvider';
 import { api } from '../../lib/api';
@@ -31,7 +31,7 @@ import { PlannedAccountButton, PlannedAccountLabel } from '../contracts/PlannedA
 import { CategoryLabel, LoadError, MirrorBadge, Money, TitleStatusBadge } from '../domain';
 import { TitleEntryInfo } from '../entry/TitleEntryInfo';
 import { CategorySelect, ModalActions } from '../forms';
-import { Badge, Button, Field, Modal, Skel, useConfirm } from '../ui';
+import { Badge, Button, Field, Modal, Skel, useConfirm, useEscapeLayer } from '../ui';
 import { SeriesEndModal } from './SeriesEndModal';
 import { termsSummary } from './SeriesTermsFields';
 import { ReverseModal, SetAccountModal, SettlementModal } from './SettlementModal';
@@ -70,13 +70,8 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
       : null,
   );
 
-  useEffect(() => {
-    const down = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !modal) onClose();
-    };
-    document.addEventListener('keydown', down);
-    return () => document.removeEventListener('keydown', down);
-  }, [onClose, modal]);
+  // Esc fecha a gaveta só quando ela é a camada de cima (os modais e as confirmações abertos dela fecham antes).
+  useEscapeLayer(true, onClose);
 
   const saved = (next: TitleDetail) => {
     setData(next);

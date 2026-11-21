@@ -68,6 +68,11 @@ export const ptBR = {
     seeAll: 'ver todos',
     loadError: 'Não foi possível carregar.',
     noResults: 'Nada encontrado.',
+    /** Lista cortada no servidor (tarefa 116). */
+    shownOf: (shown: number, total: number) => `Mostrando ${shown} de ${total}.`,
+    shownFirst: (shown: number) => `Mostrando os primeiros ${shown}; há mais.`,
+    loadMore: 'Carregar mais',
+    refineToSeeMore: 'Refine o filtro para ver o restante.',
     deletedOrArchived: (archived: boolean) => (archived ? 'Registro arquivado (tinha vínculos).' : 'Registro excluído.'),
   },
   period: {
@@ -133,6 +138,12 @@ export const ptBR = {
     invalid: 'Usuário ou senha incorretos, ou usuário desativado.',
     required: 'Informe usuário e senha.',
     sessionExpired: 'Sua sessão terminou. Entre de novo.',
+    /** A janela de login por cima do console quando a sessão cai (tarefa 119). */
+    expiredDialog: {
+      title: 'Sua sessão terminou',
+      description:
+        'Entre de novo para continuar. O que você estava fazendo continua na tela, e o que ficou pendente é enviado depois do login.',
+    },
     forgot: 'Esqueceu a senha? Peça a um administrador.',
     logout: 'Sair',
     unauthenticated: 'Faça login para continuar.',

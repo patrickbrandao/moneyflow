@@ -15,6 +15,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
+import { isSessionExpired } from '../lib/api';
 
 /* ============================================================
    Primitivos do console. Todo o visual é classe de CSS
@@ -354,6 +355,47 @@ export function Tabs({
   );
 }
 
+/* ---- pilha de camadas do Esc (tarefa 115) ---- */
+
+type EscapeLayer = { run: () => void };
+
+/** As camadas abertas na ordem em que abriram: o Esc fecha só a de cima. */
+const escapeStack: EscapeLayer[] = [];
+
+function onEscapeKey(event: KeyboardEvent) {
+  // Quem já tratou o Esc (a paleta, um gráfico com o dia em destaque) chamou preventDefault.
+  if (event.key !== 'Escape' || event.defaultPrevented) return;
+  const top = escapeStack[escapeStack.length - 1];
+  if (!top) return;
+  event.preventDefault();
+  top.run();
+}
+
+// Um ouvinte só, registrado antes de qualquer tela: os ouvintes de Esc das
+// telas (o canvas) veem o `defaultPrevented` quando uma camada já fechou.
+if (typeof document !== 'undefined') document.addEventListener('keydown', onEscapeKey);
+
+/**
+ * Uma camada que fecha no Esc (modal, confirmação, gaveta, lista de um
+ * seletor, popover): enquanto `active`, fica no topo da pilha das abertas
+ * depois dela, e o Esc chama só o `onEscape` da camada de cima. A lista do
+ * seletor dentro de um modal fecha sem levar o modal; a confirmação aberta de
+ * uma gaveta, sem levar a gaveta.
+ */
+export function useEscapeLayer(active: boolean, onEscape: () => void) {
+  const handler = useRef(onEscape);
+  handler.current = onEscape;
+  useEffect(() => {
+    if (!active) return;
+    const layer: EscapeLayer = { run: () => handler.current() };
+    escapeStack.push(layer);
+    return () => {
+      const index = escapeStack.lastIndexOf(layer);
+      if (index >= 0) escapeStack.splice(index, 1);
+    };
+  }, [active]);
+}
+
 /* ---- menu flutuante (popover) ---- */
 export function useClickOutside(ref: RefObject<HTMLElement | null>, onOutside: () => void, active = true) {
   useEffect(() => {
@@ -361,18 +403,14 @@ export function useClickOutside(ref: RefObject<HTMLElement | null>, onOutside: (
     const handler = (event: MouseEvent | TouchEvent) => {
       if (ref.current && !ref.current.contains(event.target as Node)) onOutside();
     };
-    const onEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onOutside();
-    };
     document.addEventListener('mousedown', handler);
     document.addEventListener('touchstart', handler);
-    document.addEventListener('keydown', onEscape);
     return () => {
       document.removeEventListener('mousedown', handler);
       document.removeEventListener('touchstart', handler);
-      document.removeEventListener('keydown', onEscape);
     };
   }, [ref, onOutside, active]);
+  useEscapeLayer(active, onOutside);
 }
 
 const MenuContext = createContext<{ close: () => void }>({ close: () => {} });
@@ -479,7 +517,7 @@ function openerOutside(card: HTMLElement | null): HTMLElement | null {
  * circulando por dentro e o foco devolvido a quem abriu ao fechar. Um
  * `autoFocus` no conteúdo tem prioridade.
  */
-function useModalFocus(open: boolean) {
+export function useModalFocus(open: boolean) {
   const card = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -547,14 +585,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
     [pending],
   );
 
-  useEffect(() => {
-    if (!pending) return;
-    const onEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') settle(false);
-    };
-    document.addEventListener('keydown', onEscape);
-    return () => document.removeEventListener('keydown', onEscape);
-  }, [pending, settle]);
+  useEscapeLayer(pending !== null, () => settle(false));
 
   return (
     <ConfirmContext.Provider value={confirm}>
@@ -609,14 +640,7 @@ export function Modal({
   const titleId = useId();
   const { card, trapTab } = useModalFocus(open);
 
-  useEffect(() => {
-    if (!open) return;
-    const onEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', onEscape);
-    return () => document.removeEventListener('keydown', onEscape);
-  }, [open, onClose]);
+  useEscapeLayer(open, onClose);
 
   if (!open) return null;
   // Portal no <body>: aberto de dentro de uma gaveta, o modal não herda o empilhamento dela.
@@ -652,14 +676,14 @@ export function useDebounced<T>(value: T, delay = 250): T {
   return debounced;
 }
 
-/** Repete `fn` a cada `ms` enquanto a aba estiver visível. */
+/** Repete `fn` a cada `ms` enquanto a aba estiver visível (e parado com a sessão caída, à espera do login de novo). */
 export function usePolling(fn: () => void | Promise<void>, ms: number, enabled = true) {
   const latest = useRef(fn);
   latest.current = fn;
   useEffect(() => {
     if (!enabled) return;
     const tick = () => {
-      if (document.visibilityState === 'visible') void latest.current();
+      if (document.visibilityState === 'visible' && !isSessionExpired()) void latest.current();
     };
     tick();
     const timer = setInterval(tick, ms);

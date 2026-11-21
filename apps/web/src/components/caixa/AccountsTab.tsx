@@ -440,32 +440,35 @@ export function AdjustmentModal({ account, onClose, onSaved }: { account: Accoun
   );
 }
 
-/** Ocorrências em aberto do cofre que o lançamento pode baixar (só no cofre, com entidade, valor e data). */
+/**
+ * Ocorrências em aberto do cofre que o lançamento pode baixar (só no cofre, com entidade, valor e data).
+ * A resposta guarda a chave que a pediu e só vale enquanto ela for a da tela (tarefa 117): durante o
+ * debounce e a requisição de um valor novo não há oferta, e "Baixar a ocorrência" nunca usa a
+ * repartição calculada para o valor anterior.
+ */
 function useObligationMatches(account: AccountRow, entityId: string | null, signedCents: number | null, occurredOn: string) {
-  const [matches, setMatches] = useState<ObligationMatch[]>([]);
+  const [result, setResult] = useState<{ key: string; rows: ObligationMatch[] } | null>(null);
   const query = account.kind === 'cash' && entityId && signedCents && occurredOn ? { entityId, signedCents, occurredOn } : null;
-  const debounced = useDebounced(query ? `${query.entityId}|${query.signedCents}|${query.occurredOn}` : '', 300);
+  const key = query ? `${account.id}|${query.entityId}|${query.signedCents}|${query.occurredOn}` : '';
+  const debounced = useDebounced(key, 300);
   useEffect(() => {
-    if (!debounced) {
-      setMatches([]);
-      return;
-    }
-    const [entity, cents, date] = debounced.split('|');
+    if (!debounced) return;
+    const [accountId, entity, cents, date] = debounced.split('|');
     let cancelled = false;
     api
-      .get<ObligationMatch[]>(`/api/accounts/${account.id}/obligation-matches`, { occurredOn: date, amountCents: cents, entityId: entity })
+      .get<ObligationMatch[]>(`/api/accounts/${accountId}/obligation-matches`, { occurredOn: date, amountCents: cents, entityId: entity })
       .then((rows) => {
-        if (!cancelled) setMatches(rows);
+        if (!cancelled) setResult({ key: debounced, rows });
       })
       .catch(() => {
         // Sem a sugestão, o lançamento avulso segue normal.
-        if (!cancelled) setMatches([]);
+        if (!cancelled) setResult({ key: debounced, rows: [] });
       });
     return () => {
       cancelled = true;
     };
-  }, [debounced, account.id]);
-  return query ? matches : [];
+  }, [debounced]);
+  return key && result?.key === key ? result.rows : [];
 }
 
 function ObligationMatchOffer({ match, busy, onSettle }: { match: ObligationMatch; busy: boolean; onSettle: () => void }) {

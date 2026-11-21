@@ -1,12 +1,12 @@
 import { formatDateTime, type MessageDestinationDto, type TestSendResult, t } from '@moneyflow/shared';
 import { ArchiveRestore, Bell, History, MoreHorizontal, Pencil, Plus, Send, Trash2 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { LoadError, PageHead, SkelRows } from '../components/domain';
 import { DestinationFormModal } from '../components/messages/DestinationFormModal';
 import { HistoryTab } from '../components/messages/HistoryTab';
 import { SubscriptionsDrawer } from '../components/messages/SubscriptionsDrawer';
 import { useToast } from '../components/Toast';
-import { Badge, Button, cx, EmptyRow, EmptyState, Menu, MenuItem, MenuSeparator, Tabs, useConfirm } from '../components/ui';
+import { Badge, Button, cx, EmptyRow, EmptyState, Menu, MenuItem, MenuSeparator, Tabs, useConfirm, useEscapeLayer } from '../components/ui';
 import { api } from '../lib/api';
 import { useRegisterCommands } from '../lib/commands';
 import { useAction, useApi } from '../lib/hooks';
@@ -29,15 +29,8 @@ export function MessagesPage() {
   const history = tab === 'history';
   const opened = !history && openId ? (data?.find((d) => d.id === openId) ?? null) : null;
 
-  // Esc fecha a gaveta do destino.
-  useEffect(() => {
-    if (!openId) return;
-    const down = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !document.querySelector('.modal')) setOpenId(null);
-    };
-    document.addEventListener('keydown', down);
-    return () => document.removeEventListener('keydown', down);
-  }, [openId, setOpenId]);
+  // Esc fecha a gaveta do destino quando ela é a camada de cima.
+  useEscapeLayer(Boolean(openId), () => setOpenId(null));
 
   useRegisterCommands(
     [

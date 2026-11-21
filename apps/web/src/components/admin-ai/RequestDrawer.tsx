@@ -1,13 +1,13 @@
 import { type AiRequestBodyPart, type AiRequestDetail, buildCurl, formatDateTime, t } from '@moneyflow/shared';
 import { Download, MessageSquare, Radio, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useAgents } from '../../agents/AgentsProvider';
 import { formatInt } from '../../agents/format';
 import { downloadFile } from '../../lib/download';
 import { useAction, useApi } from '../../lib/hooks';
 import { formatBytes } from '../attachments/AttachmentsPanel';
 import { LoadError } from '../domain';
-import { Badge, Button, CopyButton, cx, Skel, Tabs } from '../ui';
+import { Badge, Button, CopyButton, cx, Skel, Tabs, useEscapeLayer } from '../ui';
 import { JsonViewer } from './JsonViewer';
 import { RequestStatusBadge } from './RequestsTable';
 
@@ -26,13 +26,7 @@ export function RequestDrawer({ requestId, onClose }: { requestId: string; onClo
   const { data, error, reload } = useApi<AiRequestDetail>(`/api/admin/ai/requests/${requestId}`);
   const agents = useAgents();
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  useEscapeLayer(true, onClose);
 
   return (
     <aside className="drawer page-drawer request-drawer" aria-label={d.title} data-testid="request-drawer">
