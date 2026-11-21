@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -82,4 +82,22 @@ Nada foi executado. A ordem de desempate (`auto_settled`, `created_entry`, `matc
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado: no CTE `legs` de `contract_payments`, o LATERAL `ln` filtrava `m.settlement_id IN (…) OR m.transfer_id IN (SELECT … FROM transfers …)`. No plano do schema da 0057, isso aparece como filtro `((settlement_id = ANY (…)) OR (ANY (transfer_id = (hashed SubPlan …))))` sobre as linhas conciliadas, sem condição de índice em `movements`.
+
 ## Resolução (executor)
+
+Migration `database/migrations/0058_query_performance.sql` (com as tarefas 146 e 147); teste `database/tests/0058_query_performance.sql`.
+
+- O `ln` virou dois ramos num `UNION ALL`, com a mesma ordem de desempate (`auto_settled`, `created_entry`, `matched_at`, `id`):
+  - movimento da baixa ou da perna do espelho: `movements.settlement_id = ANY (s.id, s.mirror_settlement_id)` e a linha por `movement_id`;
+  - perna da transferência da baixa: `movements.transfer_id = ANY (ARRAY(SELECT x.id FROM transfers x WHERE x.settlement_id IN (…)))` e a linha por `movement_id`.
+- No segundo ramo, a transferência vai num `ARRAY(…)` e não num JOIN. Com o JOIN, a estimativa de `movements.transfer_id` (quase todo nulo) levava o planejador a varrer as linhas num hash join.
+- Testes:
+  - Origem `auto`, `manual` com e sem linha, `reconciliation` pela perna da transferência (`transfer_settlement`, com `transfer_id` e `funding_account_id`) e pela perna do espelho; a linha só sugerida não conta.
+  - Desempate entre a linha da baixa e a da transferência (ramos diferentes).
+  - Com 1.500 linhas conciliadas e `ANALYZE`, o plano parte de `movements_settlement_id_idx` e de `movements_transfer_id_idx`, sem o `OR` com subconsulta.
+  - O mesmo arquivo passou na função antiga antes da migration, então o resultado não mudou.
+- Os pgTAP `0051_contract_payments.sql` e `0052_contracts_on_series.sql` passam sem mudança. `make dump` rodado.
+- Nada a fazer na aplicação: a assinatura e as colunas são as mesmas.

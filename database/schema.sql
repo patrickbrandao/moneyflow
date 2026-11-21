@@ -5789,15 +5789,22 @@ CREATE FUNCTION public.contract_payments(p_contract_id uuid, p_from date DEFAULT
       FROM settlements s
       JOIN obligations o ON o.id = s.title_id
       LEFT JOIN transfers tr ON tr.settlement_id = s.id
+      -- A linha conciliada com a baixa: pelo movimento da baixa (ou da perna do espelho) ou pela perna da transferência
+      -- que a financia. Dois ramos indexáveis (movements.settlement_id e transfers.settlement_id) em vez de um OR
+      -- (tarefa 144); uma linha só cai num deles (o movimento é de baixa ou de transferência).
       LEFT JOIN LATERAL (
-        SELECT l.id, l.auto_settled, l.created_entry
-          FROM statement_lines l
-          JOIN movements m ON m.id = l.movement_id
-         WHERE l.status = 'matched'
-           AND (m.settlement_id IN (s.id, s.mirror_settlement_id)
-                OR m.transfer_id IN (SELECT x.id FROM transfers x
-                                      WHERE x.settlement_id IN (s.id, s.mirror_settlement_id)))
-         ORDER BY l.auto_settled DESC, (l.created_entry IS NOT NULL) DESC, l.matched_at, l.id
+        SELECT c.id, c.auto_settled, c.created_entry
+          FROM (SELECT l.id, l.auto_settled, l.created_entry, l.matched_at
+                  FROM movements m
+                  JOIN statement_lines l ON l.movement_id = m.id AND l.status = 'matched'
+                 WHERE m.settlement_id IN (s.id, s.mirror_settlement_id)
+                UNION ALL
+                SELECT l.id, l.auto_settled, l.created_entry, l.matched_at
+                  FROM movements m
+                  JOIN statement_lines l ON l.movement_id = m.id AND l.status = 'matched'
+                 WHERE m.transfer_id = ANY (ARRAY(SELECT x.id FROM transfers x
+                                                   WHERE x.settlement_id IN (s.id, s.mirror_settlement_id)))) c
+         ORDER BY c.auto_settled DESC, (c.created_entry IS NOT NULL) DESC, c.matched_at, c.id
          LIMIT 1
       ) ln ON true
      WHERE s.reversed_at IS NULL
@@ -6365,7 +6372,9 @@ BEGIN
      WHERE t.caixa_id = ANY (p_caixa_ids)
        AND NOT (t.direction = 'receivable' AND coalesce(cp.id = ANY (p_caixa_ids), false))
   ),
-  title_ends AS (
+  -- NOT MATERIALIZED (tarefa 146): cada ramo abaixo inlina os títulos e aplica o próprio período (baixas no período;
+  -- em aberto que vencem no período), em vez de separar antes todos os títulos das caixas.
+  title_ends AS NOT MATERIALIZED (
     SELECT tt.*,
            CASE WHEN tt.direction = 'payable' THEN 'caixa'
                 ELSE 'entity' END AS s_kind,
@@ -6399,7 +6408,8 @@ BEGIN
     FROM title_ends e
     JOIN title_balances b ON b.title_id = e.id
     LEFT JOIN card_invoices v ON v.id = e.card_invoice_id
-   WHERE b.open_cents > 0 AND e.archived_at IS NULL AND e.due_date BETWEEN p_from AND p_to
+   WHERE e.status IN ('open', 'partial') AND b.open_cents > 0 AND e.archived_at IS NULL
+     AND e.due_date BETWEEN p_from AND p_to
      AND (v.id IS NULL OR v.closed_at IS NOT NULL)
   UNION ALL
   -- Faturas abertas: previsão por pagadora (itens − antecipações).
@@ -18074,10 +18084,10 @@ CREATE INDEX card_purchases_entity_id_idx ON public.card_purchases USING btree (
 
 
 --
--- Name: card_purchases_payer_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: card_purchases_payer_caixa_id_purchased_on_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX card_purchases_payer_caixa_id_idx ON public.card_purchases USING btree (payer_caixa_id);
+CREATE INDEX card_purchases_payer_caixa_id_purchased_on_idx ON public.card_purchases USING btree (payer_caixa_id, purchased_on);
 
 
 --
@@ -19117,6 +19127,13 @@ CREATE INDEX titles_counterparty_caixa_id_idx ON public.titles USING btree (coun
 
 
 --
+-- Name: titles_description_trgm_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_description_trgm_idx ON public.titles USING gin (description public.gin_trgm_ops);
+
+
+--
 -- Name: titles_due_date_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -19128,6 +19145,13 @@ CREATE INDEX titles_due_date_idx ON public.titles USING btree (due_date) WHERE (
 --
 
 CREATE INDEX titles_entity_id_idx ON public.titles USING btree (entity_id);
+
+
+--
+-- Name: titles_mirror_pending_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_mirror_pending_idx ON public.titles USING btree (caixa_id) WHERE (mirror_status = 'pending'::text);
 
 
 --

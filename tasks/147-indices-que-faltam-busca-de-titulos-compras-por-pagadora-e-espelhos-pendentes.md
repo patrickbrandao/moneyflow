@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: em-andamento
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -62,4 +62,31 @@ Nada foi executado. O índice GIN aumenta um pouco o custo de inserir e editar t
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado no `schema.sql`:
+- `titles` não tinha índice trigram;
+- `card_purchases` só tinha `(payer_caixa_id)` do lado da pagadora;
+- não havia índice para `mirror_status = 'pending'`.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+Migration `database/migrations/0058_query_performance.sql` (com as tarefas 144 e 146); teste `database/tests/0058_query_performance.sql`.
+
+- `titles_description_trgm_idx`: `gin (description gin_trgm_ops)`.
+- `titles_mirror_pending_idx`: `(caixa_id) WHERE mirror_status = 'pending'`.
+- `card_purchases_payer_caixa_id_purchased_on_idx`: `(payer_caixa_id, purchased_on)`. Substitui `card_purchases_payer_caixa_id_idx`, que foi excluído; o composto serve à FK.
+- Testes: os índices existem com a definição esperada, o substituído não existe mais e a FK continua indexada. Os planos usam os índices novos em:
+  - `ILIKE '%…%'` e `%` na descrição dos títulos;
+  - compras da pagadora no período;
+  - espelhos pendentes com e sem caixa.
+- `tests/0013_credit_cards.sql` passou a esperar o índice novo. `docs/016` (Títulos e Cartão) atualizada. `make dump` rodado.
+
+### Pendente na aplicação
+
+1. `pnpm db:pull`: os índices novos e o removido entram no schema gerado.
+2. Em `apps/server/src/services/titles.ts:106` (`listTitles` com `q`), trocar `t.description ILIKE $q OR e.name ILIKE $q` por `(t.description ILIKE $q OR t.entity_id IN (SELECT id FROM entities WHERE name ILIKE $q))`. Assim o planejador usa os dois índices trigram, `titles_description_trgm_idx` e `entities_name_trgm_idx`, num BitmapOr.
+3. A busca dos agentes (`agents/search.ts:121`) já usa `t.description % … OR t.description ILIKE …`: com o índice ela fica indexada, sem mudar o código.
+4. Teste em `apps/server/test/titles.test.ts`: a busca por `q` acha pelo trecho da descrição e pelo nome da entidade, depois da reescrita.

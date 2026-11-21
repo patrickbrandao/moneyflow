@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -66,4 +66,20 @@ Nada foi executado. Com `NOT MATERIALIZED`, a expressão de `title_ends` é aval
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado: em `flow_graph_lines`, `title_ends` é referenciada nos ramos do realizado e do previsto e, sem `NOT MATERIALIZED`, é materializada com todos os títulos das caixas, de qualquer data.
+
 ## Resolução (executor)
+
+Migration `database/migrations/0058_query_performance.sql` (com as tarefas 144 e 147); teste `database/tests/0058_query_performance.sql`.
+
+- `title_ends AS NOT MATERIALIZED`: cada ramo inlina os títulos e aplica o próprio período.
+  - O realizado parte das baixas do período e busca o título pela chave.
+  - O previsto ganhou `e.status IN ('open', 'partial')`, que é indexável por `titles_caixa_id_status_due_date_idx` com caixa e vencimento; continua junto de `open_cents > 0`, que é equivalente pela tarefa 093.
+- Testes:
+  - O canvas de abril traz a baixa do mês, o aberto que vence nele e a transferência, e deixa de fora um título pago antigo e os de outros meses.
+  - O título antigo aparece no mês da baixa dele.
+  - `prosrc` com o `NOT MATERIALIZED`.
+- `tests/0019_flow_graph.sql` passa sem mudar os valores. `make dump` rodado.
+- Nada a fazer na aplicação: a assinatura e as colunas são as mesmas.

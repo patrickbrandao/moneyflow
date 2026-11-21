@@ -34,7 +34,7 @@ SELECT fk_ok('card_invoice_items', 'carried_from_invoice_id', 'card_invoices', '
 SELECT fk_ok('card_invoice_items', 'payer_caixa_id', 'caixas', 'id');
 SELECT fk_ok('titles', 'card_invoice_id', 'card_invoices', 'id');
 SELECT has_index('card_purchases', i) FROM unnest(ARRAY['card_purchases_card_caixa_id_purchased_on_idx',
-  'card_purchases_payer_caixa_id_idx', 'card_purchases_entity_id_idx', 'card_purchases_category_id_idx',
+  'card_purchases_payer_caixa_id_purchased_on_idx', 'card_purchases_entity_id_idx', 'card_purchases_category_id_idx',
   'card_purchases_refunded_purchase_id_idx']) i;
 SELECT has_index('card_invoice_items', i) FROM unnest(ARRAY['card_invoice_items_card_invoice_id_payer_idx',
   'card_invoice_items_payer_caixa_id_idx']) i;
