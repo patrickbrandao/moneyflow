@@ -19,8 +19,10 @@ import { createOwnedDatabase, DATABASE_DIR, migrate, withDatabase } from './migr
  * faz o dump e a restauração nos testes de backup.
  */
 
-const TEMPLATE = 'moneyflow_it_tpl';
-const TARGET = 'moneyflow_it';
+// MONEYFLOW_TEST_LOCAL_DB separa execuções locais simultâneas (worktrees): cada nome tem o seu modelo.
+const TARGET = process.env.MONEYFLOW_TEST_LOCAL_DB ?? 'moneyflow_it';
+if (!/^[a-z_][a-z0-9_]{0,50}$/.test(TARGET)) throw new Error(`MONEYFLOW_TEST_LOCAL_DB inválido: ${TARGET}`);
+const TEMPLATE = `${TARGET}_tpl`;
 
 function migrationsHash(): string {
   const dir = join(DATABASE_DIR, 'migrations');

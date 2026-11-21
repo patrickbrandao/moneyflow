@@ -26,3 +26,6 @@ e2e/.auth/
 
 # Credenciais e anotações locais (nunca versionar)
 .local/
+
+# Rascunhos locais (o Biome respeita o .gitignore; um biome.json aninhado aqui quebrava o lint, tarefa 189)
+tmp/
