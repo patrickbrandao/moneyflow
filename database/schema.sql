@@ -4593,6 +4593,18 @@ BEGIN
       USING ERRCODE = 'check_violation', CONSTRAINT = 'caixas_kind_immutable_check';
   END IF;
 
+  -- O titular define os espelhos, os contratos e o recebedor dos encargos do cartão (tarefa 148): com algum deles
+  -- ligado à caixa, não muda.
+  IF TG_OP = 'UPDATE' AND NEW.holder_entity_id IS DISTINCT FROM OLD.holder_entity_id
+     AND (EXISTS (SELECT 1 FROM titles t WHERE t.caixa_id = OLD.id)
+          OR EXISTS (SELECT 1 FROM titles t WHERE t.counterparty_caixa_id = OLD.id)
+          OR EXISTS (SELECT 1 FROM contracts k WHERE k.caixa_id = OLD.id)
+          OR EXISTS (SELECT 1 FROM contracts k WHERE k.counterparty_caixa_id = OLD.id)
+          OR EXISTS (SELECT 1 FROM card_purchases p WHERE p.card_caixa_id = OLD.id AND p.kind = 'charge')) THEN
+    RAISE EXCEPTION 'caixas: holder of caixa % cannot change while titles, contracts or issuer charges depend on it', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'caixas_holder_locked_check';
+  END IF;
+
   IF NEW.default_payer_caixa_id IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM caixas c
                       WHERE c.id = NEW.default_payer_caixa_id AND c.kind = 'general') THEN
@@ -4824,6 +4836,32 @@ BEGIN
   RETURN NEW;
 END
 $$;
+
+
+--
+-- Name: card_invoice_items_validate_statement(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.card_invoice_items_validate_statement() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM statement_lines l
+              WHERE l.card_invoice_item_id = OLD.id AND l.status = 'matched'
+                AND (l.amount_cents <> -NEW.amount_cents OR NEW.card_invoice_id <> OLD.card_invoice_id)) THEN
+    RAISE EXCEPTION 'card_invoice_items: item % is reconciled with a statement line', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_card_item_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION card_invoice_items_validate_statement(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.card_invoice_items_validate_statement() IS 'Trigger de card_invoice_items: o item conciliado com uma linha de extrato (matched) não muda de valor nem de fatura (23514 statement_lines_card_item_check), como movements_validate_statement (tarefa 148).';
 
 
 --
@@ -8907,6 +8945,34 @@ $$;
 
 
 --
+-- Name: settlements_mirror_required_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.settlements_mirror_required_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  s settlements;
+BEGIN
+  SELECT * INTO s FROM settlements WHERE id = NEW.id;
+  IF FOUND AND s.reversed_at IS NULL AND s.mirror_settlement_id IS NULL
+     AND EXISTS (SELECT 1 FROM titles t WHERE t.id = s.title_id AND t.mirror_title_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'settlements: settlement % of a mirrored title needs the mirror leg', s.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_mirror_required_check';
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION settlements_mirror_required_check(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.settlements_mirror_required_check() IS 'Constraint trigger de settlements (no COMMIT): baixa ativa em título espelhado tem mirror_settlement_id, a perna no outro lado do par (spec 006; tarefa 148). O lado do título (ligar o par depois) é conferido em titles_mirror_check.';
+
+
+--
 -- Name: settlements_movements_check(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -9890,6 +9956,18 @@ BEGIN
       USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_caixa_check';
   END IF;
 
+  -- O sentido inverso (tarefa 148): trocar a caixa de um lado só dispara o trigger deste lado.
+  IF t.caixa_id IS DISTINCT FROM m.counterparty_caixa_id THEN
+    RAISE EXCEPTION 'titles: title % is not in counterparty caixa % of its mirror %', t.id, m.counterparty_caixa_id, m.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_caixa_check';
+  END IF;
+
+  SELECT c.holder_entity_id INTO holder FROM caixas c WHERE c.id = t.caixa_id;
+  IF holder IS DISTINCT FROM m.entity_id THEN
+    RAISE EXCEPTION 'titles: caixa % is not held by entity % of mirror %', t.caixa_id, m.entity_id, m.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_caixa_check';
+  END IF;
+
   IF m.direction = t.direction OR m.amount_cents <> t.amount_cents OR m.due_date <> t.due_date THEN
     RAISE EXCEPTION 'titles: mirror pair % / % must have opposite direction, same amount and due date', t.id, m.id
       USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_match_check';
@@ -9910,6 +9988,14 @@ BEGIN
   IF (t.mirror_status IS NULL) = (m.mirror_status IS NULL) THEN
     RAISE EXCEPTION 'titles: exactly one title of pair % / % must carry mirror_status', t.id, m.id
       USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_side_check';
+  END IF;
+
+  -- Baixa ativa num par espelhado tem a perna do espelho (tarefa 148): ligar depois dois títulos com baixas soltas não
+  -- passa. As pernas ligadas já têm a mesma data e os mesmos valores (settlements_mirror_check).
+  IF EXISTS (SELECT 1 FROM settlements x
+              WHERE x.title_id IN (t.id, m.id) AND x.reversed_at IS NULL AND x.mirror_settlement_id IS NULL) THEN
+    RAISE EXCEPTION 'titles: mirrored pair % / % has an active settlement without the mirror leg', t.id, m.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_mirror_required_check';
   END IF;
 
   RETURN NULL;
@@ -19941,6 +20027,13 @@ CREATE TRIGGER card_invoice_items_validate BEFORE INSERT OR DELETE OR UPDATE ON 
 
 
 --
+-- Name: card_invoice_items card_invoice_items_validate_statement; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER card_invoice_items_validate_statement BEFORE UPDATE OF amount_cents, card_invoice_id ON public.card_invoice_items FOR EACH ROW EXECUTE FUNCTION public.card_invoice_items_validate_statement();
+
+
+--
 -- Name: card_invoices card_invoices_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -20806,6 +20899,13 @@ CREATE TRIGGER settlements_audit AFTER INSERT OR DELETE OR UPDATE ON public.sett
 --
 
 CREATE CONSTRAINT TRIGGER settlements_mirror_check AFTER INSERT OR UPDATE OF mirror_settlement_id, reversed_at ON public.settlements DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.settlements_mirror_check();
+
+
+--
+-- Name: settlements settlements_mirror_required_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER settlements_mirror_required_check AFTER INSERT OR UPDATE OF mirror_settlement_id ON public.settlements DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.settlements_mirror_required_check();
 
 
 --
