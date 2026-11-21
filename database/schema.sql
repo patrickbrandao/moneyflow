@@ -10063,7 +10063,15 @@ BEGIN
   END IF;
 
   IF NEW.recurrence_rule_id IS NOT NULL THEN
-    SELECT r.installments_total INTO total FROM recurrence_rules r WHERE r.id = NEW.recurrence_rule_id;
+    -- Ocorrência nova (ou que mudou de série/número): lê o total com FOR SHARE (tarefa 149). Uma redução de N em
+    -- andamento (FOR UPDATE ou UPDATE da série) termina antes e o total lido é o novo; uma redução que chega depois
+    -- espera esta transação e recurrence_rules_validate enxerga a ocorrência já confirmada.
+    IF TG_OP = 'INSERT' OR NEW.recurrence_rule_id IS DISTINCT FROM OLD.recurrence_rule_id
+       OR NEW.occurrence IS DISTINCT FROM OLD.occurrence THEN
+      SELECT r.installments_total INTO total FROM recurrence_rules r WHERE r.id = NEW.recurrence_rule_id FOR SHARE;
+    ELSE
+      SELECT r.installments_total INTO total FROM recurrence_rules r WHERE r.id = NEW.recurrence_rule_id;
+    END IF;
     IF NEW.occurrence > total THEN
       RAISE EXCEPTION 'titles: occurrence % exceeds installments total %', NEW.occurrence, total
         USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_occurrence_total_check';

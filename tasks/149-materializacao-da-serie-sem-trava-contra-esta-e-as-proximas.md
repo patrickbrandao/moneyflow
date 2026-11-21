@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: em-andamento
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -71,4 +71,33 @@ Nada foi executado. A reprodução por duas sessões depende da ordem descrita (
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado: `titles_validate` lia `installments_total` da regra sem trava (a FK só toma `FOR KEY SHARE`, que não conflita com o `UPDATE` da série). Já `card_purchases_validate_occurrence` trava a regra com `FOR NO KEY UPDATE`. Do lado da aplicação, `updateTitle` (scope `following`) e `endSeriesFrom` não tomam a trava consultiva `MATERIALIZE_LOCK` da série, que o worker e os outros caminhos de série tomam.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+Migration `database/migrations/0061_recurrence_occurrence_lock.sql`; teste `database/tests/0061_recurrence_occurrence_lock.sql`.
+
+- `titles_validate` lê o total da regra com `FOR SHARE` no INSERT e quando a ocorrência muda de série ou de número. A edição comum da ocorrência continua sem trava.
+  - Se a redução de N chega primeiro (`FOR UPDATE` ou `UPDATE` da série), a inserção espera e relê o total novo.
+  - Se a inserção chega primeiro, a redução espera o COMMIT dela, e `recurrence_rules_validate` enxerga a ocorrência confirmada.
+- pgTAP, por `pgrowlocks` (só na transação do teste):
+  - A ocorrência nova deixa a regra com `For Share`. A função antiga deixava só o `For Key Share` da FK, o que foi conferido rodando a função antiga na mesma fixture.
+  - Ocorrência acima do total e redução abaixo de uma ocorrência continuam recusadas.
+  - Editar a ocorrência e aumentar o total continuam livres.
+- Conferido à mão com duas sessões em `moneyflow_test`, numa série 1..11 de 12:
+  - Com o worker inserindo a 12 aberto e o "excluir este e os próximos" (`FOR UPDATE` + `installments_total = 11`) em paralelo, a redução esperou e falhou com `titles_occurrence_total_check`. Quando o worker desfez, a redução passou.
+  - Na ordem inversa, a inserção da 12 esperou e falhou com `titles_occurrence_total_check`.
+  - No fim ficou N = 11 e a maior ocorrência = 11.
+- `docs/016` (Recorrência) atualizada. Os pgTAP `0007`, `0008` e `0052` passam. `make dump` rodado.
+
+### Pendente na aplicação
+
+1. `apps/server/src/services/titles.ts`:
+   - Em `updateTitle` com `scope = 'following'` (`:375-403`), antes de ler as ocorrências seguintes: `await tx.execute(sql\`SELECT pg_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${ruleId}))\`)`.
+   - Em `endSeriesFrom` (`:616-650`), a mesma chamada antes do `SELECT … FOR UPDATE` da regra, como no diff da tarefa.
+   - Com isso, o worker (`pg_try_advisory_xact_lock`) pula a série naquela volta e a materializa na próxima, já a partir do modelo novo. A trava do banco só garante o "n de N": sem a trava consultiva, a ocorrência nova ainda pode sair com o valor, a descrição ou a conta prevista de antes.
+2. Teste em `apps/server/test/titles.test.ts` (`describe('séries …')`): `materializeAll` em paralelo com `updateTitle(scope: 'following')`; a ocorrência nova tem de sair com o valor novo.
