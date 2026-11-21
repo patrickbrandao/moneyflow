@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -70,4 +70,32 @@ Nada foi executado. Supõe o isolamento padrão (READ COMMITTED), que é o que a
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado: `period_assert_open` → `period_is_closed` é uma leitura sem trava; fechar é um `INSERT INTO period_closings` cuja checagem do provisório também só lê. No READ COMMITTED, uma escrita e um fechamento do mesmo mês em paralelo confirmavam os dois. Não havia advisory lock nem `FOR SHARE` nesse caminho.
+
 ## Resolução (executor)
+
+Migration `database/migrations/0059_period_closing_lock.sql`; teste `database/tests/0059_period_closing_lock.sql`.
+
+- Funções novas:
+  - `period_lock_key(caixa)` = `hashtextextended('period_closing:' || caixa, 0)`.
+  - `period_lock_shared(caixa)`: `pg_advisory_xact_lock_shared`, nada se a caixa é nula.
+- Trava compartilhada, tomada antes da leitura do fechamento, numa instrução própria:
+  - `period_assert_open` passou a `VOLATILE`: trava numa instrução e lê o fechamento na seguinte, com snapshot novo. Isso cobre os triggers de títulos, baixas, movimentos e compras do cartão (a pagadora e o cartão).
+  - `financial_accounts_period_lock`: saldo e data de abertura.
+  - Trigger novo `statement_lines_period_lock` (BEFORE INSERT): só a linha de lote provisório ativo.
+  - Trigger novo `statement_imports_period_lock` (BEFORE UPDATE OF provisional, quando o lote vira provisório).
+  - Os dois triggers novos vêm antes das checagens `*_supersede_validate` na ordem alfabética.
+- Trava exclusiva: trigger `period_closings_lock` (BEFORE INSERT, antes de `period_closings_provisional_check`).
+- Decisão: a chave é por caixa, como a tarefa propõe. Uma importação ou restauração toma uma trava por caixa (o contador local repete a mesma), sem encher a tabela de locks.
+- pgTAP, numa sessão:
+  - cada caminho toma a trava no modo certo (conferido em `pg_locks`): movimento, título e saldo inicial compartilhada; fechamento exclusiva; linha de provisório ativo e lote que vira provisório compartilhada; lote comum e linha dele sem trava;
+  - a ordem dos triggers;
+  - a volatilidade;
+  - as regras de mês fechado e do provisório continuam.
+- Conferido à mão com duas sessões em `moneyflow_test`:
+  - Com o movimento de outubro aberto (S1) e o fechamento de outubro em paralelo (S2), S2 esperou o COMMIT de S1 e confirmou depois.
+  - Com o fechamento de novembro aberto e o movimento de novembro em paralelo, a escrita esperou e falhou com `period_closings_locked_check`.
+- `docs/016` (Fechamento de mês) atualizada. Os pgTAP `0016`, `0049`, `0010`, `0013`, `0014`, `0008` e `0009` passam. `make dump` rodado.
+- Na aplicação, nada obrigatório. O teste de integração com duas conexões em `apps/server/test/operation.test.ts`, sugerido pela tarefa, fica como reforço opcional para o app: `closeMonth` espera a transação aberta com um lançamento, e a escrita durante o fechamento é recusada.

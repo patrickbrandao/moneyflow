@@ -6237,6 +6237,7 @@ CREATE FUNCTION public.financial_accounts_period_lock() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
+  PERFORM period_lock_shared(OLD.caixa_id);
   IF EXISTS (SELECT 1 FROM period_closings pc
               WHERE pc.caixa_id = OLD.caixa_id
                 AND pc.month >= date_trunc('month', least(OLD.opening_date, NEW.opening_date))::date) THEN
@@ -8102,10 +8103,15 @@ COMMENT ON FUNCTION public.notes_sync_reminder() IS 'Trigger de notes: ao arquiv
 --
 
 CREATE FUNCTION public.period_assert_open(p_caixa_id uuid, p_on date, p_what text) RETURNS void
-    LANGUAGE plpgsql STABLE
+    LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF p_caixa_id IS NOT NULL AND p_on IS NOT NULL AND period_is_closed(p_caixa_id, p_on) THEN
+  IF p_caixa_id IS NULL OR p_on IS NULL THEN
+    RETURN;
+  END IF;
+  PERFORM period_lock_shared(p_caixa_id);
+  IF EXISTS (SELECT 1 FROM period_closings pc
+              WHERE pc.caixa_id = p_caixa_id AND pc.month = date_trunc('month', p_on)::date) THEN
     RAISE EXCEPTION '%: month % is closed in caixa %', p_what, to_char(p_on, 'YYYY-MM'), p_caixa_id
       USING ERRCODE = 'check_violation', CONSTRAINT = 'period_closings_locked_check';
   END IF;
@@ -8117,7 +8123,28 @@ $$;
 -- Name: FUNCTION period_assert_open(p_caixa_id uuid, p_on date, p_what text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.period_assert_open(p_caixa_id uuid, p_on date, p_what text) IS 'Erro 23514 (period_closings_locked_check) se o mês da data está fechado na caixa.';
+COMMENT ON FUNCTION public.period_assert_open(p_caixa_id uuid, p_on date, p_what text) IS 'Erro 23514 (period_closings_locked_check) se o mês da data está fechado na caixa. Antes de ler, toma a trava compartilhada do fechamento da caixa (period_lock_shared): um fechamento em andamento termina antes, e é visto.';
+
+
+--
+-- Name: period_closings_lock(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.period_closings_lock() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(period_lock_key(NEW.caixa_id));
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION period_closings_lock(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.period_closings_lock() IS 'Trigger de period_closings (INSERT): trava exclusiva do fechamento da caixa até o fim da transação. Espera as escritas em andamento na caixa (que têm a trava compartilhada) e faz as seguintes esperarem o fechamento (tarefa 145).';
 
 
 --
@@ -8194,6 +8221,46 @@ $$;
 --
 
 COMMENT ON FUNCTION public.period_is_closed(p_caixa_id uuid, p_on date) IS 'true se o mês da data está fechado na caixa.';
+
+
+--
+-- Name: period_lock_key(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.period_lock_key(p_caixa_id uuid) RETURNS bigint
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  SELECT hashtextextended('period_closing:' || p_caixa_id::text, 0)
+$$;
+
+
+--
+-- Name: FUNCTION period_lock_key(p_caixa_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.period_lock_key(p_caixa_id uuid) IS 'Chave do advisory lock do fechamento de mês da caixa (tarefa 145): compartilhado por quem escreve no período, exclusivo para quem fecha.';
+
+
+--
+-- Name: period_lock_shared(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.period_lock_shared(p_caixa_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF p_caixa_id IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock_shared(period_lock_key(p_caixa_id));
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION period_lock_shared(p_caixa_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.period_lock_shared(p_caixa_id uuid) IS 'Trava compartilhada (até o fim da transação) do fechamento de mês da caixa: quem escreve num período espera um fechamento em andamento na caixa e, depois, o enxerga na próxima instrução (tarefa 145). Escritores não se esperam.';
 
 
 --
@@ -8983,6 +9050,27 @@ $$;
 
 
 --
+-- Name: statement_imports_period_lock(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.statement_imports_period_lock() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM period_lock_shared(a.caixa_id) FROM financial_accounts a WHERE a.id = NEW.financial_account_id;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION statement_imports_period_lock(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.statement_imports_period_lock() IS 'Trigger de statement_imports (UPDATE que marca o lote como provisório): trava compartilhada do fechamento da caixa da conta antes da checagem das linhas em mês fechado (tarefa 145).';
+
+
+--
 -- Name: statement_imports_supersede_commit_check(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -9174,6 +9262,32 @@ $$;
 --
 
 COMMENT ON FUNCTION public.statement_line_inferred_created_entry(p_line_id uuid) IS 'Uso interno (backfill da 0048): created_entry inferido para uma linha matched pelo instante de criação do lançamento igual ao matched_at (mesma transação). Nulo se o lançamento é mais antigo que a conciliação. Não é usado pela aplicação, que grava created_entry ao conciliar.';
+
+
+--
+-- Name: statement_lines_period_lock(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.statement_lines_period_lock() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  caixa uuid;
+BEGIN
+  SELECT a.caixa_id INTO caixa
+    FROM statement_imports i JOIN financial_accounts a ON a.id = i.financial_account_id
+   WHERE i.id = NEW.statement_import_id AND i.provisional AND i.superseded_by_import_id IS NULL;
+  PERFORM period_lock_shared(caixa);
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION statement_lines_period_lock(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.statement_lines_period_lock() IS 'Trigger de statement_lines (INSERT): a linha de lote provisório ativo toma a trava compartilhada do fechamento da caixa da conta antes da checagem do mês fechado (tarefa 145).';
 
 
 --
@@ -20611,6 +20725,13 @@ CREATE TRIGGER period_closings_audit AFTER INSERT OR DELETE OR UPDATE ON public.
 
 
 --
+-- Name: period_closings period_closings_lock; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER period_closings_lock BEFORE INSERT ON public.period_closings FOR EACH ROW EXECUTE FUNCTION public.period_closings_lock();
+
+
+--
 -- Name: period_closings period_closings_provisional_check; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -20751,6 +20872,13 @@ CREATE TRIGGER statement_imports_audit AFTER INSERT OR DELETE OR UPDATE ON publi
 
 
 --
+-- Name: statement_imports statement_imports_period_lock; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER statement_imports_period_lock BEFORE UPDATE OF provisional ON public.statement_imports FOR EACH ROW WHEN ((new.provisional AND (NOT old.provisional))) EXECUTE FUNCTION public.statement_imports_period_lock();
+
+
+--
 -- Name: statement_imports statement_imports_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -20790,6 +20918,13 @@ CREATE TRIGGER statement_imports_validate BEFORE INSERT OR UPDATE ON public.stat
 --
 
 CREATE TRIGGER statement_lines_audit AFTER INSERT OR DELETE OR UPDATE ON public.statement_lines FOR EACH ROW EXECUTE FUNCTION public.audit_row('provisional');
+
+
+--
+-- Name: statement_lines statement_lines_period_lock; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER statement_lines_period_lock BEFORE INSERT ON public.statement_lines FOR EACH ROW EXECUTE FUNCTION public.statement_lines_period_lock();
 
 
 --
