@@ -190,6 +190,8 @@ export const ptBR = {
       `Há ocorrências com baixa depois dessa data (${list}); estorne-as ou escolha uma data a partir do vencimento delas.`,
     caixaKindF1: 'Caixas de cartão chegam na fase 2.',
     holderArchived: 'O titular está arquivado.',
+    primaryOfOtherCaixa:
+      'O titular já tem uma caixa principal que você não edita: só o administrador troca a principal dele. Salve esta caixa sem marcá-la como principal.',
     inactiveUser: 'Usuário desativado.',
     invalidMonth: 'Mês inválido.',
     cardFieldsRequired: 'Cartão precisa de pagadora padrão, limite, dias de fechamento e vencimento e os 4 últimos dígitos.',

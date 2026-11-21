@@ -3,7 +3,7 @@
 ## Caixa = livro financeiro de um titular
 
 - Não existe camada de "Espaço". Cada Caixa tem um **titular** (entidade) e é a unidade de permissão ([002](002-usuarios-e-permissoes.md)).
-- Uma entidade pode ser titular de várias caixas (ex.: Patrick → Casa Praia, Casa Cidade) e marca uma como **principal**.
+- Uma entidade pode ser titular de várias caixas (ex.: Patrick → Casa Praia, Casa Cidade) e marca uma como **principal**. Como os espelhos caem na principal ([006](006-espelhamento-entre-caixas.md)), só o admin ou quem edita a principal atual do titular marca outra caixa como principal (criando ou editando); sem isso, a resposta é 403 (2026-11-21, tarefa 072). Caixa de cartão nunca é principal.
 - Tipos de caixa: **geral** (empresa, pessoa, casa) e **cartão de crédito** ([007](007-cartao-de-credito.md)).
 - Cada caixa tem os próprios títulos a pagar e a receber ([005](005-titulos-baixas-e-movimentos.md)).
 - Na tela da caixa, o nome no título é um link para a página inicial dela (`/caixas/:id`, a primeira aba), de qualquer aba ou sub-tela.
