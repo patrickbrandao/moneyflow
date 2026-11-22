@@ -27,7 +27,7 @@ SELECT columns_are('classification_rules', ARRAY['id', 'caixa_id', 'match_kind',
                                                  'financial_account_id', 'copied_from_rule_id']);
 SELECT columns_are('statement_csv_mappings', ARRAY['id', 'financial_account_id', 'card_caixa_id', 'name', 'delimiter', 'encoding',
                                                    'has_header', 'skip_rows', 'date_format', 'decimal_separator', 'columns',
-                                                   'is_default', 'created_at', 'updated_at']);
+                                                   'is_default', 'created_at', 'updated_at', 'amount_sign']);
 SELECT fk_ok('statement_imports', 'financial_account_id', 'financial_accounts', 'id');
 SELECT fk_ok('statement_imports', 'card_caixa_id', 'caixas', 'id');
 SELECT fk_ok('statement_imports', 'card_invoice_id', 'card_invoices', 'id');

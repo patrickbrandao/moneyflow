@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: em-andamento
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -71,4 +71,38 @@ Nada foi executado; a conta foi feita lendo o código. Não verifiquei quais ban
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado: `statement_csv_mappings` não guarda a convenção de sinal, e a importação do cartão inverte pela maioria das linhas de cada arquivo (`statements.ts:239-242`). Os valores importados são imutáveis.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+Migration `database/migrations/0063_csv_mapping_amount_sign.sql`; teste `database/tests/0063_csv_mapping_amount_sign.sql`; teste de migração com dados `database/migration-tests/0063_csv_mapping_amount_sign/` (`make test-migration M=0063` passou na subida, descida e subida).
+
+- Coluna nova: `statement_csv_mappings.amount_sign text NOT NULL DEFAULT 'as_is'`, com `CHECK (amount_sign IN ('as_is', 'invert'))` (`statement_csv_mappings_amount_sign_check`). Vale para cartão e para conta. O `moneyflow_app` tem SELECT, INSERT e UPDATE pela tabela.
+- Decisão para os mapeamentos que já existiam: a primeira opção da tarefa (pelo que os lotes importados mostram), com uma regra que dá para conferir no banco.
+  - O arquivo original só existe como anexo e não dá para reinterpretar o CSV em SQL. Por isso a conversão usa `statement_lines.raw` (a linha do arquivo): a célula com os mesmos dígitos do valor dá o sinal do arquivo, pelas regras do `parseAmount` (sufixo D/C, parênteses, "-" na frente ou atrás).
+  - A linha gravada com o sinal oposto foi invertida. Linha com células de sinais diferentes (por exemplo, o saldo com os mesmos dígitos) não conta.
+  - O lote foi invertido se a maioria das linhas conferíveis foi. O mapeamento de cartão fica `invert` com pelo menos metade dos lotes conferíveis invertida e `as_is` se a maioria não foi.
+  - Sem lote conferível (nenhum lote, ou valores sem as casas decimais no arquivo), fica `invert`, porque a fatura em CSV costuma trazer as compras positivas (spec 009).
+  - Mapeamento de conta fica `as_is`, porque a aplicação nunca inverteu conta.
+  - O auxiliar da conversão sai no fim da migration.
+- Fixture do teste de migração: Nubank invertido, Inter não invertido, cartão sem lote, conta, valores sem casas, empate entre dois lotes e três lotes com parênteses, sufixo D/C e "-" atrás. As linhas e os valores gravados não mudam.
+- `tests/0014_statements.sql` passou a ter a coluna em `columns_are`. `docs/016` (Extratos) atualizada. `make dump` rodado.
+
+### Pendente na aplicação
+
+1. `pnpm db:pull`, para a coluna nova `amount_sign` em `statement_csv_mappings`.
+2. Schemas do shared:
+   - `packages/shared/src/schemas/operation.ts`: `csvMappingInput` e `csvMappingUpdateInput` ganham `amountSign: z.enum(['as_is', 'invert'])`, opcional na atualização.
+   - O DTO do mapeamento (`toMapping` em `apps/server/src/services/reconciliation.ts:527`) devolve `amountSign`, e o INSERT/UPDATE do mapeamento o grava.
+3. `apps/server/src/services/statements.ts:239-242` (`parseStatementFile`): trocar a inversão pela maioria por `if (mapping.amountSign === 'invert') lines = lines.map((l) => ({ ...l, amountCents: -l.amountCents }))`. Vale para cartão e para conta, nunca pela maioria.
+4. Tela do mapeamento (`ImportModal.tsx`):
+   - A opção "Compras vêm positivas (inverter o sinal)", pré-marcada pela heurística da maioria só na criação do mapeamento.
+   - A prévia mostra o sinal final das linhas.
+5. Backup (`apps/server/src/services/backup/import.ts`): arquivo anterior à 0063, com o mapeamento sem `amountSign`, deve gravar `invert` no de cartão (o padrão da migração sem evidência) e `as_is` no de conta. Sem esse ajuste, o padrão do banco (`as_is`) deixaria o cartão sem inverter.
+6. Testes em `apps/server/test/statements.test.ts`:
+   - fatura CSV de cartão com 1 compra + 1 pagamento, com `amountSign` `invert` e `as_is`;
+   - o caso de mais créditos que compras com `as_is`, que não pode ser invertido.

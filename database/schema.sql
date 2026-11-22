@@ -15773,6 +15773,8 @@ CREATE TABLE public.statement_csv_mappings (
     is_default boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    amount_sign text DEFAULT 'as_is'::text NOT NULL,
+    CONSTRAINT statement_csv_mappings_amount_sign_check CHECK ((amount_sign = ANY (ARRAY['as_is'::text, 'invert'::text]))),
     CONSTRAINT statement_csv_mappings_columns_check CHECK (((jsonb_typeof(columns) = 'object'::text) AND (columns ? 'date'::text) AND (columns ? 'description'::text) AND ((columns ? 'amount'::text) OR ((columns ? 'debit'::text) AND (columns ? 'credit'::text))))),
     CONSTRAINT statement_csv_mappings_date_format_check CHECK ((btrim(date_format) <> ''::text)),
     CONSTRAINT statement_csv_mappings_decimal_separator_check CHECK ((decimal_separator = ANY (ARRAY[','::text, '.'::text]))),
@@ -15803,6 +15805,13 @@ COMMENT ON COLUMN public.statement_csv_mappings.date_format IS 'Formato da data 
 --
 
 COMMENT ON COLUMN public.statement_csv_mappings.columns IS 'Objeto JSON: chave = campo (date, description, amount OU debit+credit; opcionais fitid, balance, document), valor = índice (0-based) ou nome da coluna no cabeçalho. Interpretado pela aplicação.';
+
+
+--
+-- Name: COLUMN statement_csv_mappings.amount_sign; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.statement_csv_mappings.amount_sign IS 'Sinal dos valores do arquivo (tarefa 091): as_is = como vêm; invert = inverte todos (fatura do cartão com as compras positivas; conta com o débito positivo). A aplicação aplica pelo mapeamento, nunca pela maioria das linhas.';
 
 
 --
