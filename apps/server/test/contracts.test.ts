@@ -1,10 +1,12 @@
-import { addMonths, spClock, todayIso } from '@moneyflow/shared';
+import { addMonths, spClock, statementImportQuery, todayIso } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { Access } from '../src/authz/access';
-import { contractMaintenance } from '../src/services/contract-worker';
+import { Access, loadAccess } from '../src/authz/access';
+import type { ServiceContext } from '../src/context';
+import { type ContractMaintenanceFailure, contractMaintenance } from '../src/services/contract-worker';
 import { syncLifecycle } from '../src/services/contracts';
 import { produceNotifications, recipientsByCaixa } from '../src/services/message-worker';
+import { importStatement } from '../src/services/statements';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
 /*
@@ -415,6 +417,43 @@ describe('reconhecer o pagamento pela série (specs 033 e 034)', () => {
     expect(late.lines[0].target.series).toMatchObject({ contractId: null, ruleId: light.rule.id, split: { kind: 'exact', days: 22 } });
   });
 
+  it('baixa sem confirmação que falha vira sugestão e deixa o motivo no log, sem valores (tarefa 136)', async () => {
+    const { session, admin, s } = await setup();
+    const contract = await admin.post('/api/contracts', lease(s, [rentObligation(s)]));
+    const rent = obligation(contract, 'Aluguel');
+    await admin.patch(`/api/series/${rent.id}`, { autoSettle: true });
+    await closeMonth(session.id, s.caixaA.id, '2026-11-01');
+    const warnings: Record<string, unknown>[] = [];
+    const actor = {
+      id: session.id,
+      username: session.username,
+      email: `${session.username}@teste.local`,
+      role: 'admin' as const,
+      isActive: true,
+    };
+    const ctx: ServiceContext = {
+      db: h.db,
+      access: await loadAccess(h.db, actor),
+      config: h.config,
+      log: { warn: (obj) => warnings.push(obj as Record<string, unknown>) },
+    };
+    const imp = await importStatement(ctx, statementImportQuery.parse({ accountId: s.accountA.id, fileName: 'extrato.ofx' }), {
+      mime: 'application/x-ofx',
+      content: ofxOf([{ date: '2026-11-10', cents: -200_000, memo: 'PIX ALUGUEL' }]),
+    });
+    expect(imp.lines[0]).toMatchObject({ status: 'suggested', autoSettled: false });
+    expect(warnings).toEqual([
+      {
+        importId: imp.id,
+        lineId: imp.lines[0]!.id,
+        code: 'period_closings_locked_check',
+        pgCode: '23514',
+        constraint: 'period_closings_locked_check',
+      },
+    ]);
+    expect(JSON.stringify(warnings)).not.toContain('200000');
+  });
+
   it('cofre: os previstos da conta, "Baixar" e o "É o pagamento de…?" do lançamento avulso', async () => {
     const { admin, s } = await setup();
     const contract = await admin.post('/api/contracts', lease(s, [condoObligation(s, { lateFeePercent: 2 })]));
@@ -767,6 +806,32 @@ describe('aditivo, renovação e rescisão como operações da série (spec 034)
     expect(notice.rows[0]?.title).toContain('renovado automaticamente');
     // Encerrado pode ser renovado à mão.
     expect((await admin.post(`/api/contracts/${stop.id}/renew`, { endsOn: '2027-06-30' })).contract.status).toBe('active');
+  });
+
+  it('contrato que o worker não consegue renovar vai para o log com o id e o motivo (tarefa 136)', async () => {
+    const { session, admin, s } = await setup();
+    const contract = await admin.post(
+      '/api/contracts',
+      lease(s, [rentObligation(s, { firstDueDate: '2026-01-10' })], {
+        startsOn: '2026-01-01',
+        endsOn: '2026-06-30',
+        autoRenew: true,
+        contractNumber: null,
+      }),
+    );
+    // Agosto fechado na caixa: a renovação não materializa a ocorrência dele.
+    await closeMonth(session.id, s.caixaA.id, '2026-08-01');
+    const failures: ContractMaintenanceFailure[] = [];
+    const result = await contractMaintenance(h.db, todayIso(), undefined, (failure) => failures.push(failure));
+    expect(result.failed).toBeGreaterThanOrEqual(1);
+    expect(failures.find((f) => f.contractId === contract.id)).toMatchObject({
+      code: 'period_closings_locked_check',
+      constraint: 'period_closings_locked_check',
+      message: expect.stringMatching(/mês está fechado/),
+    });
+    expect((await admin.get(`/api/contracts/${contract.id}`)).status).toBe('active');
+    // Fora das passadas seguintes deste arquivo.
+    await admin.del(`/api/contracts/${contract.id}`);
   });
 
   it('renovar até o meio do mês ou com vencimento no dia 31 não perde a última ocorrência (tarefa 087)', async () => {

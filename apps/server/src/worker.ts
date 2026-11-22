@@ -32,10 +32,18 @@ export function startWorker(db: Database, config: Config, log: FastifyBaseLogger
     try {
       const result = await materializeAll(db, undefined, (failure) => log.warn(failure, 'worker: série não materializada'));
       log.info(result, 'worker: séries materializadas');
-      const cards = await cardMaintenance(db, { autoClose: config.cardAutoClose });
+      const cards = await cardMaintenance(db, {
+        autoClose: config.cardAutoClose,
+        onError: (failure) => log.warn(failure, 'worker: fatura de cartão não atualizada'),
+      });
       log.info(cards, 'worker: faturas de cartão');
       // Contratos (spec 034): renova sozinho (renovação automática, com aviso) ou encerra quem passou do fim.
-      const contracts = await contractMaintenance(db, todayIso(), (ids) => recipientsByCaixa(db, ids));
+      const contracts = await contractMaintenance(
+        db,
+        todayIso(),
+        (ids) => recipientsByCaixa(db, ids),
+        (failure) => log.warn(failure, 'worker: contrato não renovado nem encerrado'),
+      );
       if (contracts.renewed || contracts.ended || contracts.failed) log.info(contracts, 'worker: contratos');
       await purgeExpiredSessions(db);
     } catch (error) {

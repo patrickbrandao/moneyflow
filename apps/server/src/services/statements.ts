@@ -39,7 +39,7 @@ import {
 import { eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
-import { AppError, notFound, unprocessable } from '../errors';
+import { AppError, failureReason, notFound, unprocessable } from '../errors';
 import { cleanFileName, storeAttachment } from './attachments';
 import { getAccount } from './caixas';
 import { expectedCardOccurrences, insertChargePurchase, toSuggestion } from './card-charges';
@@ -711,6 +711,7 @@ export async function autoMatch(ctx: ServiceContext, tx: Tx, importId: string) {
   let matched = 0;
   let suggested = 0;
   let autoSettled = 0;
+  let autoSettleFailed = 0;
   for (const line of lines.rows) {
     const candidates = await candidatesFor(tx, line, 3);
     const pick = pickMatch(
@@ -720,10 +721,14 @@ export async function autoMatch(ctx: ServiceContext, tx: Tx, importId: string) {
     );
     if (!pick) continue;
     used.add(pick.candidate.id);
-    if (pick.autoSettle && (await autoSettleLine(ctx, tx, line, pick.candidate))) {
-      autoSettled += 1;
-      matched += 1;
-      continue;
+    if (pick.autoSettle) {
+      const settled = await autoSettleLine(ctx, tx, importId, line, pick.candidate);
+      if (settled === true) {
+        autoSettled += 1;
+        matched += 1;
+        continue;
+      }
+      if (settled === 'failed') autoSettleFailed += 1;
     }
     // A cobrança esperada não tem lançamento para sugerir: a tela mostra "Lançar como cobrança de…".
     if (pick.candidate.kind === 'card_charge') continue;
@@ -742,18 +747,26 @@ export async function autoMatch(ctx: ServiceContext, tx: Tx, importId: string) {
     }
   }
   if (autoSettled > 0) await notifyAutoSettled(ctx, tx, importId, autoSettled);
-  return { matched, suggested, autoSettled };
+  return { matched, suggested, autoSettled, autoSettleFailed };
 }
 
 /**
  * A baixa sem confirmação de uma linha, num savepoint: na conta, a baixa
  * repartida da ocorrência; na fatura, a compra ligada à cobrança esperada. Se
- * o usuário não escreve na caixa (ou o lançamento falha), a linha fica como
- * sugestão.
+ * o usuário não escreve na caixa, a linha fica como sugestão sem tentar; se o
+ * lançamento falha, também, e o log da requisição registra o motivo (o código
+ * do erro, sem valores; tarefa 136): devolve 'failed'.
  */
-async function autoSettleLine(ctx: ServiceContext, tx: Tx, line: LineRow, candidate: MatchCandidate): Promise<boolean> {
+async function autoSettleLine(
+  ctx: ServiceContext,
+  tx: Tx,
+  importId: string,
+  line: LineRow,
+  candidate: MatchCandidate,
+): Promise<boolean | 'failed'> {
   try {
     if (candidate.kind === 'card_charge' && line.card_caixa_id && candidate.series) {
+      if (!ctx.access.canWrite(line.card_caixa_id)) return false;
       await tx.transaction(async (sp) => {
         const created = await insertChargePurchase(ctx, sp, {
           cardCaixaId: line.card_caixa_id!,
@@ -775,7 +788,7 @@ async function autoSettleLine(ctx: ServiceContext, tx: Tx, line: LineRow, candid
       sql`SELECT caixa_id FROM financial_accounts WHERE id = ${line.financial_account_id}::uuid`,
     );
     const caixaId = caixa.rows[0]?.caixa_id;
-    if (!caixaId) return false;
+    if (!caixaId || !ctx.access.canWrite(caixaId)) return false;
     await tx.transaction(async (sp) => {
       const settled = await settleFromLine(
         ctx,
@@ -797,8 +810,10 @@ async function autoSettleLine(ctx: ServiceContext, tx: Tx, line: LineRow, candid
       await sp.execute(sql`SET CONSTRAINTS ALL DEFERRED`);
     });
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    const { code, pgCode, constraint } = failureReason(error);
+    ctx.log?.warn({ importId, lineId: line.id, code, pgCode, constraint }, 'baixa automática virou sugestão');
+    return 'failed';
   }
 }
 

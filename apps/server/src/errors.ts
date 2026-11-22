@@ -59,3 +59,20 @@ export function translateDbError(error: unknown): AppError | null {
   const status = pg.code === '42501' ? 403 : pg.code === '23505' || pg.code === '40P01' || pg.code === '40001' ? 409 : 422;
   return new AppError(status, pg.constraint ?? `pg_${pg.code}`, message);
 }
+
+/**
+ * Motivo de uma falha engolida por um laço do worker ou por um recuo previsto
+ * (tarefa 136): o código do AppError ou o traduzido do banco, o código do
+ * Postgres e a constraint, e a mensagem pt-BR (ou a crua do erro).
+ */
+export function failureReason(error: unknown): { code: string | null; pgCode: string | null; constraint: string | null; message: string } {
+  if (error instanceof AppError) return { code: error.code, pgCode: null, constraint: null, message: error.message };
+  const pg = findPgError(error);
+  const known = translateDbError(error);
+  return {
+    code: known?.code ?? (pg ? `pg_${pg.code}` : null),
+    pgCode: pg?.code ?? null,
+    constraint: pg?.constraint ?? null,
+    message: known?.message ?? (error instanceof Error ? error.message : String(error)),
+  };
+}

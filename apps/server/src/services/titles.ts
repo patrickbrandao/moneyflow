@@ -84,11 +84,13 @@ function toRow(row: Record<string, unknown>): TitleRow {
 export async function listTitles(
   ctx: ServiceContext,
   query: z.output<typeof titleListQuery>,
-  opts: { writableOnly?: boolean } = {},
+  /** `cardInvoiceId`: só os títulos dessa fatura (o detalhe da fatura, tarefa 084). */
+  opts: { writableOnly?: boolean; cardInvoiceId?: string } = {},
 ): Promise<TitleRow[]> {
   if (query.caixaId) ctx.access.assertRead(query.caixaId);
   const today = todayIso();
   const where = [readableFilter(ctx.access, sql`t.caixa_id`)];
+  if (opts.cardInvoiceId) where.push(sql`t.card_invoice_id = ${opts.cardInvoiceId}`);
   if (opts.writableOnly && !ctx.access.isAdmin) {
     const ids = ctx.access.writableCaixaIds() as string[];
     where.push(

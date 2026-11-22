@@ -129,7 +129,7 @@ export async function buildApp({
     if (!session) throw new AppError(401, 'unauthenticated', t.auth.unauthenticated);
     request.actor = session.actor;
     request.sessionId = session.sessionId;
-    request.ctx = { db, config, access: await loadAccess(db, session.actor), sessionId: session.sessionId };
+    request.ctx = { db, config, access: await loadAccess(db, session.actor), sessionId: session.sessionId, log: request.log };
   });
 
   app.get('/api/health', { logLevel: 'warn' }, async () => {

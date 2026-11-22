@@ -870,6 +870,8 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     preview: async (ctx, i) => {
       ctx.access.assertWrite(i.cardId);
       const c = i.charge;
+      // A pagadora pedida precisa ser legível, como na compra (tarefa 133).
+      if (c.payerCaixaId) ctx.access.assertRead(c.payerCaixaId);
       return {
         title: 'Lançar encargo do cartão',
         summary: `${t.card.chargeKinds[c.chargeKind] ?? c.chargeKind} · ${formatBRL(c.amountCents)}`,

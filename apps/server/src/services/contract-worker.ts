@@ -20,6 +20,7 @@ import { sql } from 'drizzle-orm';
 import { Access } from '../authz/access';
 import type { Config } from '../config';
 import type { ServiceContext } from '../context';
+import { failureReason } from '../errors';
 import { syncLifecycle } from './contracts';
 import { createNotifications, type NewNotification } from './notifications';
 import { uuidArray } from './reports';
@@ -27,9 +28,9 @@ import { uuidArray } from './reports';
 /*
  * Contratos no worker (specs 020 e 034):
  *  - manutenção: o contrato vigente que passou do fim é renovado pelo mesmo
- *    prazo, com as obrigações estendidas (renovação automática, com aviso no
- *    sino), ou encerrado (as séries já terminam no fim da vigência). Nada é
- *    lançado além das ocorrências das séries;
+ *    prazo, uma vigência por prazo, com as obrigações estendidas (renovação
+ *    automática, com aviso no sino), ou encerrado, com as obrigações que iam
+ *    além do fim terminando nele. Nada é lançado além das ocorrências das séries;
  *  - eventos de mensagem (aviso prévio, fim, reajuste), com dedup por contrato
  *    e fim da vigência, e as notificações do sino, inclusive a cobrança no
  *    cartão não feita (contract_charge_missing, uma vez por ocorrência).
@@ -53,8 +54,16 @@ function systemContext(db: Database): ServiceContext {
 
 type Recipients = (caixaIds: string[]) => Promise<Map<string, string[]>>;
 
-/** Uma passada: cada contrato numa transação curta própria. */
-export async function contractMaintenance(db: Database, today: string, recipients?: Recipients) {
+/** Contrato que não renovou nem encerrou numa passada, com o motivo (tarefa 136). */
+export type ContractMaintenanceFailure = ReturnType<typeof failureReason> & { contractId: string };
+
+/** Uma passada: cada contrato numa transação curta própria; a falha vai para `onError` com o id e o motivo. */
+export async function contractMaintenance(
+  db: Database,
+  today: string,
+  recipients?: Recipients,
+  onError?: (failure: ContractMaintenanceFailure) => void,
+) {
   const candidates = await db.execute<{ id: string; caixa_id: string; name: string }>(sql`
     SELECT c.id, c.caixa_id, c.name FROM contracts c
      WHERE c.status = 'active' AND c.archived_at IS NULL AND c.ends_on IS NOT NULL AND c.ends_on < ${today}::date`);
@@ -83,8 +92,9 @@ export async function contractMaintenance(db: Database, today: string, recipient
             dedupKey: dedupKeys.contractRenewed(contract.id, result.seq),
           });
       }
-    } catch {
+    } catch (error) {
       failed += 1;
+      onError?.({ contractId: contract.id, ...failureReason(error) });
     }
   }
   if (notices.length > 0) await createNotifications(db, notices);
