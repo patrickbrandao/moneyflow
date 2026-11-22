@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: em-andamento
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -63,4 +63,54 @@ Nada foi executado nem medido. O custo exato depende do volume de cada instalaç
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado:
+- `ai_embedding_index_stats` conta todos os vetores do par (`count(e.id)` com `LEFT JOIN`).
+- `ai_embedding_indexes` só tinha `last_in_use_at`, então não havia onde o worker gravar que terminou uma passada.
+- `indexComplete` (`search.ts`) lê essa visão e ainda soma `embeddingSourceTotal`, a cada chamada.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+Migration `database/migrations/0069_ai_embedding_index_complete.sql`; teste `database/tests/0069_ai_embedding_index_complete.sql`.
+
+- Coluna nova `ai_embedding_indexes.complete_at timestamptz` (nula): o fim da última passada completa do worker no par.
+- `ai_embedding_index_mark(p_provider_id uuid, p_model text, p_complete boolean) RETURNS boolean` (`SECURITY INVOKER`, `EXECUTE` para a aplicação):
+  - com `true`, grava `complete_at = now()` só se o par não tiver vetor em `needs_reindex`; senão grava nulo;
+  - com `false`, limpa;
+  - devolve se o par ficou completo;
+  - par não registrado dá `P0002`, e `p_complete` nulo dá `22023`.
+- `ai_embedding_index_ready(p_provider_id uuid, p_model text) RETURNS boolean` (`STABLE`): verdadeiro com `complete_at` preenchido e nenhum vetor do par em `needs_reindex`. Usa o índice parcial `ai_embeddings_reindex_idx` e não conta as fontes. Par não registrado dá `false`.
+- `ai_embedding_index_stats` ganhou `complete_at` no fim. As colunas de antes não mudam.
+- Decisão: a troca do item 4 da tarefa foi aceita. Um registro criado depois da marcação fica fora da busca vetorial e do aviso até a próxima passada (um ciclo de manutenção). O texto editado de um registro já sincronizado tira o "pronto" na hora, porque vira `needs_reindex`.
+- `tests/0041_ai_provider_capabilities.sql`: o `columns_are` de `ai_embedding_indexes` inclui a coluna nova.
+
+Testes:
+- nunca marcado e par não registrado: não está pronto;
+- a marcação com a fila vazia grava `complete_at`;
+- o texto editado tira o pronto, e marcar com fila não marca;
+- o vetor recalculado permite marcar de novo;
+- uma fonte nova na fila tira o pronto;
+- `false` desmarca;
+- os erros `P0002` e `22023`;
+- o `ai_embedding_indexes_touch` não mexe na marca;
+- a visão mostra a marca.
+
+Verificação:
+- `make test` com `0069`, `0041` e `0029` passou, com o down da 0069.
+- `docs/016` (Embeddings) atualizada. `make dump` rodado.
+
+### Pendente na aplicação
+
+1. `pnpm db:pull`, para a coluna nova `ai_embedding_indexes.complete_at` e a coluna `complete_at` da visão.
+2. `apps/server/src/agents/embeddings.ts` (`indexEmbeddings`):
+   - marcar o par quando a passada alcançar o fim: em `syncEmbeddingSources`, todo tipo devolveu menos linhas que o `batch` (contar as linhas de `src`, e não só as `upserted`, que ficam em 0 quando nada mudou), e `embedPending` saiu sem pendentes;
+   - nesse caso, `SELECT ai_embedding_index_mark(${providerId}, ${model}, true)`. Numa passada incompleta, ou com erro, `false`.
+   - Na primeira passada de um processo (`state.since` vazio), o worker não sabe o que foi criado enquanto ele estava parado. Recomendo marcar `false` no início e só marcar `true` quando a recuperação alcançar o fim.
+3. `apps/server/src/agents/search.ts`: `indexComplete` vira `SELECT ai_embedding_index_ready(${providerId}, ${model}) AS ready`, sem `ai_embedding_index_stats` nem `embeddingSourceTotal`. O total de fontes fica só no detalhe do provedor (tela do admin).
+4. Testes em `apps/server/test/agents.test.ts` (embedding por par):
+   - antes da primeira passada completa, `building: true`;
+   - depois dela, `mode: 'embeddings'` sem `building`;
+   - com um título editado e sincronizado (`needs_reindex`), `building: true` de novo.
