@@ -5,7 +5,8 @@ import { expect, type Page, test } from '@playwright/test';
  * roxo (matiz 250°–320°) no acento, no anel de foco, nos neutros, nas 12
  * cores de categoria/canvas nem no logo; o texto branco sobre o acento mantém AA e as
  * 12 cores --port-N continuam distintas entre si; as 5 dos tipos de anotação (spec 035)
- * passam AA no cartão. Só precisa da tela de login.
+ * passam AA no cartão; e todo token de texto (o secundário, os estados e o negativo)
+ * passa AA sobre o fundo, o cartão e o campo (tarefa 175). Só precisa da tela de login.
  */
 
 type Rgb = [number, number, number];
@@ -77,6 +78,20 @@ const ACCENT = ['--accent', '--accent-hover', '--accent-soft', '--accent-deep', 
 const PORTS = Array.from({ length: 12 }, (_, i) => `--port-${i + 1}`);
 /** Tipos das anotações (spec 035). */
 const NOTES = ['--note-info', '--note-good', '--note-bad', '--note-severe', '--note-reminder'];
+/** Tokens usados como cor de texto: AA (4,5:1) sobre o fundo, o cartão e o campo (tarefa 175). */
+const TEXT = [
+  '--text',
+  '--text-dim',
+  '--text-muted',
+  '--text-faint',
+  '--ok',
+  '--warn',
+  '--danger',
+  '--negative',
+  '--info',
+  '--accent-soft',
+];
+const TEXT_BACKGROUNDS = ['--bg', '--bg-elev', '--surface-2'];
 const NEUTRALS = [
   '--bg',
   '--bg-sunken',
@@ -111,7 +126,7 @@ async function tokens(page: Page, theme: 'dark' | 'light') {
       const style = win.getComputedStyle(root);
       return Object.fromEntries(names.map((n) => [n, style.getPropertyValue(n)]));
     },
-    { theme, names: [...ACCENT, ...PORTS, ...NEUTRALS, ...NOTES, '--on-accent', '--ring-accent', '--info'] },
+    { theme, names: [...ACCENT, ...PORTS, ...NEUTRALS, ...NOTES, ...TEXT, '--on-accent', '--ring-accent'] },
   );
 }
 
@@ -150,6 +165,18 @@ for (const theme of ['dark', 'light'] as const) {
       expect(contrast(c, parseColor(t['--bg-elev']!)), `${NOTES[i]} sobre --bg-elev`).toBeGreaterThanOrEqual(4.5);
       for (let j = i + 1; j < notes.length; j += 1) expect(distance(c, notes[j]!), `${NOTES[i]} × ${NOTES[j]}`).toBeGreaterThan(0.06);
     }
+
+    // todo token de texto com AA sobre o fundo, o cartão e o campo (tarefa 175)
+    for (const name of TEXT) {
+      for (const bg of TEXT_BACKGROUNDS) {
+        const ratio = contrast(parseColor(t[name]!), parseColor(t[bg]!));
+        expect(ratio, `${name} = ${t[name]} sobre ${bg} = ${t[bg]}: ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+    // a rampa do texto continua em ordem: dim > muted > faint em contraste com o cartão
+    const onCard = (name: string) => contrast(parseColor(t[name]!), parseColor(t['--bg-elev']!));
+    expect(onCard('--text-dim')).toBeGreaterThan(onCard('--text-muted'));
+    expect(onCard('--text-muted')).toBeGreaterThan(onCard('--text-faint'));
 
     // 12 cores de categoria distintas duas a duas
     const ports = PORTS.map((n) => parseColor(t[n]!));

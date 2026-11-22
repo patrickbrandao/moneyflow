@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -58,8 +58,8 @@ Abra uma caixa → A pagar no tema escuro. Meça com o DevTools (Inspect → Con
 4. No `tema.spec.ts`, acrescente o AA de `--text-muted`, `--text-faint`, `--ok`, `--danger` e `--negative` sobre `--bg` e `--bg-elev` nos dois temas.
 
 ## Critérios de aceite
-- [ ] Todos os tokens de texto têm razão ≥ 4,5:1 sobre `--bg` e `--bg-elev` nos dois temas.
-- [ ] O `tema.spec.ts` falha se algum deles cair abaixo disso.
+- [x] Todos os tokens de texto têm razão ≥ 4,5:1 sobre `--bg` e `--bg-elev` nos dois temas.
+- [x] O `tema.spec.ts` falha se algum deles cair abaixo disso.
 
 ## Testes recomendados
 `e2e/tests/tema.spec.ts`: um laço novo com `contrast(parseColor(t[name]), parseColor(t['--bg-elev']))` ≥ 4,5 para os cinco tokens, nos dois temas (os auxiliares `contrast` e `parseColor` já existem no arquivo).
@@ -68,5 +68,9 @@ Abra uma caixa → A pagar no tema escuro. Meça com o DevTools (Inspect → Con
 Contraste calculado a partir dos hex do `tokens.css`, sem medir a tela renderizada (opacidades e misturas podem mudar um pouco os valores). Os tons sugeridos são aproximados e precisam ser recalculados.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado com as razões do WCAG 2.x calculadas dos hex de `apps/web/src/styles/tokens.css`: no escuro, `--text-faint` 2,82 / `--text-muted` 3,95 / `--ok` 4,09 / `--danger` 3,63 sobre o cartão; no claro, `--text-faint` 2,98 sobre o fundo. Achado a mais: o `--warn` do claro (#a8741c), usado como texto em avisos e selos, dava 3,69 sobre o fundo. `e2e/tests/tema.spec.ts` só conferia o AA do texto sobre o acento e das cores das anotações.
 
 ## Resolução (executor)
+`apps/web/src/styles/tokens.css`, mesma matiz e saturação, só a luminosidade: escuro `--text-muted` #767880 → #9a9ca3, `--text-faint` #5e616c → #838793, `--ok` #3a8963 → #40966d, `--danger` #d7322d → #df5c58; claro `--text-muted` #676a73 → #575a62, `--text-faint` #8b8e97 → #666972, `--ok` #2e7a55 → #2b7350, `--warn` #a8741c → #8e6218. Os neutros continuam no azul-frio (matiz ~225°) e a rampa continua em ordem (dim > muted > faint). Decisão: o alvo foi o AA também sobre o `--surface-2` (campos e linhas em hover), não só sobre `--bg` e `--bg-elev`, e o `--text-faint` ficou como texto (sem um `--text-subtle` à parte), porque os ~170 usos dele são quase todos texto. Os `*-tint` ficaram como estavam. A pior razão agora é 4,60 no escuro (`--ok` sobre o campo) e 4,75 no claro (`--warn` sobre o campo), conferido no Chromium com os tokens reais por um script descartável. `docs/001-stack-e-entrega.md` registra a regra (e corrige a nota da CSP: o markdown saneado não tem mais `style`, tarefa 073).
+
+Testes: `e2e/tests/tema.spec.ts`, nos dois temas: todo token de texto (`--text`, `--text-dim`, `--text-muted`, `--text-faint`, `--ok`, `--warn`, `--danger`, `--negative`, `--info`, `--accent-soft`) com razão ≥ 4,5 sobre `--bg`, `--bg-elev` e `--surface-2`, e a rampa dim > muted > faint (não rodado aqui; o arquivo passa no typecheck). Verificação: `pnpm verify:quick`.
