@@ -8,7 +8,7 @@ POSTGRES_DB ?= moneyflow
 PSQL := $(COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER)
 T ?= /tests
 
-.PHONY: env up down logs psql owner migrate rollback status new test test-migration dump seed reset
+.PHONY: env up down logs psql owner migrate rollback status new test test-migration dump seed sizes reset
 
 env:            ## cria .env a partir do exemplo, se faltar
 	@test -f .env || cp .env.example .env
@@ -61,6 +61,13 @@ dump: migrate   ## regrava schema.sql (estrutura atual, commitado como referênc
 
 seed: migrate   ## carrega dados de desenvolvimento
 	$(PSQL) -d $(POSTGRES_DB) < seeds/dev.sql
+
+# Diagnóstico do volume (tarefa 103): as maiores tabelas com índices e TOAST, e as linhas estimadas. DB=<banco> mede outro.
+sizes: up       ## tamanho das 30 maiores tabelas (make sizes DB=moneyflow)
+	$(PSQL) -d $(or $(DB),$(POSTGRES_DB)) -c "SELECT c.relname AS tabela, pg_size_pretty(pg_total_relation_size(c.oid)) AS total, \
+	  pg_size_pretty(pg_relation_size(c.oid)) AS heap, pg_size_pretty(pg_total_relation_size(c.oid) - pg_relation_size(c.oid)) AS indices_e_toast, \
+	  greatest(c.reltuples, 0)::bigint AS linhas_estimadas FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+	  WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') ORDER BY pg_total_relation_size(c.oid) DESC LIMIT 30"
 
 reset: owner    ## APAGA o banco de desenvolvimento e recria do zero
 	$(PSQL) -d postgres -c 'DROP DATABASE IF EXISTS "$(POSTGRES_DB)" WITH (FORCE)' \

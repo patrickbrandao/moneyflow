@@ -31,6 +31,7 @@ make test                # completo: o mesmo, rodando todo o pgTAP (só quando p
 make test-migration M=0052   # migration com dados: cria <db>_mig, aplica as anteriores, fixture, sobe, confere, desce, confere, sobe e confere
 make dump                # regrava schema.sql
 make seed                # carrega seeds/dev.sql
+make sizes               # diagnóstico: as 30 maiores tabelas (total, heap, índices e TOAST, linhas); DB=<banco> mede outro
 make psql                # console no banco de desenvolvimento
 make reset               # APAGA o banco de desenvolvimento e recria do zero
 ```
