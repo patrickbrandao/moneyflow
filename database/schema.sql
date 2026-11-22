@@ -7121,8 +7121,10 @@ CREATE TABLE public.message_outbox (
     provider_message_id text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    deferrals smallint DEFAULT 0 NOT NULL,
     CONSTRAINT message_outbox_attempts_check CHECK ((((max_attempts >= 1) AND (max_attempts <= 20)) AND ((attempts >= 0) AND (attempts <= max_attempts)))),
     CONSTRAINT message_outbox_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
+    CONSTRAINT message_outbox_deferrals_check CHECK (((deferrals >= 0) AND (deferrals <= 100))),
     CONSTRAINT message_outbox_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'test'::text, 'note_reminder'::text]))),
     CONSTRAINT message_outbox_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
     CONSTRAINT message_outbox_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'sending'::text, 'sent'::text, 'failed'::text, 'canceled'::text]))),
@@ -7184,6 +7186,13 @@ COMMENT ON COLUMN public.message_outbox.locked_at IS 'Quando o worker reservou (
 --
 
 COMMENT ON COLUMN public.message_outbox.provider_message_id IS 'Id da mensagem no provedor (Telegram message_id), após o envio.';
+
+
+--
+-- Name: COLUMN message_outbox.deferrals; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_outbox.deferrals IS 'Quantas vezes a mensagem reservada voltou à fila sem gastar tentativa (message_outbox_release: 429 do Telegram ou liberada sem envio pelo limite do chat). Teto 100: dali em diante a liberação conta a tentativa (tarefa 109).';
 
 
 --
@@ -7292,7 +7301,7 @@ $$;
 -- Name: FUNCTION message_outbox_mark_failed(p_message_id uuid, p_error text, p_retry_after interval, p_permanent boolean); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.message_outbox_mark_failed(p_message_id uuid, p_error text, p_retry_after interval, p_permanent boolean) IS 'Registra a falha de uma tentativa de uma mensagem em sending. Volta a pending com next_attempt_at = agora + p_retry_after (ex.: retry_after do Telegram 429) ou backoff 30 s × 2^(tentativa−1), máximo 1 h; vira failed se p_permanent (ex.: chat não existe, token inválido) ou se esgotou max_attempts. Devolve o novo status. Erro 23514 (message_outbox_transition_check) se ela não está em sending.';
+COMMENT ON FUNCTION public.message_outbox_mark_failed(p_message_id uuid, p_error text, p_retry_after interval, p_permanent boolean) IS 'Registra a falha de uma tentativa de uma mensagem em sending. Volta a pending com next_attempt_at = agora + p_retry_after ou backoff 30 s × 2^(tentativa−1), máximo 1 h; vira failed se p_permanent (ex.: chat não existe, token inválido) ou se esgotou max_attempts. A tentativa conta: para o 429 do Telegram, que só adia, use message_outbox_release (tarefa 109). Devolve o novo status. Erro 23514 (message_outbox_transition_check) se ela não está em sending.';
 
 
 --
@@ -7319,6 +7328,61 @@ $$;
 --
 
 COMMENT ON FUNCTION public.message_outbox_mark_sent(p_message_id uuid, p_provider_message_id text) IS 'Fecha uma mensagem reservada como enviada (sent_at, id no provedor). Erro 23514 (message_outbox_transition_check) se ela não está em sending.';
+
+
+--
+-- Name: message_outbox_release(uuid, interval, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.message_outbox_release(p_message_id uuid, p_retry_after interval DEFAULT NULL::interval, p_error text DEFAULT NULL::text) RETURNS text
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  m          message_outbox;
+  max_deferrals constant smallint := 100;
+  wait       interval;
+  new_status text;
+BEGIN
+  IF p_retry_after < interval '0' THEN
+    RAISE EXCEPTION 'message_outbox_release: retry_after must not be negative' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  SELECT * INTO m FROM message_outbox WHERE id = p_message_id FOR UPDATE;
+  IF NOT FOUND OR m.status <> 'sending' THEN
+    RAISE EXCEPTION 'message_outbox: message % is not being sent', p_message_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'message_outbox_transition_check';
+  END IF;
+  wait := least(greatest(coalesce(p_retry_after, interval '30 seconds'), interval '1 second'), interval '1 day');
+
+  IF m.deferrals < max_deferrals THEN
+    UPDATE message_outbox o
+       SET status = 'pending',
+           locked_at = NULL,
+           attempts = greatest(o.attempts - 1, 0),
+           deferrals = o.deferrals + 1,
+           last_error = coalesce(left(nullif(btrim(p_error), ''), 2000), o.last_error),
+           next_attempt_at = clock_timestamp() + wait
+     WHERE o.id = p_message_id;
+    RETURN 'pending';
+  END IF;
+
+  -- No teto: conta a tentativa (já somada na reserva), como message_outbox_mark_failed.
+  new_status := CASE WHEN m.attempts >= m.max_attempts THEN 'failed' ELSE 'pending' END;
+  UPDATE message_outbox o
+     SET status = new_status,
+         locked_at = NULL,
+         last_error = left(coalesce(nullif(btrim(p_error), ''), 'rate limited: deferred ' || max_deferrals || ' times'), 2000),
+         next_attempt_at = CASE WHEN new_status = 'pending' THEN clock_timestamp() + wait ELSE o.next_attempt_at END
+   WHERE o.id = p_message_id;
+  RETURN new_status;
+END
+$$;
+
+
+--
+-- Name: FUNCTION message_outbox_release(p_message_id uuid, p_retry_after interval, p_error text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.message_outbox_release(p_message_id uuid, p_retry_after interval, p_error text) IS 'Devolve à fila uma mensagem em sending sem gastar tentativa (tarefa 109): 429 do Telegram, ou reservada do mesmo destino que o worker libera sem enviar depois de um 429. status = pending, attempts − 1 (desfaz a reserva), deferrals + 1, next_attempt_at = agora + p_retry_after (padrão 30 s, entre 1 s e 1 dia), last_error = p_error (vazio mantém o anterior). Com deferrals no teto (100), conta a tentativa como message_outbox_mark_failed: failed se esgotou max_attempts. Devolve o novo status. 23514 (message_outbox_transition_check) se ela não está em sending; 22023 com p_retry_after negativo.';
 
 
 --
