@@ -2,8 +2,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { userColumns, users } from '@moneyflow/db';
 import { AGENT_TOOLS, formatBRL, SseParser } from '@moneyflow/shared';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -11,10 +12,13 @@ import { z } from 'zod';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type IndexState, indexEmbeddings } from '../src/agents/embeddings';
 import { mcpExposedName } from '../src/agents/mcp-client';
-import { type ClaimedRun, processRun } from '../src/agents/runner';
+import { type ClaimedRun, callModel, processRun } from '../src/agents/runner';
 import { appendEvent } from '../src/agents/store';
-import { registerInternalTool } from '../src/agents/tools-runtime';
+import { TOOL_HANDLERS } from '../src/agents/tool-handlers';
+import { executeSecretTool, registerInternalTool } from '../src/agents/tools-runtime';
 import { startAgentWorker } from '../src/agents/worker';
+import { buildApp } from '../src/app';
+import { loadAccess } from '../src/authz/access';
 import { translateDbError } from '../src/errors';
 import { withTx } from '../src/services/tx';
 import { type FakeMcp, startFakeMcp } from './fakes/fake-mcp';
@@ -641,6 +645,39 @@ describe('kit de ferramentas (spec 021)', () => {
     expect(await confirmationsOf(outside.run.id)).toEqual([]);
   });
 
+  it('leitura e notify_user em ask: o cartão mostra os argumentos, com nomes, datas e o aviso do serviço externo (tarefa 157)', async () => {
+    const kit = await createKit('Prévias', ['list_titles', 'notify_user', 'lookup_cnpj'], {
+      list_titles: 'ask',
+      notify_user: 'ask',
+      lookup_cnpj: 'ask',
+    });
+    const asker = await kitAgent(kit.id, 'Prévias');
+    const s = await scenario(h, admin);
+    const conversation = await newSession(admin, asker.id);
+    const pendingCard = async (text: string) => {
+      const sent = await chat(admin, conversation.id, text);
+      await drain();
+      const detail = await admin.get(`/api/conversations/${conversation.id}`);
+      const card = detail.confirmations.find((c: any) => c.status === 'pending');
+      await admin.post(`/api/runs/${sent.run.id}/confirmations`, { decision: 'rejected' });
+      await drain();
+      return card.preview;
+    };
+    const rows = (preview: any) => Object.fromEntries(preview.rows.map((r: any) => [r.label, r.after]));
+
+    const list = await pendingCard(`chamar list_titles ${JSON.stringify({ caixaId: s.caixaA.id, from: '2026-11-01', status: 'open' })}`);
+    expect(list).toMatchObject({ title: 'Listar títulos', summary: 'Consulta, sem gravar nada', action: 'other', warnings: [] });
+    expect(rows(list)).toEqual({ caixaId: s.caixaA.name, status: 'open', from: '01/11/2026', limit: '50', offset: '0' });
+
+    const notify = await pendingCard(`chamar notify_user ${JSON.stringify({ title: 'Fechamento', text: 'O mês fechou sem pendências.' })}`);
+    expect(notify).toMatchObject({ title: 'Avisar o usuário', action: 'send' });
+    expect(rows(notify)).toEqual({ Título: 'Fechamento', Texto: 'O mês fechou sem pendências.' });
+
+    const lookup = await pendingCard(`chamar lookup_cnpj ${JSON.stringify({ cnpj: '11222333000181' })}`);
+    expect(lookup.warnings).toEqual([expect.stringContaining('serviço fora do MoneyFlow')]);
+    expect(rows(lookup)).toEqual({ cnpj: '11222333000181' });
+  });
+
   it('sem kit: todas as tools internas, tudo roda direto (inclusive enviar mensagem e escritas)', async () => {
     const free = await kitAgent(null, 'Sem kit');
     expect(free).toMatchObject({ toolKitId: null, toolKitName: null });
@@ -965,7 +1002,14 @@ describe('MCP', () => {
     const tools = await mcpClient.listTools();
     const createEntity = tools.tools.find((t) => t.name === 'create_entity')!;
     expect(createEntity.annotations).toMatchObject({ readOnlyHint: false });
-    expect(tools.tools.find((t) => t.name === 'list_caixas')!.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
+    expect(tools.tools.find((t) => t.name === 'list_caixas')!.annotations).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+    // Leituras que chamam serviço externo ou gastam IA (tarefa 157): openWorldHint pela marca do registro.
+    for (const name of ['lookup_cnpj', 'read_document', 'semantic_search', 'notify_user', 'send_telegram_message'])
+      expect(tools.tools.find((t) => t.name === name)!.annotations, name).toMatchObject({ openWorldHint: true });
 
     const caixas = await mcpClient.callTool({ name: 'list_caixas', arguments: {} });
     const text = (caixas.content as { text: string }[])[0]!.text;
@@ -1843,5 +1887,210 @@ describe('IA nos fluxos', () => {
     }
     // A finalidade é imutável no banco.
     await expect(h.db.execute(sql`UPDATE ai_conversations SET purpose = 'chat' WHERE id = ${conversationId}`)).rejects.toThrow();
+  });
+});
+
+describe('erros das tools (tarefa 099)', () => {
+  /** Logger que guarda as linhas (JSON) para o teste conferir o que foi registrado. */
+  const capture = () => {
+    const lines: Record<string, any>[] = [];
+    const logger = pino({ level: 'info' }, { write: (line: string) => lines.push(JSON.parse(line)) }) as unknown as FastifyBaseLogger;
+    return { lines, logger };
+  };
+
+  it('erro inesperado: o modelo recebe a mensagem segura com a referência; o log, a pilha, a tool e a execução; regra do banco com o código', async () => {
+    const { lines, logger } = capture();
+    const off = [
+      registerInternalTool(
+        {
+          name: 'test_broken_read',
+          title: 'Leitura quebrada (teste)',
+          description: 'Lança um TypeError (registrada no teste).',
+          kind: 'read',
+          category: 'search',
+          suggestedMode: 'allow',
+          input: z.object({}),
+        },
+        {
+          run: async () => {
+            throw new TypeError('quebrou de propósito');
+          },
+        },
+      ),
+      registerInternalTool(
+        {
+          name: 'test_db_rule',
+          title: 'Regra do banco (teste)',
+          description: 'Faz um cast inválido no banco (registrada no teste).',
+          kind: 'read',
+          category: 'search',
+          suggestedMode: 'allow',
+          input: z.object({}),
+        },
+        { run: async (ctx) => ctx.db.execute(sql`SELECT 'não é uuid'::uuid`) },
+      ),
+      registerInternalTool(
+        {
+          name: 'test_broken_preview',
+          title: 'Prévia quebrada (teste)',
+          description: 'A prévia lança um erro (registrada no teste).',
+          kind: 'write',
+          category: 'search',
+          suggestedMode: 'ask',
+          input: z.object({}),
+        },
+        {
+          preview: async () => {
+            throw new Error('prévia quebrou');
+          },
+          run: async () => ({ ok: true }),
+        },
+      ),
+    ];
+    try {
+      const kit = await createKit('Erros', ['test_broken_read', 'test_db_rule', 'test_broken_preview']);
+      const broken = await admin.post('/api/admin/ai/agents', {
+        name: `Erros ${uid()}`,
+        providerId: provider.id,
+        model: 'claude-sonnet-5-5',
+        params: { max_tokens: 2000, max_tool_iterations: 6 },
+        toolKitId: kit.id,
+        isActive: true,
+      });
+      const conversation = await newSession(admin, broken.id);
+      llm.queue = [
+        {
+          toolCalls: [
+            { name: 'test_broken_read', input: {} },
+            { name: 'test_db_rule', input: {} },
+            { name: 'test_broken_preview', input: {} },
+          ],
+        },
+        { text: 'entendi' },
+      ];
+      const sent = await chat(admin, conversation.id, 'teste os erros');
+      for (let i = 0; i < 5; i += 1) {
+        const result = await h.db.execute<ClaimedRun>(sql`SELECT * FROM ai_run_claim(1, '1 hour'::interval)`);
+        if (!result.rows[0]) break;
+        await processRun({ db: h.db, config: h.config, log: logger }, result.rows[0]);
+      }
+      const detail = await admin.get(`/api/conversations/${conversation.id}`);
+      const results = detail.messages.filter((m: any) => m.role === 'tool').flatMap((m: any) => m.content);
+      const [read, rule, preview] = results;
+      // Leitura: a mensagem segura, sem a pilha nem o texto do erro, com a referência do log.
+      expect(read).toMatchObject({ is_error: true });
+      expect(read.content).toMatch(/^Erro interno ao executar a consulta \(ref\. [0-9a-f]{8}\)/);
+      expect(read.content).not.toContain('quebrou de propósito');
+      const ref = /ref\. ([0-9a-f]{8})/.exec(read.content)![1];
+      const readLog = lines.find((l) => l.msg === 'tool falhou' && l.tool === 'test_broken_read')!;
+      expect(readLog).toMatchObject({ level: 50, stage: 'run', runId: sent.run.id, ref });
+      expect(readLog.err.stack).toContain('quebrou de propósito');
+      // Regra do banco traduzida: o código vai junto da mensagem, e o log é info.
+      expect(rule).toMatchObject({ is_error: true, content: expect.stringMatching(/^\[pg_22P02\] \S/) });
+      expect(lines.find((l) => l.msg === 'tool: erro esperado' && l.tool === 'test_db_rule')).toMatchObject({
+        level: 30,
+        code: 'pg_22P02',
+      });
+      // A prévia quebrada (escrita em ask): sem cartão, a mensagem da escrita e o log com o estágio.
+      expect(detail.confirmations ?? []).toHaveLength(0);
+      expect(preview.content).toMatch(/^Erro interno ao executar a ação \(ref\. [0-9a-f]{8}\).*confira o resultado antes de repetir/);
+      expect(lines.find((l) => l.msg === 'tool falhou' && l.tool === 'test_broken_preview')).toMatchObject({
+        stage: 'preview',
+        runId: sent.run.id,
+      });
+    } finally {
+      for (const remove of off) remove();
+    }
+  });
+
+  it('/mcp: o erro inesperado gera log na API e o cliente recebe só a mensagem segura', async () => {
+    const lines: Record<string, any>[] = [];
+    const app = await buildApp({
+      db: h.db,
+      config: h.config,
+      logger: { level: 'info', stream: { write: (l: string) => lines.push(JSON.parse(l)) } },
+    });
+    const handlers = TOOL_HANDLERS as unknown as Record<string, { run: (...args: unknown[]) => Promise<unknown> }>;
+    const original = handlers.list_caixas!.run;
+    handlers.list_caixas!.run = async () => {
+      throw new TypeError('listagem quebrada');
+    };
+    try {
+      const address = await app.listen({ port: 0, host: '127.0.0.1' });
+      const token = (await admin.post('/api/account/api-tokens', { name: `Erros ${uid()}`, expiresInDays: 1 })).token;
+      const mcpClient = new Client({ name: 'teste-erros', version: '1.0.0' });
+      await mcpClient.connect(
+        new StreamableHTTPClientTransport(new URL(`${address}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }),
+      );
+      const result = await mcpClient.callTool({ name: 'list_caixas', arguments: {} });
+      await mcpClient.close();
+      expect(result.isError).toBe(true);
+      const text = (result.content as { text: string }[])[0]!.text;
+      expect(text).toMatch(/^Erro interno ao executar a consulta \(ref\. [0-9a-f]{8}\)/);
+      expect(text).not.toContain('listagem quebrada');
+      const entry = lines.find((l) => l.msg === 'tool falhou' && l.tool === 'list_caixas');
+      expect(entry).toMatchObject({ level: 50, stage: 'mcp', ref: /ref\. ([0-9a-f]{8})/.exec(text)![1] });
+      expect(entry!.err.stack).toContain('listagem quebrada');
+    } finally {
+      handlers.list_caixas!.run = original;
+      await app.close();
+    }
+  });
+
+  it('tool de segredo: o log tem o tipo e a pilha, nunca a mensagem nem o valor digitado', async () => {
+    const { lines, logger } = capture();
+    const handlers = TOOL_HANDLERS as unknown as Record<string, { run: (...args: unknown[]) => Promise<unknown> }>;
+    const original = handlers.set_user_password!.run;
+    const typed = `SEGREDO-${uid()}-${uid()}`;
+    handlers.set_user_password!.run = async (_ctx, _input, meta) => {
+      throw new Error(`falhou gravando ${(meta as { secrets: Record<string, string> }).secrets.password}`);
+    };
+    try {
+      const [row] = await h.db.select(userColumns).from(users).where(eq(users.id, adminSession.id));
+      const actor = { id: row!.id, username: row!.username, email: row!.email, role: row!.role as 'admin', isActive: row!.isActive };
+      const ctx = { db: h.db, config: h.config, access: await loadAccess(h.db, actor), log: logger };
+      const outcome = await executeSecretTool(
+        ctx,
+        'set_user_password',
+        { userId: adminSession.id },
+        { toolUseId: 'tu-1', runId: null, secrets: { password: typed } },
+        [{ key: 'password', label: 'Senha', required: true }],
+      );
+      expect(outcome.isError).toBe(true);
+      expect(outcome.content).toMatch(/^Erro interno ao executar a ação/);
+      expect(outcome.content).not.toContain(typed);
+      const entry = lines.find((l) => l.msg === 'tool de segredo falhou');
+      expect(entry).toMatchObject({ level: 50, tool: 'set_user_password', errorType: 'Error' });
+      expect(entry!.stack).toBeTruthy();
+      expect(JSON.stringify(lines)).not.toContain(typed);
+      expect(JSON.stringify(lines)).not.toContain('falhou gravando');
+    } finally {
+      handlers.set_user_password!.run = original;
+    }
+  });
+
+  it('streaming: uma gravação de delta que falha é registrada e não descarta os deltas seguintes', async () => {
+    const { lines, logger } = capture();
+    let calls = 0;
+    const db = {
+      execute: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('falha ao gravar o delta');
+        return { rows: [{ seq: calls }] };
+      },
+    } as unknown as Parameters<typeof callModel>[0];
+    const llmClient = {
+      chat: async (request: { onText?: (delta: string) => void }) => {
+        request.onText?.('primeiro ');
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        request.onText?.('segundo');
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return { content: [], stopReason: 'end_turn', usage: {}, requestId: null };
+      },
+    } as unknown as Parameters<typeof callModel>[2];
+    await callModel(db, logger, llmClient, '0192d8e4-0000-7000-8000-000000000001', {} as Parameters<typeof callModel>[4]);
+    // O 1º delta falhou e o 2º ainda foi gravado (antes, a promessa rejeitada descartava todos os seguintes).
+    expect(calls).toBe(2);
+    expect(lines.find((l) => l.msg === 'agente: delta do stream não gravado')).toMatchObject({ level: 40 });
   });
 });

@@ -81,7 +81,8 @@ function toRow(row: Record<string, unknown>): TitleRow {
 export async function listTitles(
   ctx: ServiceContext,
   query: z.output<typeof titleListQuery>,
-  opts: { writableOnly?: boolean } = {},
+  /** offset: a página das tools dos agentes (tarefa 101); a ordem tem o id no fim para a página ser estável. */
+  opts: { writableOnly?: boolean; offset?: number } = {},
 ): Promise<TitleRow[]> {
   if (query.caixaId) ctx.access.assertRead(query.caixaId);
   const today = todayIso();
@@ -130,8 +131,8 @@ export async function listTitles(
   const result = await ctx.db.execute(sql`
     SELECT ${rowSelect(today)} ${fromSql}
      WHERE ${sql.join(where, sql` AND `)}
-     ORDER BY t.due_date, t.created_at
-     LIMIT ${query.limit}`);
+     ORDER BY t.due_date, t.created_at, t.id
+     LIMIT ${query.limit} OFFSET ${opts.offset ?? 0}`);
   return result.rows.map(toRow);
 }
 

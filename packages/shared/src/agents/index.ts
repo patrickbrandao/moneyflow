@@ -7,6 +7,7 @@ export * from './preview';
 export * from './prompt-vars';
 export * from './recipes';
 export * from './requests';
+export * from './result';
 export * from './schemas';
 export * from './sse';
 export * from './tasks';

@@ -672,6 +672,34 @@ export async function planSeriesChange(
 
 /* ---------------- edição pela API ---------------- */
 
+const seriesChangeOf = (input: z.output<typeof seriesUpdateInput>): SeriesChange => ({
+  description: input.description,
+  amountCents: input.amountCents,
+  anchorDay: input.anchorDay,
+  categoryId: input.categoryId,
+  accountId: input.accountId,
+  payerCaixaId: input.payerCaixaId,
+});
+
+/**
+ * O plano que `updateSeries` aplicaria, sem gravar (a prévia da tool, tarefa 100): as ocorrências que mudam, as
+ * que ficam (com baixa ou em mês fechado) e, no cartão, de qual ocorrência o valor esperado muda. null = a edição
+ * não mexe nas ocorrências (só os ajustes de reconhecimento ou o contrato).
+ */
+export async function previewSeriesUpdate(
+  ctx: ServiceContext,
+  id: string,
+  input: z.output<typeof seriesUpdateInput>,
+): Promise<Pick<SeriesChangePlan, 'affected' | 'skipped' | 'cardFrom'> | null> {
+  const current = await getSeries(ctx, id);
+  ctx.access.assertWrite(current.caixaId);
+  const change = seriesChangeOf(input);
+  if (!Object.values(change).some((v) => v !== undefined)) return null;
+  const rule = await loadRule(ctx.db, id, false);
+  const plan = await planSeriesChange(ctx, ctx.db, rule, change, input.effectiveOn ?? todayIso(), false);
+  return { affected: plan.affected, skipped: plan.skipped, cardFrom: plan.cardFrom };
+}
+
 const TERM_KEYS = [
   'matchWindowDays',
   'lateFeePercent',
@@ -713,14 +741,7 @@ export async function updateSeries(ctx: ServiceContext, id: string, input: z.out
       }
     }
 
-    const change: SeriesChange = {
-      description: input.description,
-      amountCents: input.amountCents,
-      anchorDay: input.anchorDay,
-      categoryId: input.categoryId,
-      accountId: input.accountId,
-      payerCaixaId: input.payerCaixaId,
-    };
+    const change = seriesChangeOf(input);
     if (Object.values(change).some((v) => v !== undefined)) {
       const plan = await planSeriesChange(ctx, tx, rule, change, input.effectiveOn ?? todayIso(), true);
       await plan.apply(tx);

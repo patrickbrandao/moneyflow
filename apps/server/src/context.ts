@@ -1,4 +1,5 @@
 import type { Database } from '@moneyflow/db';
+import type { FastifyBaseLogger } from 'fastify';
 import type { Access } from './authz/access';
 import type { Config } from './config';
 
@@ -25,4 +26,9 @@ export type ServiceContext = {
    * todas as sessões do usuário são encerradas.
    */
   sessionId?: string | null;
+  /**
+   * Logger de quem montou o contexto (a requisição, o /mcp ou o worker). As tools registram por ele os
+   * erros que viram mensagem segura para o modelo (tarefa 099); sem ele, nada é registrado.
+   */
+  log?: FastifyBaseLogger;
 };

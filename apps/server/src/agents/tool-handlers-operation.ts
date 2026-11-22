@@ -4,6 +4,7 @@ import {
   diffStats,
   formatBRL,
   formatDate,
+  formatFileSize,
   formatMonth,
   type OPERATION_TOOLS,
   type PreviewField,
@@ -29,7 +30,7 @@ import { nfeEntry, pixEntry, readDocument } from '../services/title-entry';
 import * as titles from '../services/titles';
 import * as transfers from '../services/transfers';
 import { supersedeRows } from './tool-handlers-supersede';
-import { type Handlers, nameOf, toolAttachment, withNames } from './tool-helpers';
+import { type Handlers, listed, listPage, nameOf, toolAttachment, withNames } from './tool-helpers';
 
 /*
  * Executores do lote F13a (spec 027): Contratos, Importação a partir de
@@ -42,8 +43,6 @@ type OperationToolName = (typeof OPERATION_TOOLS)[number]['name'];
 
 const DIRECTION = (v: unknown) => t.contracts.directionsShort[String(v)] ?? String(v);
 const EVERY: Record<string, string> = { weekly: 'semana(s)', monthly: 'mês(es)', yearly: 'ano(s)' };
-const listed = (items: string[], max = 12) =>
-  items.length > max ? `${items.slice(0, max).join(', ')} e mais ${items.length - max}` : items.join(', ') || '—';
 
 /* ---------------- contratos ---------------- */
 
@@ -224,8 +223,7 @@ const ruleTargetLabel = (target: { caixaId: string; accountId: string | null; na
 
 /* ---------------- importação ---------------- */
 
-const fileLabel = (file: { fileName: string; sizeBytes: number }) =>
-  `${file.fileName} (${file.sizeBytes < 1024 ? `${file.sizeBytes} B` : `${Math.ceil(file.sizeBytes / 1024)} KB`})`;
+const fileLabel = (file: { fileName: string; sizeBytes: number }) => `${file.fileName} (${formatFileSize(file.sizeBytes)})`;
 
 /** Pagamento de boleto ou PIX copia-e-cola: o PIX começa pelo cabeçalho do BR Code. */
 const lotBalance = (cents: number | null, on: string | null) =>
@@ -236,7 +234,12 @@ const isPixPayload = (code: string) => /^000201/.test(code.trim());
 
 export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
   /* ---- contratos ---- */
-  list_contracts: { run: (ctx, i) => contracts.listContracts(ctx, i) },
+  list_contracts: {
+    run: async (ctx, i) => {
+      const { offset, ...query } = i;
+      return listPage(await contracts.listContracts(ctx, { ...query, limit: i.limit + 1 }, { offset }), i);
+    },
+  },
   get_contract: { run: (ctx, i) => contracts.getContract(ctx, i.contractId) },
   create_contract: {
     preview: async (ctx, i) => {
@@ -442,24 +445,39 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         rows.push({ label: 'Categoria', before: before.categoryName, after: (await nameOf(ctx, 'category', i.changes.categoryId)) ?? '' });
       if (i.changes.accountId)
         rows.push({ label: 'Conta', before: before.accountName ?? '—', after: (await nameOf(ctx, 'account', i.changes.accountId)) ?? '' });
+      if (i.changes.payerCaixaId)
+        rows.push({
+          label: 'Caixa pagadora',
+          before: before.payerCaixaName ?? '—',
+          after: (await nameOf(ctx, 'caixa', i.changes.payerCaixaId)) ?? '',
+        });
       if (i.changes.contractId !== undefined)
         rows.push({
           label: 'Contrato',
           before: before.contractName ?? '—',
           after: i.changes.contractId ? (await contracts.getContract(ctx, i.changes.contractId)).name : '—',
         });
-      const changesSeries = ['amountCents', 'description', 'anchorDay', 'categoryId', 'accountId', 'payerCaixaId'].some(
-        (k) => (i.changes as Record<string, unknown>)[k] !== undefined,
-      );
-      return {
-        title: 'Editar série',
-        summary: before.description,
-        action: 'update',
-        rows,
-        warnings: changesSeries
-          ? [`Vale para as ocorrências em aberto sem baixa a partir de ${formatDate(i.changes.effectiveOn ?? todayIso())}.`]
-          : [],
-      };
+      // As ocorrências que mudam, pelo mesmo plano que a execução aplica (tarefa 100), como no aditivo.
+      const plan = await series.previewSeriesUpdate(ctx, i.ruleId, i.changes);
+      const warnings: string[] = [];
+      if (plan) {
+        const changed = plan.affected.filter((a) => a.before.amountCents !== a.after.amountCents || a.before.dueDate !== a.after.dueDate);
+        for (const a of changed.slice(0, 24)) rows.push(changeRow(a));
+        for (const c of plan.cardFrom)
+          rows.push({
+            label: `Cobrança no cartão (a partir da ${c.fromOccurrence}ª)`,
+            before: formatBRL(c.beforeCents),
+            after: formatBRL(c.afterCents),
+          });
+        if (before.kind === 'card') warnings.push('Na cobrança do cartão, vale a partir da próxima ocorrência esperada.');
+        else
+          warnings.push(
+            `Vale para ${plan.affected.length} ocorrência(s) em aberto sem baixa a partir de ${formatDate(i.changes.effectiveOn ?? todayIso())}.`,
+          );
+        if (changed.length > 24) warnings.push(`E mais ${changed.length - 24} ocorrência(s) com valor ou vencimento alterados.`);
+        if (plan.skipped.length > 0) warnings.push(`${plan.skipped.length} ocorrência(s) ficam como estão (com baixa ou em mês fechado).`);
+      }
+      return { title: 'Editar série', summary: before.description, action: 'update', rows, warnings };
     },
     run: (ctx, i) => series.updateSeries(ctx, i.ruleId, i.changes),
   },
@@ -694,6 +712,21 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     },
   },
   read_document: {
+    // Em ask (tarefa 157): o arquivo e o custo, porque a leitura roda o agente dos fluxos.
+    preview: async (ctx, i) => {
+      const file = await toolAttachment(ctx, i.attachmentId);
+      return {
+        title: 'Ler documento',
+        summary: file.fileName,
+        action: 'other',
+        rows: [
+          { label: 'Arquivo', after: file.fileName },
+          { label: 'Tipo', after: file.mime },
+          { label: 'Tamanho', after: formatFileSize(file.sizeBytes) },
+        ],
+        warnings: ['A leitura usa o agente dos fluxos (IA paga, conta no orçamento do mês) e não grava nada.'],
+      };
+    },
     run: async (ctx, i) => {
       const file = await toolAttachment(ctx, i.attachmentId);
       return readDocument(ctx, { name: file.fileName, mime: file.mime, content: file.content });
@@ -1234,7 +1267,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
           after: `${describeRule({ ...skip, direction: source?.direction ?? null })}: pulada, ${t.statements.copySkippedReasons[skip.reason]}`,
         });
       }
-      const warnings: string[] = [t.statements.copyHint];
+      const warnings: string[] = [t.statements.copyHintAgent];
       if (plan.toCopy.length === 0) warnings.unshift('Nenhuma regra nova entra: todas já existem no destino ou estão arquivadas.');
       return {
         title: 'Copiar regras de classificação',
@@ -1245,6 +1278,54 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
       };
     },
     run: (ctx, i) => rec.copyRules(ctx, i),
+  },
+  apply_classification_rules: {
+    // A prévia é o mesmo plano da execução, sem gravar (tarefa 152): quantas linhas mudam e por qual regra.
+    preview: async (ctx, i) => {
+      const plan = await rec.planApplyRules(ctx, i);
+      const caixaName = await nameOf(ctx, 'caixa', plan.target.caixaId);
+      const where = i.importId
+        ? await ctx.db.execute<{ file_name: string }>(sql`
+            SELECT f.file_name FROM statement_imports s JOIN attachments f ON f.id = s.attachment_id WHERE s.id = ${i.importId}`)
+        : null;
+      const targetName = plan.target.accountId
+        ? await nameOf(ctx, 'account', plan.target.accountId)
+        : `${caixaName ?? plan.target.cardCaixaId} (cartão)`;
+      const rules = plan.byRule.length
+        ? await ctx.db.execute<{
+            id: string;
+            match_kind: string;
+            pattern: string;
+            entity_name: string | null;
+            category_name: string | null;
+          }>(sql`
+            SELECT r.id, r.match_kind, r.pattern, e.name AS entity_name, c.name AS category_name
+              FROM classification_rules r LEFT JOIN entities e ON e.id = r.entity_id LEFT JOIN categories c ON c.id = r.category_id
+             WHERE r.id = ANY (${`{${plan.byRule.map((x) => x.ruleId).join(',')}}`}::uuid[])`)
+        : { rows: [] };
+      const byId = new Map(rules.rows.map((r) => [r.id, r]));
+      const rows: PreviewRow[] = [
+        { label: 'Onde', after: where?.rows[0] ? `Lote ${where.rows[0].file_name} · ${targetName}` : `Todos os lotes de ${targetName}` },
+        ...plan.byRule.map(({ ruleId, lines }) => {
+          const rule = byId.get(ruleId);
+          const target = [rule?.entity_name, rule?.category_name].filter(Boolean).join(' · ') || '—';
+          return {
+            label: rule ? `${MATCH_KIND(rule.match_kind)} "${rule.pattern}"` : ruleId,
+            after: `${lines} linha(s) → ${target}`,
+          };
+        }),
+      ];
+      if (plan.cleared > 0)
+        rows.push({ label: 'Sem regra que sirva', after: `${plan.cleared} linha(s) perdem a classificação da regra antiga` });
+      return {
+        title: 'Aplicar regras de classificação',
+        summary: `${plan.changes} linha(s) mudam`,
+        action: 'update',
+        rows,
+        warnings: plan.changes === 0 ? ['Nenhuma linha nova muda de classificação com as regras atuais.'] : [],
+      };
+    },
+    run: (ctx, i) => (i.importId ? rec.applyRulesToImport(ctx, i.importId) : rec.applyRulesToAccount(ctx, i)),
   },
   update_classification_rule: {
     preview: async (ctx, i) => {

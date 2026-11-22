@@ -37,7 +37,7 @@ import {
   runDto,
   toNeutral,
 } from './store';
-import { RunTools, toolErrorMessage } from './tools-runtime';
+import { RunTools, reportToolError, toolErrorMessage } from './tools-runtime';
 
 /*
  * Loop do agente no worker (spec 011, guia do DBA em docs/016):
@@ -221,6 +221,7 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
       actorKind: 'agent',
       agentRunId: runId,
       recipeLineIds: recipe ? new Set(recipe.lineIds) : null,
+      log,
     };
 
     const creds = await db.execute<{ kind: 'anthropic' | 'openai'; base_url: string | null; api_key: string | null; model: string }>(
@@ -341,7 +342,7 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
         const detail = `cerca de ${formatFileSize(size)}, acima do teto de ${formatFileSize(deps.config.aiRequestMaxBytes)}`;
         throw new LlmError(detail, null, false, 'context_overflow');
       }
-      const response = await callModel(db, llm, runId, {
+      const response = await callModel(db, log, llm, runId, {
         model: claimed.model,
         system: system.stable,
         systemUser: system.user,
@@ -493,8 +494,17 @@ async function loadContext(db: Database, run: RunRow) {
   };
 }
 
-/** Chama o modelo com streaming: deltas de texto viram eventos (agrupados a cada ~120 ms). */
-async function callModel(db: Database, llm: LlmClient, runId: string, request: Parameters<LlmClient['chat']>[0]): Promise<LlmResponse> {
+/**
+ * Chama o modelo com streaming: deltas de texto viram eventos (agrupados a cada ~120 ms). Cada gravação
+ * tem o próprio catch (tarefa 099): uma falha registra no log e não descarta os deltas seguintes.
+ */
+export async function callModel(
+  db: Database,
+  log: WorkerDeps['log'],
+  llm: LlmClient,
+  runId: string,
+  request: Parameters<LlmClient['chat']>[0],
+): Promise<LlmResponse> {
   let text = '';
   let thinking = '';
   let flushing: Promise<unknown> = Promise.resolve();
@@ -503,10 +513,13 @@ async function callModel(db: Database, llm: LlmClient, runId: string, request: P
     const pendingThinking = thinking;
     text = '';
     thinking = '';
-    flushing = flushing.then(async () => {
-      if (pendingThinking) await appendEvent(db, runId, { type: 'thinking_delta', text: pendingThinking });
-      if (pendingText) await appendEvent(db, runId, { type: 'text_delta', text: pendingText });
-    });
+    if (!pendingText && !pendingThinking) return;
+    flushing = flushing
+      .then(async () => {
+        if (pendingThinking) await appendEvent(db, runId, { type: 'thinking_delta', text: pendingThinking });
+        if (pendingText) await appendEvent(db, runId, { type: 'text_delta', text: pendingText });
+      })
+      .catch((error) => log.warn({ err: error, runId }, 'agente: delta do stream não gravado'));
   };
   const timer = setInterval(flush, FLUSH_MS);
   try {
@@ -582,7 +595,17 @@ async function resolvePending(
     try {
       toConfirm.push({ use, preview: await tools.preview(ctx, tool, use.input) });
     } catch (error) {
-      preErrors.set(use.id, toolErrorMessage(error));
+      preErrors.set(
+        use.id,
+        reportToolError(ctx.log, error, {
+          tool: use.name,
+          runId,
+          toolUseId: use.id,
+          stage: 'preview',
+          write: tool.write,
+          secret: tool.source === 'internal' && Boolean(tool.def.secrets?.length),
+        }),
+      );
     }
   }
 

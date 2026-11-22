@@ -350,6 +350,8 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   ai_model_prices_audio_values_check: 'Os preços de áudio não podem ser negativos.',
   ai_providers_active_check: 'Um provedor arquivado não pode ficar ativo.',
   ai_model_prices_valid_from_key: 'Já existe um preço desse modelo com a mesma vigência.',
+  ai_usage_price_id_fkey:
+    'Este preço já foi usado em chamadas e não pode ser excluído (o custo delas fica como foi gravado). Cadastre um preço novo com a vigência certa.',
   ai_model_prices_model_check: 'Nome de modelo inválido.',
   ai_agents_name_key: 'Já existe um agente com esse nome.',
   ai_agents_ready_check: 'Para ativar o agente, escolha o provedor e o modelo.',

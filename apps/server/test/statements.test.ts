@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENT_TOOLS } from '@moneyflow/shared';
+import { AGENT_TOOLS, formatBRL } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { TOOL_HANDLERS } from '../src/agents/tool-handlers';
@@ -814,9 +814,10 @@ describe('ocorrências de série no extrato (specs 033 e 034)', () => {
     const preview = await tool('match_statement_line', { lineId: line.id, titleId: rows[0].id }).preview();
     expect(preview.rows).toEqual(
       expect.arrayContaining([
-        { label: 'Principal', after: '2000,00' },
-        { label: 'Multa', after: '40,00' },
-        { label: 'Juros', after: '6,67' },
+        // Dinheiro pelo formatBRL, como no resto do cartão (tarefa 155).
+        { label: 'Principal', after: formatBRL(200_000) },
+        { label: 'Multa', after: formatBRL(4_000) },
+        { label: 'Juros', after: formatBRL(667) },
       ]),
     );
     expect((preview.warnings ?? []).join(' ')).toContain('10 dia(s) de atraso');

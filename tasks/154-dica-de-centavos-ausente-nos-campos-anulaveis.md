@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -76,4 +76,10 @@ A lista vem do script desta revisão, com o registro do commit `7f0984f`.
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado com um percurso do JSON Schema de todo o registro: `add_contract_amendment.amendment.amountCents`, `terminationPenaltyCents` (criar e editar contrato) e `create_caixa.creditLimitCents` sem "centavos"; `bankBalanceOn` e `reminder.endsOn` sem o formato da data.
+
 ## Resolução (executor)
+
+- `packages/shared/src/agents/json-schema.ts`: a regra olha os tipos das alternativas do `anyOf` (campo anulável) e completa também a descrição própria que não diz a unidade ou o formato (o mês `AAAA-MM` já diz o seu).
+- Teste: `packages/shared/test/agents.test.ts` percorre o JSON Schema de todas as tools e exige "centavos" em todo `*Cents` e "AAAA-MM" em toda data (`*Date`, `*On`, `from`, `to`).
+- Verificação: `pnpm verify:quick` (Biome, typecheck, os testes do shared relacionados e, passados depois de `--`, os de integração `agents`, `agent-tools`, `agent-tools-admin`, `titles`, `cards`, `contracts`, `statements`, `vision`, `reconcile-recipes`, `statement-supersede`, `autonomous` e `budgets` no Postgres local). Não rodei `verify:full` nem o e2e.

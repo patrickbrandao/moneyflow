@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { nfeAccessKeyDv, t } from '@moneyflow/shared';
+import { addDays, nfeAccessKeyDv, t, todayIso } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
@@ -270,7 +270,7 @@ describe('contratos', () => {
     const ruleId = created.value.obligations[0].id;
 
     const listed = await call(adminSession, 'list_contracts', { caixaId: s.caixaA.id, q: base.name });
-    expect(listed.value.map((c: any) => c.id)).toEqual([contractId]);
+    expect(listed.value.items.map((c: any) => c.id)).toEqual([contractId]);
     expect((await call(viewerSession, 'get_contract', { contractId })).value).toMatchObject({ id: contractId, canWrite: false });
 
     const edited = await approved(adminSession, 'update_contract', { contractId, changes: { noticeDays: 45 } });
@@ -324,6 +324,26 @@ describe('contratos', () => {
     const series = await approved(adminSession, 'update_series', { ruleId, changes: { toleranceCents: 500, matchWindowDays: 20 } });
     expect(rowsOf(series.preview)).toMatchObject({ 'Janela da conciliação (dias)': '15 → 20', Tolerância: 'R$ 0,00 → R$ 5,00' });
     expect(series.value.terms).toMatchObject({ toleranceCents: 500, matchWindowDays: 20 });
+    // Tarefa 100: mudar o dia lista as ocorrências que mudam, pelo mesmo plano que a execução grava (na série solta ligada).
+    const moved = await approved(adminSession, 'update_series', {
+      ruleId: loose.rule.id,
+      changes: { anchorDay: 25, effectiveOn: '2026-12-01' },
+    });
+    expect(rowsOf(moved.preview)).toMatchObject({
+      Dia: '20 → 25',
+      'Ocorrência 2': 'R$ 10,00 · venc. 20/12/2026 → R$ 10,00 · venc. 25/12/2026',
+      'Ocorrência 3': 'R$ 10,00 · venc. 20/01/2027 → R$ 10,00 · venc. 25/01/2027',
+    });
+    expect(rowsOf(moved.preview)['Ocorrência 1']).toBeUndefined();
+    expect(moved.preview.warnings[0]).toMatch(/^Vale para 2 ocorrência\(s\) em aberto sem baixa a partir de 01\/12\/2026/);
+    const dues = await h.db.execute<{ occurrence: number; due_date: string }>(sql`
+      SELECT occurrence, to_char(due_date, 'YYYY-MM-DD') AS due_date FROM titles
+       WHERE recurrence_rule_id = ${loose.rule.id} AND mirror_status IS NULL ORDER BY occurrence`);
+    expect(dues.rows.map((r) => [Number(r.occurrence), r.due_date])).toEqual([
+      [1, '2026-11-20'],
+      [2, '2026-12-25'],
+      [3, '2027-01-25'],
+    ]);
 
     // Markdown: documento novo (versão 1 do agente) e nova versão com o diff.
     const doc = await approved(adminSession, 'save_contract_markdown', {
@@ -889,6 +909,13 @@ describe('conciliação: avulso, desfazer e excluir e lotes em páginas', () => 
       lines: [],
     });
 
+    // Tarefa 155: as prévias de lote mostram até 50 linhas (data e valor formatados) e avisam as demais.
+    const sixty = Array.from({ length: 60 }, (_, n) => ({ lineId: imp.lines[n % imp.lines.length].id, categoryId: s.expense.id }));
+    const classify = await call(adminSession, 'classify_statement_lines', { suggestions: sixty }, { approve: false });
+    expect(classify.preview.rows).toHaveLength(50);
+    expect(classify.preview.warnings).toEqual(['E mais 10 linha(s) não mostradas.']);
+    expect(classify.preview.rows[0].label.replace(/ /g, ' ')).toMatch(/^\d{2}\/\d{2}\/\d{4} · .+ · -?R\$ /);
+
     // Linha lançada como avulso: a leitura mostra createdEntry; desfazer sem excluir avisa a duplicação.
     const lineId = imp.lines.find((l: any) => l.fitid === 'OFX2-0005').id;
     const created = await admin.post(`/api/statement-lines/${lineId}/create`, { mode: 'adjustment', learnRule: false });
@@ -1013,6 +1040,20 @@ describe('títulos e baixas', () => {
     expect(removed.preview).toMatchObject({ title: 'Excluir transferência', action: 'delete' });
     expect(removed.value).toEqual({ deleted: true, archived: false });
     await admin.get(`/api/transfers/${transfer.id}`, 404);
+
+    // Tarefa 155: a baixa sem encargos não mostra juros, multa e desconto zerados, e o dinheiro sai sempre em R$.
+    const toSettle = await newTitle({ amountCents: 123_456 });
+    const settled = await approved(adminSession, 'settle_title', {
+      titleId: toSettle.id,
+      settlement: { settledOn: '2031-04-10', amountCents: 123_456, financialAccountId: s.accountA.id },
+    });
+    expect(rowsOf(settled.preview)).toEqual({
+      'Em aberto': 'R$ 1.234,56',
+      Data: '10/04/2031',
+      Valor: 'R$ 1.234,56',
+      Conta: `Banco A (${s.caixaA.name})`,
+    });
+    expect(settled.preview.summary).toBe(`${toSettle.description} (${s.supplier.name})`);
 
     // Viewer: só leitura.
     const other = await newTitle();
@@ -1163,6 +1204,78 @@ describe('categorias e regras', () => {
       await mcpClient.close();
     }
   });
+
+  it('aplicar regras às linhas já importadas: no lote e na conta, com a prévia do plano, o uso contado e o /mcp (tarefa 152)', async () => {
+    const account = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'checking',
+      name: `Corrente aplicar ${uid()}`,
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/statement-imports?accountId=${account.id}&fileName=aplicar.ofx`,
+      payload: fixture('extrato-ofx2.ofx'),
+      headers: { cookie: adminSession.cookie, 'content-type': 'application/x-ofx' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    const imp = res.json();
+    const market = imp.lines.find((l: any) => /Supermercado/.test(l.description));
+    expect(market).toMatchObject({ status: 'new', classificationRuleId: null });
+    // A importação pela tela pede a sugestão do agente dos fluxos; descartada, a linha volta a aceitar regra.
+    await drain();
+    await admin.post('/api/statement-lines/suggestions', { lineIds: imp.lines.map((l: any) => l.id), decision: 'reject' });
+    // A regra nasce depois da importação: a linha que já estava no lote não muda sozinha.
+    const rule = await admin.post('/api/classification-rules', {
+      accountId: account.id,
+      pattern: 'Supermercado',
+      direction: 'out',
+      categoryId: s.expense.id,
+    });
+    expect((await call(viewerSession, 'apply_classification_rules', { importId: imp.id })).error).toBe('Você só tem leitura nesta caixa.');
+    expect((await call(adminSession, 'apply_classification_rules', { importId: imp.id, accountId: account.id })).error).toMatch(
+      /Informe um só/,
+    );
+    const applied = await approved(adminSession, 'apply_classification_rules', { importId: imp.id });
+    expect(applied.preview.summary).toBe('1 linha(s) mudam');
+    expect(rowsOf(applied.preview)).toMatchObject({
+      Onde: `Lote aplicar.ofx · ${account.name} (${s.caixaA.name})`,
+      'Contém "Supermercado"': `1 linha(s) → ${s.expense.name}`,
+    });
+    expect(applied.value).toEqual({ updated: 1 });
+    const line = await h.db.execute<{ classification_rule_id: string; category_id: string }>(
+      sql`SELECT classification_rule_id, category_id FROM statement_lines WHERE id = ${market.id}`,
+    );
+    expect(line.rows[0]).toEqual({ classification_rule_id: rule.id, category_id: s.expense.id });
+    const usage = await h.db.execute<{ usage_count: number }>(sql`SELECT usage_count FROM classification_rules WHERE id = ${rule.id}`);
+    expect(Number(usage.rows[0]!.usage_count)).toBe(1);
+    // Nada mais muda: a prévia avisa.
+    const again = await call(adminSession, 'apply_classification_rules', { accountId: account.id }, { approve: false });
+    expect(again.preview.warnings).toEqual(['Nenhuma linha nova muda de classificação com as regras atuais.']);
+
+    // /mcp: a conta inteira pelo token do admin.
+    await admin.post('/api/classification-rules', {
+      accountId: account.id,
+      pattern: 'Provedor Fibra',
+      direction: 'out',
+      categoryId: s.expense.id,
+    });
+    const token = (await admin.post('/api/account/api-tokens', { name: `MCP aplicar ${uid()}`, expiresInDays: 1 })).token;
+    const mcpClient = new Client({ name: 'teste-152', version: '1.0.0' });
+    await mcpClient.connect(
+      new StreamableHTTPClientTransport(new URL(`${await listenOnce()}/mcp`), {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      }),
+    );
+    try {
+      const viaMcp = await mcpClient.callTool({ name: 'apply_classification_rules', arguments: { accountId: account.id } });
+      const text = (viaMcp.content as { text: string }[])[0]!.text;
+      expect(viaMcp.isError, text).toBeFalsy();
+      expect(JSON.parse(text)).toEqual({ updated: 1 });
+    } finally {
+      await mcpClient.close();
+    }
+  });
 });
 
 describe('prévias pelo Access (tarefa 058)', () => {
@@ -1212,5 +1325,67 @@ describe('prévias pelo Access (tarefa 058)', () => {
     );
     expect(rowsOf(recipe.preview).Contas).toBe(`${account.name}, ${s.accountB.id}`);
     expect(JSON.stringify(recipe.preview)).not.toContain(s.accountB.name);
+  });
+});
+
+describe('listas paginadas e o extrato da conta (tarefa 101)', () => {
+  it('list_titles e list_contracts paginam por offset/nextOffset, sem campos nulos e sem JSON cortado', async () => {
+    const tag = `Pagina ${uid()}`;
+    for (const day of [10, 11, 12, 13, 14]) {
+      await admin.post('/api/titles', {
+        caixaId: s.caixaA.id,
+        direction: 'payable',
+        entityId: s.supplier.id,
+        categoryId: s.expense.id,
+        description: `${tag} dia ${day}`,
+        competenceDate: '2031-06-01',
+        dueDate: `2031-06-${day}`,
+        amountCents: 5_000,
+        mirrorCaixaId: null,
+      });
+    }
+    const first = await call(adminSession, 'list_titles', { q: tag, limit: 2 });
+    expect(first.value).toMatchObject({ offset: 0, nextOffset: 2 });
+    expect(first.value.items).toHaveLength(2);
+    expect(Object.values(first.value.items[0])).not.toContain(null);
+    const second = await call(adminSession, 'list_titles', { q: tag, limit: 2, offset: 2 });
+    expect(second.value).toMatchObject({ offset: 2, nextOffset: 4 });
+    const last = await call(adminSession, 'list_titles', { q: tag, limit: 2, offset: 4 });
+    expect(last.value).toMatchObject({ offset: 4, nextOffset: null });
+    const ids = [...first.value.items, ...second.value.items, ...last.value.items].map((x: any) => x.id);
+    expect(new Set(ids).size).toBe(5);
+    const dues = [...first.value.items, ...second.value.items, ...last.value.items].map((x: any) => x.dueDate);
+    expect(dues).toEqual([...dues].sort());
+    const contracts = await call(viewerSession, 'list_contracts', { limit: 1 });
+    expect(contracts.value).toMatchObject({ offset: 0 });
+    expect(contracts.value.items.length).toBeLessThanOrEqual(1);
+  });
+
+  it('extrato sem período: a janela da tela, avisada; acima do limit, os movimentos mais recentes', async () => {
+    const account = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'checking',
+      name: `Extrato janela ${uid()}`,
+      openingBalanceCents: 0,
+      openingDate: '2020-01-01',
+    });
+    const at = (days: number) => addDays(todayIso(), days);
+    for (const [days, cents, description] of [
+      [-200, 1_000, 'Antigo'],
+      [-10, -300, 'Recente 1'],
+      [-1, -200, 'Ontem'],
+    ] as const) {
+      await admin.post(`/api/accounts/${account.id}/adjustments`, { occurredOn: at(days), amountCents: cents, description });
+    }
+    const window = await call(viewerSession, 'get_account_statement', { accountId: account.id });
+    expect(window.value.from).toBe(at(-60));
+    expect(window.value.to).toBe(at(30));
+    expect(window.value.rows.map((r: any) => r.description)).toEqual(['Recente 1', 'Ontem']);
+    expect(window.value.notes[0]).toMatch(/^Sem período informado/);
+    expect(window.value.openingCents).toBe(1_000);
+    const cut = await call(viewerSession, 'get_account_statement', { accountId: account.id, from: at(-365), limit: 2 });
+    expect(cut.value.rows.map((r: any) => r.description)).toEqual(['Recente 1', 'Ontem']);
+    expect(cut.value.rowCount).toBe(3);
+    expect(cut.value.notes).toEqual([expect.stringContaining('1 movimento(s) mais antigos')]);
+    expect(cut.value.closingCents).toBe(500);
   });
 });

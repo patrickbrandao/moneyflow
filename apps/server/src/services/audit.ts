@@ -97,7 +97,12 @@ async function assertRecordReadable(ctx: ServiceContext, table: string, recordId
 }
 
 /** Histórico de um registro (antes/depois de cada alteração). */
-export async function recordHistory(ctx: ServiceContext, table: string, recordId: string): Promise<AuditEntry[]> {
+export async function recordHistory(
+  ctx: ServiceContext,
+  table: string,
+  recordId: string,
+  page: { limit?: number; offset?: number } = {},
+): Promise<AuditEntry[]> {
   await assertRecordReadable(ctx, table, recordId);
   // Atribuir e remover tags é alteração da entidade: as ligações são auditadas com record_id = entity_id.
   const tables = table === 'entities' ? ['entities', 'entity_tag_links'] : [table];
@@ -105,7 +110,7 @@ export async function recordHistory(ctx: ServiceContext, table: string, recordId
     sql`${entrySql} WHERE l.table_name IN (${sql.join(
       tables.map((name) => sql`${name}`),
       sql`, `,
-    )}) AND l.record_id = ${recordId} ORDER BY l.id DESC LIMIT 500`,
+    )}) AND l.record_id = ${recordId} ORDER BY l.id DESC LIMIT ${page.limit ?? 500} OFFSET ${page.offset ?? 0}`,
   );
   return result.rows.map(toEntry);
 }

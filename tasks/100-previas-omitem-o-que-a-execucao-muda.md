@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -70,4 +70,13 @@ Não verifiquei a tela equivalente (`SeriesEditModal`), que talvez já mostre o 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `update_ai_agent`/`create_ai_agent` não mostravam `params`, `icon`, a troca de provedor de uma inferência, os servidores MCP pelo nome nem o efeito do `defaultProviderId`; `update_series` não mostrava a pagadora nem as ocorrências; `set_user_password` na própria conta não avisava; `end_series` por `ruleId` nunca dava o aviso do espelho.
+
 ## Resolução (executor)
+
+- `tool-handlers-admin.ts`: `agentValues` com um campo por parâmetro (`param:<nome>`, ausente = null, porque a gravação troca o conjunto), as inferências como "Visão: Provedor · modelo" (modelo nulo = "modelo padrão"), os servidores MCP pelo nome (com as tools quando parciais) e o ícone; `agentInputAsSaved` aplica o `applyDefaultProvider` do serviço (exportado de `ai-admin.ts`) antes do diff, com o aviso do provedor padrão.
+- `update_series` (`tool-handlers-operation.ts`): a linha da caixa pagadora e as ocorrências que mudam pelo mesmo plano que a execução aplica (`previewSeriesUpdate` em `services/series.ts`, sobre `planSeriesChange` com `lock = false`; até 24, como no aditivo), a cobrança do cartão e os avisos de quantas mudam e quantas ficam.
+- `set_user_password` na própria conta: "As suas outras sessões são encerradas (fica só a do console em que você aprovar)".
+- `end_series`: o aviso do espelho pelas próprias ocorrências canceladas (vale pelo `titleId` e pelo `ruleId`).
+- Testes: `agent-tools-admin.test.ts` (criar com o provedor padrão, só `params`, só a troca do provedor da visão, ícone e a própria senha) e `agent-tools.test.ts` (o `update_series` com `anchorDay` lista as ocorrências e as datas, iguais às gravadas).
+- Verificação: `pnpm verify:quick` (Biome, typecheck, os testes do shared relacionados e, passados depois de `--`, os de integração `agents`, `agent-tools`, `agent-tools-admin`, `titles`, `cards`, `contracts`, `statements`, `vision`, `reconcile-recipes`, `statement-supersede`, `autonomous` e `budgets` no Postgres local). Não rodei `verify:full` nem o e2e.

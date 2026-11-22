@@ -309,24 +309,53 @@ export async function listSubscriptions(ctx: ServiceContext, destinationId: stri
   return result.rows.map((row) => camel<MessageSubscriptionDto>(row));
 }
 
+async function writeSubscription(tx: Executor, destinationId: string, input: z.output<typeof subscriptionInput>) {
+  const result = await tx.execute<{ id: string }>(sql`
+    INSERT INTO message_subscriptions (destination_id, event_kind, params, is_active)
+    VALUES (${destinationId}, ${input.eventKind}, ${JSON.stringify(input.params)}::jsonb, ${input.isActive})
+    ON CONFLICT (destination_id, event_kind) DO UPDATE SET params = EXCLUDED.params, is_active = EXCLUDED.is_active
+    RETURNING id`);
+  const subscriptionId = result.rows[0]!.id;
+  const keep = input.caixaIds.length > 0 ? sql`AND caixa_id <> ALL (${`{${input.caixaIds.join(',')}}`}::uuid[])` : sql``;
+  await tx.execute(sql`DELETE FROM message_subscription_caixas WHERE subscription_id = ${subscriptionId} ${keep}`);
+  if (input.caixaIds.length > 0) {
+    await tx.execute(sql`
+      INSERT INTO message_subscription_caixas (subscription_id, caixa_id)
+      SELECT ${subscriptionId}::uuid, unnest(${`{${input.caixaIds.join(',')}}`}::uuid[])
+      ON CONFLICT (subscription_id, caixa_id) DO NOTHING`);
+  }
+}
+
 export async function upsertSubscription(ctx: ServiceContext, destinationId: string, input: z.output<typeof subscriptionInput>) {
+  return setSubscriptions(ctx, destinationId, { upsert: [input], remove: [] });
+}
+
+/**
+ * Cria/atualiza e remove várias assinaturas de um destino numa transação só
+ * (tarefa 153): tudo é validado antes, e uma falha em qualquer item não deixa
+ * nada gravado. O destino é travado na transação (um arquivamento concorrente
+ * espera ou faz esta gravação falhar inteira).
+ */
+export async function setSubscriptions(
+  ctx: ServiceContext,
+  destinationId: string,
+  input: { upsert: z.output<typeof subscriptionInput>[]; remove: MessageEventKind[] },
+) {
   const d = await manageable(ctx, destinationId);
-  if (d.archivedAt) throw unprocessable(t.errors.destinationArchived);
-  for (const caixaId of input.caixaIds) ctx.access.assertRead(caixaId);
+  if (input.upsert.length > 0 && d.archivedAt) throw unprocessable(t.errors.destinationArchived);
+  for (const sub of input.upsert) for (const caixaId of sub.caixaIds) ctx.access.assertRead(caixaId);
   await withTx(ctx, async (tx) => {
-    const result = await tx.execute<{ id: string }>(sql`
-      INSERT INTO message_subscriptions (destination_id, event_kind, params, is_active)
-      VALUES (${destinationId}, ${input.eventKind}, ${JSON.stringify(input.params)}::jsonb, ${input.isActive})
-      ON CONFLICT (destination_id, event_kind) DO UPDATE SET params = EXCLUDED.params, is_active = EXCLUDED.is_active
-      RETURNING id`);
-    const subscriptionId = result.rows[0]!.id;
-    const keep = input.caixaIds.length > 0 ? sql`AND caixa_id <> ALL (${`{${input.caixaIds.join(',')}}`}::uuid[])` : sql``;
-    await tx.execute(sql`DELETE FROM message_subscription_caixas WHERE subscription_id = ${subscriptionId} ${keep}`);
-    if (input.caixaIds.length > 0) {
+    if (input.upsert.length > 0) {
+      const locked = await tx.execute<{ archived_at: string | null }>(
+        sql`SELECT archived_at FROM message_destinations WHERE id = ${destinationId} FOR UPDATE`,
+      );
+      if (locked.rows[0]?.archived_at) throw unprocessable(t.errors.destinationArchived);
+    }
+    for (const sub of input.upsert) await writeSubscription(tx, destinationId, sub);
+    if (input.remove.length > 0) {
       await tx.execute(sql`
-        INSERT INTO message_subscription_caixas (subscription_id, caixa_id)
-        SELECT ${subscriptionId}::uuid, unnest(${`{${input.caixaIds.join(',')}}`}::uuid[])
-        ON CONFLICT (subscription_id, caixa_id) DO NOTHING`);
+        DELETE FROM message_subscriptions
+         WHERE destination_id = ${destinationId} AND event_kind = ANY (${`{${input.remove.join(',')}}`}::text[])`);
     }
   });
   return listSubscriptions(ctx, destinationId);

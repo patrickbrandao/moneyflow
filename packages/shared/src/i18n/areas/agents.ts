@@ -44,6 +44,14 @@ export const agentsStrings = {
     fileTooLarge: (size: string) =>
       `O arquivo gerado tem ${size}, acima do limite de 20 MB dos anexos. Gere-o pela tela (Administração → Backup e restauração).`,
     toolInvalidInput: (detail: string) => `Entrada inválida para a tool: ${detail}`,
+    /**
+     * Erro inesperado de uma tool (tarefa 099): o defeito fica no log do servidor com a mesma referência; na
+     * escrita, o modelo confere antes de repetir, porque a ação pode ter sido gravada em parte.
+     */
+    toolInternal: (ref: string, write: boolean) =>
+      write
+        ? `Erro interno ao executar a ação (ref. ${ref}); o defeito foi registrado. A ação pode ter sido feita em parte: confira o resultado antes de repetir.`
+        : `Erro interno ao executar a consulta (ref. ${ref}); o defeito foi registrado. Tente de novo uma vez; se repetir, avise o usuário com a referência.`,
     confirmationRejected: (reason: string | null) =>
       reason ? `O usuário recusou esta ação. Motivo: ${reason}` : 'O usuário recusou esta ação.',
     confirmationExpired: 'A confirmação expirou.',
@@ -78,6 +86,9 @@ export const agentsStrings = {
     rateLimited: (limit: number, seconds: number) =>
       `Limite de ${limit} execuç${limit === 1 ? 'ão' : 'ões'} de IA por minuto atingido. Tente de novo em ${seconds} s.`,
     budgetNotFound: 'Orçamento não encontrado.',
+    /** O custo do uso é calculado na gravação (tarefa 156): o preço que já precificou chamadas não sai. */
+    priceInUse: (calls: number) =>
+      `Este preço já foi usado em ${calls} chamada${calls === 1 ? '' : 's'} e não pode ser excluído (o custo delas fica como foi gravado). Cadastre um preço novo com a vigência certa.`,
     embeddingDimensions: (got: number) => `O modelo precisa produzir 1536 dimensões (devolveu ${got}).`,
   },
   /** Rótulo do escopo do orçamento (spec 028), no erro, no aviso e na tela. */
@@ -116,6 +127,21 @@ export const agentsStrings = {
       `[resultado antigo omitido do histórico (${chars} caracteres); chame a tool de novo se precisar dele]`,
     describePrompt:
       'Descreva o anexo para outro modelo que não consegue vê-lo. Transcreva todo o texto legível (valores, datas, nomes, documentos, códigos) e descreva o que não é texto (tabelas, gráficos, fotos) de forma objetiva. Responda só com a descrição, em português.',
+  },
+  /** Resultado de tool acima do limite (tarefa 101): cortado por item, com o como continuar. */
+  result: {
+    hint: 'Resultado acima do limite: só os primeiros itens vieram. Peça a página seguinte (offset = nextOffset), um limit menor ou filtre (período, caixa, texto).',
+    textCut: (omitted: number, total: number) => `[texto cortado: ${omitted} de ${total} caracteres omitidos]`,
+    /** Extrato da conta sem período: a janela padrão da tela (spec 004). */
+    defaultPeriod: (from: string, to: string) =>
+      `Sem período informado: o extrato vai de ${from} a ${to} (60 dias atrás a 30 à frente). Informe from/to para outro período.`,
+    olderOmitted: (omitted: number) =>
+      `Os ${omitted} movimento(s) mais antigos do período ficaram de fora (vieram os mais recentes): peça um período menor (from/to) para vê-los.`,
+  },
+  /** Prévia genérica de uma tool sem prévia própria (tarefa 157): os argumentos, linha a linha. */
+  inputPreview: {
+    read: 'Consulta, sem gravar nada',
+    external: 'Chama um serviço fora do MoneyFlow (provedor de IA, consulta de CNPJ, Telegram ou servidor MCP); pode ter custo.',
   },
   /** Resultado de uma tool com segredo para o modelo (o valor nunca vai). */
   secrets: {

@@ -26,14 +26,19 @@ const toRow = (row: Record<string, unknown>): TransferRow => {
   return { ...r, createdAt: new Date(r.createdAt).toISOString() };
 };
 
-export async function listTransfers(ctx: ServiceContext, query: z.output<typeof transferListQuery>): Promise<TransferRow[]> {
+export async function listTransfers(
+  ctx: ServiceContext,
+  query: z.output<typeof transferListQuery>,
+  page: { offset?: number } = {},
+): Promise<TransferRow[]> {
   if (query.caixaId) ctx.access.assertRead(query.caixaId);
   const where = [sql`(${readableFilter(ctx.access, sql`fa.caixa_id`)} OR ${readableFilter(ctx.access, sql`ta.caixa_id`)})`];
   if (query.caixaId) where.push(sql`(fa.caixa_id = ${query.caixaId} OR ta.caixa_id = ${query.caixaId})`);
   if (query.from) where.push(sql`tr.transferred_on >= ${query.from}::date`);
   if (query.to) where.push(sql`tr.transferred_on <= ${query.to}::date`);
   const result = await ctx.db.execute(
-    sql`${selectSql} WHERE ${sql.join(where, sql` AND `)} ORDER BY tr.transferred_on DESC, tr.created_at DESC LIMIT ${query.limit}`,
+    sql`${selectSql} WHERE ${sql.join(where, sql` AND `)} ORDER BY tr.transferred_on DESC, tr.created_at DESC, tr.id DESC
+     LIMIT ${query.limit} OFFSET ${page.offset ?? 0}`,
   );
   return result.rows.map(toRow);
 }
