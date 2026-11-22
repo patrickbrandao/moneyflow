@@ -982,6 +982,16 @@ BEGIN
     FROM ai_messages m
    WHERE m.conversation_id = src.id AND m.seq <= upto
    ORDER BY m.seq;
+
+  -- Os vínculos que não vêm de blocos attachment (os arquivos gerados pelas tools, spec 027); os dos blocos o trigger
+  -- já criou.
+  INSERT INTO ai_message_attachments (message_id, attachment_id)
+  SELECT n.id, ma.attachment_id
+    FROM ai_messages o
+    JOIN ai_message_attachments ma ON ma.message_id = o.id
+    JOIN ai_messages n ON n.conversation_id = new_id AND n.seq = o.seq
+   WHERE o.conversation_id = src.id AND o.seq <= upto
+  ON CONFLICT (message_id, attachment_id) DO NOTHING;
   RETURN new_id;
 END
 $$;
@@ -991,7 +1001,7 @@ $$;
 -- Name: FUNCTION ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text) IS 'Bifurca: finaliza a sessão chat ativa de p_user_id com o agente da origem (archived_reason = forked; pode ser a própria origem) e cria a sessão nova, que vira a ativa, copiando as mensagens da origem até p_message_id (inclusive, mesmos seq, sem run_id; anexos religados); devolve o id. Título = p_title ou o da origem. A cópia é sempre purpose chat (sem a chave purpose no screen_context), mesmo vinda de uma conversa de fluxo. Corte a bifurcação numa mensagem que não deixe tool_use sem tool_result (a aplicação escolhe). P0002 se a mensagem não existe; 23514 ai_conversations_archive_active_run_check se a sessão ativa tem execução ativa sem cancelamento pedido; 23505 se outra transação criou a ativa do par ao mesmo tempo.';
+COMMENT ON FUNCTION public.ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text) IS 'Bifurca: finaliza a sessão chat ativa de p_user_id com o agente da origem (archived_reason = forked; pode ser a própria origem) e cria a sessão nova, que vira a ativa, copiando as mensagens da origem até p_message_id (inclusive, mesmos seq, sem run_id) com todos os anexos delas em ai_message_attachments (os dos blocos attachment e os arquivos gerados pelas tools, tarefa 160; o áudio gerado por mensagem não é copiado, é refeito sob demanda); devolve o id. Título = p_title ou o da origem. A cópia é sempre purpose chat (sem a chave purpose no screen_context), mesmo vinda de uma conversa de fluxo. Corte a bifurcação numa mensagem que não deixe tool_use sem tool_result (a aplicação escolhe). P0002 se a mensagem não existe; 23514 ai_conversations_archive_active_run_check se a sessão ativa tem execução ativa sem cancelamento pedido; 23505 se outra transação criou a ativa do par ao mesmo tempo.';
 
 
 --

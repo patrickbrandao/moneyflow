@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -83,4 +83,27 @@ Nada foi executado. Não conferi como o front desenha o link do arquivo na mensa
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado no `schema.sql`: `ai_conversation_fork` copiava só `seq`, `role` e `content`. Os vínculos da cópia nasciam só do `ai_messages_after_insert`, que lê os blocos `attachment`. O papel `tool` só aceita `tool_result` (`ai_message_content_valid`), então o arquivo gerado por uma tool, ligado por INSERT explícito em `ai_message_attachments`, ficava sem vínculo na cópia. O comentário da função prometia "anexos religados".
+
 ## Resolução (executor)
+
+Migration `database/migrations/0066_ai_conversation_fork_attachments.sql`; teste `database/tests/0066_ai_conversation_fork_attachments.sql`.
+
+- `ai_conversation_fork` copia, depois das mensagens, todos os vínculos de `ai_message_attachments` das mensagens copiadas, casando por `seq`, com `ON CONFLICT (message_id, attachment_id) DO NOTHING`. Os vínculos dos blocos já vêm do trigger. O comentário da função foi atualizado.
+- Decisão: o áudio gerado por mensagem (`ai_attachment_derivatives`, `speech`) não é copiado. Ele é refeito sob demanda, e copiá-lo pediria duplicar o derivado.
+
+Testes:
+- a cópia tem o anexo do bloco e o arquivo gerado na mensagem `tool`, sem duplicar e sem o vínculo de depois do corte;
+- a origem não muda;
+- o arquivo está numa mensagem da conversa da cópia, que é o critério do `toolAttachment`;
+- a bifurcação da bifurcação leva os vínculos adiante;
+- excluir a original deixa em `attachment_links` os anexos que a cópia cita. Só o anexo de depois do corte fica órfão.
+
+Verificação:
+- `make test T=/tests/0066_ai_conversation_fork_attachments.sql` passou, com o down da 0066.
+- `0026`, `0042` e `0043` passaram de novo.
+- `docs/016` (Sessões, Bifurcação) atualizada. `make dump` rodado.
+
+Para a aplicação, nada obrigatório. O teste de integração recomendado (gerar um arquivo, bifurcar, excluir a original e baixar pela cópia) continua útil em `apps/server/test/agents.test.ts`.
