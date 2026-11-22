@@ -87,6 +87,7 @@ Testes:
 
 Verificação:
 - `make test T=/tests/0065_audit_secret_columns.sql` passou, com o down da 0065.
+- A suíte inteira, rodada no fim do lote 2, achou `tests/0054_ai_provider_api_key_readers.sql`, que conferia os nomes no código de `audit_row()`. Passou a conferir `audit_secret_columns()`.
 - Rodei de novo `0015`, `0025`, `0028`, `0030`, `0035`, `0039` e `0045`: passaram.
 - `make dump` rodado.
 - `docs/016` (Auditoria) e `database/AGENTS.md` (Segurança) atualizados.
