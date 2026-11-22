@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: em-andamento
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -64,4 +64,42 @@ Nada foi executado. O `stop_grace_period` do compose de produção não foi vist
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado no `schema.sql`: a requisição nasce `running` e só o `UPDATE … WHERE status = 'running'` do fim da chamada a fecha. `ai_requests_purge` apaga pela idade, sem olhar o status, e `ai_provider_health` ignora as `running`. Nenhuma função passava uma `running` velha a final. O trigger `ai_requests_before_write` já permite `running` → final com `finished_at`, então a correção não mexe na imutabilidade.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+Migration `database/migrations/0067_ai_requests_close_stale.sql`; teste `database/tests/0067_ai_requests_close_stale.sql`.
+
+- Função nova `ai_requests_close_stale(p_after interval DEFAULT '1 hour', p_limit integer DEFAULT 1000) RETURNS integer`, `SECURITY INVOKER` (a aplicação já tem UPDATE em `ai_requests`), com `EXECUTE` para `moneyflow_app`.
+  - Passa a `error` até `p_limit` requisições `running` iniciadas há mais de `p_after`, as mais velhas primeiro, pulando as travadas (`FOR UPDATE SKIP LOCKED`). Grava `finished_at` = agora e `error_message` = `interrupted: the process stopped before the request finished`, e devolve quantas fechou.
+  - Prazo mínimo de 10 minutos e limite de 1 a 100000. Fora disso, `22023`.
+- Decisão: o prazo padrão é 1 hora, e não os 30 minutos sugeridos. Não há timeout de streaming na aplicação, e uma resposta longa com raciocínio pode passar de 30 minutos. Fechar uma chamada viva a gravaria como erro, e o UPDATE do fim dela não acharia mais a linha.
+- Índice parcial novo `ai_requests_running_idx (started_at) WHERE status = 'running'`.
+- As fechadas passam a contar como erro em `ai_provider_health`.
+
+Testes:
+- os parâmetros fora da faixa;
+- em lotes, a mais velha primeiro, até zerar;
+- motivo, `finished_at` e duração das fechadas;
+- a recente fica `running`, e a terminada não muda;
+- a saúde conta as interrompidas;
+- a fechada não volta a `ok`;
+- o prazo de 15 minutos alcança a de 20.
+
+Verificação:
+- `make test T=/tests/0067_ai_requests_close_stale.sql` passou, com o down da 0067.
+- `0040` passou de novo.
+- `docs/016` (Requisições ao provedor) atualizada. `make dump` rodado.
+
+### Pendente na aplicação
+
+1. `pnpm db:pull`. Não há coluna nova; só a função e o índice.
+2. `apps/server/src/agents/worker.ts`, no laço de manutenção e junto da purga das requisições (`purgeAiRequests`): chamar `SELECT ai_requests_close_stale(interval '1 hour', 1000) AS n` em lotes, cada lote na sua transação, até devolver menos que 1000. Fica antes da purga, para a requisição fechada ainda aparecer na saúde.
+   - O prazo pode ir para a configuração (por exemplo `AI_REQUEST_STALE_MINUTES`, mínimo 10), mas tem de ficar acima do maior tempo de uma chamada: o `AI_DOCUMENT_TIMEOUT_MS` e um streaming longo.
+3. Na tela Requisições (`RequestsTable`/`RequestDrawer`), mostrar o `error_message` que começa por `interrupted:` como "Interrompida (o processo parou antes do fim)", em `t`.
+4. Teste em `apps/server/test/ai-requests.test.ts`: uma requisição inserida `running` com `started_at` de 2 horas atrás vira `error` depois da manutenção. Uma de agora fica `running`.
+5. `docs/023` (Ciclo): registrar o fechamento das interrompidas pela manutenção.

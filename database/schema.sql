@@ -2339,6 +2339,48 @@ COMMENT ON FUNCTION public.ai_requests_before_write() IS 'INSERT: tentativas = 0
 
 
 --
+-- Name: ai_requests_close_stale(interval, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_requests_close_stale(p_after interval DEFAULT '01:00:00'::interval, p_limit integer DEFAULT 1000) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  n integer;
+BEGIN
+  IF p_after IS NULL OR p_after < interval '10 minutes' THEN
+    RAISE EXCEPTION 'ai_requests_close_stale: after must be at least 10 minutes' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100000 THEN
+    RAISE EXCEPTION 'ai_requests_close_stale: limit must be between 1 and 100000' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  WITH stale AS (
+    SELECT r.id FROM ai_requests r
+     WHERE r.status = 'running' AND r.started_at < clock_timestamp() - p_after
+     ORDER BY r.started_at, r.id
+     LIMIT p_limit
+     FOR UPDATE SKIP LOCKED
+  )
+  UPDATE ai_requests r
+     SET status = 'error',
+         finished_at = clock_timestamp(),
+         error_message = 'interrupted: the process stopped before the request finished'
+    FROM stale s
+   WHERE r.id = s.id AND r.status = 'running';
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_requests_close_stale(p_after interval, p_limit integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_requests_close_stale(p_after interval, p_limit integer) IS 'Manutenção (spec 023, tarefa 162): fecha como error, com error_message = ''interrupted: the process stopped before the request finished'' e finished_at = agora, até p_limit (padrão 1000, máx. 100000) requisições running iniciadas há mais de p_after (padrão 1 hora, mínimo 10 minutos), as mais velhas primeiro, pulando as travadas; devolve quantas. São as chamadas que o processo não fechou (queda ou SIGKILL no meio do streaming): passam a contar como erro em ai_provider_health. O worker chama em lotes até devolver menos que o limite. Erro 22023 com prazo ou limite fora da faixa. SECURITY INVOKER (a aplicação já tem UPDATE em ai_requests).';
+
+
+--
 -- Name: ai_requests_purge(integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -18067,6 +18109,13 @@ CREATE INDEX ai_requests_provider_id_idx ON public.ai_requests USING btree (prov
 --
 
 CREATE INDEX ai_requests_run_id_idx ON public.ai_requests USING btree (run_id);
+
+
+--
+-- Name: ai_requests_running_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_requests_running_idx ON public.ai_requests USING btree (started_at) WHERE (status = 'running'::text);
 
 
 --
