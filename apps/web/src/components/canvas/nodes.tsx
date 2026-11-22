@@ -8,7 +8,10 @@ import type { CaixaFlowNode, ClusterFlowNode, EntityFlowNode } from './graph';
 
 /*
  * Os nós do canvas de fluxo. `memo` é obrigatório (arrastar um nó não
- * re-renderiza os outros) e nenhum nó busca dado: tudo chega por `data`.
+ * re-renderiza os outros; o `MoneyFlowCanvas` reaproveita o objeto de cada nó
+ * pelo `createViewCache` para o `memo` valer) e nenhum nó busca dado: tudo
+ * chega por `data`.
+
  * Entrada à esquerda (handle "in"), saída à direita ("out").
  */
 
