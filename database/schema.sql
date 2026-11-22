@@ -2615,7 +2615,7 @@ BEGIN
     RAISE EXCEPTION 'ai_run_event_append: run % not found', p_run_id USING ERRCODE = 'no_data_found';
   END IF;
   INSERT INTO ai_run_events (run_id, seq, event_type, payload) VALUES (p_run_id, s, p_event_type, coalesce(p_payload, '{}'));
-  PERFORM pg_notify('ai_run_events', json_build_object('run_id', p_run_id, 'seq', s)::text);
+  PERFORM pg_notify('ai_run_events', ai_run_event_notice(p_run_id, s, p_event_type, p_payload));
   RETURN s;
 END
 $$;
@@ -2625,7 +2625,27 @@ $$;
 -- Name: FUNCTION ai_run_event_append(p_run_id uuid, p_event_type text, p_payload jsonb); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_run_event_append(p_run_id uuid, p_event_type text, p_payload jsonb) IS 'Grava o próximo evento da execução (seq = last_event_seq + 1, trava a linha da execução) e avisa por NOTIFY no canal ai_run_events com {"run_id", "seq"} (entregue no COMMIT). A API escuta (LISTEN) e lê WHERE run_id = … AND seq > último enviado. Devolve o seq. P0002 se a execução não existe.';
+COMMENT ON FUNCTION public.ai_run_event_append(p_run_id uuid, p_event_type text, p_payload jsonb) IS 'Grava o próximo evento da execução (seq = last_event_seq + 1, trava a linha da execução) e avisa por NOTIFY no canal ai_run_events com ai_run_event_notice: {"run_id", "seq", "type"} e, em status/done, "status" (entregue no COMMIT; tarefa 164). A API escuta (LISTEN), lê WHERE run_id = … AND seq > último enviado e, sem stream aberto, só consulta o banco pelos eventos que importam (done, status). Devolve o seq. P0002 se a execução não existe.';
+
+
+--
+-- Name: ai_run_event_notice(uuid, integer, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_run_event_notice(p_run_id uuid, p_seq integer, p_event_type text, p_payload jsonb) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT json_strip_nulls(json_build_object(
+           'run_id', p_run_id, 'seq', p_seq, 'type', p_event_type,
+           'status', CASE WHEN p_event_type IN ('status', 'done') THEN left(p_payload ->> 'status', 40) END))::text
+$$;
+
+
+--
+-- Name: FUNCTION ai_run_event_notice(p_run_id uuid, p_seq integer, p_event_type text, p_payload jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_run_event_notice(p_run_id uuid, p_seq integer, p_event_type text, p_payload jsonb) IS 'Payload do NOTIFY de ai_run_events: {"run_id", "seq", "type"} e, nos eventos status e done com status no payload, "status" (até 40 caracteres). Sem o resto do payload: os dados do evento continuam só na tabela (tarefa 164).';
 
 
 --
