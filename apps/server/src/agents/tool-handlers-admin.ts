@@ -500,6 +500,7 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
   close_month: {
     preview: async (ctx, i) => {
       ctx.access.assertWrite(i.caixaId);
+      audit.assertClosableMonth(i.month);
       const overview = await audit.closingsOverview(ctx, i.caixaId);
       if (overview.closings.some((c) => c.month === i.month)) throw unprocessable('Este mês já está fechado nesta caixa.', 'month_closed');
       const pending = overview.unreconciled.find((u) => u.month === i.month)?.lines ?? 0;

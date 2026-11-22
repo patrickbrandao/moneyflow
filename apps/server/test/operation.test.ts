@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildBrCode } from '@moneyflow/shared';
+import { addMonths, buildBrCode, todayIso } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { type MaterializeFailure, materializeAll } from '../src/services/recurrence';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
 let h: Harness;
@@ -102,6 +103,52 @@ describe('fechamento de mês (spec 008)', () => {
     const reopened = await admin.del(`/api/caixas/${s.caixaA.id}/closings/2026-10-01`);
     expect(reopened.closings).toEqual([]);
     await user.post(`/api/accounts/${s.accountA.id}/adjustments`, { occurredOn: '2026-10-05', amountCents: 100, description: 'Ajuste' });
+  });
+
+  it('não fecha mês futuro; a série presa num mês fechado aparece no log do worker (tarefa 082)', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const next = `${addMonths(today, 1).slice(0, 7)}-01`;
+    const future = await admin.raw('POST', `/api/caixas/${s.caixaA.id}/closings`, { month: next, force: true });
+    expect(future.statusCode).toBe(422);
+    expect(future.json().error.code).toBe('closing_future_month');
+    expect((await admin.get(`/api/caixas/${s.caixaA.id}/closings`)).closings).toEqual([]);
+
+    // Um mês futuro já fechado (de antes da trava), direto no banco: a série para nele e o worker diz qual e por quê.
+    const series = await admin.post('/api/titles', {
+      caixaId: s.caixaA.id,
+      direction: 'payable',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      description: 'Assinatura',
+      competenceDate: today,
+      dueDate: today,
+      amountCents: 1_000,
+      mirrorCaixaId: null,
+      series: { kind: 'recurrence', frequency: 'monthly', endsOn: addMonths(today, 13) },
+    });
+    const blocked = `${addMonths(today, 13).slice(0, 7)}-01`;
+    await h.db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT set_config('app.user_id', ${adminSession.id}, true), set_config('app.actor_kind', 'human', true)`);
+      await tx.execute(
+        sql`INSERT INTO period_closings (caixa_id, month, closed_by_user_id) VALUES (${s.caixaA.id}, ${blocked}::date, ${adminSession.id})`,
+      );
+    });
+    const failures: MaterializeFailure[] = [];
+    const result = await materializeAll(h.db, addMonths(today, 14), (failure) => failures.push(failure));
+    const mine = failures.find((f) => f.ruleId === series.recurrenceRuleId);
+    expect(mine).toMatchObject({ code: 'period_closings_locked_check' });
+    expect(mine!.message).toMatch(/mês está fechado/);
+    expect(result.closedMonth).toBeGreaterThanOrEqual(1);
+    expect(result.failed).toBeGreaterThanOrEqual(result.closedMonth);
+
+    // Reaberto o mês, a série volta a andar.
+    await admin.del(`/api/caixas/${s.caixaA.id}/closings/${blocked}`);
+    await materializeAll(h.db, addMonths(today, 14));
+    const titles = await admin.get(`/api/titles?caixaId=${s.caixaA.id}&limit=1000`);
+    expect(titles.filter((t: { recurrenceRuleId: string }) => t.recurrenceRuleId === series.recurrenceRuleId)).toHaveLength(14);
   });
 
   it('estorno com desfazer transferência é barrado se a transferência caiu em mês fechado', async () => {

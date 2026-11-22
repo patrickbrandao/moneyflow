@@ -30,7 +30,7 @@ export function startWorker(db: Database, config: Config, log: FastifyBaseLogger
     if (running) return;
     running = true;
     try {
-      const result = await materializeAll(db);
+      const result = await materializeAll(db, undefined, (failure) => log.warn(failure, 'worker: série não materializada'));
       log.info(result, 'worker: séries materializadas');
       const cards = await cardMaintenance(db, { autoClose: config.cardAutoClose });
       log.info(cards, 'worker: faturas de cartão');

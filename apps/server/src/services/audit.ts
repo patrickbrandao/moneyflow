@@ -6,6 +6,7 @@ import {
   type PeriodClosingRow,
   type periodClosingInput,
   t,
+  todayIso,
 } from '@moneyflow/shared';
 import { and, eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
@@ -158,9 +159,15 @@ async function unreconciledByMonth(ctx: ServiceContext, caixaId: string, month?:
   return result.rows.map((r) => ({ month: r.month, lines: Number(r.lines) }));
 }
 
+/** Só se fecha até o mês atual em São Paulo: o fechamento congela o que já aconteceu (spec 008, tarefa 082). */
+export function assertClosableMonth(month: string) {
+  if (month > `${todayIso().slice(0, 7)}-01`) throw new AppError(422, 'closing_future_month', t.errors.closingFutureMonth);
+}
+
 /** Fecha o mês na caixa (spec 008: depois da conciliação; `force` fecha com pendências). */
 export async function closeMonth(ctx: ServiceContext, caixaId: string, input: z.output<typeof periodClosingInput>) {
   ctx.access.assertWrite(caixaId);
+  assertClosableMonth(input.month);
   if (!input.force) {
     const [pending] = await unreconciledByMonth(ctx, caixaId, input.month);
     if (pending && pending.lines > 0) throw new AppError(422, 'closing_unreconciled', t.errors.closingUnreconciled(pending.lines));
