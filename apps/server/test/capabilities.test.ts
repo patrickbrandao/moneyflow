@@ -3,7 +3,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
-import { type IndexState, indexEmbeddings, touchEmbeddingIndexes } from '../src/agents/embeddings';
+import { type IndexState, indexEmbeddings, syncEmbeddingSources, touchEmbeddingIndexes } from '../src/agents/embeddings';
 import { resolveInference } from '../src/agents/inferences';
 import { speak, transcribe } from '../src/agents/llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
@@ -543,5 +543,53 @@ describe('embeddings por par (provedor, modelo)', () => {
     const trigram = await search(plain.id);
     expect(trigram.model).toBeUndefined();
     expect(trigram.payload.mode).toBe('trigram');
+  });
+
+  it('o cursor da indexação não perde registros com o mesmo updated_at nem o COMMIT tardio (tarefa 094)', async () => {
+    const provider = await newProvider({
+      kind: 'openai',
+      baseUrl: `${llm.url}/v1`,
+      capabilities: ['embeddings'],
+      defaultModels: { embeddings: 'emb-cursor' },
+    });
+    await newAgent({ providerId: claude.id, inferences: [{ capability: 'embeddings', providerId: provider.id }] });
+    await touchEmbeddingIndexes(h.db);
+    const pair = { providerId: provider.id, model: 'emb-cursor' };
+    const state: IndexState = { since: new Map() };
+    const indexed = async (ids: string[]) =>
+      Number(
+        (
+          await h.db.execute<{ n: number }>(sql`
+            SELECT count(*)::int AS n FROM ai_embeddings
+             WHERE object_type = 'entity' AND provider_id = ${provider.id} AND model = 'emb-cursor'
+               AND object_id = ANY (${`{${ids.join(',')}}`}::uuid[])`)
+        ).rows[0]!.n,
+      );
+    const sync = async (ids: string[]) => {
+      for (let i = 0; i < 400 && (await indexed(ids)) < ids.length; i += 1) await syncEmbeddingSources(h.db, pair, state, 10);
+      return indexed(ids);
+    };
+    // 25 entidades numa transação: o mesmo updated_at, mais que o lote de 10.
+    const tag = uid();
+    const batch = await h.db.transaction(async (tx) =>
+      (
+        await tx.execute<{ id: string }>(sql`
+          INSERT INTO entities (kind, name) SELECT 'company', 'Cursor ' || ${tag} || ' ' || g FROM generate_series(1, 25) g RETURNING id`)
+      ).rows.map((r) => r.id),
+    );
+    expect(await sync(batch)).toBe(25);
+
+    // COMMIT tardio: a transação começa antes de o cursor passar pelo carimbo dela e confirma depois.
+    const late = await h.db.transaction(async (tx) => {
+      const rows = await tx.execute<{ id: string }>(sql`
+        INSERT INTO entities (kind, name) SELECT 'company', 'Tardia ' || ${tag} || ' ' || g FROM generate_series(1, 3) g RETURNING id`);
+      // Outra conexão grava depois (carimbo maior) e a indexação lê até ela antes deste COMMIT.
+      const [after] = (
+        await h.db.execute<{ id: string }>(sql`INSERT INTO entities (kind, name) VALUES ('company', ${`Depois ${tag}`}) RETURNING id`)
+      ).rows;
+      expect(await sync([after!.id])).toBe(1);
+      return rows.rows.map((r) => r.id);
+    });
+    expect(await sync(late)).toBe(3);
   });
 });

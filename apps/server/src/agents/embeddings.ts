@@ -128,8 +128,19 @@ export async function embeddingSourceTotal(db: Executor): Promise<number> {
   return Number(result.rows[0]?.n ?? 0);
 }
 
-/** Até onde cada par já leu os textos-fonte de cada tipo (em memória: um worker que reinicia relê tudo, sem custo). */
-export type IndexState = { since: Map<string, string> };
+/**
+ * Até onde cada par já leu os textos-fonte de cada tipo: o cursor (updated_at, object_id) do último registro lido
+ * (em memória: um worker que reinicia relê tudo, sem custo).
+ */
+export type IndexState = { since: Map<string, { at: string; id: string }> };
+
+const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
+/**
+ * Janela relida a cada passada que alcança o fim (tarefa 094): updated_at é o início da transação, não o COMMIT, e
+ * uma importação longa confirmada depois de o cursor passar pelo carimbo dela ficaria para trás. Reler é barato: o
+ * upsert só grava o texto que mudou.
+ */
+const LATE_COMMIT_WINDOW = '10 minutes';
 
 /** Pares em uso (registrados com last_in_use_at = agora); rode antes de gravar vetores de um par novo. */
 export async function touchEmbeddingIndexes(db: Executor): Promise<EmbeddingPair[]> {
@@ -143,15 +154,21 @@ export async function purgeEmbeddingIndexes(db: Executor, idle = '7 days'): Prom
   return Number(result.rows[0]?.n ?? 0);
 }
 
-/** Grava os textos-fonte alterados desde a última passada do par (até `batch` por tipo). */
+/**
+ * Grava os textos-fonte alterados desde a última passada do par (até `batch` por tipo). Pagina pela chave composta
+ * (updated_at, object_id), porque uma transação grava milhares de linhas com o mesmo carimbo (tarefa 094); alcançado
+ * o fim, o cursor volta à janela de COMMIT tardio.
+ */
 export async function syncEmbeddingSources(db: Database, pair: EmbeddingPair, state: IndexState, batch = 500) {
   let upserted = 0;
   for (const [type, source] of Object.entries(SOURCES)) {
     const key = `${pair.providerId}|${pair.model}|${type}`;
-    const since = state.since.get(key) ?? '-infinity';
-    const result = await db.execute<{ max: string | null; n: number }>(sql`
-      WITH src AS (SELECT * FROM (${source}) s WHERE s.updated_at > ${since}::timestamptz AND btrim(s.source_text) <> ''
-                    ORDER BY s.updated_at LIMIT ${batch}),
+    const since = state.since.get(key) ?? { at: '-infinity', id: ZERO_UUID };
+    const result = await db.execute<{ last_at: string | null; last_id: string | null; read: number; n: number; rewind: string }>(sql`
+      WITH src AS (SELECT * FROM (${source}) s
+                    WHERE (s.updated_at, s.object_id) > (${since.at}::timestamptz, ${since.id}::uuid) AND btrim(s.source_text) <> ''
+                    ORDER BY s.updated_at, s.object_id LIMIT ${batch}),
+           last AS (SELECT updated_at, object_id FROM src ORDER BY updated_at DESC, object_id DESC LIMIT 1),
            up AS (
              INSERT INTO ai_embeddings (object_type, object_id, caixa_id, provider_id, model, source_text)
              SELECT object_type, object_id, caixa_id, ${pair.providerId}::uuid, ${pair.model}, left(source_text, 32000) FROM src
@@ -160,9 +177,13 @@ export async function syncEmbeddingSources(db: Database, pair: EmbeddingPair, st
                WHERE ai_embeddings.source_text IS DISTINCT FROM EXCLUDED.source_text
                   OR ai_embeddings.caixa_id IS DISTINCT FROM EXCLUDED.caixa_id
              RETURNING 1)
-      SELECT (SELECT max(updated_at)::text FROM src) AS max, (SELECT count(*)::int FROM up) AS n`);
+      SELECT (SELECT updated_at::text FROM last) AS last_at, (SELECT object_id::text FROM last) AS last_id,
+             (SELECT count(*)::int FROM src) AS read, (SELECT count(*)::int FROM up) AS n,
+             least(coalesce((SELECT updated_at FROM last), ${since.at}::timestamptz),
+                   now() - ${LATE_COMMIT_WINDOW}::interval)::text AS rewind`);
     const row = result.rows[0];
-    if (row?.max) state.since.set(key, row.max);
+    if (row && row.read >= batch && row.last_at && row.last_id) state.since.set(key, { at: row.last_at, id: row.last_id });
+    else if (row) state.since.set(key, { at: row.rewind, id: ZERO_UUID });
     upserted += row?.n ?? 0;
   }
   return upserted;
