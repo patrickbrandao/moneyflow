@@ -6,6 +6,7 @@ import { useAction, useApi } from '../../lib/hooks';
 import { LoadError, SkelRows } from '../domain';
 import { FormError, ModalActions } from '../forms';
 import { Badge, Button, CopyButton, cx, EmptyRow, Field, Modal, Panel, useConfirm } from '../ui';
+import { ExpiresInDaysField, expiresInDaysOf, TokenRevealModal } from './TokenReveal';
 
 const k = t.agentsUi.tokens;
 
@@ -119,22 +120,7 @@ export function ApiTokensPanel() {
           }}
         />
       )}
-      <Modal open={created !== null} title={k.createdTitle} onClose={() => setCreated(null)}>
-        {created && (
-          <>
-            <div className="key-reveal">
-              <p className="t">{k.createdWarn}</p>
-              <div className="row">
-                <code data-testid="api-token-value">{created.token}</code>
-                <CopyButton text={created.token} label={t.common.copy} />
-              </div>
-            </div>
-            <ModalActions>
-              <Button onClick={() => setCreated(null)}>{k.done}</Button>
-            </ModalActions>
-          </>
-        )}
-      </Modal>
+      <TokenRevealModal title={k.createdTitle} token={created?.token ?? null} testId="api-token-value" onClose={() => setCreated(null)} />
     </Panel>
   );
 }
@@ -147,10 +133,8 @@ function CreateTokenModal({ onClose, onCreated }: { onClose: () => void; onCreat
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const expiresInDays = days.trim() ? Number(days) : null;
-    if (expiresInDays !== null && (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 3650)) {
-      return setError(k.expiresInDays);
-    }
+    const { value: expiresInDays, error: daysError } = expiresInDaysOf(days);
+    if (daysError) return setError(daysError);
     setError(null);
     const token = await run(() => api.post<ApiTokenCreated>('/api/account/api-tokens', { name: name.trim(), expiresInDays }));
     if (token) onCreated(token);
@@ -170,14 +154,7 @@ function CreateTokenModal({ onClose, onCreated }: { onClose: () => void; onCreat
             autoFocus
           />
         </Field>
-        <Field label={k.expiresInDays} hint={k.expiresHint}>
-          <input
-            className="field field-mono"
-            inputMode="numeric"
-            value={days}
-            onChange={(e) => setDays(e.target.value.replace(/\D/g, ''))}
-          />
-        </Field>
+        <ExpiresInDaysField value={days} onChange={setDays} />
         <FormError>{error}</FormError>
         <ModalActions>
           <Button variant="ghost" onClick={onClose}>

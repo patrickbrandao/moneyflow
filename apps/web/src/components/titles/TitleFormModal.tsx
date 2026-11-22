@@ -2,6 +2,8 @@ import {
   FREQUENCIES,
   formatCents,
   type SeriesInput,
+  seriesTermsDraft,
+  seriesTermsFromDraft,
   type TitleCreateInput,
   type TitleDetail,
   type TitleUpdateInput,
@@ -14,15 +16,14 @@ import { useAction } from '../../lib/hooks';
 import { PlannedAccountSelect, useCaixaAccounts } from '../contracts/PlannedAccount';
 import { type EntryPatch, EntrySources } from '../entry/EntrySources';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
+import { SeriesTermsFields } from '../series/SeriesTermsFields';
+import { kindOf } from '../series/series-text';
 import { Button, Field, Modal } from '../ui';
 import { MirrorFields, mirrorPayload, useMirrorChoice } from './MirrorFields';
-import { SeriesTermsFields, termsDraft, termsFromDraft } from './SeriesTermsFields';
 
 type Direction = 'payable' | 'receivable';
 type SeriesKind = 'none' | 'installments' | 'recurrence';
 type Frequency = (typeof FREQUENCIES)[number];
-
-const kindOf = (direction: Direction) => (direction === 'payable' ? 'expense' : 'income');
 
 /**
  * Novo título (com espelho, parcelas e recorrência) ou edição de um existente.
@@ -66,7 +67,7 @@ export function TitleFormModal({
   const [plannedAccountId, setPlannedAccountId] = useState<string | null>(title?.plannedAccountId ?? null);
   const plannedEditable = !title || title.status === 'open' || title.status === 'partial';
   // Ajustes de reconhecimento do pagamento da série (só na criação; depois, em "Editar série").
-  const [terms, setTerms] = useState(termsDraft());
+  const [terms, setTerms] = useState(() => seriesTermsDraft());
 
   const mirror = useMirrorChoice(entity?.id ?? null, caixaId, !editing);
   const [error, setError] = useState<string | null>(null);
@@ -136,6 +137,13 @@ export function TitleFormModal({
     let series: SeriesInput | null = null;
     if (seriesKind === 'installments') series = { kind: 'installments', count, frequency, intervalCount };
     if (seriesKind === 'recurrence') series = { kind: 'recurrence', frequency, intervalCount, endsOn: endsOn || null };
+    // Os ajustes da série (tarefa 181): percentual inválido para o envio com o erro, em vez de virar "sem".
+    let seriesTerms: TitleCreateInput['seriesTerms'] = null;
+    if (series) {
+      const parsed = seriesTermsFromDraft(terms);
+      if (parsed.error) return setError(parsed.error);
+      seriesTerms = parsed.terms;
+    }
     const body: TitleCreateInput = {
       caixaId,
       direction,
@@ -149,7 +157,7 @@ export function TitleFormModal({
       ...mirrorPayload(mirror),
       series,
       plannedAccountId,
-      seriesTerms: series ? termsFromDraft(terms) : null,
+      seriesTerms,
       boletoBarcode,
       pixPayload,
       nfeDocumentId,

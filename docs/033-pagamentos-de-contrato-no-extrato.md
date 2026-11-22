@@ -24,6 +24,8 @@ Campos da série (no formulário do título recorrente, da obrigação do contra
 
 Sem ajustes, a série casa no mesmo mês do vencimento ou na janela com o valor exato. Título avulso (fora de série) continua com a regra de sempre (valor exato, ±3 dias).
 
+Na tela, os ajustes têm um só editor e um só resumo (no título, na obrigação do contrato e na edição da série; o resumo igual na guia Obrigações e na gaveta do título, "multa 2% · juros 1% a.m. · janela 15 d"). O percentual aceita "2", "2,5" ou "2%"; o que não é número ou passa do teto mostra o erro no campo e não deixa salvar, em vez de virar "sem" (tarefa 181).
+
 ## Como a linha acha a ocorrência
 
 Para cada linha nova de uma conta, além dos candidatos de sempre (movimentos da conta; títulos da caixa da conta com valor exato e ±3 dias), entram as **ocorrências de séries** em aberto ou parciais, na direção da linha, que cumprem:

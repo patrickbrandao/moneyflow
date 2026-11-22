@@ -3,13 +3,20 @@ import {
   contractAmendmentInput,
   contractCreateInput,
   cycleEnd,
+  DEFAULT_SERIES_TERMS,
   diffLines,
   diffStats,
   occurrencePeriodEnd,
+  parsePercent,
   periodicityCalendar,
   proratedAmount,
   readjustedTotal,
   readjustmentDateIn,
+  seriesTermsDraft,
+  seriesTermsFieldError,
+  seriesTermsFromDraft,
+  seriesTermsSummary,
+  seriesTermsTouched,
   stripInstallmentSuffix,
   termMonths,
 } from '../src';
@@ -131,5 +138,49 @@ describe('diff de versões do markdown', () => {
       { kind: 'del', text: 'Cláusula 1: R$ 100', oldLine: 2, newLine: null },
       { kind: 'add', text: 'Cláusula 1: R$ 150', oldLine: null, newLine: 2 },
     ]);
+  });
+});
+
+describe('ajustes de reconhecimento da série: um editor e um resumo (tarefa 181)', () => {
+  it('o percentual aceita "2%", vírgula, ponto e espaços; vazio e zero = sem', () => {
+    expect(parsePercent('2%', 20)).toEqual({ value: 2, error: null });
+    expect(parsePercent(' 2,5 % ', 20)).toEqual({ value: 2.5, error: null });
+    expect(parsePercent('2.5', 20)).toEqual({ value: 2.5, error: null });
+    expect(parsePercent('', 20)).toEqual({ value: null, error: null });
+    expect(parsePercent('0', 20)).toEqual({ value: null, error: null });
+  });
+
+  it('o percentual inválido ou acima do teto vira erro, não "sem"', () => {
+    expect(parsePercent('dois', 20).error).toBe('informe um número (ex.: 2 ou 2,5).');
+    expect(parsePercent('2,5,1', 20).error).toBeTruthy();
+    expect(parsePercent('-1', 20).error).toBeTruthy();
+    expect(parsePercent('21', 20).error).toBe('no máximo 20%.');
+    // O reajuste do aditivo aceita o negativo, dentro da faixa do schema.
+    expect(parsePercent('-3,5%', 1000, -100)).toEqual({ value: -3.5, error: null });
+    expect(parsePercent('−3', 1000, -100)).toEqual({ value: -3, error: null });
+    expect(parsePercent('-101', 1000, -100).error).toBe('entre -100% e 1000%.');
+  });
+
+  it('o rascunho vai e volta; o erro de um campo barra o envio com o nome dele', () => {
+    const terms = { ...DEFAULT_SERIES_TERMS, lateFeePercent: 2.5, interestMonthPercent: 1, toleranceCents: 150 };
+    const draft = seriesTermsDraft(terms);
+    expect(draft.lateFee).toBe('2,5');
+    expect(seriesTermsTouched(draft)).toBe(true);
+    expect(seriesTermsTouched(seriesTermsDraft())).toBe(false);
+    expect(seriesTermsFromDraft(draft)).toEqual({ terms, error: null });
+    expect(seriesTermsFromDraft({ ...draft, lateFee: '2%' }).terms?.lateFeePercent).toBe(2);
+    const bad = { ...draft, interest: '11' };
+    expect(seriesTermsFieldError(bad, 'interest')).toBe('no máximo 10%.');
+    expect(seriesTermsFieldError(bad, 'lateFee')).toBeNull();
+    expect(seriesTermsFromDraft(bad)).toEqual({ terms: null, error: 'Juros de mora (% ao mês): no máximo 10%.' });
+    expect(seriesTermsFromDraft({ ...draft, matchWindowDays: 60 }).error).toBe('Janela da conciliação (dias): de 0 a 45 dias.');
+  });
+
+  it('o resumo é um só, com o percentual em vírgula', () => {
+    expect(seriesTermsSummary(DEFAULT_SERIES_TERMS)).toBe('Sem ajustes: valor exato no mês do vencimento ou na janela.');
+    expect(seriesTermsSummary({ ...DEFAULT_SERIES_TERMS, matchWindowDays: 30 })).toBe('janela 30 d');
+    expect(
+      seriesTermsSummary({ ...DEFAULT_SERIES_TERMS, lateFeePercent: 2, interestMonthPercent: 0.5, toleranceCents: 150, autoSettle: true }),
+    ).toMatch(/^multa 2% · juros 0,5% a\.m\. · tolerância R\$\s1,50 · baixa sem confirmação · janela 15 d$/);
   });
 });

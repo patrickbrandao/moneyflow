@@ -21,6 +21,7 @@ export * from './reconcile';
 export * from './recurrence';
 export * from './reports';
 export * from './schemas';
+export * from './series-terms';
 export * from './supersede';
 export * from './text-diff';
 export type * from './types';

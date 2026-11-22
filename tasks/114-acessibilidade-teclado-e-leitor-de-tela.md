@@ -141,4 +141,6 @@ Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o ap
 
 **Fora desta tarefa.** As linhas de `ContractPage.tsx` (títulos avulsos e documentos) ficaram para depois da tarefa 182, que vai cortar o arquivo (pedido da sessão principal: só trocas de texto e data nele); o foco preso na gaveta em tela estreita (`role="dialog"`) também não entrou.
 
+**Nota (tarefa 182).** O que ficou para depois do corte foi feito lá: as linhas dos títulos avulsos e dos documentos do contrato (agora em `ContractObligations.tsx` e `ContractDocuments.tsx`) com o `RowLink`/`RowButton`, o `role="radiogroup"` do "Ligar série existente" fora do `<ul>`, e `noNoninteractiveElementToInteractiveRole` religada como `error` no `biome.json`.
+
 Testes: e2e novos (não rodados aqui) em `e2e/tests/teclado.spec.ts` → "teclado: o nome do título abre a gaveta, o foco entra nela e volta à linha; a caixa e a entidade abrem pelo link (tarefa 114)" e em `e2e/tests/agentes.spec.ts` → "acessibilidade (tarefa 114): abrir o agente pelo menu foca o compositor; as mensagens são uma região viva", mais o aviso `role="alert"` do cartão no primeiro teste dos agentes. O `pnpm lint` (Biome no projeto inteiro) passa com as regras religadas. Verificação: `pnpm verify:quick`.

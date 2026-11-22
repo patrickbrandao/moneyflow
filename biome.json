@@ -36,7 +36,7 @@
         "useKeyWithClickEvents": "error",
         "noLabelWithoutControl": "error",
         "useSemanticElements": "off",
-        "noNoninteractiveElementToInteractiveRole": "off",
+        "noNoninteractiveElementToInteractiveRole": "error",
         "useAriaPropsSupportedByRole": "error"
       },
       "style": {

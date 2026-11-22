@@ -1,4 +1,13 @@
-import { contractLink, formatAccounting, formatDate, formatDateTime, type SeriesDto, type TitleDetail, t } from '@moneyflow/shared';
+import {
+  contractLink,
+  formatAccounting,
+  formatDate,
+  formatDateTime,
+  type SeriesDto,
+  seriesTermsSummary,
+  type TitleDetail,
+  t,
+} from '@moneyflow/shared';
 import {
   Ban,
   CalendarDays,
@@ -28,14 +37,13 @@ import { useDrawerFocus } from '../a11y';
 import { AttachmentsPanel } from '../attachments/AttachmentsPanel';
 
 import { AuditHistory } from '../audit/AuditHistory';
-import { SeriesEditModal } from '../contracts/ObligationFormModal';
 import { PlannedAccountButton, PlannedAccountLabel } from '../contracts/PlannedAccount';
 import { CategoryLabel, LoadError, MirrorBadge, Money, TitleStatusBadge } from '../domain';
 import { TitleEntryInfo } from '../entry/TitleEntryInfo';
 import { CategorySelect, ModalActions } from '../forms';
+import { SeriesEditModal } from '../series/SeriesEditModal';
 import { Badge, Button, Field, Modal, Skel, useConfirm, useEscapeLayer } from '../ui';
 import { SeriesEndModal } from './SeriesEndModal';
-import { termsSummary } from './SeriesTermsFields';
 import { ReverseModal, SetAccountModal, SettlementModal } from './SettlementModal';
 import { TitleFormModal } from './TitleFormModal';
 
@@ -385,7 +393,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                   </dd>
                   <dt>{t.contracts.planned.terms}</dt>
                   <dd className="text-[13px]" data-testid="title-series-terms">
-                    {termsSummary(title.rule.terms)}
+                    {seriesTermsSummary(title.rule.terms)}
                   </dd>
                 </dl>
                 {title.canWrite && (

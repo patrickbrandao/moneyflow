@@ -8,6 +8,7 @@ import {
 } from '../contracts';
 import { ptBR } from '../i18n/pt-BR';
 import { FREQUENCIES } from '../recurrence';
+import { SERIES_TERMS_LIMITS } from '../series-terms';
 import { id, isoDate, nonNegativeCents, optionalText, positiveCents, queryBool, requiredText } from './common';
 
 /* Entradas dos contratos (specs 020 e 034) e das séries com conta, cartão e ajustes. */
@@ -30,10 +31,10 @@ function percent(max: number) {
  * conferido no servidor.
  */
 export const seriesTermsFields = {
-  matchWindowDays: z.number().int().min(0).max(45),
-  lateFeePercent: percent(20),
-  interestMonthPercent: percent(10),
-  earlyDiscountPercent: percent(50),
+  matchWindowDays: z.number().int().min(0).max(SERIES_TERMS_LIMITS.matchWindowDays),
+  lateFeePercent: percent(SERIES_TERMS_LIMITS.lateFeePercent),
+  interestMonthPercent: percent(SERIES_TERMS_LIMITS.interestMonthPercent),
+  earlyDiscountPercent: percent(SERIES_TERMS_LIMITS.earlyDiscountPercent),
   toleranceCents: nonNegativeCents,
   autoSettle: z.boolean(),
 };
