@@ -17,5 +17,5 @@
   - "Excluir este e os próximos" continua existindo para apagar ocorrências lançadas por engano (some com elas e falha se houver baixa).
 - **Listagem de títulos** (abas A pagar e A receber da caixa): filtro de vencimento com o padrão dos últimos 60 dias e próximos 30, os atalhos Mês anterior, Mês atual, Próximo mês e Hoje e a última escolha lembrada por caixa e direção, como no extrato ([004](004-caixas-e-contas.md)). As abas de situação (em aberto, vencido…) combinam com o período.
 - **Transferência** = par de movimentos ligados por `transfer_id`; não conta como receita nem despesa.
-- Pagar um título da caixa B com uma conta da caixa A (com permissão) gera automaticamente a transferência A → B e a baixa em B.
+- Pagar um título da caixa B com uma conta da caixa A (com permissão) gera automaticamente a transferência A → B e a baixa em B. O estorno desfaz essa transferência por padrão, o que pede escrita nas caixas das duas contas dela (como excluir uma transferência); sem isso, a resposta é 403 e o estorno sai sem desfazer (2026-11-21, tarefa 081).
 - Títulos cuja contraparte é titular de uma caixa são espelhados ([006](006-espelhamento-entre-caixas.md)).

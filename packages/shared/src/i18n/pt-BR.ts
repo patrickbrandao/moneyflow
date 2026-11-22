@@ -185,6 +185,8 @@ export const ptBR = {
     settlementHasAccount: 'Esta baixa já tem conta definida.',
     reversalBeforeSettlement: 'O estorno não pode ser antes da data da baixa.',
     transferFromSettlement: 'Esta transferência nasceu de uma baixa: estorne a baixa.',
+    undoTransferOtherCaixa:
+      'A transferência desta baixa mexe numa conta de outra caixa que você não edita: estorne sem desfazer a transferência ou peça a quem edita aquela caixa.',
     seriesHasSettlements: 'Há ocorrências seguintes com baixa; estorne-as antes.',
     seriesEndInstallments: 'Parcelamento não tem data de fim: exclua as parcelas seguintes.',
     seriesEndBeforeStart: 'A série não pode terminar antes do início.',

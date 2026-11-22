@@ -231,6 +231,64 @@ describe('baixas (spec 005)', () => {
     await admin.post(`/api/settlements/${settled.settlements[0].id}/reverse`, { reason: 'de novo' }, 422);
   });
 
+  it('sem escrita na caixa da outra conta, o estorno não desfaz a transferência (tarefa 081)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const title = await admin.post('/api/titles', { ...base(s), caixaId: s.caixaB.id, entityId: s.supplier.id, amountCents: 30_000 });
+    const settled = await admin.post(`/api/titles/${title.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 30_000,
+      financialAccountId: s.accountB.id,
+      sourceAccountId: s.accountA.id,
+    });
+    const legId = settled.settlements[0].id;
+    const editorB = await userSession(h);
+    await admin.put(`/api/users/${editorB.id}/memberships`, { memberships: [{ caixaId: s.caixaB.id, role: 'editor' }] });
+    const editor = client(h, editorB.cookie);
+    const balanceA = async () => (await admin.get('/api/accounts')).find((a: { id: string }) => a.id === s.accountA.id).balanceCents;
+
+    const denied = await editor.post(
+      `/api/settlements/${legId}/reverse`,
+      { reason: 'erro', reversedOn: '2026-10-16', undoTransfer: true },
+      403,
+    );
+    expect(denied.error.message).toMatch(/sem desfazer a transferência/);
+    expect(await admin.get(`/api/transfers?caixaId=${s.caixaA.id}`)).toHaveLength(1);
+    expect(await balanceA()).toBe(70_000);
+
+    // Sem desfazer, o estorno sai; a conta da caixa A não muda.
+    const reversed = await editor.post(`/api/settlements/${legId}/reverse`, {
+      reason: 'erro',
+      reversedOn: '2026-10-16',
+      undoTransfer: false,
+    });
+    expect(reversed.status).toBe('open');
+    expect(await admin.get(`/api/transfers?caixaId=${s.caixaA.id}`)).toHaveLength(1);
+    expect(await balanceA()).toBe(70_000);
+  });
+
+  it('baixas simultâneas nos dois lados do espelho não se travam (tarefa 188)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    for (let i = 0; i < 20; i += 1) {
+      const title = await admin.post('/api/titles', { ...base(s), amountCents: 2_000 });
+      const [a, b] = await Promise.all([
+        admin.raw('POST', `/api/titles/${title.id}/settlements`, {
+          settledOn: '2026-10-15',
+          amountCents: 1_000,
+          financialAccountId: s.accountA.id,
+        }),
+        admin.raw('POST', `/api/titles/${title.mirror.id}/settlements`, {
+          settledOn: '2026-10-15',
+          amountCents: 1_000,
+          financialAccountId: s.accountB.id,
+        }),
+      ]);
+      expect([a.statusCode, b.statusCode], `${a.body} ${b.body}`).toEqual([200, 200]);
+      expect((await admin.get(`/api/titles/${title.id}`)).status).toBe('paid');
+    }
+  }, 120_000);
+
   it('baixa do espelho: duas pernas; o lado sem acesso fica com conta a definir', async () => {
     const admin = client(h, (await userSession(h, 'admin')).cookie);
     const s = await scenario(h, admin);

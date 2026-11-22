@@ -1,4 +1,4 @@
-import { type Executor, movements, settlements, type Tx, titles, transfers } from '@moneyflow/db';
+import { type Executor, financialAccounts, movements, settlements, type Tx, titles, transfers } from '@moneyflow/db';
 import {
   diffDays,
   type settlementAccountInput,
@@ -15,7 +15,7 @@ import { forbidden, notFound, unprocessable } from '../errors';
 import { getAccount } from './caixas';
 import { assertNotReconciled, clearStatementSuggestions, transferMovementIds } from './reconciliation-guards';
 import { newIds } from './title-pair';
-import { getTitle } from './titles';
+import { getTitle, lockTitlePair } from './titles';
 import { withTx } from './tx';
 
 /*
@@ -30,12 +30,6 @@ type Direction = 'payable' | 'receivable';
 const sign = (direction: string) => (direction === 'payable' ? -1 : 1);
 const cashOf = (s: { amountCents: number; interestCents: number; fineCents: number; discountCents: number }) =>
   s.amountCents + s.interestCents + s.fineCents - s.discountCents;
-
-async function lockTitle(tx: Executor, id: string) {
-  const [row] = await tx.select().from(titles).where(eq(titles.id, id)).for('update');
-  if (!row) throw notFound();
-  return row;
-}
 
 async function accountInCaixa(ctx: ServiceContext, tx: Executor, accountId: string, caixaId: string) {
   const account = await getAccount(ctx, accountId, tx);
@@ -83,7 +77,8 @@ export async function settleInTx(
   titleId: string,
   input: z.output<typeof settlementCreateInput>,
 ): Promise<{ settlementId: string; movementId: string | null }> {
-  const title = await lockTitle(tx, titleId);
+  // O par numa ordem fixa: baixas simultâneas nos dois lados não se travam (tarefa 188).
+  const { title, mirror } = await lockTitlePair(tx, titleId);
   ctx.access.assertWrite(title.caixaId);
   const cash = cashOf(input);
 
@@ -101,7 +96,6 @@ export async function settleInTx(
     transfer = (title.direction as Direction) === 'payable' ? { from: source.id, to: accountId } : { from: accountId, to: source.id };
   }
 
-  const mirror = title.mirrorTitleId ? await lockTitle(tx, title.mirrorTitleId) : null;
   let mirrorAccountId: string | null = null;
   if (mirror && input.mirrorAccountId) {
     if (!ctx.access.canWrite(mirror.caixaId)) throw forbidden();
@@ -186,6 +180,20 @@ async function loadLeg(tx: Executor, id: string) {
   return row;
 }
 
+/** A perna pedida e a do espelho, travadas numa ordem fixa (pelo id), como os títulos do par (tarefa 188). */
+async function loadLegPair(tx: Executor, id: string) {
+  const [peek] = await tx.select({ mirrorId: settlements.mirrorSettlementId }).from(settlements).where(eq(settlements.id, id));
+  if (!peek) throw notFound();
+  const ids = [id, ...(peek.mirrorId ? [peek.mirrorId] : [])];
+  const rows = await tx.select().from(settlements).where(inArray(settlements.id, ids)).orderBy(settlements.id).for('update');
+  const leg = rows.find((r) => r.id === id);
+  if (!leg) throw notFound();
+  const other = leg.mirrorSettlementId
+    ? (rows.find((r) => r.id === leg.mirrorSettlementId) ?? (await loadLeg(tx, leg.mirrorSettlementId)))
+    : null;
+  return [leg, ...(other ? [other] : [])];
+}
+
 /** Define a conta de uma baixa "conta a definir" (o lado sem acesso no espelho). */
 export async function setSettlementAccount(
   ctx: ServiceContext,
@@ -218,7 +226,8 @@ export async function reverseSettlement(
   input: z.output<typeof settlementReverseInput>,
 ): Promise<TitleDetail> {
   const titleId = await withTx(ctx, async (tx) => {
-    const leg = await loadLeg(tx, settlementId);
+    const legs = await loadLegPair(tx, settlementId);
+    const leg = legs[0]!;
     const [title] = await tx.select().from(titles).where(eq(titles.id, leg.titleId));
     if (!title) throw notFound();
     ctx.access.assertWrite(title.caixaId);
@@ -226,8 +235,6 @@ export async function reverseSettlement(
     const reversedOn = input.reversedOn ?? todayIso();
     if (diffDays(leg.settledOn, reversedOn) < 0) throw unprocessable(strings.errors.reversalBeforeSettlement);
 
-    const legs = [leg];
-    if (leg.mirrorSettlementId) legs.push(await loadLeg(tx, leg.mirrorSettlementId));
     for (const current of legs) {
       await tx.update(settlements).set({ reversedAt: sql`now()`, reversalReason: input.reason }).where(eq(settlements.id, current.id));
       const [owner] = await tx.select().from(titles).where(eq(titles.id, current.titleId));
@@ -235,7 +242,7 @@ export async function reverseSettlement(
     }
     if (input.undoTransfer) {
       const doomed = await tx
-        .select({ id: transfers.id })
+        .select({ id: transfers.id, from: transfers.fromAccountId, to: transfers.toAccountId })
         .from(transfers)
         .where(
           inArray(
@@ -243,6 +250,15 @@ export async function reverseSettlement(
             legs.map((l) => l.id),
           ),
         );
+      // Como em deleteTransfer: apagar a transferência mexe nas duas contas, então pede escrita nas duas caixas (tarefa 081).
+      const accountIds = [...new Set(doomed.flatMap((d) => [d.from, d.to]))];
+      if (accountIds.length > 0) {
+        const owners = await tx
+          .select({ caixaId: financialAccounts.caixaId })
+          .from(financialAccounts)
+          .where(inArray(financialAccounts.id, accountIds));
+        if (owners.some((o) => !ctx.access.canWrite(o.caixaId))) throw forbidden(strings.errors.undoTransferOtherCaixa);
+      }
       const movementIds = await transferMovementIds(
         tx,
         doomed.map((d) => d.id),

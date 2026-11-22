@@ -56,6 +56,6 @@ export function translateDbError(error: unknown): AppError | null {
   const byColumn = pg.code === '23502' && pg.table && pg.column ? DB_NOT_NULL_MESSAGES[`${pg.table}.${pg.column}`] : undefined;
   const message = byConstraint ?? byColumn ?? DB_CODE_MESSAGES[pg.code];
   if (!message) return null;
-  const status = pg.code === '42501' ? 403 : pg.code === '23505' ? 409 : 422;
+  const status = pg.code === '42501' ? 403 : pg.code === '23505' || pg.code === '40P01' || pg.code === '40001' ? 409 : 422;
   return new AppError(status, pg.constraint ?? `pg_${pg.code}`, message);
 }
