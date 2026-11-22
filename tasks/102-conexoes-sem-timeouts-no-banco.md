@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: em-andamento
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -66,4 +66,39 @@ Nada foi executado. A configuração do Postgres de produção (projeto externo)
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado:
+- Nem `database/` (migrations, `docker/initdb`, compose) nem o papel `moneyflow_app` definiam `statement_timeout`, `lock_timeout` ou `idle_in_transaction_session_timeout`.
+- O serviço `dbmate` daqui e o `migrate` da raiz conectavam sem `lock_timeout`.
+- Verifiquei que o dbmate 2.38.2 (lib/pq) repassa o parâmetro `options` da URL à sessão. Uma migration de prova que recusa `lock_timeout <> '10s'` passou com `options=-c%20lock_timeout%3D10s` e falhou sem ele (`lock_timeout = 0`). A prova rodou num banco descartável, já apagado.
+- Achado ligado, para a aplicação: o `PGOPTIONS: '-c lock_timeout=30s'` da restauração (`dump.ts:357`) não vale. O SQL que o `pg_restore -f -` gera começa com `SET lock_timeout = 0` (e `statement_timeout`, `idle_in_transaction_session_timeout` e `transaction_timeout` = 0), que vence o `PGOPTIONS`. O mesmo cabeçalho aparece no topo do `schema.sql`.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+- `database/docker-compose.yml`: o `DATABASE_URL` e o `TEST_DATABASE_URL` do serviço `dbmate` levam `&options=-c%20lock_timeout%3D10s`. A migration que não consegue o lock falha em 10 s, em vez de esperar sem limite e enfileirar as consultas da aplicação àquela tabela. Sem `statement_timeout`, porque a migration de dados pode demorar.
+- `database/docker/initdb/02-app-role.sh` (agora idempotente): `ALTER ROLE moneyflow_app SET idle_in_transaction_session_timeout = '5min'`, como rede de segurança fora da aplicação.
+  - Decisão: o papel não recebe `statement_timeout` nem `lock_timeout`. Um padrão no papel derrubaria as esperas legítimas (advisory locks do worker, a trava do fechamento de mês da 0059, o backup), e esses prazos ficam no pool, com exceções por transação.
+- `database/Makefile`: `make owner` roda também o `02-app-role.sh`, para um volume antigo ganhar a configuração. O `make test` já depende de `owner`.
+- O container foi reconstruído uma vez, junto com a tarefa 163, porque o `02-app-role.sh` faz parte da imagem. Conferido: `SHOW idle_in_transaction_session_timeout` como `moneyflow_app` devolve `5min`.
+- pgTAP: `tests/0001_base.sql` confere a configuração do papel em `pg_db_role_setting`.
+- `docs/016` (Segurança, "Prazos no Postgres") registra os prazos e o cabeçalho do `pg_dump`.
+- `make test` completo (68 arquivos, 4308 testes) passou.
+
+### Pendente na aplicação
+
+1. `packages/db/src/index.ts` (`createPool`): passar ao `pg.Pool`
+   - `statement_timeout` (por exemplo 60 s, por variável, como `DB_STATEMENT_TIMEOUT_MS`);
+   - `lock_timeout` (por exemplo 30 s, acima das esperas legítimas por advisory lock e pela trava do fechamento de mês);
+   - `idle_in_transaction_session_timeout` (5 min);
+   - `connectionTimeoutMillis` (por exemplo 10 s).
+
+   O node-postgres aceita os três primeiros direto na configuração. O que precisa de mais tempo usa `SET LOCAL statement_timeout` maior na própria transação: o export do backup JSON, a busca do admin em todas as conversas (`ai_conversation_search` com `p_user_id` nulo) e os relatórios longos.
+2. `apps/server/src/errors.ts`: traduzir `57014` (cancelado pelo `statement_timeout`), `55P03` (`lock_not_available`) e o erro de espera por conexão do pool para 503 com mensagem em pt-BR.
+3. `docker-compose.yml` da raiz (serviço `migrate`): `DATABASE_URL` com `&options=-c%20lock_timeout%3D10s`, como o de `database/`. O deploy de produção (projeto externo) faz o mesmo, e roda `ALTER ROLE moneyflow_app SET idle_in_transaction_session_timeout = '5min'` uma vez, porque lá o `initdb` daqui não roda.
+4. `apps/server/src/services/backup/dump.ts` (restauração): o `PGOPTIONS` com `lock_timeout=30s` é anulado pelo `SET lock_timeout = 0` do SQL do `pg_restore`. Para limitar a espera, troque essa linha no fluxo, de `SET lock_timeout = 0;` para `SET lock_timeout = '30s';` entre o `pg_restore` e o `psql`, ou aceite a espera sem limite e retire o `PGOPTIONS`. Precisa de teste em `test/backup.test.ts`.
+5. Testes de integração (modo local):
+   - `SHOW statement_timeout`, `lock_timeout` e `idle_in_transaction_session_timeout` numa conexão do pool devolvem os valores configurados;
+   - `SELECT pg_sleep(…)` acima do `statement_timeout` do teste devolve o erro traduzido.

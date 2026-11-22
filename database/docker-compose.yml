@@ -37,8 +37,10 @@ services:
         condition: service_healthy
     environment:
       # Como o dono (moneyflow_owner), nunca o superusuário: os objetos ficam dele e a restauração do dump os recria.
-      DATABASE_URL: postgres://moneyflow_owner:${OWNER_DB_PASSWORD:-moneyflow_owner}@postgres:5432/${POSTGRES_DB:-moneyflow}?sslmode=disable
-      TEST_DATABASE_URL: postgres://moneyflow_owner:${OWNER_DB_PASSWORD:-moneyflow_owner}@postgres:5432/${POSTGRES_DB:-moneyflow}_test?sslmode=disable
+      # lock_timeout de 10 s (tarefa 102): a migration que não consegue o lock falha em segundos, em vez de esperar sem
+      # limite e enfileirar atrás dela as consultas da aplicação àquela tabela.
+      DATABASE_URL: postgres://moneyflow_owner:${OWNER_DB_PASSWORD:-moneyflow_owner}@postgres:5432/${POSTGRES_DB:-moneyflow}?sslmode=disable&options=-c%20lock_timeout%3D10s
+      TEST_DATABASE_URL: postgres://moneyflow_owner:${OWNER_DB_PASSWORD:-moneyflow_owner}@postgres:5432/${POSTGRES_DB:-moneyflow}_test?sslmode=disable&options=-c%20lock_timeout%3D10s
       DBMATE_MIGRATIONS_DIR: /db/migrations
       DBMATE_NO_DUMP_SCHEMA: "true"
       DBMATE_STRICT: "true"

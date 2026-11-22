@@ -25,8 +25,10 @@ logs:
 psql:           ## console interativo no banco de desenvolvimento
 	$(COMPOSE) exec postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB)
 
-# Dono do banco sem superusuário (docs/016): idempotente; num volume antigo cria o moneyflow_owner e lhe passa a posse.
-owner: up       ## garante o papel moneyflow_owner como dono de <db> e <db>_test
+# Papéis (docs/016): idempotente; num volume antigo garante o moneyflow_app com o prazo de transação ociosa (tarefa 102),
+# cria o moneyflow_owner e lhe passa a posse.
+owner: up       ## garante os papéis moneyflow_app e moneyflow_owner (dono de <db> e <db>_test)
+	$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/02-app-role.sh
 	$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/03-owner-role.sh
 
 # As migrations rodam como moneyflow_owner (DATABASE_URL do serviço dbmate); criar e apagar bancos fica com o
