@@ -4345,8 +4345,7 @@ CREATE FUNCTION public.audit_row() RETURNS trigger
     AS $$
 DECLARE
   quiet   text[] := coalesce(string_to_array(nullif(TG_ARGV[0], ''), ','), '{}');
-  secrets constant text[] := ARRAY['password', 'bot_token', 'api_key', 'secret_headers', 'token_hash',
-                                   'webhook_secret_hash', 'code_hash'];
+  bulky   text[] := coalesce(string_to_array(nullif(TG_ARGV[1], ''), ','), '{}');
   o       jsonb;
   n       jsonb;
   changed text[];
@@ -4363,7 +4362,8 @@ BEGIN
     END IF;
   END IF;
 
-  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o - secrets, n - secrets, changed);
+  -- Os segredos saem em audit_write (audit_secret_columns); as colunas volumosas, aqui.
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o - bulky, n - bulky, changed);
   RETURN NULL;
 END
 $$;
@@ -4373,7 +4373,7 @@ $$;
 -- Name: FUNCTION audit_row(); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de auditoria. Remove os segredos (password, bot_token, api_key, secret_headers, token_hash, webhook_secret_hash, code_hash): a troca aparece só em changed_columns, sem o valor. TG_ARGV[0] = colunas que sozinhas não geram linha.';
+COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de auditoria. Os segredos (audit_secret_columns) saem em audit_write: a troca aparece só em changed_columns, sem o valor. TG_ARGV[0] = colunas que sozinhas não geram linha; TG_ARGV[1] = colunas volumosas (caches) que ficam fora de old_data e new_data e só aparecem em changed_columns (tarefa 159).';
 
 
 --
@@ -4414,6 +4414,24 @@ COMMENT ON FUNCTION public.audit_row_keyed() IS 'Trigger de auditoria de tabelas
 
 
 --
+-- Name: audit_secret_columns(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.audit_secret_columns() RETURNS text[]
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT ARRAY['password', 'bot_token', 'api_key', 'secret_headers', 'token_hash', 'webhook_secret_hash', 'code_hash']
+$$;
+
+
+--
+-- Name: FUNCTION audit_secret_columns(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.audit_secret_columns() IS 'Colunas de segredo que nunca vão ao audit_log (old_data e new_data), qualquer que seja a tabela: audit_write as tira de tudo o que grava. Segredo novo (coluna sem SELECT para moneyflow_app) entra aqui; o pgTAP da 0065 confere que toda coluna auditada sem SELECT para a aplicação está na lista (tarefa 159).';
+
+
+--
 -- Name: audit_write(text, text, jsonb, jsonb, text[], uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4425,6 +4443,7 @@ DECLARE
   uid_text text := nullif(current_setting('app.user_id', true), '');
   kind     text := nullif(current_setting('app.actor_kind', true), '');
   run_text text := nullif(current_setting('app.agent_run_id', true), '');
+  secrets  constant text[] := public.audit_secret_columns();
   uid      uuid;
 BEGIN
   IF uid_text IS NOT NULL THEN
@@ -4454,8 +4473,8 @@ BEGIN
 
   INSERT INTO public.audit_log (table_name, record_id, action, old_data, new_data, changed_columns,
                                 user_id, actor_kind, agent_run_id, transaction_id)
-  VALUES (p_table, coalesce(p_record_id, (p_new ->> 'id')::uuid, (p_old ->> 'id')::uuid), p_action, p_old, p_new,
-          p_changed, uid, kind, run_text, pg_current_xact_id()::text::bigint);
+  VALUES (p_table, coalesce(p_record_id, (p_new ->> 'id')::uuid, (p_old ->> 'id')::uuid), p_action,
+          p_old - secrets, p_new - secrets, p_changed, uid, kind, run_text, pg_current_xact_id()::text::bigint);
 END
 $_$;
 
@@ -4464,7 +4483,7 @@ $_$;
 -- Name: FUNCTION audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[], p_record_id uuid); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[], p_record_id uuid) IS 'Interna: grava em audit_log com o ator de app.user_id / app.actor_kind / app.agent_run_id. record_id = p_record_id (tabelas sem coluna id, como entity_tag_links) ou o id da linha. Erro 23514 (audit_log_actor_check) se app.user_id não é uuid, se actor_kind é inválido, se human/agent vem sem usuário, ou se app.agent_run_id vem sem actor_kind = agent ou não é uma execução (ai_runs) do mesmo usuário.';
+COMMENT ON FUNCTION public.audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[], p_record_id uuid) IS 'Interna: grava em audit_log com o ator de app.user_id / app.actor_kind / app.agent_run_id. record_id = p_record_id (tabelas sem coluna id, como entity_tag_links) ou o id da linha. Tira de old_data e new_data as colunas de audit_secret_columns() (tarefa 159), para todo trigger de auditoria; a troca de um segredo fica só em p_changed. Erro 23514 (audit_log_actor_check) se app.user_id não é uuid, se actor_kind é inválido, se human/agent vem sem usuário, ou se app.agent_run_id vem sem actor_kind = agent ou não é uma execução (ai_runs) do mesmo usuário.';
 
 
 --
@@ -20683,7 +20702,7 @@ CREATE TRIGGER financial_accounts_validate_rules BEFORE UPDATE OF caixa_id, kind
 -- Name: mcp_servers mcp_servers_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER mcp_servers_audit AFTER INSERT OR DELETE OR UPDATE ON public.mcp_servers FOR EACH ROW EXECUTE FUNCTION public.audit_row('tools_cache,tools_cached_at,tools_error,instructions_cache');
+CREATE TRIGGER mcp_servers_audit AFTER INSERT OR DELETE OR UPDATE ON public.mcp_servers FOR EACH ROW EXECUTE FUNCTION public.audit_row('tools_cache,tools_cached_at,tools_error,instructions_cache', 'tools_cache,instructions_cache');
 
 
 --

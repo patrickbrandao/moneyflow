@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -65,4 +65,30 @@ Nada foi executado. A decisão de manter a linha inteira no antes e depois (spec
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado no `schema.sql` antes da mudança: a lista `secrets` e o corte `o - secrets, n - secrets` existiam só em `audit_row()`; `audit_write` gravava `p_old`/`p_new` como chegavam, e os onze triggers próprios (`audit_row_keyed` e os `*_audit_row`) chamam `audit_write` direto. Nenhuma tabela desses onze tem coluna de segredo hoje (as colunas sem SELECT para `moneyflow_app` são exatamente as sete da lista, todas em tabelas de `audit_row()`), então não havia vazamento atual. O `mcp_servers_audit` silenciava os caches, mas os gravava inteiros no antes e no depois quando outra coluna mudava.
+
 ## Resolução (executor)
+
+Migration `database/migrations/0065_audit_secret_columns.sql`; teste `database/tests/0065_audit_secret_columns.sql`.
+
+- `audit_secret_columns()` (`IMMUTABLE`) é a lista única dos segredos. `audit_write` tira essas colunas de `old_data` e `new_data`, para todo trigger que grava por ela. A troca de um segredo continua só em `changed_columns`.
+- `audit_row()` usa a lista de `audit_write` e aceita um segundo argumento, `TG_ARGV[1]`: as colunas volumosas, que ficam fora do antes e do depois e só aparecem em `changed_columns`. Decisão: argumento por tabela, em vez de uma lista fixa de caches dentro de `audit_row()`, para não esconder sem querer uma coluna de mesmo nome noutra tabela.
+- `mcp_servers_audit` foi recriado com `audit_row('tools_cache,tools_cached_at,tools_error,instructions_cache', 'tools_cache,instructions_cache')`. O `tools_error` e o `tools_cached_at` continuam no corpo, porque são pequenos.
+
+Testes:
+- só `audit_write` insere em `audit_log`;
+- toda coluna de tabela auditada sem SELECT para `moneyflow_app` está em `audit_secret_columns()`. Este é o teste que falha com um segredo novo fora da lista;
+- `audit_write` chamada direto com `api_key` e `token_hash` grava sem eles;
+- o roteiro da tarefa: tabela temporária com `api_key` auditada por `audit_row_keyed('id')` sai sem o valor no insert, no update e no delete;
+- a senha de `users` continua fora;
+- em `mcp_servers`, mudar só o cache não gera linha. Renomear grava sem `tools_cache` e sem `instructions_cache`, e o cache que muda junto aparece só em `changed_columns`. O delete também sai sem o cache.
+
+Verificação:
+- `make test T=/tests/0065_audit_secret_columns.sql` passou, com o down da 0065.
+- Rodei de novo `0015`, `0025`, `0028`, `0030`, `0035`, `0039` e `0045`: passaram.
+- `make dump` rodado.
+- `docs/016` (Auditoria) e `database/AGENTS.md` (Segurança) atualizados.
+
+Para a aplicação, nada obrigatório. `audit_secret_columns()` é nova, mas a aplicação não precisa chamá-la. O histórico do `mcp_servers` deixa de trazer o cache.
