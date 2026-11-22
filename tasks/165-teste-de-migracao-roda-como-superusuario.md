@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -66,4 +66,27 @@ Nada foi executado (sem `make` nesta revisão). Não conferi se o CI roda o test
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado em `database/scripts/test-migration.sh`:
+- o `sql()` usava o superusuário (`POSTGRES_USER`) para tudo;
+- o `CREATE DATABASE` saía sem `OWNER`;
+- as migrations, anteriores e testada, rodavam como superusuário;
+- no `Makefile`, `test-migration` dependia de `up`, não de `owner`.
+
 ## Resolução (executor)
+
+- `database/scripts/test-migration.sh`:
+  - recria `<db>_mig` com `DROP DATABASE … WITH (FORCE)` e `CREATE DATABASE … OWNER moneyflow_owner`;
+  - roda o `03-owner-role.sh` com `OWNER_DBS=<db>_mig`, como o `make test` (extensões pelo superusuário, posse do schema);
+  - aplica todas as migrations, as anteriores e a testada nos dois sentidos, por `owner_sql()`: `psql -U moneyflow_owner` em `127.0.0.1`, com `PGPASSWORD=$OWNER_DB_PASSWORD`.
+  - O fixture e as conferências continuam como superusuário. O cabeçalho do script explica o porquê.
+- `database/Makefile`: `test-migration: owner`.
+- `docs/016` (Migrations e testes) e `database/AGENTS.md` (Comandos) dizem com que papel cada parte roda.
+
+Verificação:
+- `make test-migration M=0052` passou, com 42/29/42 asserções, igual a antes.
+- `make test-migration M=0063` passou, com 13/3/13.
+- O caso negativo da tarefa também foi rodado, a partir de uma cópia descartável de `database/` no scratchpad, para não tocar em `database/migrations`, que as frentes do app usam nos seus modelos de teste. A migration `0073` temporária tinha `ALTER TABLE statement_lines DISABLE TRIGGER ALL` e um `migration-tests/0073_*/` mínimo. Falhou com `permission denied: "RI_ConstraintTrigger_a_…" is a system trigger`, como falharia no deploy. A cópia foi apagada.
+
+Para a aplicação, nada. Pelo `ci.yml`, o CI não roda `make test-migration`. Se o app quiser cobrir as migrations de dados no CI, basta acrescentar `make -C database test-migration M=0052` (e as próximas) ao job `database`.

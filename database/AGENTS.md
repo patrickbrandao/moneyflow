@@ -28,7 +28,7 @@ make rollback            # desfaz a última migration
 make new NAME=create_x   # cria migrations/NNNN_create_x.sql
 make test T=/tests/0003_entities.sql   # rápido: recria <db>_test, migra, testa o down da última, migra de novo e roda só o(s) arquivo(s) dados (caminho no container; vários: T="/tests/a.sql /tests/b.sql")
 make test                # completo: o mesmo, rodando todo o pgTAP (só quando pedido, antes de PR ou de release)
-make test-migration M=0052   # migration com dados: cria <db>_mig, aplica as anteriores, fixture, sobe, confere, desce, confere, sobe e confere
+make test-migration M=0052   # migration com dados: cria <db>_mig (dono moneyflow_owner), aplica as anteriores, fixture, sobe, confere, desce, confere, sobe e confere; as migrations rodam como o dono, o fixture e as conferências como o superusuário
 make dump                # regrava schema.sql
 make seed                # carrega seeds/dev.sql
 make sizes               # diagnóstico: as 30 maiores tabelas (total, heap, índices e TOAST, linhas); DB=<banco> mede outro

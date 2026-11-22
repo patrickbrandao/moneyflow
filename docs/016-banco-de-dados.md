@@ -18,7 +18,7 @@
 - Uma migration que já está na `main` nunca é editada; mudanças vão numa nova.
 - Testes **pgTAP** em `database/tests/` cobrem constraints, triggers, funções e permissões. `make test` recria o banco de testes, aplica as migrations, testa o down da última e roda os testes.
 - `database/schema.sql` é o dump da estrutura atual, regenerado a cada mudança e commitado como referência.
-- Migration que converte dados de produção ganha um **teste de migração com dados** em `database/migration-tests/NNNN_nome/` (`fixture.sql` no schema anterior, `after_up.sql` e `after_down.sql` em pgTAP), rodado por `make test-migration M=NNNN`: cria `<db>_mig`, aplica as migrations anteriores, carrega o fixture e confere subida, descida e subida de novo (na segunda subida, `:pass = 2`). Não entra no `make test` (o pgTAP roda sobre o schema final).
+- Migration que converte dados de produção ganha um **teste de migração com dados** em `database/migration-tests/NNNN_nome/` (`fixture.sql` no schema anterior, `after_up.sql` e `after_down.sql` em pgTAP), rodado por `make test-migration M=NNNN`: cria `<db>_mig` com dono `moneyflow_owner` (e o `03-owner-role.sh`, como o `make test`), aplica as migrations anteriores, carrega o fixture e confere subida, descida e subida de novo (na segunda subida, `:pass = 2`). Todas as migrations, as anteriores e a testada, rodam como o dono, como em produção (tarefa 165): uma que só passa como superusuário (`DISABLE TRIGGER ALL`, `session_replication_role`, objeto de outro dono) falha no teste. O fixture e as conferências rodam como o superusuário. Não entra no `make test` (o pgTAP roda sobre o schema final).
 
 ## Fronteira com a aplicação
 

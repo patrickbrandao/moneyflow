@@ -52,7 +52,7 @@ test: owner     ## recria o banco de testes, migra e roda pgTAP (make test T=/te
 	$(DBMATE) -e TEST_DATABASE_URL up
 	$(COMPOSE) exec -T postgres bash -c 'pg_prove -U $(POSTGRES_USER) -d $(POSTGRES_DB)_test --ext .sql -r $(T)'
 
-test-migration: up  ## testa uma migration com dados: subida, descida e subida (make test-migration M=0052)
+test-migration: owner  ## testa uma migration com dados, com as migrations como o dono (make test-migration M=0052)
 	./scripts/test-migration.sh $(M)
 
 dump: migrate   ## regrava schema.sql (estrutura atual, commitado como referência)
