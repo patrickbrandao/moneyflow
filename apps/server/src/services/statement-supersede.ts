@@ -198,9 +198,22 @@ async function resolveProvisionals(db: Executor, substitute: ImportRow, requeste
     if (overlapping.length === 0) throw unprocessable(t.errors.supersedeNothing, 'supersede_nothing');
     return overlapping.map((p) => p.id);
   }
+  assertAmong(active, requested);
+  return [...new Set(requested)];
+}
+
+function assertAmong(active: { id: string }[], requested: string[]) {
   const ok = new Set(active.map((p) => p.id));
   if (requested.some((id) => !ok.has(id))) throw unprocessable(t.errors.supersedeInvalidTarget, 'supersede_invalid_target');
-  return [...new Set(requested)];
+}
+
+/**
+ * Os provisórios pedidos para a troca são provisórios ativos da conta (a mesma
+ * regra da execução, para a prévia do import_statement; tarefa 142): outro
+ * lote, de outra conta ou caixa, já substituído ou não provisório, é 422.
+ */
+export async function assertActiveProvisionals(db: Executor, accountId: string, requested: string[]) {
+  if (requested.length > 0) assertAmong(await activeProvisionals(db, accountId), requested);
 }
 
 /**

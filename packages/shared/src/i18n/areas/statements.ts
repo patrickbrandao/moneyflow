@@ -55,6 +55,13 @@ export const statementsStrings = {
   ofxMatchesTarget: 'casa com esta conta',
   ofxNeedsChoice: 'Nenhuma conta do arquivo casa com o banco, a agência e a conta cadastrados: escolha qual importar.',
   ofxLeftOut: (labels: string) => `Ficaram de fora as transações de ${labels}, que vieram no mesmo arquivo.`,
+  /** Tarefa 140: linhas do CSV com data ou valor inválidos. */
+  invalidRows: (total: number, examples: string) => `${total} linha(s) do arquivo não foram lidas (ex.: ${examples}).`,
+  invalidRowExample: (row: number, message: string) => `linha ${row}, ${message}`,
+  /** Tarefa 089: FITID repetido em transações diferentes. */
+  fitidCollisions: (total: number, examples: string) =>
+    `${total} transação(ões) com o FITID de outra transação (data ou valor diferentes) entraram como linhas novas (ex.: ${examples}).`,
+  fitidCollisionExample: (fitid: string, date: string, amount: string) => `FITID ${fitid} em ${date}, ${amount}`,
   ledgerBalance: 'Saldo informado no arquivo',
   sample: 'Primeiras transações',
   bankBalanceOptional: 'Saldo informado pelo banco (opcional)',

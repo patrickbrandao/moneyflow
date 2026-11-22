@@ -10,6 +10,7 @@ import {
   type PreviewRow,
   parseBoleto,
   parseNfeXml,
+  statementImportNotices,
   t,
   todayIso,
 } from '@moneyflow/shared';
@@ -587,6 +588,8 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         warnings: [
           ...(info.duplicated > 0 ? [`${info.duplicated} linha(s) já importada(s) ficam de fora.`] : []),
           ...(info.ofxLeftOut.length ? [t.statements.ofxLeftOut(info.ofxLeftOut.join(', '))] : []),
+          // Tarefas 140 e 089: as linhas do CSV que não foram lidas e o FITID repetido que entra como linha nova.
+          ...statementImportNotices(info),
           ...(!info.superseded && info.provisionalOverlap.length
             ? [t.statements.supersede.overlapWarning(info.provisionalOverlap.map((p) => `${p.fileName} (${p.id})`).join(', '))]
             : []),

@@ -1,11 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENT_TOOLS } from '@moneyflow/shared';
+import { AGENT_TOOLS, statementImportNotices } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { TOOL_HANDLERS } from '../src/agents/tool-handlers';
 import { loadAccess } from '../src/authz/access';
 import type { ServiceContext } from '../src/context';
+import { storeAttachment } from '../src/services/attachments';
+import { previewStatementImport } from '../src/services/statements';
+import { withTx } from '../src/services/tx';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
 let h: Harness;
@@ -795,13 +798,13 @@ describe('renomear o arquivo do lote (spec 009)', () => {
 
 /* ---------------- ocorrências de série no extrato (specs 033 e 034) ---------------- */
 
-function ofxOf(lines: { date: string; cents: number; memo: string }[]) {
+function ofxOf(lines: { date: string; cents: number; memo: string; fitid?: string }[]) {
   const key = Math.random().toString(36).slice(2, 10);
   const trn = lines
     .map(
       (l, i) =>
         `<STMTTRN><TRNTYPE>${l.cents < 0 ? 'DEBIT' : 'CREDIT'}</TRNTYPE><DTPOSTED>${l.date.replaceAll('-', '')}120000</DTPOSTED>` +
-        `<TRNAMT>${(l.cents / 100).toFixed(2)}</TRNAMT><FITID>${key}-${i}</FITID><NAME>${l.memo}</NAME></STMTTRN>`,
+        `<TRNAMT>${(l.cents / 100).toFixed(2)}</TRNAMT><FITID>${l.fitid ?? `${key}-${i}`}</FITID><NAME>${l.memo}</NAME></STMTTRN>`,
     )
     .join('\n');
   const dates = lines.map((l) => l.date.replaceAll('-', '')).sort();
@@ -941,4 +944,123 @@ describe('ocorrências de série no extrato (specs 033 e 034)', () => {
     };
     return { admin, s, rule: first.rule, rows: listed.rows as any[], importLines };
   }
+});
+
+/** Contexto de serviço de um usuário (para chamar a prévia das tools direto). */
+async function ctxOf(session: Awaited<ReturnType<typeof userSession>>, role: 'admin' | 'user'): Promise<ServiceContext> {
+  const actor = { id: session.id, username: session.username, email: `${session.username}@teste.local`, role, isActive: true };
+  return { db: h.db, access: await loadAccess(h.db, actor), config: h.config };
+}
+
+describe('leitura do arquivo na importação (tarefas 088, 089, 090 e 140)', () => {
+  it('CSV em Latin-1 decrescente: codificação detectada, sem "�", saldo do último dia e as linhas que não foram lidas', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const text = [
+      'data;lançamento;valor;saldo',
+      '20/10/2026;PADARIA SÃO JOÃO;-10,00;1.000,00',
+      '20/10/2026;PIX RECEBIDO;100,00;1.010,00',
+      '19/10/2026;TED;1,234.56;910,00',
+      '19/10/2026;MERCADO;-50,00;910,00',
+      '18/10/2026;SALDO ANTERIOR;0,00;960,00',
+    ].join('\r\n');
+    const latin1 = Buffer.from(text, 'latin1');
+    expect(latin1.includes(0xc3)).toBe(true); // "Ã" em Latin-1, não UTF-8
+
+    const inspect = await upload(session.cookie, '/api/statements/inspect?fileName=x.csv', latin1, 'text/csv');
+    expect(inspect.json()).toMatchObject({ format: 'csv', encoding: 'windows-1252' });
+    expect(inspect.json().csv.rows[0]).toEqual(['data', 'lançamento', 'valor', 'saldo']);
+
+    // A prévia da tool (o agente não vê os bytes; o mapeamento inline vem em UTF-8, o padrão).
+    const ctx = await ctxOf(session, 'admin');
+    const columns = { date: 'data', description: 'lançamento', amount: 'valor', balance: 'saldo' };
+    const inline = {
+      delimiter: ';',
+      encoding: 'utf-8',
+      hasHeader: true,
+      skipRows: 0,
+      dateFormat: 'dd/MM/yyyy',
+      decimalSeparator: ',',
+      columns,
+    };
+    const preview = await previewStatementImport(ctx, { accountId: s.accountA.id }, latin1, { inline });
+    expect(preview).toMatchObject({ lines: 3, fresh: 3, invalidRows: { total: 1, rows: [{ row: 4, message: 'valor inválido' }] } });
+    const attachmentId = await withTx(ctx, (tx) => storeAttachment(tx, ctx, { name: 'extrato.csv', mime: 'text/csv', content: latin1 }));
+    const input = AGENT_TOOLS.find((d) => d.name === 'import_statement')!.input.parse({
+      attachmentId,
+      accountId: s.accountA.id,
+      csvMapping: { name: 'Banco', delimiter: ';', dateFormat: 'dd/MM/yyyy', decimalSeparator: ',', columns },
+    });
+    const card = await TOOL_HANDLERS.import_statement.preview!(ctx, input as never);
+    expect(card.warnings).toContain('1 linha(s) do arquivo não foram lidas (ex.: linha 4, valor inválido).');
+
+    await admin.post('/api/csv-mappings', { financialAccountId: s.accountA.id, name: 'Banco', delimiter: ';', columns, isDefault: true });
+    const res = await upload(session.cookie, `/api/statement-imports?accountId=${s.accountA.id}&fileName=x.csv`, latin1, 'text/csv');
+    expect(res.statusCode, res.body).toBe(200);
+    const imp = res.json();
+    expect(imp.lines.map((l: any) => l.description).sort()).toEqual(['MERCADO', 'PADARIA SÃO JOÃO', 'PIX RECEBIDO']);
+    expect(imp.lines.some((l: any) => l.description.includes('\uFFFD'))).toBe(false);
+    // Arquivo do mais recente para o mais antigo: o saldo final do dia 20 é o da primeira linha (tarefa 090).
+    expect(imp).toMatchObject({ bankBalanceCents: 100_000, bankBalanceOn: '2026-10-20' });
+    // A linha do valor zero não conta como problema (tarefa 140).
+    expect(imp.invalidRows).toEqual({ total: 1, rows: [{ row: 4, message: 'valor inválido' }] });
+    expect(statementImportNotices(imp)).toEqual(['1 linha(s) do arquivo não foram lidas (ex.: linha 4, valor inválido).']);
+
+    // "Voltar ao saldo do arquivo" relê o CSV pela mesma regra.
+    await admin.put(`/api/statement-imports/${imp.id}/bank-balance`, { mode: 'clear' });
+    const restored = await admin.put(`/api/statement-imports/${imp.id}/bank-balance`, { mode: 'file' });
+    expect(restored).toMatchObject({ bankBalanceCents: 100_000, bankBalanceOn: '2026-10-20' });
+  });
+
+  it('FITID repetido: outra transação entra com aviso, no arquivo ou entre arquivos; o reimport continua duplicado', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const fitid = `F-${s.tag}`;
+    const post = (file: Buffer) => upload(session.cookie, `/api/statement-imports?accountId=${s.accountA.id}&fileName=x.ofx`, file);
+
+    const october = ofxOf([
+      { date: '2026-10-05', cents: -5_000, memo: 'FARMACIA', fitid },
+      { date: '2026-10-06', cents: -1_000, memo: 'CAFE' },
+    ]);
+    const first = await post(october);
+    expect(first.statusCode, first.body).toBe(200);
+    expect(first.json().fitidCollisions).toBeUndefined();
+
+    // Novembro com o mesmo FITID numa transação diferente: entra, com o aviso.
+    const november = ofxOf([{ date: '2026-11-05', cents: -8_000, memo: 'MERCADO', fitid }]);
+    const second = await post(november);
+    expect(second.statusCode, second.body).toBe(200);
+    expect(second.json()).toMatchObject({
+      lineCount: 1,
+      skippedDuplicates: 0,
+      fitidCollisions: { total: 1, lines: [{ fitid, postedOn: '2026-11-05', amountCents: -8_000, description: 'MERCADO' }] },
+    });
+    expect(second.json().lines[0]).toMatchObject({ fitid, amountCents: -8_000 });
+    expect(statementImportNotices(second.json())[0]).toContain(`FITID ${fitid} em 05/11/2026`);
+
+    // O mesmo FITID duas vezes no arquivo (transações diferentes e uma repetida igual): tudo entra.
+    const same = `G-${s.tag}`;
+    const twice = [
+      { date: '2026-12-01', cents: -2_000, memo: 'PADARIA', fitid: same },
+      { date: '2026-12-02', cents: -3_000, memo: 'LIVRARIA', fitid: same },
+      { date: '2026-12-02', cents: -3_000, memo: 'LIVRARIA', fitid: same },
+    ];
+    const third = await post(ofxOf(twice));
+    expect(third.statusCode, third.body).toBe(200);
+    expect(third.json()).toMatchObject({ lineCount: 3, fitidCollisions: { total: 2 } });
+
+    // Reimportar os mesmos arquivos (inclusive na ordem inversa) continua 409.
+    for (const file of [october, november, ofxOf(twice), ofxOf([...twice].reverse())]) {
+      const again = await post(file);
+      expect(again.statusCode, again.body).toBe(409);
+      expect(again.json().error.code).toBe('statement_duplicated');
+    }
+    const keys = await h.db.execute<{ dedup_hash: string }>(
+      sql`SELECT dedup_hash FROM statement_lines WHERE financial_account_id = ${s.accountA.id} AND fitid = ${same}`,
+    );
+    expect(keys.rows.map((r) => r.dedup_hash).filter((k) => k === `fitid:${same}`)).toHaveLength(1);
+    expect(keys.rows.every((r) => r.dedup_hash.length <= 200)).toBe(true);
+  });
 });

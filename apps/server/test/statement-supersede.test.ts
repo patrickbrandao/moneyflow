@@ -4,6 +4,8 @@ import pino from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
+import { loadAccess } from '../src/authz/access';
+import { previewStatementImport } from '../src/services/statements';
 import { client, type Harness, newSession, scenario, startApp, uid, userSession } from './helpers';
 
 /*
@@ -444,5 +446,35 @@ describe('lote provisório e a troca pelo consolidado (spec 031)', () => {
     const after = await admin.get(`/api/statement-imports/${cons.id}/superseded-lines`);
     expect(after.find((l: any) => l.id === livro.id)).toMatchObject({ status: 'superseded', supersedeOutcome: 'kept' });
     expect((await admin.get(`/api/statement-imports/${cons.id}`)).supersedePending).toBe(0);
+  });
+
+  it('a prévia do import_statement só troca provisórios ativos da conta, como a execução (tarefa 142)', async () => {
+    const s = await scenario(h, admin);
+    const other = await scenario(h, admin);
+    const editorSession = await userSession(h);
+    await admin.post(`/api/caixas/${s.caixaA.id}/members`, { userId: editorSession.id, role: 'editor' });
+    const actor = { id: editorSession.id, username: editorSession.username, email: 'e@teste.local', role: 'user' as const, isActive: true };
+    const ctx = { db: h.db, access: await loadAccess(h.db, actor), config: h.config };
+    const october = (name: string) => ofx('2026-10-01', '2026-10-10', [{ date: '2026-10-02', cents: -1_500, name }]);
+
+    const prov = await importOfx(adminSession, s.accountA.id, october('CAFE'));
+    await admin.put(`/api/statement-imports/${prov.id}/provisional`, { provisional: true });
+    const notProvisional = await importOfx(
+      adminSession,
+      s.accountA.id,
+      ofx('2026-09-01', '2026-09-30', [{ date: '2026-09-02', cents: -900, name: 'PAO' }]),
+    );
+    const foreign = await importOfx(adminSession, other.accountA.id, october('CHA'));
+    await admin.put(`/api/statement-imports/${foreign.id}/provisional`, { provisional: true });
+
+    const file = ofx('2026-10-01', '2026-10-31', [{ date: '2026-10-02', cents: -1_500, name: 'CAFETERIA' }]);
+    for (const ids of [[foreign.id], [notProvisional.id], [prov.id, foreign.id]]) {
+      await expect(previewStatementImport(ctx, { accountId: s.accountA.id }, file, { supersede: ids })).rejects.toMatchObject({
+        status: 422,
+        code: 'supersede_invalid_target',
+      });
+    }
+    const ok = await previewStatementImport(ctx, { accountId: s.accountA.id }, file, { supersede: [prov.id] });
+    expect(ok.superseded).toMatchObject({ provisionalImportIds: [prov.id], paired: [expect.objectContaining({ description: 'CAFE' })] });
   });
 });

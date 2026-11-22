@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -69,4 +69,16 @@ Executado só o script de decodificação (`<RASCUNHO>/scripts/enc.ts`). Não co
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código: `inspectStatement` devolvia `encoding: 'auto'` fixo, a tela caía sempre em `utf-8` e o `decodeWith` do import decodificava os bytes Latin-1 com o `TextDecoder('utf-8')` não fatal, gravando `U+FFFD` (e mudando a base do `dedup_hash`).
+
 ## Resolução (executor)
+
+- `packages/shared/src/parsers/ofx.ts`: `detectStatementEncoding(bytes)` (BOM ou UTF-8 válido → `utf-8`; senão o charset do cabeçalho OFX/XML, caindo em `windows-1252`), reaproveitado por `decodeStatementFile`; `detectCsvEncoding` (`utf-8` ou `windows-1252`, os valores do mapeamento) e `decodeCsvFile(bytes, encoding)`: com BOM, UTF-8; `latin1`/`windows-1252`, windows-1252; `utf-8` com bytes que não são UTF-8 válido, windows-1252 (nunca "�").
+- `apps/server/src/services/statements.ts`: a leitura prévia devolve a codificação detectada (no CSV, `utf-8` ou `windows-1252`; no OFX, o rótulo usado) e o import lê o CSV por `decodeCsvFile` (saiu o `decodeWith`).
+- `apps/web/src/components/reconciliation/ImportModal.tsx`: a prévia do mapeamento usa o mesmo `decodeCsvFile`, então a tela pré-seleciona `windows-1252` e mostra o que o servidor vai gravar.
+- Decisão: ler como windows-1252 (em vez de recusar com 422) o mapeamento em UTF-8 com bytes inválidos, porque o agente não vê os bytes e o resultado é sempre melhor que o "�". O mapeamento explícito em `latin1`/`windows-1252` continua valendo como está.
+- Spec 009 (codificação detectada) e a linha dela no `docs/INDEX.md`.
+- Testes: `packages/shared/test/ofx.test.ts` ("codificação do CSV": UTF-8 com e sem BOM, Latin-1, o OFX 1252 e o mapeamento UTF-8 com arquivo Latin-1); `apps/server/test/statements.test.ts`, "CSV em Latin-1 decrescente…": inspect com `windows-1252`, prévia da tool e import com mapeamento `utf-8` sem `U+FFFD`.
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

@@ -6,8 +6,12 @@ import {
   type CardChargeSuggestion,
   type CsvMapping,
   cardChargeMatch,
+  csvBankBalance,
+  decodeCsvFile,
   decodeStatementFile,
+  detectCsvEncoding,
   detectDelimiter,
+  detectStatementEncoding,
   type importBankBalanceInput,
   importLink,
   type importRenameInput,
@@ -25,9 +29,11 @@ import {
   pickOfxStatement,
   pickSeriesOccurrences,
   type SeriesCandidateInfo,
+  type StatementFitidCollisions,
   type StatementImportDetail,
   type StatementImportSummary,
   type StatementInspect,
+  type StatementInvalidRows,
   type StatementLineRow,
   type SupersedeResult,
   scoreCandidate,
@@ -47,7 +53,7 @@ import { loadCard } from './card-core';
 import { settleFromLine } from './line-settle';
 import { createNotifications } from './notifications';
 import { TERMS_SQL, termsOf } from './series-core';
-import { activeProvisionals, lockImports, previewSupersedeForFile, supersedeInTx } from './statement-supersede';
+import { activeProvisionals, assertActiveProvisionals, lockImports, previewSupersedeForFile, supersedeInTx } from './statement-supersede';
 import { withTx } from './tx';
 import { camel, iso } from './util';
 
@@ -119,6 +125,8 @@ type ParsedFile = {
   csvMappingId: string | null;
   /** OFX com várias contas: as que ficaram de fora (rótulos). */
   ofxLeftOut: string[];
+  /** CSV: as linhas com data ou valor inválidos, que não entram (tarefa 140). */
+  invalidRows: { row: number; message: string }[];
 };
 
 const ofxLabel = (st: OfxStatement) => t.statements.ofxAccountLabel(st);
@@ -156,11 +164,6 @@ function chooseOfxStatement(statements: OfxStatement[], target: StatementTarget,
   if (pick.index !== null) return pick.index;
   const list = statements.map((st, i) => `${i + 1} = ${ofxLabel(st)}`).join('; ');
   throw unprocessable(t.errors.statementOfxChooseAccount(list), 'statement_ofx_choose_account');
-}
-
-function decodeWith(bytes: Buffer, encoding: string): string {
-  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return bytes.subarray(3).toString('utf8');
-  return new TextDecoder(encoding === 'latin1' ? 'latin1' : encoding).decode(bytes);
 }
 
 function mappingOf(row: InlineCsvMapping): CsvMapping {
@@ -218,12 +221,13 @@ export async function parseStatementFile(
       bankBalance: ofx.ledgerBalance,
       csvMappingId: null,
       ofxLeftOut: statements.filter((_, i) => i !== index).map(ofxLabel),
+      invalidRows: [],
     };
   }
 
   const mapping = inline ? { ...inline, id: null } : await findMapping(db, target, mappingId);
   if (!mapping) throw unprocessable(t.errors.csvMappingRequired, 'csv_mapping_required');
-  const csvText = decodeWith(bytes, mapping.encoding);
+  const csvText = decodeCsvFile(bytes, mapping.encoding);
   let applied: ReturnType<typeof applyCsvMapping>;
   try {
     applied = applyCsvMapping(parseCsv(csvText, mapping.delimiter), mappingOf(mapping));
@@ -242,31 +246,60 @@ export async function parseStatementFile(
   if (target.kind === 'card' && lines.filter((l) => l.amountCents > 0).length > lines.length / 2) {
     lines = lines.map((l) => ({ ...l, amountCents: -l.amountCents }));
   }
-  const withBalance = applied.lines.filter((l) => l.balanceCents !== null);
-  const last = withBalance.reduce<(typeof withBalance)[number] | null>((acc, l) => (!acc || l.postedOn >= acc.postedOn ? l : acc), null);
   return {
     format: 'csv',
     lines,
     periodStart: null,
     periodEnd: null,
-    bankBalance: last ? { amountCents: last.balanceCents!, date: last.postedOn } : null,
+    bankBalance: csvBankBalance(applied.lines),
     csvMappingId: mapping.id,
     ofxLeftOut: [],
+    invalidRows: applied.errors,
   };
 }
+
+type DedupLine = Pick<ParsedLine, 'postedOn' | 'amountCents' | 'description' | 'fitid'>;
+
+/** A linha da conta que tem a chave `fitid:<FITID>` (data e valor), para reconhecer a colisão de FITID. */
+export type FitidHolder = { postedOn: string; amountCents: number };
+
+const fitidKey = (fitid: string) => `fitid:${fitid}`.slice(0, 200);
+const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
 /**
  * Chave de deduplicação (docs/016): `fitid:<FITID>` ou SHA-256 de data|valor|descrição normalizada|ordem.
  * A normalização do dedup é congelada (normalizeDescriptionForDedup): o hash das linhas já importadas não muda.
+ *
+ * FITID que não é único (tarefa 089): se a conta já tem `fitid:<FITID>` com outra data ou outro valor
+ * (`holders`), ou se o FITID se repete no arquivo, a linha é outra transação e recebe a chave de reserva
+ * `fitid:<FITID>#<SHA-256 de FITID|data|valor|descrição normalizada|ordem entre as iguais>`. A linha com a
+ * mesma data e o mesmo valor da que tem a chave é a mesma transação (duplicada), uma vez só. O reimport do
+ * mesmo arquivo dá as mesmas chaves, em qualquer ordem.
  */
-export function dedupHashes(lines: Pick<ParsedLine, 'postedOn' | 'amountCents' | 'description' | 'fitid'>[]): string[] {
+export function dedupHashes(lines: DedupLine[], holders: ReadonlyMap<string, FitidHolder> = new Map()): string[] {
   const seen = new Map<string, number>();
+  const taken = new Set<string>();
+  const reserved = new Map<string, number>();
   return lines.map((line) => {
-    if (line.fitid) return `fitid:${line.fitid}`.slice(0, 200);
+    if (line.fitid) {
+      const key = fitidKey(line.fitid);
+      if (!taken.has(key)) {
+        const holder = holders.get(key);
+        if (!holder || (holder.postedOn === line.postedOn && holder.amountCents === line.amountCents)) {
+          taken.add(key);
+          return key;
+        }
+      }
+      // 6 + 129 + 1 + 64 = 200, o limite de statement_lines_dedup_hash_check.
+      const base = `${line.fitid}|${line.postedOn}|${line.amountCents}|${normalizeDescriptionForDedup(line.description)}`;
+      const ordinal = reserved.get(base) ?? 0;
+      reserved.set(base, ordinal + 1);
+      return `fitid:${line.fitid.slice(0, 129)}#${sha256(`${base}|${ordinal}`)}`;
+    }
     const base = `${line.postedOn}|${line.amountCents}|${normalizeDescriptionForDedup(line.description)}`;
     const ordinal = seen.get(base) ?? 0;
     seen.set(base, ordinal + 1);
-    return createHash('sha256').update(`${base}|${ordinal}`).digest('hex');
+    return sha256(`${base}|${ordinal}`);
   });
 }
 
@@ -275,8 +308,57 @@ const notProvisional = sql`NOT EXISTS (SELECT 1 FROM statement_imports si
                                     WHERE si.id = statement_lines.statement_import_id AND si.provisional)`;
 
 /**
+ * As linhas do arquivo contra as da conta (ou do cartão): a chave de cada uma,
+ * as que já existem (`known`) e as novas que entram pela chave de reserva do
+ * FITID repetido (tarefa 089). Duas consultas, qualquer que seja o tamanho do arquivo.
+ */
+async function dedupAgainstTarget(db: Executor, target: StatementTarget, lines: ParsedLine[]) {
+  const ownerColumn = target.kind === 'account' ? sql`financial_account_id` : sql`card_caixa_id`;
+  const ownerId = target.kind === 'account' ? target.accountId : target.cardId;
+  const inList = (keys: string[]) =>
+    sql.join(
+      keys.map((h) => sql`${h}`),
+      sql`, `,
+    );
+  const fitidKeys = [...new Set(lines.flatMap((l) => (l.fitid ? [fitidKey(l.fitid)] : [])))];
+  const holders = new Map<string, FitidHolder>();
+  if (fitidKeys.length > 0) {
+    const rows = await db.execute<{ dedup_hash: string; posted_on: string; amount_cents: number }>(sql`
+      SELECT dedup_hash, posted_on, amount_cents FROM statement_lines WHERE ${ownerColumn} = ${ownerId}::uuid
+         AND ${notProvisional} AND dedup_hash IN (${inList(fitidKeys)})`);
+    for (const r of rows.rows) holders.set(r.dedup_hash, { postedOn: r.posted_on, amountCents: Number(r.amount_cents) });
+  }
+  const hashes = dedupHashes(lines, holders);
+  const existing = await db.execute<{ dedup_hash: string }>(sql`
+    SELECT dedup_hash FROM statement_lines WHERE ${ownerColumn} = ${ownerId}::uuid
+       AND ${notProvisional} AND dedup_hash IN (${inList(hashes)})`);
+  const known = new Set(existing.rows.map((r) => r.dedup_hash));
+  const fresh = lines.map((line, i) => ({ line, hash: hashes[i]! })).filter((x) => !known.has(x.hash));
+  const collided = fresh.filter((x) => x.line.fitid && x.hash !== fitidKey(x.line.fitid));
+  const fitidCollisions: StatementFitidCollisions | undefined = collided.length
+    ? {
+        total: collided.length,
+        lines: collided.slice(0, SHOWN_ROWS).map(({ line }) => ({
+          fitid: line.fitid!,
+          postedOn: line.postedOn,
+          amountCents: line.amountCents,
+          description: line.description,
+        })),
+      }
+    : undefined;
+  return { fresh, fitidCollisions };
+}
+
+/** Quantas linhas inválidas ou colisões a resposta lista (o total vem junto). */
+const SHOWN_ROWS = 50;
+
+const invalidRowsOf = (parsed: ParsedFile): StatementInvalidRows | undefined =>
+  parsed.invalidRows.length ? { total: parsed.invalidRows.length, rows: parsed.invalidRows.slice(0, SHOWN_ROWS) } : undefined;
+
+/**
  * Prévia de um import (sem gravar): formato, período e quantas linhas são
- * novas ou já importadas (spec 027, cartão de aprovação do import_statement).
+ * novas ou já importadas (spec 027, cartão de aprovação do import_statement),
+ * com as linhas do CSV que não foram lidas e as colisões de FITID.
  */
 export async function previewStatementImport(
   ctx: ServiceContext,
@@ -285,23 +367,15 @@ export async function previewStatementImport(
   opts: { mappingId?: string; inline?: InlineCsvMapping; ofxStatement?: number; provisional?: boolean; supersede?: string[] },
 ) {
   const target = await resolveTarget(ctx, ref, true);
-  if (opts.provisional && target.kind !== 'account')
+  if ((opts.provisional || opts.supersede?.length) && target.kind !== 'account')
     throw unprocessable(t.errors.statementProvisionalAccountOnly, 'statement_provisional_account_only');
+  // A troca pedida vale só para provisórios ativos da conta, como na execução (tarefa 142).
+  if (target.kind === 'account') await assertActiveProvisionals(ctx.db, target.accountId, opts.supersede ?? []);
   const parsed = await parseStatementFile(ctx.db, target, bytes, opts);
   if (parsed.lines.length === 0) throw unprocessable(t.errors.statementEmpty, 'statement_empty');
-  const hashes = dedupHashes(parsed.lines);
-  const ownerColumn = target.kind === 'account' ? sql`financial_account_id` : sql`card_caixa_id`;
-  const ownerId = target.kind === 'account' ? target.accountId : target.cardId;
-  const existing = await ctx.db.execute<{ dedup_hash: string }>(sql`
-    SELECT dedup_hash FROM statement_lines WHERE ${ownerColumn} = ${ownerId}::uuid
-       AND ${notProvisional}
-       AND dedup_hash IN (${sql.join(
-         hashes.map((h) => sql`${h}`),
-         sql`, `,
-       )})`);
-  const known = new Set(existing.rows.map((r) => r.dedup_hash));
+  const dedup = await dedupAgainstTarget(ctx.db, target, parsed.lines);
+  const fresh = dedup.fresh.map((x) => x.line);
   const dates = parsed.lines.map((l) => l.postedOn).sort();
-  const fresh = parsed.lines.filter((_, i) => !known.has(hashes[i]!));
   const periodStart = [parsed.periodStart, dates[0]].filter(Boolean).sort()[0] ?? null;
   const periodEnd = [parsed.periodEnd, dates.at(-1)].filter(Boolean).sort().at(-1) ?? null;
   // Spec 031: os provisórios ativos sobrepostos e, com a troca, o resultado dela sem gravar.
@@ -325,6 +399,8 @@ export async function previewStatementImport(
     inCents: fresh.filter((l) => l.amountCents > 0).reduce((sum, l) => sum + l.amountCents, 0),
     outCents: fresh.filter((l) => l.amountCents < 0).reduce((sum, l) => sum + l.amountCents, 0),
     ofxLeftOut: parsed.ofxLeftOut,
+    invalidRows: invalidRowsOf(parsed),
+    fitidCollisions: dedup.fitidCollisions,
   };
 }
 
@@ -356,6 +432,7 @@ export async function inspectStatement(
   ref: { accountId?: string; cardCaixaId?: string } = {},
 ): Promise<StatementInspect> {
   const text = decodeStatementFile(bytes);
+  // A codificação detectada (tarefa 088): no CSV, a tela a pré-seleciona no mapeamento.
   if (looksLikeOfx(text)) {
     const statements = readOfxStatements(text);
     const target = ref.accountId || ref.cardCaixaId ? (await resolveTarget(ctx, ref, false)).ofx : null;
@@ -364,7 +441,7 @@ export async function inspectStatement(
     const shown = all[pick.index ?? pick.suggested ?? 0]!;
     return {
       format: 'ofx',
-      encoding: 'auto',
+      encoding: detectStatementEncoding(bytes),
       ofx: {
         ...shown,
         statements: all,
@@ -377,7 +454,7 @@ export async function inspectStatement(
   const delimiter = detectDelimiter(text);
   const rows = parseCsv(text, delimiter);
   if (rows.length === 0) throw unprocessable(t.errors.statementFormat, 'statement_format');
-  return { format: 'csv', encoding: 'auto', ofx: null, csv: { delimiter, rows: rows.slice(0, 20) } };
+  return { format: 'csv', encoding: detectCsvEncoding(bytes), ofx: null, csv: { delimiter, rows: rows.slice(0, 20) } };
 }
 
 /* ---------------- import ---------------- */
@@ -392,20 +469,9 @@ export async function importStatement(
     throw unprocessable(t.errors.statementProvisionalAccountOnly, 'statement_provisional_account_only');
   const parsed = await parseStatementFile(ctx.db, target, file.content, query);
   if (parsed.lines.length === 0) throw unprocessable(t.errors.statementEmpty, 'statement_empty');
-  const hashes = dedupHashes(parsed.lines);
 
   const result = await withTx(ctx, async (tx) => {
-    const ownerColumn = target.kind === 'account' ? sql`financial_account_id` : sql`card_caixa_id`;
-    const ownerId = target.kind === 'account' ? target.accountId : target.cardId;
-    const existing = await tx.execute<{ dedup_hash: string }>(sql`
-      SELECT dedup_hash FROM statement_lines WHERE ${ownerColumn} = ${ownerId}::uuid
-         AND ${notProvisional}
-         AND dedup_hash IN (${sql.join(
-           hashes.map((h) => sql`${h}`),
-           sql`, `,
-         )})`);
-    const known = new Set(existing.rows.map((r) => r.dedup_hash));
-    const fresh = parsed.lines.map((line, i) => ({ line, hash: hashes[i]! })).filter((x) => !known.has(x.hash));
+    const { fresh, fitidCollisions } = await dedupAgainstTarget(tx, target, parsed.lines);
     if (fresh.length === 0) throw new AppError(409, 'statement_duplicated', t.errors.statementAllDuplicated);
 
     const dates = parsed.lines.map((l) => l.postedOn).sort();
@@ -480,13 +546,16 @@ export async function importStatement(
       if (!query.provisional && left.length > 0) provisionalOverlap = left;
     }
     await autoMatch(ctx, tx, imp!.id);
-    return { id: imp!.id, skipped: parsed.lines.length - fresh.length, superseded, provisionalOverlap };
+    return { id: imp!.id, skipped: parsed.lines.length - fresh.length, superseded, provisionalOverlap, fitidCollisions };
   });
   const detail = await getImport(ctx, result.id);
+  const invalidRows = invalidRowsOf(parsed);
   return {
     ...detail,
     skippedDuplicates: result.skipped,
     ...(parsed.ofxLeftOut.length ? { ofxLeftOut: parsed.ofxLeftOut } : {}),
+    ...(invalidRows ? { invalidRows } : {}),
+    ...(result.fitidCollisions ? { fitidCollisions: result.fitidCollisions } : {}),
     ...(result.superseded ? { superseded: result.superseded } : {}),
     ...(result.provisionalOverlap ? { provisionalOverlap: result.provisionalOverlap } : {}),
   };

@@ -4,6 +4,7 @@ import {
   CSV_DELIMITERS,
   CSV_ENCODINGS,
   type CsvMappingRow,
+  decodeCsvFile,
   formatDate,
   formatMonth,
   parseCsv,
@@ -11,6 +12,7 @@ import {
   type StatementImportDetail,
   type StatementImportSummary,
   type StatementInspect,
+  statementImportNotices,
   t,
   todayIso,
 } from '@moneyflow/shared';
@@ -98,13 +100,8 @@ function guessLayout(text: string, fallback: MappingForm['delimiter']) {
   return best;
 }
 
-function decode(buffer: ArrayBuffer, encoding: string): string {
-  try {
-    return new TextDecoder(encoding === 'latin1' ? 'iso-8859-1' : encoding).decode(buffer);
-  } catch {
-    return new TextDecoder().decode(buffer);
-  }
-}
+/** A mesma leitura do servidor (tarefa 088): o CSV em Latin-1 com mapeamento em UTF-8 não aparece com "�". */
+const decode = (buffer: ArrayBuffer, encoding: string): string => decodeCsvFile(new Uint8Array(buffer), encoding);
 
 /** Importar extrato (conta) ou fatura (cartão): lê o arquivo, mostra o resumo do OFX ou o mapeamento do CSV, e importa. */
 export function ImportModal({
@@ -197,7 +194,8 @@ export function ImportModal({
         provisional: provisional || undefined,
         supersede: !isCard && !provisional && replacing.size ? [...replacing].join(',') : undefined,
       });
-      toast.success(s.imported(detail.lineCount, detail.skippedDuplicates ?? 0));
+      // Tarefas 140 e 089: as linhas que não foram lidas e o FITID repetido que entrou como linha nova.
+      toast.success([s.imported(detail.lineCount, detail.skippedDuplicates ?? 0), ...statementImportNotices(detail)].join(' '));
       onImported(detail);
       return true;
     } catch (err) {
