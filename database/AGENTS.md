@@ -9,13 +9,14 @@ Leia antes de trabalhar: [docs/016-banco-de-dados.md](../docs/016-banco-de-dados
 | Caminho | Conteúdo |
 |---|---|
 | `docker-compose.yml` | Serviço `postgres` (PostgreSQL 18 + pgvector + pgTAP) e `dbmate` (profile `tools`). |
-| `docker/Dockerfile` | Imagem `pgvector/pgvector:pg18` com pgTAP e `pg_prove`. |
+| `docker/Dockerfile` | Imagem `pgvector/pgvector:0.8.7-pg18-bookworm` (presa pelo digest) com pgTAP e `pg_prove` em versões fixas (docs/016, Motor e imagem). |
 | `docker/initdb/` | Scripts do primeiro boot do volume: banco `<db>_test`, papel `moneyflow_app` e o dono `moneyflow_owner` (`03-owner-role.sh`, idempotente: `make owner` converte um volume antigo). |
 | `migrations/NNNN_nome.sql` | Migrations dbmate, numeradas com 4 dígitos sequenciais. |
 | `tests/NNNN_nome.sql` | Testes pgTAP, um arquivo por área (mesmo número da migration que cria a área). |
 | `migration-tests/NNNN_nome/` | Teste de migração com dados: `fixture.sql` (no schema anterior), `after_up.sql` e `after_down.sql` (pgTAP). Fora do `make test`. |
 | `seeds/dev.sql` | Dados de desenvolvimento, idempotentes. Nunca usados em testes nem em produção. |
 | `schema.sql` | Dump da estrutura atual (gerado por `make dump`, commitado como referência; não edite). |
+| `privileges.sql` | Os `GRANT`/`REVOKE` e privilégios padrão do schema (gerado por `make dump` junto com o `schema.sql`; não edite). |
 | `scripts/` | Utilitários (`new-migration.sh`, `test-migration.sh`). |
 
 ## Comandos (rodar dentro de `database/`)
@@ -29,7 +30,7 @@ make new NAME=create_x   # cria migrations/NNNN_create_x.sql
 make test T=/tests/0003_entities.sql   # rápido: recria <db>_test, migra, testa o down da última, migra de novo e roda só o(s) arquivo(s) dados (caminho no container; vários: T="/tests/a.sql /tests/b.sql")
 make test                # completo: o mesmo, rodando todo o pgTAP (só quando pedido, antes de PR ou de release)
 make test-migration M=0052   # migration com dados: cria <db>_mig (dono moneyflow_owner), aplica as anteriores, fixture, sobe, confere, desce, confere, sobe e confere; as migrations rodam como o dono, o fixture e as conferências como o superusuário
-make dump                # regrava schema.sql
+make dump                # regrava schema.sql e privileges.sql
 make seed                # carrega seeds/dev.sql
 make sizes               # diagnóstico: as 30 maiores tabelas (total, heap, índices e TOAST, linhas); DB=<banco> mede outro
 make psql                # console no banco de desenvolvimento
@@ -41,7 +42,7 @@ make reset               # APAGA o banco de desenvolvimento e recria do zero
 1. `make new NAME=...` e escreva o `-- migrate:up` e um `-- migrate:down` que desfaça tudo.
 2. Escreva ou atualize o teste pgTAP da área. Migration que converte dados de produção também ganha o teste de migração com dados (`migration-tests/NNNN_nome/`, `make test-migration M=NNNN`).
 3. Rode o nível rápido: `make test T=/tests/NNNN_area.sql` com o(s) arquivo(s) pgTAP da área tocada precisa passar. Ele ainda recria o banco de testes, aplica todas as migrations e testa o down da última; só não roda todo o pgTAP.
-4. `make dump` (obrigatório quando o schema muda) e commite `schema.sql` junto com a migration e o teste.
+4. `make dump` (obrigatório quando o schema ou um privilégio muda) e commite `schema.sql` e `privileges.sql` junto com a migration e o teste.
 5. Informe ao agente da aplicação o que mudou, para ele regenerar o schema Drizzle (ver 016).
 
 ## Níveis de verificação

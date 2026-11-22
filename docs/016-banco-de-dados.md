@@ -8,7 +8,11 @@
 
 ## Motor e imagem
 
-- PostgreSQL 18 com **pgvector** (imagem `pgvector/pgvector:pg18`) e **pgTAP** para testes.
+- PostgreSQL 18 com **pgvector** e **pgTAP** para testes, em versões fixas (tarefa 163), registradas aqui e no `database/docker/Dockerfile`:
+  - imagem base `pgvector/pgvector:0.8.7-pg18-bookworm`, presa também pelo digest `sha256:38681dc6…fe39782`: PostgreSQL 18.7 e pgvector 0.8.7 (o `hnsw.iterative_scan` de `ai_embeddings_search` pede 0.8+). A tag `0.8.7-pg18` é republicada a cada versão menor do Postgres, e o digest impede a troca silenciosa;
+  - pgTAP `postgresql-18-pgtap=1.3.4-1.pgdg12+2` e `pg_prove` (`libtap-parser-sourcehandler-pgtap-perl=3.37-1.pgdg120+1`), do apt do PGDG. Quando o PGDG publicar outra versão e tirar esta do repositório, o build falha e a troca é deliberada;
+  - dbmate `ghcr.io/amacneil/dbmate:2.38.2` no serviço `dbmate` daqui (o `migrate` do compose da raiz usa a mesma versão);
+  - para atualizar: troque a tag e o digest juntos (`docker buildx imagetools inspect pgvector/pgvector:<tag>`) e as versões do apt, rode o `make test` inteiro e registre as versões aqui. O cliente `postgresql-client-18` da imagem da aplicação (dump e restauração do backup) precisa ser da mesma versão principal do servidor.
 - `database/docker-compose.yml` sobe o banco isoladamente. O compose da aplicação, quando existir, inclui este arquivo em vez de redefinir o Postgres. A porta é publicada só no loopback (`MONEYFLOW_DB_BIND`, padrão `127.0.0.1`; `0.0.0.0` expõe na rede de propósito), porque o superusuário de desenvolvimento tem senha conhecida (tarefa 068).
 - Extensões habilitadas: `vector` (embeddings para os agentes de IA, F4), `pg_trgm` (busca textual), `citext` (username e email sem distinção de maiúsculas).
 
@@ -17,7 +21,7 @@
 - **SQL-first com dbmate**: `database/migrations/NNNN_nome.sql` (4 dígitos sequenciais), cada uma com `migrate:up` e `migrate:down`.
 - Uma migration que já está na `main` nunca é editada; mudanças vão numa nova.
 - Testes **pgTAP** em `database/tests/` cobrem constraints, triggers, funções e permissões. `make test` recria o banco de testes, aplica as migrations, testa o down da última e roda os testes.
-- `database/schema.sql` é o dump da estrutura atual, regenerado a cada mudança e commitado como referência.
+- `database/schema.sql` é o dump da estrutura atual (sem os privilégios), e `database/privileges.sql`, só os `GRANT`/`REVOKE` (inclusive os por coluna que blindam os segredos) e os `ALTER DEFAULT PRIVILEGES`, na ordem do `pg_dump` (tarefa 163). Os dois são regenerados por `make dump` a cada mudança e commitados como referência. O CI os confere com `git diff --exit-code` depois de um `make dump`.
 - Migration que converte dados de produção ganha um **teste de migração com dados** em `database/migration-tests/NNNN_nome/` (`fixture.sql` no schema anterior, `after_up.sql` e `after_down.sql` em pgTAP), rodado por `make test-migration M=NNNN`: cria `<db>_mig` com dono `moneyflow_owner` (e o `03-owner-role.sh`, como o `make test`), aplica as migrations anteriores, carrega o fixture e confere subida, descida e subida de novo (na segunda subida, `:pass = 2`). Todas as migrations, as anteriores e a testada, rodam como o dono, como em produção (tarefa 165): uma que só passa como superusuário (`DISABLE TRIGGER ALL`, `session_replication_role`, objeto de outro dono) falha no teste. O fixture e as conferências rodam como o superusuário. Não entra no `make test` (o pgTAP roda sobre o schema final).
 
 ## Fronteira com a aplicação

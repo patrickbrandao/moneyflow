@@ -57,9 +57,14 @@ test: owner     ## recria o banco de testes, migra e roda pgTAP (make test T=/te
 test-migration: owner  ## testa uma migration com dados, com as migrations como o dono (make test-migration M=0052)
 	./scripts/test-migration.sh $(M)
 
-dump: migrate   ## regrava schema.sql (estrutura atual, commitado como referência)
-	$(COMPOSE) exec -T postgres pg_dump -U $(POSTGRES_USER) -d $(POSTGRES_DB) --schema-only --no-owner --no-privileges \
+# schema.sql: a estrutura, sem os privilégios; privileges.sql: só os GRANT/REVOKE (inclusive os por coluna que blindam os
+# segredos) e os privilégios padrão, na ordem do pg_dump (tarefa 163). Os dois são referência commitada; o CI confere.
+dump: migrate   ## regrava schema.sql (estrutura) e privileges.sql (GRANT/REVOKE e privilégios padrão)
+	set -o pipefail; $(COMPOSE) exec -T postgres pg_dump -U $(POSTGRES_USER) -d $(POSTGRES_DB) --schema-only --no-owner --no-privileges \
 	  | sed '/^\\restrict/d;/^\\unrestrict/d' > schema.sql
+	set -o pipefail; { echo '-- Privilégios do schema (GRANT/REVOKE e ALTER DEFAULT PRIVILEGES), gerado por make dump. Não edite.'; \
+	  $(COMPOSE) exec -T postgres pg_dump -U $(POSTGRES_USER) -d $(POSTGRES_DB) --schema-only --no-owner \
+	  | grep -E '^(GRANT|REVOKE|ALTER DEFAULT PRIVILEGES) '; } > privileges.sql
 
 seed: migrate   ## carrega dados de desenvolvimento
 	$(PSQL) -d $(POSTGRES_DB) < seeds/dev.sql

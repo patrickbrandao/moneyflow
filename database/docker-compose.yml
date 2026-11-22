@@ -30,7 +30,7 @@ services:
 
   # Ferramenta de migrations (só roda sob demanda: `make migrate`).
   dbmate:
-    image: ghcr.io/amacneil/dbmate:2
+    image: ghcr.io/amacneil/dbmate:2.38.2
     profiles: ["tools"]
     depends_on:
       postgres:
