@@ -113,3 +113,27 @@ Verificação:
 - `docs/016` atualizada (Caixas, Espelho, Baixas e Extratos). `make dump` rodado.
 
 Para a aplicação, nada obrigatório. Opcional: traduzir em `apps/server/src/errors.ts` as constraints novas `caixas_holder_locked_check` (hoje só a checagem de títulos de `caixas.ts:148-153` tem mensagem própria), `settlements_mirror_required_check` e `statement_lines_card_item_check`. Também convém confirmar que `test/backup.test.ts` passa, porque a ida e volta leva as duas pernas na mesma unidade.
+
+### Complemento (lote 2 do dba, 2026-11-22): desligar o par com baixas ligadas
+
+Achado no lote 1: `settlements_mirror_title_check` (as pernas da baixa ficam nos dois títulos do par) só rodava quando a baixa mudava. Desligar o par espelhado, ou trocar o espelho de um dos lados, deixava as pernas apontando uma para a outra fora de um par.
+
+Migration `database/migrations/0072_mirror_unlink_settlement_legs.sql`; teste `database/tests/0072_mirror_unlink_settlement_legs.sql`.
+
+- `titles_mirror_check` confere também as pernas das baixas do título: a perna ligada a uma baixa dele tem de estar no `mirror_title_id` dele. Senão, dá `23514 settlements_mirror_title_check` no COMMIT, com a mesma constraint e o mesmo texto ("are not on a mirrored title pair") da checagem do lado da baixa.
+- Vale para baixas ativas e estornadas.
+- Para desligar o par, solte as pernas (`mirror_settlement_id` nulo nas duas) na mesma transação.
+
+Testes:
+- desligar só o par com a baixa ligada é recusado;
+- desligar o par e soltar as pernas juntos passa;
+- o par sem baixa desliga como antes;
+- trocar o espelho com a perna no espelho antigo é recusado;
+- com as pernas estornadas, desligar só o par continua recusado;
+- as regras de reciprocidade e de valor de `titles_mirror_check` continuam valendo.
+
+Verificação:
+- `make test` com `0072`, `0060`, `0008`, `0009`, `0013` e `0022` passou, com o down da 0072.
+- `docs/016` (Baixas) atualizada.
+
+Para a aplicação, nada obrigatório. Não achei código que desligue um par com baixas. Se um dia houver, ele solta as pernas na mesma transação. Opcional: traduzir `settlements_mirror_title_check` em `apps/server/src/errors.ts`.

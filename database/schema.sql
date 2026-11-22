@@ -10336,6 +10336,13 @@ BEGIN
     RETURN NULL;
   END IF;
 
+  -- As pernas das baixas acompanham o par (tarefa 148): a perna ligada a uma baixa deste título fica no espelho dele.
+  IF EXISTS (SELECT 1 FROM settlements s JOIN settlements o ON o.id = s.mirror_settlement_id
+              WHERE s.title_id = t.id AND o.title_id IS DISTINCT FROM t.mirror_title_id) THEN
+    RAISE EXCEPTION 'titles: settlement legs of title % are not on a mirrored title pair', t.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_mirror_title_check';
+  END IF;
+
   IF t.mirror_title_id IS NULL THEN
     IF EXISTS (SELECT 1 FROM titles x WHERE x.mirror_title_id = t.id) THEN
       RAISE EXCEPTION 'titles: mirror link to % is not reciprocal', t.id
@@ -10343,7 +10350,6 @@ BEGIN
     END IF;
     RETURN NULL;
   END IF;
-
   SELECT * INTO m FROM titles WHERE id = t.mirror_title_id;
   IF NOT FOUND THEN
     RETURN NULL;  -- a FK (também deferida) reporta o erro.
