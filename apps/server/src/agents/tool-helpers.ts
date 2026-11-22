@@ -20,6 +20,8 @@ export type ToolCallMeta = {
    * decisão, em memória, e nunca são gravados nem devolvidos.
    */
   secrets?: Readonly<Record<string, string>>;
+  /** O "parar" da execução (tarefa 097): a tool MCP é abortada; um handler longo pode respeitá-lo. */
+  signal?: AbortSignal;
 };
 
 /**

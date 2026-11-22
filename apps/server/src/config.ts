@@ -45,8 +45,12 @@ export type Config = {
   agentConcurrency: number;
   /** Manutenção dos agentes (retenção de eventos, expiração de confirmações, embeddings), em ms. */
   agentMaintenanceMs: number;
-  /** Espera máxima da leitura de documento por IA, em ms. */
+  /** Espera máxima da leitura de documento por IA, em ms (esgotada, a execução é cancelada: tarefa 150). */
   aiDocumentTimeoutMs: number;
+  /** Espera máxima da conversão do PDF do contrato em markdown, em ms (mais longa: a saída é o documento inteiro). */
+  aiDocumentConvertTimeoutMs: number;
+  /** Teto do tamanho estimado de uma chamada ao modelo, em bytes (tarefa 098): acima dele, falha sem chamar. */
+  aiRequestMaxBytes: number;
   /** Requisições ao provedor (spec 023): tentativas do próprio MoneyFlow por chamada (padrão 3). */
   aiRequestMaxAttempts: number;
   /** Base do backoff entre as tentativas, em ms (1 s, 2 s, 4 s…; menor nos testes). */
@@ -130,6 +134,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     agentConcurrency: Math.max(1, Number(env.AGENT_CONCURRENCY ?? 4)),
     agentMaintenanceMs: Number(env.AGENT_MAINTENANCE_MS ?? 5 * 60 * 1000),
     aiDocumentTimeoutMs: Number(env.AI_DOCUMENT_TIMEOUT_MS ?? 120_000),
+    aiDocumentConvertTimeoutMs: clampInt(env.AI_DOCUMENT_CONVERT_TIMEOUT_MS, 300_000, 1000, 1_800_000),
+    aiRequestMaxBytes: clampInt(env.AI_REQUEST_MAX_BYTES, 30 * 1024 * 1024, 10_000, 512 * 1024 * 1024),
     aiRequestMaxAttempts: clampInt(env.AI_REQUEST_MAX_ATTEMPTS, 3, 1, 10),
     aiRequestBackoffMs: clampInt(env.AI_REQUEST_BACKOFF_MS, 1000, 0, 60_000),
     aiRequestRetentionDays: clampInt(env.AI_REQUEST_RETENTION_DAYS, 30, 1, 365),

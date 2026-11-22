@@ -83,6 +83,8 @@ export function useConversation(target: PaneTarget) {
   const [liveThinking, setLiveThinking] = useState('');
   const [liveTools, setLiveTools] = useState<Record<string, LiveTool>>({});
   const [streamError, setStreamError] = useState<string | null>(null);
+  /** Volta à fila por erro temporário do provedor (tarefa 151): aviso passageiro até a nova tentativa responder. */
+  const [retrying, setRetrying] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const alive = useRef(true);
   /** Anexos enviados nesta tela (spec 025): entram nos metadados do detalhe ao enviar a mensagem. */
@@ -156,6 +158,7 @@ export function useConversation(target: PaneTarget) {
     setLiveThinking('');
     setLiveTools({});
     setStreamError(null);
+    setRetrying(false);
     setReconnecting(false);
   }, []);
 
@@ -166,9 +169,11 @@ export function useConversation(target: PaneTarget) {
           setRun((r) => (r ? { ...r, status: event.status, error: event.error ?? r.error } : r));
           break;
         case 'text_delta':
+          setRetrying(false);
           setLiveText((text) => text + event.text);
           break;
         case 'thinking_delta':
+          setRetrying(false);
           setLiveThinking((text) => text + event.text);
           break;
         case 'tool_start':
@@ -190,6 +195,7 @@ export function useConversation(target: PaneTarget) {
           if (event.message.role === 'assistant') {
             setLiveText('');
             setLiveThinking('');
+            setRetrying(false);
           }
           break;
         case 'confirmation':
@@ -204,11 +210,20 @@ export function useConversation(target: PaneTarget) {
           bumpList();
           break;
         case 'error':
+          if (event.code === 'provider_retry') {
+            // A execução volta à fila e a resposta recomeça do zero: o texto parcial da tentativa que caiu sai da tela.
+            setLiveText('');
+            setLiveThinking('');
+            setRetrying(true);
+            break;
+          }
           setStreamError(event.message);
           break;
         case 'done':
           setRun((r) => (r ? { ...r, status: event.status, error: event.error ?? r.error } : r));
+          setRetrying(false);
           if (event.error) setStreamError(event.error);
+          else if (event.status === 'completed') setStreamError(null);
           break;
       }
     },
@@ -357,6 +372,7 @@ export function useConversation(target: PaneTarget) {
     liveThinking,
     liveTools,
     streamError,
+    retrying,
     reconnecting,
     reload: load,
     send,

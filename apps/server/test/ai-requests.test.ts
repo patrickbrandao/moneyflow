@@ -182,6 +182,71 @@ describe('tentativas', () => {
     expect(all.map((r) => r.status)).toEqual(['error', 'ok']);
   });
 
+  it('5xx persistente: a execução falha depois de max_attempts − 1 voltas à fila, com espera entre elas (tarefa 074)', async () => {
+    const conversation = await newSession(admin, agent.id);
+    llm.queue = Array.from({ length: 30 }, () => ({ status: 503 }));
+    const sent = await admin.post(`/api/conversations/${conversation.id}/messages`, { text: 'oi' });
+    await drain();
+    const run = await runStatus(sent.run.id);
+    expect(run.status).toBe('failed');
+    expect(run.error).toContain('O provedor de IA respondeu com erro');
+    expect(run.error).toContain('falha simulada');
+    // 3 reservas, cada uma com as 3 tentativas da chamada; nenhuma chamada a mais.
+    const requests = await chatRequests(sent.run.id);
+    expect(requests.map((r) => [r.status, r.attempts])).toEqual([
+      ['error', 3],
+      ['error', 3],
+      ['error', 3],
+    ]);
+    expect(llm.queue).toHaveLength(21);
+    // Cada volta: o aviso provider_retry ao console e, depois da espera, o status queued.
+    const events = await h.db.execute<{ event_type: string; payload: any; created_at: Date }>(sql`
+      SELECT event_type, payload, created_at FROM ai_run_events
+       WHERE run_id = ${sent.run.id} AND event_type IN ('error', 'status', 'done') ORDER BY seq`);
+    const flow = events.rows.map((e) => (e.event_type === 'error' ? `error:${e.payload.code}` : `${e.event_type}:${e.payload.status}`));
+    expect(flow).toEqual([
+      'status:queued',
+      'status:running',
+      'error:provider_retry',
+      'status:queued',
+      'status:running',
+      'error:provider_retry',
+      'status:queued',
+      'status:running',
+      'done:failed',
+    ]);
+    const retry = events.rows.findIndex((e) => e.payload.code === 'provider_retry');
+    const waited = new Date(events.rows[retry + 1]!.created_at).getTime() - new Date(events.rows[retry]!.created_at).getTime();
+    // A espera é 4 × a base do backoff (5 ms aqui).
+    expect(waited).toBeGreaterThanOrEqual(15);
+  });
+
+  it('provedor fora do ar (porta fechada, sem status HTTP): também desiste depois das voltas à fila (tarefa 074)', async () => {
+    const offline = await admin.post('/api/admin/ai/providers', {
+      name: `Fora ${uid()}`,
+      kind: 'anthropic',
+      baseUrl: 'http://127.0.0.1:9',
+      apiKey: API_KEY,
+      defaultModels: { text: 'claude-sonnet-5-5' },
+    });
+    const down = await admin.post('/api/admin/ai/agents', {
+      name: `Agente fora ${uid()}`,
+      systemPrompt: 'Provedor fora.',
+      defaultProviderId: offline.id,
+      model: 'claude-sonnet-5-5',
+      params: { max_tokens: 1000 },
+      isActive: true,
+    });
+    const conversation = await newSession(admin, down.id);
+    const sent = await admin.post(`/api/conversations/${conversation.id}/messages`, { text: 'oi' });
+    await drain();
+    expect((await runStatus(sent.run.id)).status).toBe('failed');
+    const requests = await chatRequests(sent.run.id);
+    expect(requests).toHaveLength(3);
+    expect(requests.every((r) => r.status === 'error' && r.http_status === null)).toBe(true);
+    await admin.patch(`/api/admin/ai/agents/${down.id}`, { isActive: false });
+  });
+
   it('erro que não repete (400): uma tentativa só e a execução falha', async () => {
     const conversation = await newSession(admin, agent.id);
     llm.queue = [{ status: 400 }, { status: 400 }];
@@ -207,9 +272,16 @@ describe('tentativas', () => {
       sql`SELECT error_type FROM ai_request_attempts WHERE request_id = ${request!.id}`,
     );
     expect(attempt.rows).toEqual([{ error_type: 'stream_interrupted' }]);
-    // Os deltas que já tinham chegado foram ao SSE.
+    // Os deltas que já tinham chegado foram ao SSE; o aviso provider_retry e o status queued dizem ao console que a
+    // resposta recomeça (ele descarta o texto parcial, tarefa 151).
     const deltas = await h.db.execute(sql`SELECT 1 FROM ai_run_events WHERE run_id = ${sent.run.id} AND event_type = 'text_delta'`);
     expect(deltas.rows.length).toBeGreaterThan(0);
+    const tail = await h.db.execute<{ event_type: string; payload: any }>(sql`
+      SELECT event_type, payload FROM ai_run_events WHERE run_id = ${sent.run.id} ORDER BY seq DESC LIMIT 2`);
+    expect(tail.rows.reverse().map((e) => [e.event_type, e.payload.code ?? e.payload.status])).toEqual([
+      ['error', 'provider_retry'],
+      ['status', 'queued'],
+    ]);
     await drain();
     expect((await runStatus(sent.run.id)).status).toBe('completed');
   });

@@ -100,7 +100,8 @@ async function sse(cookie: string, runId: string, lastEventId?: number) {
 beforeAll(async () => {
   llm = await startFakeLlm(0, '127.0.0.1');
   mcp = await startFakeMcp(MCP_SECRET);
-  h = await startApp();
+  // Backoff curto: as tentativas e as voltas à fila por erro do provedor (tarefa 074) levam milissegundos.
+  h = await startApp({ AI_REQUEST_BACKOFF_MS: '5' });
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   // Anthropic compatível (base_url): modelo de texto obrigatório; cache e raciocínio ligados à mão (spec 024).
@@ -377,15 +378,123 @@ describe('execução do agente', () => {
     await expect(h.db.execute(sql`SELECT ai_run_heartbeat(${sent.run.id}::uuid, ${claimed.rows[0]!.lock_token}::uuid)`)).rejects.toThrow();
   });
 
-  it('falha do provedor: erro 500 repetido termina como failed com a mensagem', async () => {
+  it('falha do provedor: erro 500 repetido termina como failed com a mensagem (tarefa 074)', async () => {
     const conversation = await newSession(admin, agent.id);
-    llm.queue = Array.from({ length: 12 }, () => ({ status: 400 }));
+    llm.queue = Array.from({ length: 30 }, () => ({ status: 500 }));
     const sent = await chat(admin, conversation.id, 'oi');
     await drain();
     const status = await runStatus(sent.run.id);
     expect(status.status).toBe('failed');
     expect(status.error).toMatch(/provedor de IA/);
     expect(status.error).not.toContain('SEGREDO');
+    // 3 reservas (2 voltas à fila) × 3 tentativas da chamada: a fila não fica girando.
+    expect(llm.queue).toHaveLength(30 - 9);
+  });
+
+  it('sessão acima do limite do provedor: erro de contexto vira context_overflow e pede para finalizar (tarefa 098)', async () => {
+    const conversation = await newSession(admin, agent.id);
+    llm.queue = [{ status: 400, errorMessage: 'prompt is too long: 250000 tokens > 200000 maximum' }];
+    const sent = await chat(admin, conversation.id, 'oi');
+    await drain();
+    const status = await runStatus(sent.run.id);
+    expect(status.status).toBe('failed');
+    expect(status.error).toContain('Finalize a sessão');
+    expect(status.error).toContain('prompt is too long');
+    const events = await sse(adminSession.cookie, sent.run.id);
+    expect(events.find((e) => e.event === 'error')?.data).toMatchObject({ code: 'context_overflow' });
+    // Uma tentativa só: o erro de contexto não se repete.
+    const requests = await h.db.execute(sql`SELECT 1 FROM ai_requests WHERE run_id = ${sent.run.id} AND operation = 'chat'`);
+    expect(requests.rows).toHaveLength(1);
+
+    // Acima do teto estimado (AI_REQUEST_MAX_BYTES), a chamada nem sai.
+    const previous = h.config.aiRequestMaxBytes;
+    h.config.aiRequestMaxBytes = 50_000;
+    try {
+      const big = await newSession(admin, agent.id);
+      const upload = await h.app.inject({
+        method: 'POST',
+        url: `/api/conversations/${big.id}/attachments?fileName=grande.txt`,
+        payload: Buffer.alloc(80_000, 'a'),
+        headers: { cookie: adminSession.cookie, 'content-type': 'text/plain' },
+      });
+      expect(upload.statusCode, upload.body).toBe(200);
+      const before = llm.calls.length;
+      const blocked = await admin.post(`/api/conversations/${big.id}/messages`, { text: 'resuma', attachmentIds: [upload.json().id] });
+      await drain();
+      expect(llm.calls.length).toBe(before);
+      const run = await runStatus(blocked.run.id);
+      expect(run.status).toBe('failed');
+      expect(run.error).toMatch(/cerca de [\d,]+ KB, acima do teto de 48,8 KB/);
+    } finally {
+      h.config.aiRequestMaxBytes = previous;
+    }
+  });
+
+  it('parar ou finalizar no meio de um lote de tools: só a tool em andamento roda; as outras voltam "cancelado" (tarefa 097)', async () => {
+    let runs = 0;
+    let started: () => void = () => {};
+    let release: () => void = () => {};
+    const off = registerInternalTool(
+      {
+        name: 'test_batch_write',
+        title: 'Escrita lenta (teste)',
+        description: 'Escrita do lote (registrada no teste).',
+        kind: 'write',
+        category: 'search',
+        suggestedMode: 'allow',
+        input: z.object({ n: z.number() }),
+      },
+      {
+        run: async (_ctx, input) => {
+          runs += 1;
+          started();
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return { done: (input as { n: number }).n };
+        },
+      },
+    );
+    try {
+      // Sem kit: todas as tools internas (a registrada no teste inclusive), tudo roda direto.
+      const free = await admin.post('/api/admin/ai/agents', {
+        name: `Lote ${uid()}`,
+        providerId: provider.id,
+        model: 'claude-sonnet-5-5',
+        params: { max_tokens: 2000, max_tool_iterations: 6 },
+        toolKitId: null,
+        isActive: true,
+      });
+      for (const mode of ['cancel', 'finish'] as const) {
+        runs = 0;
+        const firstStarted = new Promise<void>((resolve) => {
+          started = resolve;
+        });
+        const conversation = await newSession(admin, free.id);
+        llm.queue = [{ toolCalls: Array.from({ length: 5 }, (_, n) => ({ name: 'test_batch_write', input: { n } })) }];
+        const sent = await chat(admin, conversation.id, 'faça o lote');
+        const claimed = await h.db.execute<ClaimedRun>(sql`SELECT * FROM ai_run_claim(1, '1 hour')`);
+        expect(claimed.rows[0]!.id).toBe(sent.run.id);
+        const job = processRun({ db: h.db, config: h.config, log }, claimed.rows[0]!);
+        await firstStarted;
+        if (mode === 'cancel') await admin.post(`/api/runs/${sent.run.id}/cancel`);
+        else await admin.post(`/api/conversations/${conversation.id}/finish`);
+        const stoppedAt = Date.now();
+        release();
+        await job;
+        expect(Date.now() - stoppedAt, mode).toBeLessThan(5000);
+        expect(runs, mode).toBe(1);
+        expect((await runStatus(sent.run.id)).status, mode).toBe('canceled');
+        const detail = await admin.get(`/api/conversations/${conversation.id}`);
+        const results = detail.messages.filter((m: any) => m.role === 'tool').flatMap((m: any) => m.content);
+        expect(results, mode).toHaveLength(5);
+        expect(results[0]).toMatchObject({ content: expect.stringContaining('"done":0') });
+        expect(results[0].is_error).toBeUndefined();
+        for (const rest of results.slice(1)) expect(rest).toMatchObject({ is_error: true, content: 'Execução interrompida pelo usuário.' });
+      }
+    } finally {
+      off();
+    }
   });
 });
 
@@ -796,6 +905,41 @@ describe('MCP', () => {
     await drain();
     expect(mcp.calls.at(-1)).toEqual({ tool: 'create_ticket', args: { title: 'Falta luz' } });
     await admin.patch(`/api/admin/ai/mcp-servers/${server.id}`, { isActive: false });
+  });
+
+  it('o "parar" aborta a tool MCP em andamento, sem esperar o timeout dela (tarefa 097)', async () => {
+    const slow = await startFakeMcp(MCP_SECRET, { slowMs: 20_000 });
+    const server = await admin.post('/api/admin/ai/mcp-servers', {
+      name: `MCP lento ${uid()}`,
+      url: slow.url,
+      headers: { Authorization: `Bearer ${MCP_SECRET}` },
+      visibility: 'global',
+    });
+    try {
+      expect((await admin.post(`/api/admin/ai/mcp-servers/${server.id}/refresh`)).toolsError).toBeNull();
+      const conversation = await newSession(admin, agent.id);
+      const sent = await chat(admin, conversation.id, `chamar ${mcpExposedName(server.name, 'slow_lookup')} {}`);
+      const claimed = await h.db.execute<ClaimedRun>(sql`SELECT * FROM ai_run_claim(1, '1 hour')`);
+      const job = processRun({ db: h.db, config: h.config, log }, claimed.rows[0]!);
+      for (let i = 0; i < 100 && !slow.calls.some((c) => c.tool === 'slow_lookup'); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(slow.calls.some((c) => c.tool === 'slow_lookup')).toBe(true);
+      const stoppedAt = Date.now();
+      await admin.post(`/api/runs/${sent.run.id}/cancel`);
+      await job;
+      // O heartbeat (3 s) vê o pedido e aborta a chamada; sem o sinal, seriam os 20 s da tool.
+      expect(Date.now() - stoppedAt).toBeLessThan(8000);
+      expect((await runStatus(sent.run.id)).status).toBe('canceled');
+      const detail = await admin.get(`/api/conversations/${conversation.id}`);
+      expect(detail.messages.find((m: any) => m.role === 'tool').content[0]).toMatchObject({
+        is_error: true,
+        content: 'Execução interrompida pelo usuário.',
+      });
+    } finally {
+      await admin.patch(`/api/admin/ai/mcp-servers/${server.id}`, { isActive: false });
+      await slow.close();
+    }
   });
 
   it('servidor próprio /mcp: token pessoal (mostrado uma vez), permissões do dono, ator agent, revogação', async () => {
@@ -1445,6 +1589,87 @@ describe('IA nos fluxos', () => {
       expect(reading.rows.length).toBeGreaterThan(0);
       expect(new Set(reading.rows.map((r) => r.purpose))).toEqual(new Set(['contract_reading']));
     } finally {
+      await stop();
+    }
+  });
+
+  it('resposta cortada por max_tokens: a leitura responde 422 com o motivo e a conversão não grava o markdown (tarefa 095)', async () => {
+    const stop = startAgentWorker(h.db, h.config, log, { pollMs: 100, maintenanceMs: 3_600_000 });
+    try {
+      llm.queue = [{ text: '{"kind": "boleto", "entityName": "Fornec', stopReason: 'max_tokens' }];
+      const reading = await h.app.inject({
+        method: 'POST',
+        url: '/api/title-entry/document?fileName=cortado.pdf',
+        payload: Buffer.from('%PDF-1.4\n% boleto\n'),
+        headers: { cookie: adminSession.cookie, 'content-type': 'application/pdf' },
+      });
+      expect(reading.statusCode, reading.body).toBe(422);
+      expect(reading.json().error.message).toContain('limite de tokens');
+
+      const s = await scenario(h, admin);
+      const contract = await admin.post('/api/contracts', {
+        caixaId: s.caixaA.id,
+        entityId: s.holderB.id,
+        direction: 'receivable',
+        categoryId: s.income.id,
+        name: 'Cortado',
+        startsOn: '2030-03-01',
+        durationMonths: 12,
+        periodicity: 'monthly',
+        totalCents: 120_000,
+        dueDay: 10,
+        dueMonthOffset: 0,
+      });
+      const up = await h.app.inject({
+        method: 'POST',
+        url: `/api/contracts/${contract.id}/documents?fileName=longo.pdf&kind=contract`,
+        payload: Buffer.from('%PDF-1.4\n% contrato longo\n'),
+        headers: { cookie: adminSession.cookie, 'content-type': 'application/pdf' },
+      });
+      expect(up.statusCode, up.body).toBe(200);
+      llm.queue = [{ text: '# Contrato\n\n## Cláusula 1\nObjeto: supo', stopReason: 'max_tokens' }];
+      const converted = await admin.raw('POST', `/api/contract-documents/${up.json().id}/convert`);
+      expect(converted.statusCode, converted.body).toBe(422);
+      expect(converted.body).toContain('limite de tokens');
+      const markdown = await h.db.execute(sql`SELECT 1 FROM contract_documents WHERE contract_id = ${contract.id} AND format = 'markdown'`);
+      expect(markdown.rows).toHaveLength(0);
+      // O caminho normal (end_turn) segue gravando a versão 1.
+      const ok = await admin.post(`/api/contract-documents/${up.json().id}/convert`);
+      expect(ok).toMatchObject({ format: 'markdown', currentVersion: 1 });
+    } finally {
+      await stop();
+    }
+  });
+
+  it('leitura de documento que passa do prazo cancela a execução e responde "demorou demais" (tarefa 150)', async () => {
+    const previous = h.config.aiDocumentTimeoutMs;
+    h.config.aiDocumentTimeoutMs = 1500;
+    const stop = startAgentWorker(h.db, h.config, log, { pollMs: 100, maintenanceMs: 3_600_000 });
+    try {
+      llm.queue = [{ text: '{"kind": "boleto", "description": "lento"}', chunks: 40, delayMs: 250 }];
+      const res = await h.app.inject({
+        method: 'POST',
+        url: '/api/title-entry/document?fileName=lento.pdf',
+        payload: Buffer.from('%PDF-1.4\n% boleto lento\n'),
+        headers: { cookie: adminSession.cookie, 'content-type': 'application/pdf' },
+      });
+      expect(res.statusCode, res.body).toBe(422);
+      expect(res.json().error).toMatchObject({ code: 'document_timeout', message: expect.stringContaining('demorou demais') });
+      const found = await h.db.execute<{ id: string }>(sql`
+        SELECT r.id FROM ai_runs r JOIN ai_conversations c ON c.id = r.conversation_id
+         WHERE c.purpose = 'document_reading' AND c.screen_context ->> 'fileName' = 'lento.pdf' ORDER BY r.created_at DESC LIMIT 1`);
+      const runId = found.rows[0]!.id;
+      let status = '';
+      for (let i = 0; i < 40 && status !== 'canceled'; i += 1) {
+        status = (await runStatus(runId)).status;
+        if (status !== 'canceled') await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      // O worker parou na batida seguinte: nada de uso pago pelo resultado jogado fora.
+      expect(status).toBe('canceled');
+      const usage = await h.db.execute(sql`SELECT 1 FROM ai_usage WHERE run_id = ${runId}`);
+      expect(usage.rows).toHaveLength(0);
+    } finally {
+      h.config.aiDocumentTimeoutMs = previous;
       await stop();
     }
   });

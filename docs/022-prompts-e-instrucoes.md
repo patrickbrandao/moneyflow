@@ -22,6 +22,10 @@ A ordem é fixa. Os pontos de cache da Anthropic ficam onde indicado.
 6. **Contexto automático do usuário**.
    — **ponto de cache 2** (estável por usuário) —
 7. A parte volátil de hoje: data, usuário e contexto da tela.
+8. O histórico da sessão.
+   — **ponto de cache 3** (no último bloco da última mensagem; tarefa 096) —
+
+O ponto 3 só vai nas chamadas que têm continuação: o laço de tools e o chat (não no título, na descrição do anexo nem nos fluxos JSON, que pagariam a escrita do cache sem lê-la). Dentro de uma execução a parte volátil e o histórico só crescem, então cada volta do laço lê do cache o prefixo gravado pela anterior. Com o ponto da última tool, os pontos 1 e 2 e este, são os 4 que a API aceita. Com o cache desligado no provedor, nenhum.
 
 As `instructions` dos MCP no modo `user` não ficam no prompt de sistema. Elas entram como um bloco de texto do papel `user` no início do histórico enviado ao modelo, montado na hora da chamada e nunca gravado em `ai_messages`. O mesmo vale para o modo `system` (vem do cache a cada execução).
 

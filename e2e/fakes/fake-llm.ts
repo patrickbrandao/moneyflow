@@ -27,8 +27,10 @@ import type { AddressInfo } from 'node:net';
  *  - qualquer outra coisa       → "Olá! Sou o agente de teste."
  * Os testes podem trocar o cérebro (`brain`) ou enfileirar respostas (`queue`),
  * inclusive falhas: `{ status: 429, headers: { 'retry-after': '1' } }` (erro
- * HTTP com cabeçalhos) e `{ dropAfter: 2 }` (o stream cai depois de 2 pedaços,
- * com a resposta 200 já enviada) — para as tentativas da spec 023.
+ * HTTP com cabeçalhos), `{ status: 400, errorMessage: 'prompt is too long…' }`
+ * (a mensagem do erro), `{ dropAfter: 2 }` (o stream cai depois de 2 pedaços,
+ * com a resposta 200 já enviada) — para as tentativas da spec 023 — e
+ * `{ stopReason: 'max_tokens' }` (resposta cortada pelo limite de tokens).
  */
 
 export type FakeToolCall = { name: string; input: Record<string, unknown> };
@@ -45,6 +47,10 @@ export type FakeReply = {
   headers?: Record<string, string>;
   /** Derruba a conexão depois de N pedaços do texto (queda no meio do stream). */
   dropAfter?: number;
+  /** Mensagem do erro HTTP (padrão "falha simulada"). */
+  errorMessage?: string;
+  /** Motivo de parada no lugar do calculado (ex.: max_tokens; no OpenAI vira finish_reason length). */
+  stopReason?: 'end_turn' | 'tool_use' | 'max_tokens';
 };
 
 export type NeutralView = {
@@ -281,7 +287,7 @@ async function streamAnthropic(res: ServerResponse, body: any, reply: FakeReply)
   }
   send('message_delta', {
     type: 'message_delta',
-    delta: { stop_reason: reply.toolCalls?.length ? 'tool_use' : 'end_turn', stop_sequence: null },
+    delta: { stop_reason: reply.stopReason ?? (reply.toolCalls?.length ? 'tool_use' : 'end_turn'), stop_sequence: null },
     usage: { output_tokens: usage.output },
   });
   send('message_stop', { type: 'message_stop' });
@@ -312,7 +318,8 @@ async function streamOpenAi(res: ServerResponse, body: any, reply: FakeReply) {
       tool_calls: [{ index, id: nextId('call'), type: 'function', function: { name: call.name, arguments: JSON.stringify(call.input) } }],
     });
   });
-  chunk({}, reply.toolCalls?.length ? 'tool_calls' : 'stop');
+  const finish = { max_tokens: 'length', tool_use: 'tool_calls', end_turn: 'stop' } as const;
+  chunk({}, reply.stopReason ? finish[reply.stopReason] : reply.toolCalls?.length ? 'tool_calls' : 'stop');
   const usage = reply.usage ?? { input: 120, output: 30, cacheRead: 0 };
   res.write(
     `data: ${JSON.stringify({
@@ -488,9 +495,10 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
       const view = anthropic ? viewAnthropic(body) : viewOpenAi(body);
       const reply = fake.queue.shift() ?? fake.brain(view);
       if (reply.status && reply.status >= 400) {
+        const message = reply.errorMessage ?? 'falha simulada';
         return json(
           reply.status,
-          anthropic ? { type: 'error', error: { type: 'api_error', message: 'falha simulada' } } : { error: { message: 'falha simulada' } },
+          anthropic ? { type: 'error', error: { type: 'api_error', message } } : { error: { message } },
           reply.headers,
         );
       }

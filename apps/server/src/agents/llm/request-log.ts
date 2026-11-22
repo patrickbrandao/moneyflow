@@ -40,7 +40,13 @@ export type RequestLogBase = {
   log?: { warn: (obj: object, msg: string) => void };
 };
 
-export type RequestCall = { operation: AiRequestOperation; purpose: AiUsagePurpose | null; model: string | null };
+export type RequestCall = {
+  operation: AiRequestOperation;
+  purpose: AiUsagePurpose | null;
+  model: string | null;
+  /** O adaptador pediu streaming (tarefa 098): sem ele, o corpo JSON é lido só para descobrir. */
+  streaming?: boolean;
+};
 
 export type RequestOutcome = {
   status: 'ok' | 'error' | 'canceled';
@@ -183,14 +189,17 @@ function wait(ms: number, signal: AbortSignal | null | undefined): Promise<void>
 
 type BodyInfo = { text: string | null; bytes: number | null; replayable: boolean; streaming: boolean };
 
-async function describeBody(body: RequestInit['body'] | undefined, logBodies: boolean): Promise<BodyInfo> {
+async function describeBody(body: RequestInit['body'] | undefined, logBodies: boolean, streamingHint?: boolean): Promise<BodyInfo> {
   if (body === undefined || body === null) return { text: null, bytes: 0, replayable: true, streaming: false };
   if (typeof body === 'string') {
-    let streaming = false;
-    try {
-      streaming = (JSON.parse(body) as { stream?: unknown })?.stream === true;
-    } catch {
-      streaming = false;
+    // O chat diz que é streaming: nada de JSON.parse de um corpo que pode ter dezenas de MB em base64.
+    let streaming = streamingHint ?? false;
+    if (streamingHint === undefined) {
+      try {
+        streaming = (JSON.parse(body) as { stream?: unknown })?.stream === true;
+      } catch {
+        streaming = false;
+      }
     }
     return { text: body, bytes: Buffer.byteLength(body), replayable: true, streaming };
   }
@@ -328,7 +337,7 @@ export class RequestRecorder {
     if (!/^https?:/i.test(url)) return this.realFetch(input, init);
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-    const body = await describeBody(init?.body, this.base.logBodies === true);
+    const body = await describeBody(init?.body, this.base.logBodies === true, this.call.streaming);
     const signal = init?.signal ?? null;
     const t0 = performance.now();
     const id = await this.insertRow(method, url, headers, body);

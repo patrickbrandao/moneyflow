@@ -23,6 +23,14 @@ export const agentsStrings = {
     providerInactive: 'O provedor de IA deste agente está desativado.',
     providerMissing: 'Nenhum agente de IA ativo está configurado. Peça ao administrador para configurar um provedor e um agente.',
     providerError: (message: string) => `O provedor de IA respondeu com erro: ${message}`,
+    /** Sessão acima do limite do provedor (tarefa 098): a saída é finalizar e começar outra. */
+    contextOverflow: (detail: string) =>
+      `A sessão ficou grande demais para o provedor de IA (${detail}). Finalize a sessão e comece outra; depois de finalizar, dá para bifurcar de um ponto anterior.`,
+    /** Fluxo JSON cortado pelo max_tokens do agente dos fluxos (tarefa 095). */
+    flowTruncated:
+      'A resposta passou do limite de tokens do agente dos fluxos e foi cortada. Aumente o max_tokens desse agente em Administração → IA e tente de novo.',
+    /** Leitura ou conversão de documento que passou do prazo (tarefa 150): a execução é cancelada. */
+    flowTimeout: 'A leitura do documento demorou demais e foi cancelada. Tente de novo mais tarde ou preencha à mão.',
     toolUnknown: (name: string) => `Tool desconhecida ou não habilitada: ${name}`,
     attachmentNotInSession: 'O anexo não é desta sessão: use um arquivo enviado nesta conversa.',
     invoiceAdvanceFields: 'Fatura aberta: o pagamento antecipado precisa de valor maior que zero e da conta (financialAccountId).',
@@ -103,6 +111,9 @@ export const agentsStrings = {
     /** Arquivo de backup (leva chaves e senhas): o conteúdo nunca vai ao modelo (spec 027). */
     backupWithheld: (name: string) =>
       `[Backup "${name}": o conteúdo não é enviado ao modelo (leva chaves e senhas); use simulate_import ou import_backup com o attachmentId.]`,
+    /** Resultado de tool antigo cortado do histórico enviado (tarefa 098): o gravado fica inteiro. */
+    resultOmitted: (chars: number) =>
+      `[resultado antigo omitido do histórico (${chars} caracteres); chame a tool de novo se precisar dele]`,
     describePrompt:
       'Descreva o anexo para outro modelo que não consegue vê-lo. Transcreva todo o texto legível (valores, datas, nomes, documentos, códigos) e descreva o que não é texto (tabelas, gráficos, fotos) de forma objetiva. Responda só com a descrição, em português.',
   },

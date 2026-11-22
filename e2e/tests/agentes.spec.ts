@@ -392,6 +392,26 @@ test('agente: o SSE cai no meio da resposta e reconecta com Last-Event-ID, sem d
   await expect(win.locator('[data-testid="agent-message-assistant"][data-live]')).toHaveCount(0);
 });
 
+test('agente: o stream do provedor cai no meio; a nova tentativa recomeça sem o texto parcial e sem aviso de erro (tarefa 151)', async ({
+  page,
+}) => {
+  await enter(page);
+  const win = await freshSession(page);
+  // A 1ª chamada cai depois de 2 pedaços (a execução volta à fila); a 2ª responde inteira.
+  llm.queue.push(
+    { text: 'Pedaço perdido um. Pedaço perdido dois. Pedaço perdido três.', chunks: 6, dropAfter: 2, delayMs: 200 },
+    { text: 'Resposta depois da queda.', chunks: 3, delayMs: 100 },
+  );
+  await say(win, `queda do provedor ${tag}`);
+  const final = win.locator('[data-testid="agent-message-assistant"]:not([data-live])').filter({ hasText: 'Resposta depois da queda.' });
+  await expect(final).toHaveCount(1, { timeout: 45_000 });
+  await expect(win.getByTestId('agent-composer')).toBeEnabled({ timeout: 30_000 });
+  await expect(final).not.toContainText('Pedaço perdido');
+  await expect(win.getByText('Pedaço perdido')).toHaveCount(0);
+  // Concluída a nova tentativa, o aviso do provedor não fica na janela.
+  await expect(win.locator('.notice.danger')).toHaveCount(0);
+});
+
 test('agente: o admin abre a sessão de outro usuário em modo somente leitura', async ({ page }) => {
   // Outro usuário (de teste) conversa e deixa uma escrita esperando confirmação.
   const other = { username: `e2e-agente-${tag}`, password: `senha-e2e-${tag}` };

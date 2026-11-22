@@ -8,12 +8,13 @@ import { z } from 'zod';
  * Servidor MCP FALSO (Streamable HTTP, sem estado) para os testes do MCP
  * client: exige o cabeçalho secreto Authorization e expõe duas tools,
  * echo (somente leitura) e create_ticket (escrita). Opcional: as instructions
- * da resposta do initialize (spec 022).
+ * da resposta do initialize (spec 022) e, com `slowMs`, a tool slow_lookup
+ * (somente leitura, responde depois de slowMs; para o "parar" da tarefa 097).
  */
 
 export type FakeMcp = { url: string; calls: { tool: string; args: unknown }[]; authHeaders: string[]; close: () => Promise<void> };
 
-export async function startFakeMcp(secret: string, options: { instructions?: string } = {}): Promise<FakeMcp> {
+export async function startFakeMcp(secret: string, options: { instructions?: string; slowMs?: number } = {}): Promise<FakeMcp> {
   const fake: FakeMcp = { url: '', calls: [], authHeaders: [], close: async () => {} };
   const build = () => {
     const server = new McpServer(
@@ -36,6 +37,24 @@ export async function startFakeMcp(secret: string, options: { instructions?: str
         return { content: [{ type: 'text', text: `chamado criado: ${title}` }] };
       },
     );
+    const slowMs = options.slowMs;
+    if (slowMs) {
+      server.registerTool(
+        'slow_lookup',
+        { description: 'Consulta demorada.', inputSchema: {}, annotations: { readOnlyHint: true } },
+        async (_args, extra) => {
+          fake.calls.push({ tool: 'slow_lookup', args: {} });
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, slowMs);
+            extra.signal.addEventListener('abort', () => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
+          return { content: [{ type: 'text', text: 'consulta pronta' }] };
+        },
+      );
+    }
     return server;
   };
   const http: Server = createServer(async (req, res) => {

@@ -67,13 +67,36 @@ export interface LlmClient {
 
 export const emptyUsage = (): LlmUsage => ({ inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 });
 
-/** Erro do provedor, com mensagem segura (sem chaves) e se vale tentar de novo. */
+/** Erro do provedor, com mensagem segura (sem chaves), se vale tentar de novo e o tipo reconhecido. */
 export class LlmError extends Error {
   constructor(
     message: string,
     readonly status: number | null,
     readonly retryable: boolean,
+    /** context_overflow: a requisição passou do contexto ou do tamanho que o provedor aceita (tarefa 098). */
+    readonly code: 'context_overflow' | null = null,
   ) {
     super(message);
   }
+}
+
+/**
+ * Erro de contexto ou de tamanho da requisição (tarefa 098): 413, ou 400 com a
+ * mensagem de "prompt longo demais" de cada provedor (Anthropic: "prompt is too
+ * long"; OpenAI: context_length_exceeded / maximum context length; compatíveis
+ * variam). Não se repete: a próxima mensagem da sessão falharia igual.
+ */
+export function isContextOverflow(status: number | null, message: string): boolean {
+  if (status === 413) return true;
+  if (status !== 400) return false;
+  return /prompt is too long|context[_ ]length|maximum context|context window|too many (input )?tokens|request too large|too large for|reduce the length/i.test(
+    message,
+  );
+}
+
+/** O LlmError de um erro HTTP do provedor: repete 408/409/429/5xx e rede; reconhece o estouro de contexto. */
+export function providerError(message: string, status: number | null): LlmError {
+  const safe = String(message).slice(0, 500);
+  if (isContextOverflow(status, safe)) return new LlmError(safe, status, false, 'context_overflow');
+  return new LlmError(safe, status, status === null || status === 408 || status === 409 || status === 429 || status >= 500);
 }

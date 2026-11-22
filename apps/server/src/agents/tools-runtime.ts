@@ -338,7 +338,8 @@ export class RunTools {
     try {
       if (tool.source === 'mcp') {
         const session = await this.session(tool.serverId);
-        const result = await session.callTool(tool.toolName, input);
+        // O "parar" aborta a chamada (tarefa 097): sem ele, uma tool lenta seguraria a execução até o timeout de 60 s.
+        const result = await session.callTool(tool.toolName, input, meta.signal);
         return { content: resultText(result.text), isError: result.isError, summary: result.isError ? result.text.slice(0, 200) : 'ok' };
       }
       // Tools com segredo só rodam na decisão da API (executeSecretTool), com o valor digitado no cartão.
@@ -349,6 +350,7 @@ export class RunTools {
       const { value, files } = tool.def.producesFile ? await storeGeneratedFile(ctx, ran) : { value: ran, files: [] };
       return { content: resultText(value), isError: false, summary: summarize(value), raw: value, ...(files.length ? { files } : {}) };
     } catch (error) {
+      if (meta.signal?.aborted) return { content: t.agents.errors.canceled, isError: true, summary: t.agents.errors.canceled };
       const message =
         tool.source === 'mcp' && !(error instanceof AppError)
           ? t.agents.errors.mcpUnavailable(tool.serverName, error instanceof Error ? error.message.slice(0, 300) : String(error))

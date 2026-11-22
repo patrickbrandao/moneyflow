@@ -92,6 +92,8 @@ export const agentsUiStrings = {
     redactedThinking: 'Raciocínio protegido pelo provedor',
     working: 'Trabalhando…',
     queued: 'Na fila…',
+    /** Volta à fila por erro temporário do provedor (tarefa 151): o texto parcial some e a resposta recomeça. */
+    retrying: 'O provedor de IA falhou; tentando de novo…',
     stop: 'Parar',
     stopping: 'Parando…',
     stopped: 'Execução interrompida.',

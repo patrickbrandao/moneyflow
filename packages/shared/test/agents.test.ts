@@ -10,6 +10,7 @@ import {
   aiAgentUpdateInput,
   balanceToolUses,
   blocksText,
+  compactToolResults,
   diffRows,
   effectiveToolMode,
   formatSse,
@@ -301,6 +302,40 @@ describe('blocos neutros', () => {
         { type: 'text', text: 'b' },
       ]),
     ).toBe('a\nb');
+  });
+
+  it('corte do histórico enviado (tarefa 098): resultados longos das voltas antigas viram marcador, em degraus de keep', () => {
+    /** Conversa com `turns` voltas de tool; o resultado da volta i tem `size` caracteres. */
+    const history = (turns: number, size = 5000): NeutralMessage[] => [
+      { role: 'user', content: [{ type: 'text', text: 'concilie' }] },
+      ...Array.from({ length: turns }, (_, i): NeutralMessage[] => [
+        { role: 'assistant', content: [{ type: 'tool_use', id: `t${i}`, name: 'get_statement_import', input: {} }] },
+        { role: 'tool', content: [{ type: 'tool_result', tool_use_id: `t${i}`, content: `${i}:`.padEnd(size, 'x') }] },
+      ]).flat(),
+    ];
+    const omitted = (chars: number) => `[omitido ${chars}]`;
+    const full = (messages: NeutralMessage[]) =>
+      messages.filter((m) => m.role === 'tool').map((m) => !(m.content[0] as { content: string }).content.includes('[omitido'));
+    // Até 2 × keep − 1 voltas, tudo inteiro (o mesmo array volta).
+    const short = history(19);
+    expect(compactToolResults(short, omitted, { keep: 10 })).toBe(short);
+    // 30 voltas: só as 10 últimas por inteiro; as antigas com o começo e o marcador com o tamanho original.
+    const compacted = compactToolResults(history(30), omitted, { keep: 10 });
+    expect(full(compacted)).toEqual([...Array(20).fill(false), ...Array(10).fill(true)]);
+    const first = (compacted[2]!.content[0] as { content: string }).content;
+    expect(first.startsWith('0:xxx')).toBe(true);
+    expect(first.endsWith('[omitido 5000]')).toBe(true);
+    expect(first.length).toBeLessThan(400);
+    // Degraus: de 30 a 39 voltas o corte não muda (o prefixo fica igual para o cache); com 40, anda mais 10.
+    expect(full(compactToolResults(history(39), omitted, { keep: 10 })).filter(Boolean)).toHaveLength(19);
+    expect(JSON.stringify(compactToolResults(history(39), omitted, { keep: 10 }).slice(0, 41))).toBe(
+      JSON.stringify(compacted.slice(0, 41)),
+    );
+    expect(full(compactToolResults(history(40), omitted, { keep: 10 })).filter(Boolean)).toHaveLength(10);
+    // Resultados curtos ficam como estão; o gravado (a entrada) não muda.
+    const small = history(30, 100);
+    expect(compactToolResults(small, omitted, { keep: 10 })).toEqual(small);
+    expect((history(30)[2]!.content[0] as { content: string }).content).toHaveLength(5000);
   });
 });
 
