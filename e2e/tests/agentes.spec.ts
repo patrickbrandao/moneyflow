@@ -1434,4 +1434,33 @@ test.describe('chat multimídia (spec 025)', () => {
     await expect(audio.getByTestId('transcription')).toContainText('Mensagem gravada pelo microfone.', { timeout: 30_000 });
     await expect(audio.getByTestId('audio-time')).toContainText(/ 0:0[1-2]/);
   });
+
+  test('gravação: minimizar com o pedido de permissão pendente solta o microfone (tarefa 123)', async ({ page }) => {
+    // O pedido de permissão demora 1 s; as trilhas entregues ficam em __tracks.
+    await page.addInitScript(() => {
+      // roda no navegador; o tsconfig do e2e não carrega a lib DOM
+      type Track = { readyState: string };
+      type Stream = { getTracks: () => Track[] };
+      type Devices = { getUserMedia: (constraints: unknown) => Promise<Stream> };
+      const w = globalThis as unknown as { __tracks: Track[]; navigator: { mediaDevices: Devices } };
+      const devices = w.navigator.mediaDevices;
+      const original = devices.getUserMedia.bind(devices);
+      w.__tracks = [];
+      devices.getUserMedia = async (constraints) => {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const stream = await original(constraints);
+        w.__tracks.push(...stream.getTracks());
+        return stream;
+      };
+    });
+    await enter(page);
+    const win = await freshSession(page, mediaAgent.name);
+    await win.getByTestId('agent-record').click();
+    await win.getByTestId('agent-minimize').click();
+    await expect(win).toHaveCount(0);
+    // A permissão "chega" depois de a janela sumir: a trilha é parada na hora, sem gravação escondida.
+    const states = () =>
+      page.evaluate(() => (globalThis as unknown as { __tracks: { readyState: string }[] }).__tracks.map((track) => track.readyState));
+    await expect.poll(states, { timeout: 5_000 }).toEqual(['ended']);
+  });
 });
