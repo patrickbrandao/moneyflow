@@ -15,7 +15,7 @@ import type { Config } from './config';
 import { AppError, translateDbError } from './errors';
 import { apiLoggerOptions } from './log';
 import { agentRoutes } from './routes/agents';
-import { attachmentRoutes, UPLOAD_BODY_LIMIT } from './routes/attachments';
+import { attachmentRoutes } from './routes/attachments';
 import { authRoutes } from './routes/auth';
 import { backupRoutes } from './routes/backup';
 import { caixaRoutes } from './routes/caixas';
@@ -82,19 +82,21 @@ export async function buildApp({
 
   // Uploads (anexos, extratos, NF-e): o arquivo vai cru no corpo, com o próprio Content-Type
   // (rotas com config.rawUpload). JSON e texto puro só são interpretados nas demais rotas.
+  // Sem bodyLimit nos parsers (tarefa 106): vale o da rota (os uploads declaram 20 MB e o /mcp, o do
+  // upload_file em base64) ou o de 1 MB do servidor; acima dele, 413 sem ler o corpo (pelo
+  // content-length) ou assim que passar do limite. Login e webhook do Telegram, sem sessão, ficam em 1 MB.
   app.removeContentTypeParser(['application/json', 'text/plain']);
   const isUpload = (request: { routeOptions: { config: unknown } }) =>
     Boolean((request.routeOptions.config as { rawUpload?: boolean } | undefined)?.rawUpload);
-  app.addContentTypeParser('application/json', { parseAs: 'buffer', bodyLimit: UPLOAD_BODY_LIMIT }, (request, body, done) => {
+  app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (request, body, done) => {
     if (isUpload(request)) return done(null, body);
-    if (body.length > 1024 * 1024) return done(Object.assign(new Error('payload too large'), { statusCode: 413 }), undefined);
     try {
       done(null, body.length === 0 ? {} : JSON.parse(body.toString('utf8')));
     } catch {
       done(Object.assign(new Error('invalid json'), { statusCode: 400 }), undefined);
     }
   });
-  app.addContentTypeParser(['text/plain', '*'], { parseAs: 'buffer', bodyLimit: UPLOAD_BODY_LIMIT }, (request, body, done) =>
+  app.addContentTypeParser(['text/plain', '*'], { parseAs: 'buffer' }, (request, body, done) =>
     done(null, isUpload(request) || !String(request.headers['content-type'] ?? '').startsWith('text/plain') ? body : body.toString('utf8')),
   );
 
@@ -123,6 +125,7 @@ export async function buildApp({
     }
     const status = (error as { statusCode?: number }).statusCode;
     if (status === 429) return reply.status(429).send({ error: { code: 'rate_limited', message: t.auth.tooManyAttempts } });
+    if (status === 413) return reply.status(413).send({ error: { code: 'payload_too_large', message: t.errors.payloadTooLarge } });
     if (status && status >= 400 && status < 500) {
       return reply.status(status).send({ error: { code: 'bad_request', message: t.errors.validation } });
     }

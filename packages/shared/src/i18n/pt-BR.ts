@@ -155,6 +155,7 @@ export const ptBR = {
     forbidden: 'Você não tem permissão para esta ação.',
     readOnly: 'Você só tem leitura nesta caixa.',
     validation: 'Dados inválidos.',
+    payloadTooLarge: 'O conteúdo enviado passa do limite desta operação.',
     invalidDocument: 'CPF ou CNPJ inválido.',
     invalidCpf: 'CPF inválido.',
     invalidCnpj: 'CNPJ inválido.',

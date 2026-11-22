@@ -673,6 +673,35 @@ describe('importação a partir de anexo', () => {
       await mcpClient.close();
     }
   });
+
+  it('o upload_file pelo /mcp aceita até 5 MB de arquivo e os uploads crus passam de 1 MB (tarefa 106)', async () => {
+    const owner = await userSession(h);
+    const ownerApi = client(h, owner.cookie);
+    const token = (await ownerApi.post('/api/account/api-tokens', { name: 'MCP 4 MB', expiresInDays: 1 })).token;
+    const mcpClient = new Client({ name: 'teste-106', version: '1.0.0' });
+    await mcpClient.connect(
+      new StreamableHTTPClientTransport(new URL(`${await listenOnce()}/mcp`), {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      }),
+    );
+    try {
+      // 4 MB de arquivo = ~5,3 MB de base64 no corpo JSON (antes, 413 acima de 1 MB de corpo).
+      const big = Buffer.alloc(4 * 1024 * 1024, 7);
+      const sent = await mcpClient.callTool({
+        name: 'upload_file',
+        arguments: { fileName: 'grande.bin', contentBase64: big.toString('base64') },
+      });
+      const body = (sent.content as { text: string }[])[0]!.text;
+      expect(sent.isError, body).toBeFalsy();
+      expect(JSON.parse(body)).toMatchObject({ fileName: 'grande.bin', sizeBytes: big.length });
+    } finally {
+      await mcpClient.close();
+    }
+    // A rota de upload cru (20 MB) continua aceitando arquivos acima de 1 MB.
+    const conversation = await newSession(ownerApi, agent.id);
+    const padded = Buffer.concat([minimalPdf(['grande']), Buffer.alloc(3 * 1024 * 1024, 32)]);
+    expect(await upload(owner, conversation.id, 'grande.pdf', 'application/pdf', padded)).toBeTruthy();
+  });
 });
 
 describe('cartão de crédito', () => {

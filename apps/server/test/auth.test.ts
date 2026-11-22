@@ -209,3 +209,23 @@ describe('ociosidade da sessão e cookie Secure (tarefa 066)', () => {
     expect(insecureCookieWarning({ ...base, cookieSecure: true, publicBaseUrl: 'https://mf.exemplo.com' })).toBeNull();
   });
 });
+
+describe('limite do corpo nas rotas sem sessão (tarefa 106)', () => {
+  const big = () => JSON.stringify({ login: 'x', password: 'y', pad: 'z'.repeat(2 * 1024 * 1024) });
+
+  it('login e webhook do Telegram recusam um JSON de 2 MB com 413, antes de ler (content-length)', async () => {
+    for (const url of ['/api/auth/login', `/api/telegram/webhook/${'0'.repeat(8)}-0000-4000-8000-000000000000`]) {
+      const res = await h.app.inject({ method: 'POST', url, payload: big(), headers: { 'content-type': 'application/json' } });
+      expect(res.statusCode, url).toBe(413);
+      expect(res.json().error.code).toBe('payload_too_large');
+    }
+    // Um corpo de texto puro grande também (o parser genérico não lê mais 20 MB).
+    const text = await h.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: 'x'.repeat(2 * 1024 * 1024),
+      headers: { 'content-type': 'text/plain' },
+    });
+    expect(text.statusCode).toBe(413);
+  });
+});
