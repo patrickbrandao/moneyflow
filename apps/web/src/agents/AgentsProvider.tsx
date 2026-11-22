@@ -93,12 +93,41 @@ type AgentsApi = {
   focusRequest: { id: string; seq: number } | null;
 };
 
-const AgentsContext = createContext<AgentsApi | null>(null);
+/*
+ * Três contextos (tarefa 120), para quem só age não re-renderizar a cada
+ * clique ou arrasto numa janela: as ações (estáveis), as versões das listas e o
+ * estado das janelas. As páginas (contexto da tela) e o miolo da conversa usam
+ * só as ações; as janelas, o painel e o Layout, o estado.
+ */
+type AgentsUi = Pick<AgentsApi, 'state' | 'focusRequest'>;
+type AgentsVersions = Pick<AgentsApi, 'listVersion' | 'sessionsVersion'>;
+export type AgentsActions = Omit<AgentsApi, keyof AgentsUi | keyof AgentsVersions>;
 
-export function useAgents(): AgentsApi {
-  const value = useContext(AgentsContext);
+const ActionsContext = createContext<AgentsActions | null>(null);
+const VersionsContext = createContext<AgentsVersions | null>(null);
+const UiContext = createContext<AgentsUi | null>(null);
+
+function need<T>(value: T | null): T {
   if (!value) throw new Error('useAgents fora do AgentsProvider');
   return value;
+}
+
+/** As ações das janelas (estáveis: não mudam com o estado). */
+export function useAgentActions(): AgentsActions {
+  return need(useContext(ActionsContext));
+}
+
+/** As versões das listas de sessões (mudam quando alguma sessão muda). */
+export function useAgentVersions(): AgentsVersions {
+  return need(useContext(VersionsContext));
+}
+
+/** Tudo junto: o estado das janelas, as versões e as ações (re-renderiza a cada mudança das janelas). */
+export function useAgents(): AgentsApi {
+  const ui = need(useContext(UiContext));
+  const versions = useAgentVersions();
+  const actions = useAgentActions();
+  return useMemo(() => ({ ...actions, ...versions, ...ui }), [actions, versions, ui]);
 }
 
 /** Meta da janela de leitura de uma sessão. */
@@ -155,6 +184,7 @@ export function normalizeUiState(raw: unknown): UiState {
   return { v: 2, windows, docked, panelWidth: state.panelWidth, panelCollapsed: state.panelCollapsed };
 }
 
+/** A janela dentro da tela; a mesma janela (mesmo objeto) quando já estava dentro. */
 function clampGeometry(win: AgentWindow): AgentWindow {
   const vw = typeof window === 'undefined' ? 1280 : window.innerWidth;
   const vh = typeof window === 'undefined' ? 800 : window.innerHeight;
@@ -162,7 +192,14 @@ function clampGeometry(win: AgentWindow): AgentWindow {
   const h = Math.max(280, Math.min(win.h, vh - 16));
   const x = Math.max(8 - w + 120, Math.min(win.x, vw - 120));
   const y = Math.max(8, Math.min(win.y, vh - 48));
+  if (w === win.w && h === win.h && x === win.x && y === win.y) return win;
   return { ...win, w, h, x, y };
+}
+
+/** A lista com cada janela trocada por `fn`; a mesma lista quando nenhuma mudou. */
+function mapWindows(windows: AgentWindow[], fn: (w: AgentWindow) => AgentWindow): AgentWindow[] {
+  const next = windows.map(fn);
+  return next.every((w, i) => w === windows[i]) ? windows : next;
 }
 
 const STRING_MAX = { route: 500, title: 200, caixaName: 200 } as const;
@@ -193,7 +230,8 @@ function sanitize(context: ScreenContext): ScreenContext {
 }
 
 export function AgentsProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useStored<UiState>('agents-ui', INITIAL);
+  // `sync`: o que outra aba grava vale nesta na hora (tarefa 183), sem gravar de volta.
+  const [state, setState] = useStored<UiState>('agents-ui', INITIAL, { sync: true });
   const [listVersion, setListVersion] = useState(0);
   const [sessionsVersion, setSessionsVersion] = useState(0);
   const me = useUser().id;
@@ -205,7 +243,16 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
   // Estado salvo de uma versão antiga (convertido) ou corrompido (volta ao inicial).
   const safe: UiState = useMemo(() => normalizeUiState(state), [state]);
 
-  const update = useCallback((fn: (s: UiState) => UiState) => setState((current) => fn(normalizeUiState(current))), [setState]);
+  // A função que devolve o próprio estado (nada mudou) não grava nem re-renderiza (tarefa 120).
+  const update = useCallback(
+    (fn: (s: UiState) => UiState) =>
+      setState((current) => {
+        const base = normalizeUiState(current);
+        const next = fn(base);
+        return next === base ? current : next;
+      }),
+    [setState],
+  );
 
   const topZ = (s: UiState) => s.windows.reduce((max, w) => Math.max(max, w.z), 0) + 1;
 
@@ -333,7 +380,15 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
   );
 
   const setGeometry = useCallback<AgentsApi['setGeometry']>(
-    (id, geometry) => update((s) => ({ ...s, windows: s.windows.map((w) => (w.id === id ? clampGeometry({ ...w, ...geometry }) : w)) })),
+    (id, geometry) =>
+      update((s) => {
+        const windows = mapWindows(s.windows, (w) => {
+          if (w.id !== id) return w;
+          const next = clampGeometry({ ...w, ...geometry });
+          return next.x === w.x && next.y === w.y && next.w === w.w && next.h === w.h ? w : next;
+        });
+        return windows === s.windows ? s : { ...s, windows };
+      }),
     [update],
   );
 
@@ -360,13 +415,24 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
   );
 
   const setPanelWidth = useCallback(
-    (width: number) => update((s) => ({ ...s, panelWidth: Math.round(Math.max(PANEL_MIN, Math.min(PANEL_MAX, width))) })),
+    (width: number) =>
+      update((s) => {
+        const panelWidth = Math.round(Math.max(PANEL_MIN, Math.min(PANEL_MAX, width)));
+        return panelWidth === s.panelWidth ? s : { ...s, panelWidth };
+      }),
     [update],
   );
-  const setPanelCollapsed = useCallback((collapsed: boolean) => update((s) => ({ ...s, panelCollapsed: collapsed })), [update]);
+  const setPanelCollapsed = useCallback(
+    (collapsed: boolean) => update((s) => (s.panelCollapsed === collapsed ? s : { ...s, panelCollapsed: collapsed })),
+    [update],
+  );
 
   const setAudioMode = useCallback(
-    (id: string, on: boolean) => update((s) => ({ ...s, windows: s.windows.map((w) => (w.id === id ? { ...w, audioMode: on } : w)) })),
+    (id: string, on: boolean) =>
+      update((s) => {
+        const windows = mapWindows(s.windows, (w) => (w.id === id && Boolean(w.audioMode) !== on ? { ...w, audioMode: on } : w));
+        return windows === s.windows ? s : { ...s, windows };
+      }),
     [update],
   );
 
@@ -478,14 +544,17 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
 
   // Janela redimensionada: as janelas voltam para dentro da tela.
   useEffect(() => {
-    const onResize = () => update((s) => ({ ...s, windows: s.windows.map(clampGeometry) }));
+    const onResize = () =>
+      update((s) => {
+        const windows = mapWindows(s.windows, clampGeometry);
+        return windows === s.windows ? s : { ...s, windows };
+      });
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, [update]);
 
-  const value = useMemo<AgentsApi>(
+  const actions = useMemo<AgentsActions>(
     () => ({
-      state: safe,
       openAgent,
       openConversation,
       openById,
@@ -502,14 +571,10 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
       updateMeta,
       registerScreen,
       screenContext,
-      listVersion,
       bumpList,
-      sessionsVersion,
       bumpSessions,
-      focusRequest,
     }),
     [
-      safe,
       openAgent,
       openConversation,
       openById,
@@ -526,13 +591,12 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
       updateMeta,
       registerScreen,
       screenContext,
-      listVersion,
       bumpList,
-      sessionsVersion,
       bumpSessions,
-      focusRequest,
     ],
   );
+  const versions = useMemo<AgentsVersions>(() => ({ listVersion, sessionsVersion }), [listVersion, sessionsVersion]);
+  const ui = useMemo<AgentsUi>(() => ({ state: safe, focusRequest }), [safe, focusRequest]);
 
   // Link do sino ("agente concluiu"): ?conversation=<id> abre a sessão (a ativa na janela do agente).
   const navigate = useNavigate();
@@ -546,7 +610,13 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
     navigate(`${location.pathname}${qs ? `?${qs}` : ''}`, { replace: true });
   }, [location.search, location.pathname, openById, navigate]);
 
-  return <AgentsContext.Provider value={value}>{children}</AgentsContext.Provider>;
+  return (
+    <ActionsContext.Provider value={actions}>
+      <VersionsContext.Provider value={versions}>
+        <UiContext.Provider value={ui}>{children}</UiContext.Provider>
+      </VersionsContext.Provider>
+    </ActionsContext.Provider>
+  );
 }
 
 let screenSeq = 0;
@@ -557,7 +627,8 @@ let screenSeq = 0;
  * os dados não chegaram.
  */
 export function useAgentScreenContext(context: Omit<ScreenContext, 'route'> | null) {
-  const agents = useContext(AgentsContext);
+  // Só as ações (estáveis): a página não re-renderiza quando as janelas mudam (tarefa 120).
+  const agents = useContext(ActionsContext);
   const key = useRef(0);
   if (key.current === 0) {
     screenSeq += 1;

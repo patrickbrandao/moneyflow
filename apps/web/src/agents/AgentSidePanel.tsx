@@ -89,6 +89,7 @@ export function AgentSidePanel() {
       <ConversationPane
         key={win.id}
         target={paneTarget(win)}
+        audioMode={Boolean(win.audioMode)}
         header={(info) => (
           <PaneHeader
             win={win}

@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -61,4 +61,12 @@ Nada foi executado.
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: `useStored('agents-ui')` lia o `localStorage` só ao montar, sem ouvir o evento `storage`, e cada atualização gravava o objeto inteiro que aquela aba conhecia; com o `focus` gravando a cada clique (tarefa 120), a aba que ainda tinha a janela fechada noutra a regravava.
+
 ## Resolução (executor)
+
+`lib/storage.ts`: `useStored(nome, inicial, { sync: true })` ouve o evento `storage` da chave (só o `localStorage`; `key` nula = `clear()`) e aplica o valor gravado pela outra aba ao estado local, sem gravar de volta. O `AgentsProvider` usa o `sync` no `agents-ui`: fechar, minimizar, ancorar, a largura do painel e a posição feitos numa aba valem nas outras na hora, e a janela que some numa aba desmonta (e fecha o SSE) na outra. Com a tarefa 120, só o que muda é gravado, então um clique noutra aba não regrava nada. O item 3 (juntar por janela com carimbo de tempo) não foi preciso: cada aba grava sempre a partir do último estado de todas.
+
+Testes: e2e novo (não rodado aqui) em `e2e/tests/agentes.spec.ts` → "janelas entre abas (tarefa 183): fechar numa aba vale na outra, e clicar na outra não traz a janela de volta" (dois `page` no mesmo `context`: fechar numa, sumir na outra; abrir na outra, aparecer na primeira; clicar na segunda e recarregar a primeira sem a janela). Spec 011 atualizada. Verificação: `pnpm verify:quick`.

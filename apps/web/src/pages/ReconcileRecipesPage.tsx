@@ -16,7 +16,7 @@ import {
 import { Archive, ArchiveRestore, BookOpenCheck, History, Pencil, Plus } from 'lucide-react';
 import { type FormEvent, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useAgents } from '../agents/AgentsProvider';
+import { useAgentActions } from '../agents/AgentsProvider';
 import { LoadError, PageHead, SkelRows } from '../components/domain';
 import { FormError, ModalActions } from '../components/forms';
 import { recipeRunLabel } from '../components/reconciliation/RecipesPanel';
@@ -440,7 +440,7 @@ function RecipeFormModal({
 
 function RecipeHistoryModal({ recipe, onClose }: { recipe: ReconcileRecipeDto; onClose: () => void }) {
   const { data, error, reload } = useApi<ReconcileRecipeRunDto[]>(`/api/reconcile-recipes/${recipe.id}/runs`);
-  const agents = useAgents();
+  const agents = useAgentActions();
   return (
     <Modal open title={`${k.history}: ${recipe.name}`} onClose={onClose} wide>
       <div className="modal-body">

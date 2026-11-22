@@ -12,7 +12,7 @@ import {
   t,
 } from '@moneyflow/shared';
 import { AlertTriangle, Download, FileText, Loader2, Paperclip, Play, RotateCcw } from 'lucide-react';
-import { createContext, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { formatBytes } from '../components/attachments/AttachmentsPanel';
 import { loadPdf, PdfViewer } from '../components/contracts/PdfViewer';
 import { useToast } from '../components/Toast';
@@ -55,7 +55,7 @@ export function MediaProvider({
   children,
 }: Omit<MediaState, 'openImage' | 'attachments'> & { attachments: ChatAttachmentDto[]; children: ReactNode }) {
   const [open, setOpen] = useState<number | null>(null);
-  const byId = new Map(attachments.map((a) => [a.id, a]));
+  const byId = useMemo(() => new Map(attachments.map((a) => [a.id, a])), [attachments]);
   const openImage = useCallback(
     (id: string) => {
       const index = images.findIndex((image) => image.id === id);
@@ -64,8 +64,13 @@ export function MediaProvider({
     [images],
   );
   const close = useCallback(() => setOpen(null), []);
+  // O mesmo valor enquanto nada muda (tarefa 120): os anexos não re-renderizam com a conversa.
+  const value = useMemo<MediaState>(
+    () => ({ conversationId, readOnly, transcribes, attachments: byId, images, openImage }),
+    [conversationId, readOnly, transcribes, byId, images, openImage],
+  );
   return (
-    <MediaContext.Provider value={{ conversationId, readOnly, transcribes, attachments: byId, images, openImage }}>
+    <MediaContext.Provider value={value}>
       {children}
       {open !== null && <ImageLightbox images={images} index={open} onIndex={setOpen} onClose={close} />}
     </MediaContext.Provider>

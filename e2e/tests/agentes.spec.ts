@@ -59,6 +59,9 @@ const FIXTURES = join(import.meta.dirname, '../../apps/server/test/fixtures');
 /** Resposta longa em vários pedaços, para derrubar o SSE no meio dela. */
 const LONG_REPLY = Array.from({ length: 16 }, (_, i) => `Trecho ${String(i + 1).padStart(2, '0')} da resposta longa.`).join(' ');
 
+/** Resposta em muitos pedaços (tarefa 120): os deltas chegam juntos, um aviso por quadro. */
+const MANY_CHUNKS_REPLY = `${Array.from({ length: 400 }, (_, i) => `p${i + 1}`).join(' ')} fim dos pedaços.`;
+
 /** HTML cru na resposta (tarefa 073): tudo tem de aparecer como texto, sem mudar o console. */
 const HTML_REPLY = [
   'Oi **mundo**',
@@ -129,6 +132,7 @@ test.beforeAll(async () => {
   llm = await startFakeLlm(llmPort);
   llm.brain = (view) => {
     if (view.lastRole === 'user' && /reconectar o stream/i.test(view.lastText)) return { text: LONG_REPLY, chunks: 16, delayMs: 60 };
+    if (view.lastRole === 'user' && /muitos pedaços/i.test(view.lastText)) return { text: MANY_CHUNKS_REPLY, chunks: 400, delayMs: 2 };
     // Markdown seguro (tarefa 073): a resposta traz HTML cru, como numa injeção de prompt.
     if (view.lastRole === 'user' && /responda com html cru/i.test(view.lastText)) return { text: HTML_REPLY };
     // Conciliação com IA (spec 029): lê o lote e propõe ignorar as duas primeiras linhas novas (escritas em ask).
@@ -435,6 +439,108 @@ test('agente: o SSE cai no meio da resposta e reconecta com Last-Event-ID, sem d
   expect(assistant).toHaveLength(1);
   await expect(win.locator('[data-testid="agent-message-assistant"]:not([data-live])')).toHaveCount(assistant.length);
   await expect(win.locator('[data-testid="agent-message-assistant"][data-live]')).toHaveCount(0);
+});
+
+test('janelas (tarefa 120): clicar na janela da frente não grava o estado; a resposta em 400 pedaços chega inteira', async ({ page }) => {
+  await enter(page);
+  const win = await freshSession(page);
+  // Conta as gravações do estado das janelas a partir daqui.
+  await page.evaluate(() => {
+    const w = globalThis as unknown as { __agentsWrites: number };
+    w.__agentsWrites = 0;
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key: string, value: string) {
+      if (key.includes('agents-ui')) w.__agentsWrites += 1;
+      return original.call(this, key, value);
+    };
+  });
+  await win.getByTestId('agent-session-title').click();
+  await win.getByTestId('agent-composer').click();
+  expect(await page.evaluate(() => (globalThis as unknown as { __agentsWrites: number }).__agentsWrites)).toBe(0);
+
+  await say(win, 'muitos pedaços, por favor');
+  const final = win.locator('[data-testid="agent-message-assistant"]:not([data-live])').filter({ hasText: 'fim dos pedaços.' });
+  await expect(final).toHaveCount(1, { timeout: 45_000 });
+  expect((await final.innerText()).replace(/\s+/g, ' ').trim()).toBe(MANY_CHUNKS_REPLY);
+  await expect(win.locator('[data-testid="agent-message-assistant"][data-live]')).toHaveCount(0);
+});
+
+test('SSE (tarefa 122): nada aberto enquanto espera aprovação nem com a aba escondida; aprovar e voltar retomam', async ({ page }) => {
+  await enter(page);
+  const open = new Set<Request>();
+  const opened: Request[] = [];
+  page.on('request', (req) => {
+    if (!/\/api\/runs\/[^/]+\/events/.test(req.url())) return;
+    open.add(req);
+    opened.push(req);
+  });
+  page.on('requestfinished', (req) => open.delete(req));
+  page.on('requestfailed', (req) => open.delete(req));
+  const win = await freshSession(page);
+
+  // Esperando aprovação: o cartão na tela e nenhuma conexão de eventos aberta.
+  const entityName = `E2E Entidade SSE ${tag}`;
+  await say(win, `criar entidade ${entityName}`);
+  const card = win.getByTestId('agent-confirmation');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => open.size, { timeout: 10_000 }).toBe(0);
+  // Aprovar reabre o SSE (do último evento visto) e a resposta chega sem recarregar.
+  const before = opened.length;
+  await card.getByTestId('agent-approve').first().click();
+  await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Pronto:' })).toBeVisible({ timeout: 30_000 });
+  expect(opened.length).toBeGreaterThan(before);
+  const resumed = await opened[before]!.allHeaders();
+  expect(Number(resumed['last-event-id'])).toBeGreaterThan(0);
+
+  // Aba escondida no meio de uma resposta lenta: a conexão fecha; ao voltar, retoma e a resposta termina.
+  const setHidden = (hidden: boolean) =>
+    page.evaluate((value) => {
+      // roda no navegador; o tsconfig do e2e não carrega a lib DOM
+      const doc = (globalThis as unknown as { document: EventTarget }).document;
+      Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => (value ? 'hidden' : 'visible') });
+      doc.dispatchEvent(new Event('visibilitychange'));
+    }, hidden);
+  await say(win, 'devagar');
+  await expect(win.locator('[data-testid="agent-message-assistant"][data-live]')).toBeVisible({ timeout: 30_000 });
+  await setHidden(true);
+  await expect.poll(() => open.size, { timeout: 10_000 }).toBe(0);
+  const hiddenAt = opened.length;
+  await setHidden(false);
+  await expect.poll(() => opened.length, { timeout: 10_000 }).toBeGreaterThan(hiddenAt);
+  await expect(win.getByTestId('agent-composer')).toBeEnabled({ timeout: 45_000 });
+  await expect(
+    win.locator('[data-testid="agent-message-assistant"]:not([data-live])').filter({ hasText: 'Pensando com calma' }),
+  ).toHaveCount(1);
+});
+
+test('janelas entre abas (tarefa 183): fechar numa aba vale na outra, e clicar na outra não traz a janela de volta', async ({
+  page,
+  context,
+}) => {
+  await enter(page);
+  const win = await freshSession(page);
+  const agentId = (await win.getAttribute('data-agent-id'))!;
+  const other = await context.newPage();
+  await other.goto('/');
+  const otherWin = other.locator(`[data-testid="agent-window"][data-agent-id="${agentId}"]`);
+  await expect(otherWin).toBeVisible();
+
+  // Fechar na primeira aba some com a janela na segunda, sem recarregar.
+  await win.getByTestId('agent-close').click();
+  await expect(otherWin).toHaveCount(0);
+  // Abrir de novo na segunda aparece na primeira; minimizar lá vale aqui.
+  await other.getByTestId('agents-button').click();
+  await other.locator(`[data-testid="agents-thread"][data-agent-id="${agentId}"]`).getByTestId('agents-thread-open').click();
+  await expect(page.locator(`[data-testid="agent-window"][data-agent-id="${agentId}"]`)).toBeVisible();
+  await other.locator(`[data-testid="agent-window"][data-agent-id="${agentId}"]`).getByTestId('agent-close').click();
+  await expect(page.locator(`[data-testid="agent-window"][data-agent-id="${agentId}"]`)).toHaveCount(0);
+
+  // Um clique na segunda aba não regrava o estado antigo: recarregada, a primeira continua sem a janela.
+  await other.locator('main').click({ position: { x: 5, y: 5 } });
+  await page.reload();
+  await expect(page.getByRole('heading', { name: /^Olá,/ })).toBeVisible();
+  await expect(page.locator('[data-testid="agent-window"]')).toHaveCount(0);
+  await other.close();
 });
 
 test('agente: o admin abre a sessão de outro usuário em modo somente leitura', async ({ page }) => {

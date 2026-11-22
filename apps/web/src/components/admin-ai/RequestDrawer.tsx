@@ -1,7 +1,7 @@
 import { type AiRequestBodyPart, type AiRequestDetail, buildCurl, formatDateTime, t } from '@moneyflow/shared';
 import { Download, MessageSquare, Radio, X } from 'lucide-react';
 import { useState } from 'react';
-import { useAgents } from '../../agents/AgentsProvider';
+import { useAgentActions } from '../../agents/AgentsProvider';
 import { formatInt } from '../../agents/format';
 import { downloadFile } from '../../lib/download';
 import { useAction, useApi } from '../../lib/hooks';
@@ -24,7 +24,7 @@ const ms = (value: number | null) => (value === null ? '—' : value < 1000 ? `$
  */
 export function RequestDrawer({ requestId, onClose }: { requestId: string; onClose: () => void }) {
   const { data, error, reload } = useApi<AiRequestDetail>(`/api/admin/ai/requests/${requestId}`);
-  const agents = useAgents();
+  const agents = useAgentActions();
 
   useEscapeLayer(true, onClose);
 

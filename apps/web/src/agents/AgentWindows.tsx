@@ -225,6 +225,7 @@ function FloatingWindow({ win, layer }: { win: AgentWindow; layer: number }) {
       <WindowFocus id={win.id} />
       <ConversationPane
         target={paneTarget(win)}
+        audioMode={Boolean(win.audioMode)}
         header={(info) => (
           <PaneHeader
             win={win}

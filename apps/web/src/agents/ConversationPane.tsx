@@ -6,6 +6,7 @@ import {
   formatFileSize,
   isAudioMime,
   isImageMime,
+  type LiveBuffer,
   type PreviewRow,
   type ToolConfirmationDto,
   type ToolResultBlock,
@@ -32,6 +33,7 @@ import {
   type DragEvent,
   type FormEvent,
   type KeyboardEvent,
+  memo,
   type ReactNode,
   type Ref,
   useCallback,
@@ -41,13 +43,13 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react';
 import { MAX_ATTACHMENT_BYTES } from '../components/attachments/AttachmentsPanel';
 import { LoadError } from '../components/domain';
 import { useToast } from '../components/Toast';
 import { Badge, Button, cx, Skel } from '../components/ui';
 import { attachmentUrl } from '../lib/upload';
-import { useAgents } from './AgentsProvider';
 import { AttachmentPreview, MediaProvider, SpeechButton, TranscriptionBadge } from './AttachmentPreview';
 import { RecordButton, RecorderPanel, useAudioRecorder } from './AudioRecorder';
 import { agentColor, toolLabel, usageLine } from './format';
@@ -67,7 +69,16 @@ export type PaneHeaderInfo = {
  * quem embrulha, mensagens, confirmações, composer e rodapé de uso. A sessão
  * finalizada e a de outro usuário ficam em somente leitura (spec 026).
  */
-export function ConversationPane({ target, header }: { target: PaneTarget; header: (info: PaneHeaderInfo) => ReactNode }) {
+export function ConversationPane({
+  target,
+  header,
+  audioMode: audioModeOn = false,
+}: {
+  target: PaneTarget;
+  header: (info: PaneHeaderInfo) => ReactNode;
+  /** Modo áudio da janela (vem de quem embrulha: a conversa não assina o estado das janelas, tarefa 120). */
+  audioMode?: boolean;
+}) {
   const state = useConversation(target);
   const { detail, error } = state;
   // Sessão de um fluxo (tarefa agendada, conciliação, spec 029): sem composer, mas o dono aprova as ações pendentes.
@@ -77,7 +88,7 @@ export function ConversationPane({ target, header }: { target: PaneTarget; heade
   const canDecide = !(detail?.readOnly ?? false) && !finished;
   const agentInactive = target.kind === 'agent' && state.agent !== null && !state.agent.isActive;
   // Modo áudio (spec 025): por janela, só com texto→áudio no agente.
-  const audioMode = Boolean(useAgents().state.windows.find((w) => w.id === target.windowId)?.audioMode && detail?.media.speech);
+  const audioMode = Boolean(audioModeOn && detail?.media.speech);
   const images = useMemo(() => {
     const list: { id: string; fileName: string }[] = [];
     const meta = new Map(detail?.attachments.map((a) => [a.id, a]) ?? []);
@@ -182,30 +193,40 @@ type ToolOutcome = { content: string; isError: boolean };
 function Messages({ state, detail, audioMode }: { state: ConversationState; detail: PaneDetail; audioMode: boolean }) {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // O resultado de cada tool fica o mesmo objeto enquanto o bloco é o mesmo: o memo das mensagens
+  // segura o render quando chega uma mensagem nova (tarefa 120).
+  const outcomes = useRef(new Map<string, { block: ToolResultBlock; outcome: ToolOutcome }>());
   const results = useMemo(() => {
     const map = new Map<string, ToolOutcome>();
+    const next = new Map<string, { block: ToolResultBlock; outcome: ToolOutcome }>();
     for (const message of detail.messages) {
       if (message.role !== 'tool') continue;
       for (const block of message.content) {
         if (block.type === 'tool_result') {
           const b = block as ToolResultBlock;
-          map.set(b.tool_use_id, {
-            content: typeof b.content === 'string' ? b.content : JSON.stringify(b.content),
-            isError: Boolean(b.is_error),
-          });
+          const hit = outcomes.current.get(b.tool_use_id);
+          const outcome =
+            hit && hit.block === b
+              ? hit.outcome
+              : { content: typeof b.content === 'string' ? b.content : JSON.stringify(b.content), isError: Boolean(b.is_error) };
+          next.set(b.tool_use_id, { block: b, outcome });
+          map.set(b.tool_use_id, outcome);
         }
       }
     }
+    outcomes.current = next;
     return map;
   }, [detail.messages]);
   const confirmationsByTool = useMemo(() => new Map(detail.confirmations.map((c) => [c.toolUseId, c])), [detail.confirmations]);
-  const visible = detail.messages.filter((m) => m.role !== 'tool');
+  const visible = useMemo(() => detail.messages.filter((m) => m.role !== 'tool'), [detail.messages]);
 
-  // Rola para o fim quando chega conteúdo, se quem lê já estava no fim.
-  useLayoutEffect(() => {
+  // Rola para o fim quando chega conteúdo, se quem lê já estava no fim (só quando o conteúdo muda:
+  // ler o scrollHeight força o layout, tarefa 120). O texto ao vivo chama o mesmo pela bolha.
+  const stickToEnd = useCallback(() => {
     const el = scroller.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
-  });
+  }, []);
+  useLayoutEffect(stickToEnd, [detail.messages, detail.confirmations, state.busy, state.streamError, state.liveTools, stickToEnd]);
 
   return (
     <div
@@ -240,12 +261,7 @@ function Messages({ state, detail, audioMode }: { state: ConversationState; deta
           />
         ))}
       </div>
-      {state.busy && (state.liveThinking || state.liveText) && (
-        <div className="agent-msg assistant" data-testid="agent-message-assistant" data-live="true">
-          {state.liveThinking && <Thinking text={state.liveThinking} live />}
-          {state.liveText && <Markdown text={state.liveText} />}
-        </div>
-      )}
+      {state.busy && <LiveBubble live={state.live} onGrow={stickToEnd} />}
       {state.busy && (
         <div className="agent-working" role="status">
           <Loader2 className="spin" />
@@ -274,21 +290,45 @@ function Messages({ state, detail, audioMode }: { state: ConversationState; deta
   );
 }
 
-function MessageView({
-  message,
-  results,
-  confirmations,
-  liveTools,
-  active,
-  audioMode,
-}: {
+/**
+ * A bolha ao vivo: a única parte que assina o texto parcial (tarefa 120). Os
+ * deltas chegam juntos, um aviso por quadro; o resto da conversa não
+ * re-renderiza a cada token.
+ */
+function LiveBubble({ live, onGrow }: { live: LiveBuffer; onGrow: () => void }) {
+  const { text, thinking } = useSyncExternalStore(live.subscribe, live.get);
+  useLayoutEffect(onGrow, [text, thinking, onGrow]);
+  if (!text && !thinking) return null;
+  return (
+    <div className="agent-msg assistant" data-testid="agent-message-assistant" data-live="true">
+      {thinking && <Thinking text={thinking} live />}
+      {text && <Markdown text={text} />}
+    </div>
+  );
+}
+
+type MessageViewProps = {
   message: AiMessageDto;
   results: Map<string, ToolOutcome>;
   confirmations: Map<string, ToolConfirmationDto>;
   liveTools: Record<string, LiveTool>;
   active: boolean;
   audioMode: boolean;
-}) {
+};
+
+/** Iguais para o memo: as mesmas props e, das tools ao vivo, só as desta mensagem (tarefa 120). */
+function sameMessageView(a: MessageViewProps, b: MessageViewProps): boolean {
+  if (a.message !== b.message || a.active !== b.active || a.audioMode !== b.audioMode) return false;
+  for (const block of a.message.content) {
+    if (block.type !== 'tool_use') continue;
+    if (a.liveTools[block.id] !== b.liveTools[block.id]) return false;
+    if (a.results.get(block.id) !== b.results.get(block.id)) return false;
+    if (a.confirmations.get(block.id) !== b.confirmations.get(block.id)) return false;
+  }
+  return true;
+}
+
+const MessageView = memo(function MessageView({ message, results, confirmations, liveTools, active, audioMode }: MessageViewProps) {
   const hasText = message.content.some((b) => b.type === 'text' && b.text.trim() !== '');
   if (message.role === 'user') {
     return (
@@ -335,7 +375,7 @@ function MessageView({
       })}
     </div>
   );
-}
+}, sameMessageView);
 
 function UserBlock({ block }: { block: AiBlock }) {
   if (block.type === 'text') return block.text.trim() ? <Markdown text={block.text} /> : null;
@@ -357,7 +397,7 @@ function Thinking({ text, live }: { text: string; live?: boolean }) {
 
 type ToolStatus = 'running' | 'ok' | 'error' | 'awaiting' | 'rejected' | 'pending';
 
-function ToolView({
+const ToolView = memo(function ToolView({
   block,
   outcome,
   confirmation,
@@ -370,6 +410,9 @@ function ToolView({
   live?: LiveTool;
   active: boolean;
 }) {
+  // O corpo (a entrada e o resultado em JSON) só existe aberto (tarefa 120): numa sessão com
+  // centenas de chamadas, montar e serializar tudo fechado custa caro.
+  const [open, setOpen] = useState(false);
   let status: ToolStatus;
   if (outcome) status = outcome.isError ? (confirmation?.status === 'rejected' ? 'rejected' : 'error') : 'ok';
   else if (confirmation?.status === 'pending') status = 'awaiting';
@@ -389,33 +432,45 @@ function ToolView({
     ) : (
       <Wrench />
     );
-  const result = outcome?.content ?? '';
-  const file = toolFile(outcome);
+  const file = useMemo(() => toolFile(outcome), [outcome]);
   return (
-    <details className={cx('agent-tool', `is-${status}`)} data-testid="agent-tool" data-status={status} data-tool={block.name}>
+    <details
+      className={cx('agent-tool', `is-${status}`)}
+      data-testid="agent-tool"
+      data-status={status}
+      data-tool={block.name}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary>
         <ChevronRight className="chev" />
         <span className="agent-tool-ic">{icon}</span>
         <span className="agent-tool-name">{toolLabel(block.name, live?.title)}</span>
         <span className="agent-tool-status">{u.tool[status]}</span>
       </summary>
-      <div className="agent-tool-body">
-        {live?.summary && <p className="agent-tool-summary">{live.summary}</p>}
-        <span className="label">{u.tool.input}</span>
-        <pre>{JSON.stringify(block.input, null, 2)}</pre>
-        {outcome && (
-          <>
-            <span className="label">{u.tool.result}</span>
-            <pre>{result.length > 6000 ? `${result.slice(0, 6000)}…` : result}</pre>
-          </>
-        )}
-      </div>
+      {open && <ToolBody input={block.input} outcome={outcome} summary={live?.summary} />}
       {file && (
         <a className="agent-tool-file" href={attachmentUrl(file.attachmentId)} download={file.fileName} data-testid="agent-tool-file">
           <Download /> {u.tool.file(file.fileName, formatFileSize(file.sizeBytes))}
         </a>
       )}
     </details>
+  );
+});
+
+function ToolBody({ input, outcome, summary }: { input: unknown; outcome?: ToolOutcome; summary?: string }) {
+  const result = outcome?.content ?? '';
+  return (
+    <div className="agent-tool-body">
+      {summary && <p className="agent-tool-summary">{summary}</p>}
+      <span className="label">{u.tool.input}</span>
+      <pre>{JSON.stringify(input, null, 2)}</pre>
+      {outcome && (
+        <>
+          <span className="label">{u.tool.result}</span>
+          <pre>{result.length > 6000 ? `${result.slice(0, 6000)}…` : result}</pre>
+        </>
+      )}
+    </div>
   );
 }
 

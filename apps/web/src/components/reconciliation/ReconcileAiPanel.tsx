@@ -1,7 +1,7 @@
 import { type AiRunEvent, type ReconcileAiStartResult, type ReconcileAiStateDto, t } from '@moneyflow/shared';
 import { Bot, Check, CheckCheck, Loader2, Sparkles, X } from 'lucide-react';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
-import { useAgents } from '../../agents/AgentsProvider';
+import { useAgentActions } from '../../agents/AgentsProvider';
 import { PreviewRows } from '../../agents/ConversationPane';
 import { followRun } from '../../agents/stream';
 import { api } from '../../lib/api';
@@ -22,7 +22,7 @@ export function ReconcileAiPanel({ importId, canWrite, onChanged }: { importId: 
   const path = `/api/statement-imports/${importId}/reconcile-ai`;
   const { data, reload, setData } = useApi<ReconcileAiStateDto>(path);
   const { run, busy } = useAction();
-  const agents = useAgents();
+  const agents = useAgentActions();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState('');
