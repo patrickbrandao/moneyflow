@@ -774,6 +774,22 @@ describe('aditivo, renovação e rescisão como operações da série (spec 034)
   });
 });
 
+describe('rescisão e a sugestão do extrato (tarefa 129)', () => {
+  it('a linha sugerida para uma ocorrência cancelada pela rescisão volta a "nova"', async () => {
+    const { session, admin, s } = await setup();
+    const contract = await admin.post('/api/contracts', lease(s, [rentObligation(s)]));
+    const rows = await occurrences(obligation(contract, 'Aluguel').id);
+    const imp = await importOfx(session.cookie, `accountId=${s.accountA.id}`, [
+      { date: '2026-12-10', cents: -200_000, memo: 'PIX ALUGUEL DEZEMBRO' },
+    ]);
+    expect(imp.lines[0]).toMatchObject({ status: 'suggested', titleId: rows[1]!.id });
+    await admin.post(`/api/contracts/${contract.id}/terminate`, { terminatedOn: '2026-11-15' });
+    expect((await occurrences(obligation(contract, 'Aluguel').id))[1]!.status).toBe('canceled');
+    const after = await admin.get(`/api/statement-imports/${imp.id}`);
+    expect(after.lines[0]).toMatchObject({ status: 'new', titleId: null });
+  });
+});
+
 /* ---------------- espelho, documentos e painel ---------------- */
 
 describe('espelho e permissões', () => {

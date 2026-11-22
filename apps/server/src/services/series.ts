@@ -26,6 +26,7 @@ import { notFound, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
 import { contractOwner } from './contracts';
 import { assertPlannedAccount } from './planned-account';
+import { clearStatementSuggestions } from './reconciliation-guards';
 import { MATERIALIZE_LOCK, materializeRule } from './recurrence';
 import { uuidArray } from './reports';
 import { assertTolerance, TERMS_SQL, termsColumns, termsOf } from './series-core';
@@ -516,6 +517,9 @@ export async function patchOccurrence(
   if (patch.plannedAccountId !== undefined) sets.push(sql`planned_account_id = ${patch.plannedAccountId}, planned_account_custom = false`);
   if (patch.status !== undefined) sets.push(sql`status = ${patch.status}`);
   if (sets.length === 0) return;
+  // Cancelada (rescisão, encerramento) não recebe baixa: a sugestão do extrato sai (tarefa 129).
+  if (patch.status === 'canceled')
+    await clearStatementSuggestions(tx, { titleIds: [row.id, ...(row.mirrorTitleId ? [row.mirrorTitleId] : [])] });
   await tx.execute(sql`UPDATE titles SET ${sql.join(sets, sql`, `)} WHERE id = ${row.id}`);
   if (!row.mirrorTitleId) return;
   const mirrorSets: SQL[] = [];

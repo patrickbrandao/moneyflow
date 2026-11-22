@@ -532,6 +532,8 @@ export async function cancelTitle(ctx: ServiceContext, id: string): Promise<Titl
     ctx.access.assertWrite(title.caixaId);
     assertPairOwner(ctx, title);
     const ids = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
+    // Título cancelado não recebe baixa: a linha sugerida para ele volta a "nova" (tarefa 129).
+    await clearStatementSuggestions(tx, { titleIds: ids });
     await tx.update(titles).set({ status: 'canceled' }).where(inArray(titles.id, ids));
   });
   return getTitle(ctx, id);
@@ -570,7 +572,10 @@ export async function deleteTitle(ctx: ServiceContext, id: string, scope: 'this'
       await withTx(ctx, (tx) => endSeriesFrom(tx, title.recurrenceRuleId!, title.occurrence!, title.dueDate));
       return { deleted: true, archived: false };
     }
-    await withTx(ctx, (tx) => tx.update(titles).set({ archivedAt: sql`now()` }).where(inArray(titles.id, pair)));
+    await withTx(ctx, async (tx) => {
+      await clearStatementSuggestions(tx, { titleIds: pair });
+      await tx.update(titles).set({ archivedAt: sql`now()` }).where(inArray(titles.id, pair));
+    });
     return { deleted: false, archived: true };
   }
 
@@ -592,12 +597,13 @@ export async function archiveTitle(ctx: ServiceContext, id: string): Promise<Tit
   if (title.cardInvoiceId) throw unprocessable(strings.errors.cardInvoiceTitleLocked);
   assertPairOwner(ctx, title);
   const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
-  await withTx(ctx, (tx) =>
-    tx
+  await withTx(ctx, async (tx) => {
+    await clearStatementSuggestions(tx, { titleIds: pair });
+    await tx
       .update(titles)
       .set({ archivedAt: sql`now()` })
-      .where(and(inArray(titles.id, pair), isNull(titles.archivedAt))),
-  );
+      .where(and(inArray(titles.id, pair), isNull(titles.archivedAt)));
+  });
   return getTitle(ctx, id);
 }
 

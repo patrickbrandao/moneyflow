@@ -42,6 +42,7 @@ import {
   loadCard,
   reopenInvoiceTx,
 } from './card-core';
+import { clearStatementSuggestions } from './reconciliation-guards';
 import { settleInTx } from './settlements';
 import { listTitles } from './titles';
 import { withTx } from './tx';
@@ -474,7 +475,11 @@ export async function payInvoice(ctx: ServiceContext, id: string, input: z.outpu
       const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
       const paid = settled + input.amountCents;
       if (paid > 0) await tx.update(titles).set({ amountCents: paid }).where(inArray(titles.id, pair));
-      else await tx.update(titles).set({ status: 'canceled' }).where(inArray(titles.id, pair));
+      else {
+        // Nada pago: o par é cancelado, e a linha sugerida para ele volta a "nova" (tarefa 129).
+        await clearStatementSuggestions(tx, { titleIds: pair });
+        await tx.update(titles).set({ status: 'canceled' }).where(inArray(titles.id, pair));
+      }
       const next = await nextOpenInvoice(tx, card, invoice.referenceMonth);
       await tx.execute(sql`
         INSERT INTO card_invoice_items (card_invoice_id, kind, carried_from_invoice_id, payer_caixa_id, amount_cents, description)

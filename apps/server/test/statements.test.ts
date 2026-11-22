@@ -511,6 +511,75 @@ describe('desfazer e excluir o lançamento que nasceu da linha (spec 009)', () =
   });
 });
 
+describe('título cancelado deixa de ser sugerido (tarefa 129)', () => {
+  it('cancelar, "excluir só esta" numa série e pagar 0 na fatura devolvem a linha sugerida para "nova"', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const payable = (extra: Record<string, unknown>) =>
+      admin.post('/api/titles', {
+        caixaId: s.caixaA.id,
+        direction: 'payable',
+        entityId: s.supplier.id,
+        categoryId: s.expense.id,
+        competenceDate: '2026-10-01',
+        mirrorCaixaId: null,
+        ...extra,
+      });
+    // PIX de 400,00 (22/10): um título avulso; assinatura de 59,90 (03/10): uma série; 230,15 (08/10): a fatura do cartão.
+    // (A série com o valor da menor saída do mês: as outras, maiores, não a pegam como pagamento parcial.)
+    const single = await payable({ description: 'Pagamento avulso', dueDate: '2026-10-22', amountCents: 40_000 });
+    const series = await payable({
+      description: 'Assinatura',
+      dueDate: '2026-10-03',
+      amountCents: 5_990,
+      plannedAccountId: s.accountA.id,
+      series: { kind: 'recurrence', frequency: 'monthly', endsOn: '2026-11-03' },
+    });
+    const issuer = await admin.post('/api/entities', { kind: 'company', name: `Emissor ${s.tag}` });
+    const card = await admin.post('/api/caixas', {
+      name: `Cartão ${s.tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: s.caixaA.id,
+      creditLimitCents: 500_000,
+      closingDay: 3,
+      dueDay: 10,
+      cardLast4: '9876',
+    });
+    await admin.post(`/api/cards/${card.id}/purchases`, {
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      purchasedOn: '2026-09-12',
+      description: 'Mercado no cartão',
+      amountCents: 23_015,
+    });
+    const oct = (await admin.get(`/api/cards/${card.id}`)).invoices.find((i: any) => i.referenceMonth === '2026-10-01');
+    const closed = await admin.post(`/api/card-invoices/${oct.id}/close`, {});
+    const invoiceTitle = closed.titles.find((tr: any) => tr.caixaId === s.caixaA.id);
+
+    const res = await upload(
+      adminSession.cookie,
+      `/api/statement-imports?accountId=${s.accountA.id}&fileName=e.ofx`,
+      fixture('extrato-ofx2.ofx'),
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    const imp = res.json();
+    const line = async (fitid: string) => (await admin.get(`/api/statement-imports/${imp.id}`)).lines.find((l: any) => l.fitid === fitid);
+    expect(await line('OFX2-0006')).toMatchObject({ status: 'suggested', titleId: single.id });
+    expect(await line('OFX2-0001')).toMatchObject({ status: 'suggested', titleId: series.id });
+    expect(await line('OFX2-0003')).toMatchObject({ status: 'suggested', titleId: invoiceTitle.id });
+
+    await admin.post(`/api/titles/${single.id}/cancel`);
+    expect(await line('OFX2-0006')).toMatchObject({ status: 'new', titleId: null });
+    expect(await admin.del(`/api/titles/${series.id}?scope=this`)).toEqual({ deleted: false, archived: true });
+    expect(await line('OFX2-0001')).toMatchObject({ status: 'new', titleId: null });
+    await admin.post(`/api/card-invoices/${oct.id}/pay`, { payerCaixaId: s.caixaA.id, settledOn: '2026-10-10', amountCents: 0 });
+    expect((await admin.get(`/api/titles/${invoiceTitle.id}`)).status).toBe('canceled');
+    expect(await line('OFX2-0003')).toMatchObject({ status: 'new', titleId: null });
+  });
+});
+
 describe('aplicar regras e buscar nas linhas (spec 009)', () => {
   it('reaplica as regras às linhas novas sem mexer nas do usuário nem nas do agente', async () => {
     const adminSession = await userSession(h, 'admin');
