@@ -536,7 +536,8 @@ export async function patchOccurrence(
  * Plano de "esta e as próximas" numa série a partir de `effectiveOn`: na
  * conta, as ocorrências em aberto sem baixa com vencimento na data ou depois
  * mudam (as com baixa ou em mês fechado ficam, na lista dos puladas); no
- * cartão, o valor esperado muda a partir da primeira ocorrência na data.
+ * cartão, o valor esperado muda a partir da primeira ocorrência na data, e o
+ * dia não muda (encerre a cobrança e crie outra).
  */
 export async function planSeriesChange(
   ctx: ServiceContext,
@@ -558,6 +559,8 @@ export async function planSeriesChange(
   }
 
   if (rule.card) {
+    // As datas esperadas saem do dia âncora desde a 1ª ocorrência: mudar o dia reescreveria o passado (tarefa 137).
+    if (anchorChanged) throw unprocessable(E.cardAnchorDay, 'card_charge_anchor_day');
     const card = rule.card;
     const expected = nextExpectedOccurrence(rule, effectiveOn);
     const cardFrom: AmendmentPreview['cardFrom'] = [];
@@ -611,7 +614,6 @@ export async function planSeriesChange(
         if (after.description) sets.push(sql`description = ${after.description as string}`);
         if (sets.length)
           await w.execute(sql`UPDATE card_recurring_charges SET ${sql.join(sets, sql`, `)} WHERE recurrence_rule_id = ${rule.id}`);
-        if (anchorChanged) await w.execute(sql`UPDATE recurrence_rules SET anchor_day = ${change.anchorDay!} WHERE id = ${rule.id}`);
       },
     };
   }

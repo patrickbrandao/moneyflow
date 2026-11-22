@@ -628,7 +628,7 @@ export function SeriesEditModal({ series, onClose, onSaved }: { series: SeriesDt
     };
     if (description.trim() !== series.description) put('description', description.trim());
     if (amountCents !== series.amountCents) put('amountCents', amountCents);
-    if (anchorDay !== series.anchorDay && series.frequency !== 'weekly') put('anchorDay', anchorDay);
+    if (account && anchorDay !== series.anchorDay && series.frequency !== 'weekly') put('anchorDay', anchorDay);
     if (categoryId && categoryId !== series.categoryId) put('categoryId', categoryId);
     if (account && accountId && accountId !== series.accountId) put('accountId', accountId);
     if (!account && payerCaixaId && payerCaixaId !== series.payerCaixaId) put('payerCaixaId', payerCaixaId);
@@ -668,7 +668,8 @@ export function SeriesEditModal({ series, onClose, onSaved }: { series: SeriesDt
             <Field label={O.amount}>
               <MoneyInput value={amountCents} onChange={setAmountCents} ariaLabel={O.amount} />
             </Field>
-            {series.frequency !== 'weekly' ? (
+            {/* A cobrança no cartão não muda de dia (tarefa 137): encerra-se e cria-se outra. */}
+            {account && series.frequency !== 'weekly' ? (
               <Field label={O.anchorDay}>
                 <input
                   className="field"

@@ -11,7 +11,7 @@ import {
 import { Archive, ArrowLeft, Code, Eye, GitCompare, History, PencilLine, RotateCcw, Sparkles } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Markdown } from '../../agents/Markdown';
-import { api } from '../../lib/api';
+import { ApiError, api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
 import { attachmentUrl } from '../../lib/upload';
 import { LoadError } from '../domain';
@@ -103,6 +103,9 @@ function MarkdownDocument({ doc, canWrite, onSaved }: { doc: ContractDocumentDto
   );
   const content = current.data?.content ?? '';
   const [draft, setDraft] = useState<string | null>(null);
+  // A versão em que a edição começou: se outra for salva nesse meio tempo, o servidor recusa (409, tarefa 135).
+  const [base, setBase] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
   const [note, setNote] = useState('');
   const { run, busy } = useAction();
   const dirty = draft !== null && draft !== content;
@@ -117,20 +120,35 @@ function MarkdownDocument({ doc, canWrite, onSaved }: { doc: ContractDocumentDto
 
   function switchView(next: View) {
     if (view === 'edit' && dirty && !window.confirm(D.leaveUnsaved)) return;
-    if (next === 'edit') setDraft(content);
-    else setDraft(null);
+    if (next === 'edit') {
+      setDraft(content);
+      setBase(doc.currentVersionId);
+    } else setDraft(null);
+    setConflict(false);
     setView(next);
   }
 
-  async function save() {
+  async function save(overwrite = false) {
     if (draft === null) return;
+    const baseVersionId = overwrite ? doc.currentVersionId : base;
     const result = await run(
-      () => api.post<{ version: number }>(`/api/contract-documents/${doc.id}/versions`, { content: draft, note }),
+      () =>
+        api
+          .post<{ version: number }>(`/api/contract-documents/${doc.id}/versions`, { content: draft, note, baseVersionId })
+          .catch((error: unknown) => {
+            // Nada foi gravado: a atual recarrega, o rascunho fica e a pessoa escolhe comparar ou gravar por cima.
+            if (error instanceof ApiError && error.status === 409) {
+              setConflict(true);
+              onSaved();
+            }
+            throw error;
+          }),
       (r) => D.versionSaved(r.version),
     );
     if (result) {
       setNote('');
       setDraft(null);
+      setConflict(false);
       setView('rendered');
       onSaved();
     }
@@ -189,6 +207,14 @@ function MarkdownDocument({ doc, canWrite, onSaved }: { doc: ContractDocumentDto
               {D.saveVersion}
             </Button>
           </div>
+          {conflict && (
+            <p className="mt-2 flex flex-wrap items-center gap-2 text-sm text-warn" role="alert">
+              {D.conflictHint}
+              <Button variant="ghost" disabled={busy || !dirty} onClick={() => void save(true)}>
+                {D.saveOverwrite}
+              </Button>
+            </p>
+          )}
         </div>
       )}
       {view === 'versions' && <Versions doc={doc} canWrite={canWrite} onRestored={onSaved} />}

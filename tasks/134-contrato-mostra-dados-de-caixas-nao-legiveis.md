@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -61,4 +61,12 @@ Nada foi executado. Se o produto quiser que o leitor do contrato veja tudo das o
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: o `LATERAL nx`, `without_account` e `obligation_count` de `listSelect`/`listFrom` olhavam títulos e séries de qualquer caixa. Em `contractPayments`, toda linha `card_charge` passava sem conferir o cartão nem a pagadora, e no modo espelho as parcelas sumiam, porque `contract_payments` só devolve o lado do contrato.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/contracts.ts`: `listSelect(ctx)`/`listFrom(ctx)` filtram `obligation_count`, `without_account` e a próxima ocorrência pelas caixas legíveis (`readableFilter`). A próxima é a do lado legível do par: o original quando legível, senão o espelho (`ORDER BY …, mirror_status IS NOT NULL`). `contractPayments` mostra a ocorrência legível pela caixa dela ou pelo espelho. A cobrança no cartão só aparece para quem lê o cartão, a pagadora da série (`card_recurring_charges`) ou a da compra.
+- Decisão (spec 020, "Espelho"): quem vê pelo espelho vê na guia Pagamentos as ocorrências do lado dele. A linha aponta para o título espelho e a caixa da contraparte, e saem os ids do lado do contrato: conta, conta prevista e, nas baixas, conta, transferência, conta de origem e linha do extrato.
+- `docs/020-contratos.md`: "Espelho" e "Visões".
+- Testes: `apps/server/test/contracts.test.ts`, no `describe('espelho e permissões')`. O caso do espelho confere `/payments` (6 linhas pelo espelho, sem conta) e a lista (`obligationCount` 0, próxima = o título espelho). O caso novo, "leitor só da caixa do contrato não vê a próxima ocorrência, as contagens nem as cobranças no cartão de caixas que não lê (tarefa 134)", tem o cofre da caixa B, um cartão com a pagadora B e um leitor só de A: a próxima passa a ser o aluguel de A, as obrigações contam 1 e o cartão some, até ele passar a ler B.
+- Verificação: `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s1 pnpm verify:quick` (nível rápido).

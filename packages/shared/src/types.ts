@@ -1626,7 +1626,8 @@ export type TerminationPreview = {
   /** Ocorrências em aberto com competência depois da data: canceladas (com o espelho). */
   canceled: TerminationOccurrence[];
   /** A última ocorrência de cada obrigação (a que cobre a data), com o proporcional sugerido. */
-  last: (TerminationOccurrence & { periodEnd: string; proratedCents: number; settled: boolean })[];
+  /** `closed`: competência em mês fechado (de um dos lados): o valor não muda, como na com baixa. */
+  last: (TerminationOccurrence & { periodEnd: string; proratedCents: number; settled: boolean; closed: boolean })[];
   /** Em mês fechado: não mudam. */
   blockedClosed: TerminationOccurrence[];
   /** Com baixa depois da data: ficam como estão. */

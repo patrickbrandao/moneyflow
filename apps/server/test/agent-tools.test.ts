@@ -342,6 +342,28 @@ describe('contratos', () => {
     const read = await call(viewerSession, 'get_contract_document', { documentId });
     expect(read.value.version).toMatchObject({ version: 2, content: '# Contrato\n\nCláusula 1.\nCláusula 2.' });
     expect(read.value.versions.map((v: any) => v.authorKind)).toEqual(['agent', 'agent']);
+    // Aprovada depois de uma gravação humana: a tool volta com conflito em vez de sobrescrever (tarefa 135).
+    const pending = await call(
+      adminSession,
+      'save_contract_markdown',
+      { documentId, content: '# Contrato\n\nDo agente.' },
+      { approve: false },
+    );
+    expect(pending.preview).toBeTruthy();
+    await admin.post(`/api/contract-documents/${documentId}/versions`, { content: '# Contrato\n\nCláusula 1.\nCláusula 2.\nHumana.' });
+    await admin.post(`/api/runs/${pending.runId}/confirmations`, { decision: 'approved' });
+    await drain();
+    const late = (await admin.get(`/api/conversations/${pending.conversationId}`)).messages.filter((m: any) => m.role === 'tool').at(-1)
+      .content[0];
+    expect(late.is_error).toBe(true);
+    expect(late.content).toContain('mudou depois que a edição começou');
+    // A base lida pelo agente que já não é a atual também recusa, já na prévia.
+    const stale = await call(adminSession, 'save_contract_markdown', {
+      documentId,
+      content: 'x',
+      baseVersionId: version.value.document.currentVersionId,
+    });
+    expect(stale.error).toContain('mudou depois que a edição começou');
 
     const renewed = await approved(adminSession, 'renew_contract', { contractId, renewal: { endsOn: '2027-10-31' } });
     expect(rowsOf(renewed.preview)).toMatchObject({ Vigência: '01/11/2026 a 30/04/2027 → 01/05/2027 a 31/10/2027' });

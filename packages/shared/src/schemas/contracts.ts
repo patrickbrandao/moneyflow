@@ -260,6 +260,8 @@ export const contractTerminationInput = z.object({
       description: optionalText(300),
       /** Conta prevista da multa (da caixa do contrato). */
       accountId: id.nullish().transform((v) => v ?? null),
+      /** Competência da multa; omitida = a data da rescisão (mês fechado é recusado, tarefa 138). */
+      competenceDate: isoDate.nullish().transform((v) => v ?? null),
     })
     .nullish()
     .transform((v) => v ?? null),
@@ -306,7 +308,15 @@ export const contractDocumentUpdateInput = z
   })
   .partial();
 
-export const contractVersionCreateInput = z.object({ content: markdown, note: optionalText(500) });
+/**
+ * Nova versão do markdown. `baseVersionId`: a versão em que a edição se baseou;
+ * se a atual já é outra, nada é gravado (409 `version_conflict`, tarefa 135).
+ */
+export const contractVersionCreateInput = z.object({
+  content: markdown,
+  note: optionalText(500),
+  baseVersionId: id.nullish().transform((v) => v ?? null),
+});
 
 /** Leitura do PDF por IA: a caixa (o titular define a direção). */
 export const contractReadingQuery = z.object({
