@@ -121,6 +121,7 @@ export function ConversationPane({ target, header }: { target: PaneTarget; heade
   }
 
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: só recebe arquivos arrastados; pelo teclado, o botão Anexar faz o mesmo.
     <div
       className={cx('agent-pane', dragging && 'is-drop')}
       onDragOver={onDragOver}
@@ -224,17 +225,21 @@ function Messages({ state, detail, audioMode }: { state: ConversationState; deta
           </p>
         </div>
       )}
-      {visible.map((message) => (
-        <MessageView
-          key={message.id}
-          message={message}
-          results={results}
-          confirmations={confirmationsByTool}
-          liveTools={state.liveTools}
-          active={state.busy}
-          audioMode={audioMode}
-        />
-      ))}
+      {/* Região viva (tarefa 114): o leitor de tela lê a mensagem quando ela entra na lista; a bolha
+          ao vivo fica fora, para não ler token a token. */}
+      <div role="log" aria-live="polite" aria-relevant="additions" aria-label={u.chat.log} className="agent-log">
+        {visible.map((message) => (
+          <MessageView
+            key={message.id}
+            message={message}
+            results={results}
+            confirmations={confirmationsByTool}
+            liveTools={state.liveTools}
+            active={state.busy}
+            audioMode={audioMode}
+          />
+        ))}
+      </div>
       {state.busy && (state.liveThinking || state.liveText) && (
         <div className="agent-msg assistant" data-testid="agent-message-assistant" data-live="true">
           {state.liveThinking && <Thinking text={state.liveThinking} live />}
@@ -242,7 +247,7 @@ function Messages({ state, detail, audioMode }: { state: ConversationState; deta
         </div>
       )}
       {state.busy && (
-        <div className="agent-working">
+        <div className="agent-working" role="status">
           <Loader2 className="spin" />
           {state.reconnecting
             ? u.chat.reconnecting
@@ -256,9 +261,10 @@ function Messages({ state, detail, audioMode }: { state: ConversationState; deta
         </div>
       )}
       {state.streamError && !state.busy && (
-        <div className="notice danger mt-2 flex items-start gap-2">
+        <div className="notice danger mt-2 flex items-start gap-2" role="alert">
           <AlertTriangle className="mt-0.5 size-4 flex-none" />
           <span className="flex-1">{state.streamError}</span>
+
           <button type="button" className="row-action" aria-label={t.common.close} onClick={state.clearStreamError}>
             <X />
           </button>
@@ -436,6 +442,16 @@ function Confirmations({ state, detail }: { state: ConversationState; detail: Pa
   // Segredos digitados (spec 027): só na memória do cartão; vão na decisão e são descartados.
   const [secrets, setSecrets] = useState<Record<string, Record<string, string>>>({});
   const toast = useToast();
+  // O cartão surgiu (tarefa 114): quem estava no compositor desta janela vai para ele, para decidir pelo teclado.
+  const card = useRef<HTMLDivElement>(null);
+  const hasPending = pending.length > 0;
+  useEffect(() => {
+    const el = card.current;
+    if (!hasPending || !el) return;
+    const active = document.activeElement;
+    const pane = el.closest('.agent-pane');
+    if (active instanceof HTMLElement && active.closest('.agent-input') && pane?.contains(active)) el.focus();
+  }, [hasPending]);
   if (pending.length === 0) return null;
 
   const missingSecret = (c: ToolConfirmationDto) =>
@@ -485,7 +501,18 @@ function Confirmations({ state, detail }: { state: ConversationState; detail: Pa
   );
 
   return (
-    <div className="agent-confirm" data-testid="agent-confirmation">
+    <div
+      ref={card}
+      className="agent-confirm"
+      data-testid="agent-confirmation"
+      role="group"
+      aria-label={pending.length > 1 ? u.confirm.titleMany(pending.length) : u.confirm.title}
+      tabIndex={-1}
+    >
+      {/* Anúncio ao leitor de tela quando o pedido de aprovação aparece. */}
+      <p className="sr-only" role="alert">
+        {u.confirm.announce(pending.length)}
+      </p>
       <div className="agent-confirm-head">
         <span>{pending.length > 1 ? u.confirm.titleMany(pending.length) : u.confirm.title}</span>
         {pending.length > 1 && rejecting !== 'all' && (

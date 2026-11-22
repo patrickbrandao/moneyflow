@@ -77,8 +77,11 @@ function internalClick(event: MouseEvent<HTMLDivElement>, navigate: (to: string)
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
   const navigate = useNavigate();
   const html = useMemo(() => renderMarkdown(text), [text]);
-  // biome-ignore lint/security/noDangerouslySetInnerHtml: HTML escapado no marked e saneado pelo DOMPurify (renderMarkdown).
-  return <div className="agent-md" onClick={(event) => internalClick(event, navigate)} dangerouslySetInnerHTML={{ __html: html }} />;
+  return (
+    // biome-ignore lint/security/noDangerouslySetInnerHtml: HTML escapado no marked e saneado pelo DOMPurify (renderMarkdown).
+    // biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: delega o clique dos links internos; o Enter no link também chega aqui como clique.
+    <div className="agent-md" onClick={(event) => internalClick(event, navigate)} dangerouslySetInnerHTML={{ __html: html }} />
+  );
 });
 
 /**

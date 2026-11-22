@@ -201,6 +201,7 @@ function TranscriptionView({ attachmentId, initial }: { attachmentId: string; in
     <div className="agent-transcript" data-testid="transcription" data-status="done">
       <p
         ref={body}
+        role="group"
         className={cx('agent-transcript-text', !expanded && 'clamped')}
         style={{ ['--clamp' as string]: TRANSCRIPTION_COLLAPSE_LINES }}
         aria-label={u.transcription}

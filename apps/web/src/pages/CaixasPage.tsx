@@ -2,8 +2,10 @@ import { type CaixaSummary, t } from '@moneyflow/shared';
 import { CreditCard, Plus, Star, Wallet } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { recordDragProps } from '../agents/records';
+import { RowLink } from '../components/a11y';
 import { CaixaFormModal } from '../components/CaixaFormModal';
 import { LoadError, Money, PageHead, RoleBadge, SkelRows } from '../components/domain';
+
 import { Badge, Button, EmptyRow, Tabs } from '../components/ui';
 import { useUser } from '../lib/auth';
 import { useRegisterCommands } from '../lib/commands';
@@ -80,7 +82,7 @@ export function CaixasPage() {
                       ) : (
                         <Wallet className="size-4 text-muted" />
                       )}
-                      <span className="row-title">{caixa.name}</span>
+                      <RowLink to={`/caixas/${caixa.id}`}>{caixa.name}</RowLink>
                       {caixa.kind === 'credit_card' && <CardEnding last4={caixa.cardLast4} />}
                       {caixa.isPrimary && (
                         <Badge tone="outline" title={t.caixa.isPrimary}>

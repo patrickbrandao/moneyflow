@@ -125,6 +125,7 @@ export function ReconcileAiPanel({ importId, canWrite, onChanged }: { importId: 
           <p className="hint">{data.canDecide ? k.proposesHint : k.otherUser}</p>
           <div className="agent-confirm-list">
             {pending.map((c) => (
+              // biome-ignore lint/a11y/noLabelWithoutControl: a caixa de seleção aparece só para quem decide; sem ela, o item é só texto.
               <label key={c.id} className="agent-confirm-item flex items-start gap-2">
                 {data.canDecide && (
                   <input

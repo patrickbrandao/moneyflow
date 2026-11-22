@@ -8,8 +8,10 @@ import { useRegisterCommands } from '../../lib/commands';
 import { titlesTable } from '../../lib/export-tables';
 import { useApi, useListLimit } from '../../lib/hooks';
 import { useParamState, useSetParams } from '../../lib/params';
+import { RowButton } from '../a11y';
 import { DateRangeFilter, useStoredPeriod } from '../DateRangeFilter';
 import { CategoryLabel, ListCutNotice, LoadError, MirrorBadge, Money, SkelRows, TitleStatusBadge } from '../domain';
+
 import { ExportMenu } from '../ExportMenu';
 import { Badge, Button, cx, EmptyRow, Skel, Tabs, useDebounced } from '../ui';
 import { TitleDrawer } from './TitleDrawer';
@@ -152,7 +154,7 @@ export function TitlesTab({
                 >
                   <td className={cx('mono text-xs', row.overdue && 'text-danger')}>{formatDate(row.dueDate)}</td>
                   <td>
-                    <span className="row-title">
+                    <RowButton onClick={() => setTitleId(row.id)}>
                       {row.description}
                       {row.occurrence && (
                         <Badge mono className="ml-2">
@@ -165,7 +167,7 @@ export function TitlesTab({
                           {row.attachmentCount}
                         </span>
                       )}
-                    </span>
+                    </RowButton>
                     <span className="row-sub">
                       {row.entityName}
                       {row.counterpartyCaixaName ? ` · ⇄ ${row.counterpartyCaixaName}` : ''}

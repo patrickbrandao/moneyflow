@@ -1,6 +1,8 @@
 import { type CalendarItem, type DailyBalance, formatDate, t } from '@moneyflow/shared';
 import { Fragment } from 'react';
+import { RowButton } from '../a11y';
 import { CategoryLabel, Money } from '../domain';
+
 import { Badge, cx, EmptyRow } from '../ui';
 import type { ItemOpen } from './CalendarGrid';
 import { daysBetween, weekdayName } from './dates';
@@ -95,10 +97,13 @@ export function AgendaView({
                 {items.map((item) => (
                   <tr key={item.key} className="cursor-pointer" onClick={(event) => onOpen(item, event.currentTarget)}>
                     <td>
-                      <span className={cx('row-title inline-flex items-center gap-2', `s-${item.calendarStatus}`)}>
+                      <RowButton
+                        className={cx('inline-flex items-center gap-2', `s-${item.calendarStatus}`)}
+                        onClick={(event) => onOpen(item, (event.currentTarget.closest('tr') as HTMLElement | null) ?? event.currentTarget)}
+                      >
                         <span className="cal-dot" aria-hidden />
                         {item.description}
-                      </span>
+                      </RowButton>
                       <span className="row-sub">
                         {item.entityName ?? (item.itemKind === 'card_invoice' ? t.calendar.invoiceForecast : '')}
                       </span>

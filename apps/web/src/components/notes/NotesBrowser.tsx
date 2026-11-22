@@ -18,8 +18,10 @@ import { api } from '../../lib/api';
 import { useUser } from '../../lib/auth';
 import { useApi } from '../../lib/hooks';
 import { useSetParams } from '../../lib/params';
+import { RowButton } from '../a11y';
 import { DateRangeFilter, useStoredPeriod } from '../DateRangeFilter';
 import { LoadError, SkelRows } from '../domain';
+
 import { type EntityOption, EntityPicker } from '../forms';
 import { Badge, Button, cx, EmptyRow, useDebounced } from '../ui';
 import { NoteKindDot, NoteKindLabel } from './kinds';
@@ -225,7 +227,7 @@ export function NotesBrowser({
                     <NoteKindLabel kind={note.kind} />
                   </td>
                   <td>
-                    <span className="row-title">{note.title}</span>
+                    <RowButton onClick={() => setParams({ note: note.id, new: null })}>{note.title}</RowButton>
                     {note.bodyExcerpt && <span className="row-sub note-excerpt">{note.bodyExcerpt}</span>}
                   </td>
                   {!entity && (

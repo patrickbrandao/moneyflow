@@ -1,7 +1,9 @@
 import { formatDateTime, type MessageDestinationDto, type TestSendResult, t } from '@moneyflow/shared';
 import { ArchiveRestore, Bell, History, MoreHorizontal, Pencil, Plus, Send, Trash2 } from 'lucide-react';
 import { useState } from 'react';
+import { RowButton } from '../components/a11y';
 import { LoadError, PageHead, SkelRows } from '../components/domain';
+
 import { DestinationFormModal } from '../components/messages/DestinationFormModal';
 import { HistoryTab } from '../components/messages/HistoryTab';
 import { SubscriptionsDrawer } from '../components/messages/SubscriptionsDrawer';
@@ -130,7 +132,7 @@ export function MessagesPage() {
                   onClick={() => setOpenId(d.id)}
                 >
                   <td>
-                    <span className="row-title">{d.name}</span>
+                    <RowButton onClick={() => setOpenId(d.id)}>{d.name}</RowButton>
                     <span className="row-sub mono">bot {d.botId ?? '—'}</span>
                   </td>
                   <td>

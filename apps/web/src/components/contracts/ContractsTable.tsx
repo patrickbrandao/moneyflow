@@ -1,6 +1,8 @@
 import { type ContractRow, type ContractStatus, formatDate, t } from '@moneyflow/shared';
 import { useNavigate } from 'react-router-dom';
+import { RowLink } from '../a11y';
 import { CategoryDot, Money, SkelRows } from '../domain';
+
 import { Badge, EmptyRow, type Tone } from '../ui';
 
 const STATUS_TONE: Record<ContractStatus, Tone> = {
@@ -62,7 +64,7 @@ export function ContractsTable({
                 <span className="flex items-center gap-2">
                   <CategoryDot slot={row.categoryColorSlot} />
                   <span className="min-w-0">
-                    <span className="row-title">{row.name}</span>
+                    <RowLink to={`/contracts/${row.id}`}>{row.name}</RowLink>
                     <span className="row-sub">
                       {t.contracts.directionsShort[row.direction]}
                       {row.contractNumber ? ` · ${t.contracts.numberShort(row.contractNumber)}` : ''}

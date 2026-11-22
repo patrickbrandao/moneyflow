@@ -7,8 +7,10 @@ import { purchasesTable } from '../../lib/export-tables';
 import { useApi, useListLimit } from '../../lib/hooks';
 import { entityLink } from '../../lib/links';
 import { useParamState } from '../../lib/params';
+import { RowButton } from '../a11y';
 import { DateRangeFilter, useStoredPeriod } from '../DateRangeFilter';
 import { CategoryLabel, ListCutNotice, LoadError, Money, SkelRows } from '../domain';
+
 import { ExportMenu } from '../ExportMenu';
 import { Badge, Button, cx, EmptyRow, Skel, useDebounced } from '../ui';
 import { PurchaseDrawer } from './PurchaseDrawer';
@@ -147,7 +149,11 @@ export function PurchasesTab({
                   className={cx('cursor-pointer', row.id === purchaseId && 'is-selected')}
                   onClick={() => setPurchaseId(row.id)}
                 >
-                  <td className="mono text-xs">{formatDate(row.purchasedOn)}</td>
+                  <td className="mono text-xs">
+                    <RowButton onClick={() => setPurchaseId(row.id)} label={t.common.openItem(row.description)}>
+                      {formatDate(row.purchasedOn)}
+                    </RowButton>
+                  </td>
                   <td>
                     <span className="row-title">
                       <Link className="link" to={entityLink(row.entityId)} onClick={(e) => e.stopPropagation()}>

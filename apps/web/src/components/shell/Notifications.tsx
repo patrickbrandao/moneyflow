@@ -132,7 +132,7 @@ export function Notifications() {
                     {t.notifications.kinds[item.kind]} · {formatDateTime(item.createdAt)}
                   </span>
                 </span>
-                {!item.readAt && <span className="notif-dot" aria-label={t.notifications.markRead} />}
+                {!item.readAt && <span className="notif-dot" role="img" aria-label={t.notifications.markRead} />}
               </button>
             ))}
           </div>

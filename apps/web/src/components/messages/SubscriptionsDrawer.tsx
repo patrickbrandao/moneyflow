@@ -291,6 +291,7 @@ function SubscriptionEditor({
             </label>
           )}
           {kind === 'reconciliation_divergence' && (
+            // biome-ignore lint/a11y/noLabelWithoutControl: o controle é o MoneyInput (um input dentro do componente).
             <label>
               <span className="label">{t.messages.params.min_difference_cents}</span>
               <MoneyInput value={minDiff} onChange={touch(setMinDiff)} ariaLabel={t.messages.params.min_difference_cents} />

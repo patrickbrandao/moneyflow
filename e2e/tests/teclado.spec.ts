@@ -5,6 +5,7 @@ import { loginAsAdmin } from '../support/session';
  * Esc pela pilha de camadas (tarefa 115): cada Esc fecha só a camada de cima.
  * A lista do seletor de entidade fecha sem levar o "Novo título"; a confirmação
  * aberta da gaveta fecha sem levar a gaveta; a "Nova tag" volta às "Tags de entidade".
+ * E as listas pelo teclado (tarefa 114): o nome da linha é um botão ou um link.
  */
 
 async function base(page: Page, tag: string) {
@@ -79,4 +80,51 @@ test('Esc na "Nova tag" volta às "Tags de entidade"', async ({ page }) => {
   await expect(manage).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(manage).toBeHidden();
+});
+
+test('teclado: o nome do título abre a gaveta, o foco entra nela e volta à linha; a caixa e a entidade abrem pelo link (tarefa 114)', async ({
+  page,
+}) => {
+  const tag = Date.now().toString(36);
+  await loginAsAdmin(page);
+  const { post, expense, supplier, caixa } = await base(page, tag);
+  const description = `Teclado ${tag}`;
+  await post('/api/titles', {
+    caixaId: caixa.id,
+    direction: 'payable',
+    entityId: supplier.id,
+    categoryId: expense.id,
+    description,
+    competenceDate: '2026-11-01',
+    dueDate: '2026-11-20',
+    amountCents: 4_321,
+    mirrorCaixaId: null,
+  });
+
+  // Título: o nome é um botão; Enter abre a gaveta com o foco no título dela; Esc devolve o foco ao botão.
+  await page.goto(`/caixas/${caixa.id}/payables`);
+  const open = page.getByRole('button', { name: description, exact: true });
+  await open.focus();
+  await page.keyboard.press('Enter');
+  const drawer = page.getByRole('complementary', { name: description });
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator('.dh .t')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(drawer).toBeHidden();
+  await expect(open).toBeFocused();
+
+  // Caixa e entidade: o nome é um link da linha.
+  await page.goto('/caixas');
+  await page.getByRole('link', { name: caixa.name, exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(new RegExp(`/caixas/${caixa.id}`));
+  await page.goto('/entities?kind=all');
+  await page.getByPlaceholder('Nome, fantasia ou CPF/CNPJ').fill(supplier.name);
+  await page
+    .getByRole('row', { name: new RegExp(supplier.name) })
+    .getByRole('link', { name: supplier.name })
+    .focus();
+
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(new RegExp(`/entities/${supplier.id}`));
 });

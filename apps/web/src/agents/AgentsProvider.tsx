@@ -89,6 +89,8 @@ type AgentsApi = {
   /** Muda quando a sessão ativa de um fio mudou por fora da janela (bifurcar, excluir): as janelas dos agentes relêem. */
   sessionsVersion: number;
   bumpSessions: () => void;
+  /** Pedido de foco (tarefa 114): a janela aberta ou restaurada agora leva o foco para o compositor. */
+  focusRequest: { id: string; seq: number } | null;
 };
 
 const AgentsContext = createContext<AgentsApi | null>(null);
@@ -207,8 +209,13 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
 
   const topZ = (s: UiState) => s.windows.reduce((max, w) => Math.max(max, w.z), 0) + 1;
 
+  // Só quem abre ou restaura pede o foco: as janelas salvas que voltam com a página não o roubam.
+  const [focusRequest, setFocusRequest] = useState<AgentsApi['focusRequest']>(null);
+  const requestFocus = useCallback((id: string) => setFocusRequest((r) => ({ id, seq: (r?.seq ?? 0) + 1 })), []);
+
   const open = useCallback(
-    (meta: WindowMeta & { kind: AgentWindow['kind']; agentId: string }) =>
+    (meta: WindowMeta & { kind: AgentWindow['kind']; agentId: string }) => {
+      requestFocus(meta.id);
       update((s) => {
         const existing = s.windows.find((w) => w.id === meta.id);
         if (existing) {
@@ -251,8 +258,9 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
           minimized: false,
         });
         return { ...s, windows: [...s.windows, win] };
-      }),
-    [update],
+      });
+    },
+    [update, requestFocus],
   );
 
   const openAgent = useCallback<AgentsApi['openAgent']>(
@@ -303,13 +311,15 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
   );
 
   const restore = useCallback<AgentsApi['restore']>(
-    (id) =>
+    (id) => {
+      requestFocus(id);
       update((s) => ({
         ...s,
         panelCollapsed: s.docked === id ? false : s.panelCollapsed,
         windows: s.windows.map((w) => (w.id === id ? clampGeometry({ ...w, minimized: false, z: topZ(s) }) : w)),
-      })),
-    [update],
+      }));
+    },
+    [update, requestFocus],
   );
 
   const focus = useCallback<AgentsApi['focus']>(
@@ -496,6 +506,7 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
       bumpList,
       sessionsVersion,
       bumpSessions,
+      focusRequest,
     }),
     [
       safe,
@@ -519,6 +530,7 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
       bumpList,
       sessionsVersion,
       bumpSessions,
+      focusRequest,
     ],
   );
 

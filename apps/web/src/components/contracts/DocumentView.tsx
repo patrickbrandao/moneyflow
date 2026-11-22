@@ -172,7 +172,7 @@ function MarkdownDocument({ doc, canWrite, onSaved }: { doc: ContractDocumentDto
               aria-label={D.views.edit}
               spellCheck
             />
-            <div className="panel contract-md" aria-label={D.preview}>
+            <div className="panel contract-md" role="group" aria-label={D.preview}>
               <Markdown text={draft} />
             </div>
           </div>
@@ -229,15 +229,23 @@ function Versions({ doc, canWrite, onRestored }: { doc: ContractDocumentDto; can
       <ul className="item-list">
         {versions.map((v) => (
           <li key={v.id} className={cx('item', shown === v.id && 'bg-s2')}>
-            <span className="grow min-w-0 cursor-pointer" onClick={() => setShown(v.id)}>
+            {/* A versão é um botão: abre pelo clique e pelo teclado (tarefa 114). */}
+
+            <button
+              type="button"
+              className="grow min-w-0 cursor-pointer text-left"
+              aria-pressed={shown === v.id}
+              onClick={() => setShown(v.id)}
+            >
               <span className="row-title">
                 v{v.version} {v.id === doc.currentVersionId && <Badge tone="ok">{D.current}</Badge>}
               </span>
+
               <span className="row-sub">
                 {formatDateTime(v.createdAt)} · {v.authorKind === 'agent' ? D.authorAgent : (v.authorName ?? '—')}
                 {v.note ? ` · ${v.note}` : ''}
               </span>
-            </span>
+            </button>
             <span className="row-actions">
               <label className="check" title={D.compareWith}>
                 <input type="radio" name="left" checked={left === v.id} onChange={() => setLeft(v.id)} aria-label={`A v${v.version}`} />
@@ -301,7 +309,7 @@ function VersionDiff({ documentId, leftId, rightId }: { documentId: string; left
       {stats.added + stats.removed === 0 ? (
         <p className="hint">{D.noDiff}</p>
       ) : (
-        <div className="panel diff-view" aria-label={D.diffTitle(a.data.version, b.data.version)}>
+        <div className="panel diff-view" role="group" aria-label={D.diffTitle(a.data.version, b.data.version)}>
           {lines.map((line, i) => (
             <div key={`${i}-${line.kind}`} className={cx('diff-line', line.kind)}>
               <span className="ln">{line.oldLine ?? ''}</span>

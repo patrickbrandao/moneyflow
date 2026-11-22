@@ -98,6 +98,8 @@ export const agentsUiStrings = {
     failed: 'A execução falhou.',
     reconnecting: 'Reconectando…',
     composer: 'Mensagem para o agente',
+    /** A lista de mensagens como região viva (tarefa 114): o leitor de tela lê a resposta quando ela termina. */
+    log: 'Mensagens da sessão',
     placeholder: 'Escreva uma mensagem (Enter envia, Shift+Enter quebra a linha)…',
     placeholderBusy: 'Aguarde o agente terminar ou pare a execução…',
     send: 'Enviar',
@@ -142,6 +144,9 @@ export const agentsUiStrings = {
   confirm: {
     title: 'Aplicar?',
     titleMany: (n: number) => `Aplicar ${n} ações?`,
+    /** Anúncio ao leitor de tela quando o cartão aparece (tarefa 114). */
+    announce: (n: number) => (n === 1 ? 'O agente pede aprovação para 1 ação.' : `O agente pede aprovação para ${n} ações.`),
+
     approve: 'Aprovar',
     reject: 'Recusar',
     approveAll: 'Aprovar tudo',

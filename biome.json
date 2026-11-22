@@ -32,12 +32,12 @@
       "preset": "recommended",
       "a11y": {
         "noAutofocus": "off",
-        "noStaticElementInteractions": "off",
-        "useKeyWithClickEvents": "off",
-        "noLabelWithoutControl": "off",
+        "noStaticElementInteractions": "error",
+        "useKeyWithClickEvents": "error",
+        "noLabelWithoutControl": "error",
         "useSemanticElements": "off",
         "noNoninteractiveElementToInteractiveRole": "off",
-        "useAriaPropsSupportedByRole": "off"
+        "useAriaPropsSupportedByRole": "error"
       },
       "style": {
         "noNonNullAssertion": "off"

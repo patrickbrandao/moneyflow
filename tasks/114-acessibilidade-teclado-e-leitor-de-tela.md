@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -112,12 +112,12 @@ Um leitor que use só o teclado ou leitor de tela não abre os detalhes de nenhu
 ```
 
 ## Critérios de aceite
-- [ ] Com o teclado: Tab chega ao nome do título, Enter abre a gaveta, o foco vai para a gaveta, e Esc devolve o foco à linha.
-- [ ] O mesmo para caixas, entidades, compras, linhas da fatura, agenda, contratos, documentos, pagamentos, anotações, versões do documento e servidores MCP, com foco visível e anunciados como link ou botão.
-- [ ] Um leitor abre qualquer título da lista só com o teclado.
-- [ ] O leitor de tela lê a resposta final e o pedido de aprovação.
-- [ ] Abrir um agente pelo menu deixa o foco no compositor da janela.
-- [ ] `useKeyWithClickEvents` e `noStaticElementInteractions` ligadas, `pnpm lint` passando, cada exceção com `biome-ignore` justificado.
+- [x] Com o teclado: Tab chega ao nome do título, Enter abre a gaveta, o foco vai para a gaveta, e Esc devolve o foco à linha.
+- [ ] O mesmo para caixas, entidades, compras, linhas da fatura, agenda, contratos, documentos, pagamentos, anotações, versões do documento e servidores MCP, com foco visível e anunciados como link ou botão. (feito em todos, menos a lista de documentos e os títulos avulsos da `ContractPage`, que esperam a tarefa 182)
+- [x] Um leitor abre qualquer título da lista só com o teclado.
+- [x] O leitor de tela lê a resposta final e o pedido de aprovação.
+- [x] Abrir um agente pelo menu deixa o foco no compositor da janela.
+- [x] `useKeyWithClickEvents` e `noStaticElementInteractions` ligadas, `pnpm lint` passando, cada exceção com `biome-ignore` justificado.
 
 ## Testes recomendados
 - e2e em `fluxo-principal.spec.ts`: depois de criar o título, `page.keyboard.press('Tab')` até `getByRole('button', { name: <descrição> })`, Enter, e conferir que `getByRole('complementary', { name: <descrição> })` está visível e com o foco dentro.
@@ -128,5 +128,17 @@ Um leitor que use só o teclado ou leitor de tela não abre os detalhes de nenhu
 Nada foi executado nem testado com leitor de tela; a conclusão vem da leitura do JSX/HTML gerado. O Biome foi rodado só para contar diagnósticos (sem `--write`). As tabelas `AgentsTab`, `ToolKitsTab` e `ContractPage` foram citadas por um revisor como tendo o mesmo padrão; aqui só entram os pontos listados acima.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado no código atual: as linhas listadas abriam só pelo `onClick` da `<tr>`/`<li>`/`<span>` com o nome em `<span>`; as gavetas abriam sem mover o foco; o chat não tinha região viva, `role="status"` nem `role="alert"`; abrir um agente não levava o foco à janela; e o `biome.json` desligava sete regras de `a11y`. Contagem atual com `--max-diagnostics=500`: `useKeyWithClickEvents` 16, `noStaticElementInteractions` 14, `useAriaPropsSupportedByRole` 7, `noLabelWithoutControl` 3, `noNoninteractiveElementToInteractiveRole` 1, `useSemanticElements` 38 e `noAutofocus` 39.
 
 ## Resolução (executor)
+**Listas.** Componentes novos em `apps/web/src/components/a11y.tsx`: `RowLink` (o nome da linha como link da rota, sem subir o clique para a linha), `RowButton` (o nome como botão que abre a gaveta, a janela ou o detalhe) e `ExpandToggle` (a seta como botão com `aria-expanded` e "Expandir/Recolher <nome>"); o clique na linha continua para o mouse. Aplicados em: títulos (`TitlesTab`: o nome abre a gaveta, para qualquer papel e qualquer situação), caixas (`CaixasPage`) e entidades (`EntitiesPage`) por link, compras do cartão (`PurchasesTab`) e linhas da fatura (`card/shared.tsx`) pela data como botão "Abrir <compra>", agenda do calendário (`AgendaView`, o popover ancorado na linha), destinos do Telegram (`MessagesPage`), envios (`HistoryTab`), relatório por entidade e por categoria (`EntityReport`, `CategoryReport`), contratos (`ContractsTable` e o painel de `ContractsPage`) por link, pagamentos do contrato (`PaymentsSection`), anotações (`NotesBrowser`), servidores MCP (`McpTab`) e as versões do documento markdown (`DocumentView`, cada versão um botão com `aria-pressed`). CSS em `styles/base.css` (`button.row-title` alinhado à esquerda, hover e o contorno de foco) e `styles/agents.css`.
+
+**Gavetas.** `useDrawerFocus` (mesmo arquivo): ao abrir a gaveta do título e a da compra, o foco vai para o título dela (`tabIndex={-1}`), acompanha o registro mostrado, e volta para onde estava (a linha) ao fechar.
+
+**Chat.** `ConversationPane`: as mensagens ficam numa região `role="log"` `aria-live="polite"` `aria-relevant="additions"` ("Mensagens da sessão"), com a bolha ao vivo fora dela (sem ler token a token); o indicador de trabalho tem `role="status"` e o erro do stream `role="alert"`; o cartão "Aplicar?" é um grupo rotulado com um aviso `role="alert"` ("O agente pede aprovação para N ações.") e recebe o foco quando ele estava no compositor da mesma janela. `AgentsProvider` ganhou `focusRequest` (pedido por `open` e `restore`: menu Agentes, doca, link do sino; as janelas salvas que voltam com a página não roubam o foco), e `agents/WindowFocus.tsx` leva o foco ao compositor assim que ele habilita (ou à própria janela, numa sessão só de leitura), na janela flutuante e no painel lateral.
+
+**Biome.** Religadas como `error`: `useKeyWithClickEvents`, `noStaticElementInteractions`, `useAriaPropsSupportedByRole` e `noLabelWithoutControl`. Corrigido o que apontavam: os três defeitos reais (entidades, painel de contratos, versões do documento) e o ARIA fora do papel (`role="group"` nos diffs, na prévia do markdown, nos números dos pagamentos e na transcrição; `role="img"` nos ícones de capacidade e no ponto de não lida). Os falsos positivos ficaram com `biome-ignore` justificado: fundos de modal, da confirmação, da prévia de mídia e do menu no celular (fecham por Esc ou por um botão), células que só seguram o clique da linha para os botões dentro (`stopPropagation`), áreas que só recebem arquivo arrastado (o botão faz o mesmo), a fatia da pizza (a legenda tem um botão por fatia), a delegação dos links internos do markdown e os rótulos cujo controle vem em `children` (`Field`, `MoneyInput`, a caixa condicional). Continuam desligadas, para outra rodada com a mesma triagem: `noAutofocus` e `useSemanticElements` (39 e 38, quase todos o foco do 1º campo dos modais e `role` em `<div>`) e `noNoninteractiveElementToInteractiveRole` (um caso só, no `ObligationFormModal`, que a tarefa 182 vai cortar). `biome.json` não aceita comentário: o motivo fica aqui.
+
+**Fora desta tarefa.** As linhas de `ContractPage.tsx` (títulos avulsos e documentos) ficaram para depois da tarefa 182, que vai cortar o arquivo (pedido da sessão principal: só trocas de texto e data nele); o foco preso na gaveta em tela estreita (`role="dialog"`) também não entrou.
+
+Testes: e2e novos (não rodados aqui) em `e2e/tests/teclado.spec.ts` → "teclado: o nome do título abre a gaveta, o foco entra nela e volta à linha; a caixa e a entidade abrem pelo link (tarefa 114)" e em `e2e/tests/agentes.spec.ts` → "acessibilidade (tarefa 114): abrir o agente pelo menu foca o compositor; as mensagens são uma região viva", mais o aviso `role="alert"` do cartão no primeiro teste dos agentes. O `pnpm lint` (Biome no projeto inteiro) passa com as regras religadas. Verificação: `pnpm verify:quick`.

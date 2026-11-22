@@ -97,6 +97,7 @@ export function Panel({
 
 export function Field({ label, hint, children, className }: { label: string; hint?: ReactNode; children: ReactNode; className?: string }) {
   return (
+    // biome-ignore lint/a11y/noLabelWithoutControl: o controle vem em children (input, select ou um componente de campo).
     <label className={cx('block', className)}>
       <span className="label">{label}</span>
       {children}
@@ -594,6 +595,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
         // Portal no <body>, acima dos modais: a confirmação pedida de dentro de um modal fica por cima dele.
         createPortal(
           <>
+            {/* biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: fundo da confirmação; pelo teclado, Esc e os botões fazem o mesmo. */}
             <div className="overlay" style={{ zIndex: 62 }} onClick={() => settle(false)} />
             <div
               ref={card}
@@ -646,7 +648,9 @@ export function Modal({
   // Portal no <body>: aberto de dentro de uma gaveta, o modal não herda o empilhamento dela.
   return createPortal(
     <>
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: fundo do modal; pelo teclado, Esc fecha. */}
       <div className="overlay" style={{ zIndex: 58 }} onClick={onClose} />
+
       <div
         ref={card}
         className="modal"

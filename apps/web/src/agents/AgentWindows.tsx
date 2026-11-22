@@ -9,6 +9,7 @@ import { AgentDot, ConversationPane, type PaneHeaderInfo } from './ConversationP
 import { PreviousSessionsModal } from './PreviousSessions';
 import type { PaneTarget } from './useConversation';
 import { useConversationActions } from './useConversationActions';
+import { WindowFocus } from './WindowFocus';
 
 const u = t.agentsUi;
 export const NARROW_QUERY = '(max-width: 900px)';
@@ -219,7 +220,9 @@ function FloatingWindow({ win, layer }: { win: AgentWindow; layer: number }) {
       data-agent-id={win.agentId}
       data-conversation-id={win.conversationId ?? ''}
       aria-label={win.kind === 'agent' ? win.agentName : (win.title ?? u.list.untitled)}
+      tabIndex={-1}
     >
+      <WindowFocus id={win.id} />
       <ConversationPane
         target={paneTarget(win)}
         header={(info) => (

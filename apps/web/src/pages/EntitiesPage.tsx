@@ -3,7 +3,9 @@ import { Building2, Plus, Search, Star, Tags, UserRound } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { recordDragProps } from '../agents/records';
+import { RowLink } from '../components/a11y';
 import { ListCutNotice, LoadError, PageHead, SkelRows } from '../components/domain';
+
 import { ExportMenu } from '../components/ExportMenu';
 import { EntityFormModal } from '../components/entity/EntityFormModal';
 import { EntityTagsModal } from '../components/entity/EntityTagsModal';
@@ -166,6 +168,7 @@ export function EntitiesPage() {
                   onClick={() => navigate(`/entities/${entity.id}`)}
                   {...recordDragProps({ kind: 'entity', id: entity.id, label: entity.name })}
                 >
+                  {/* biome-ignore lint/a11y/useKeyWithClickEvents: só segura o clique da linha; a estrela é um botão próprio. */}
                   <td onClick={(e) => e.stopPropagation()}>
                     <FavoriteStar
                       entityId={entity.id}
@@ -183,10 +186,10 @@ export function EntitiesPage() {
                         <UserRound className="size-4 text-muted" />
                       )}
                       <span className="min-w-0">
-                        <span className="row-title">
+                        <RowLink to={`/entities/${entity.id}`}>
                           {entity.name}
                           <NoteBadgeDot badge={entity.noteBadge} />
-                        </span>
+                        </RowLink>
                         {entity.tradeName && <span className="row-sub">{entity.tradeName}</span>}
                       </span>
                     </span>
@@ -195,6 +198,7 @@ export function EntitiesPage() {
                     <TagChips tags={entity.tags} />
                   </td>
                   <td className="mono text-xs">{entity.document ? formatDocument(entity.document) : '—'}</td>
+                  {/* biome-ignore lint/a11y/useKeyWithClickEvents: só segura o clique da linha; o copiar é um botão próprio. */}
                   <td onClick={(e) => e.stopPropagation()}>
                     {entity.primaryPix ? (
                       <span className="inline-flex items-center gap-1">

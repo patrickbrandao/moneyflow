@@ -167,7 +167,7 @@ function PromptDiff({ before, after }: { before: AgentPromptVersionDto; after: A
       {stats.added + stats.removed === 0 ? (
         <p className="hint">{p.noDiff}</p>
       ) : (
-        <div className="panel diff-view" aria-label={title} data-testid="prompt-diff">
+        <div className="panel diff-view" role="group" aria-label={title} data-testid="prompt-diff">
           {lines.map((line, i) => (
             <div key={`${i}-${line.kind}`} className={cx('diff-line', line.kind)}>
               <span className="ln">{line.oldLine ?? ''}</span>

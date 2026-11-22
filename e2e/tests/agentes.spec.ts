@@ -202,6 +202,8 @@ test('agente: conversa, aprova uma escrita, ancora no painel direito e minimiza'
   const card = win.getByTestId('agent-confirmation');
   await expect(card).toBeVisible({ timeout: 30_000 });
   await expect(card).toContainText(entityName);
+  // O leitor de tela é avisado do pedido de aprovação (tarefa 114).
+  await expect(card.getByRole('alert')).toHaveText('O agente pede aprovação para 1 ação.');
   await card.getByTestId('agent-approve').first().click();
   await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Pronto:' })).toBeVisible({ timeout: 30_000 });
   const entities: { name: string }[] = await (await page.request.get(`/api/entities?q=${encodeURIComponent(entityName)}`)).json();
@@ -229,6 +231,17 @@ test('agente: conversa, aprova uma escrita, ancora no painel direito e minimiza'
   // O provedor falso recebeu as tools e o prompt com cache.
   const call = llm.calls.find((c) => c.path === '/v1/messages' && Array.isArray(c.body.tools));
   expect(call?.body.system[0].cache_control).toEqual({ type: 'ephemeral' });
+});
+
+test('acessibilidade (tarefa 114): abrir o agente pelo menu foca o compositor; as mensagens são uma região viva', async ({ page }) => {
+  await enter(page);
+  const win = await freshSession(page);
+  await expect(win.getByTestId('agent-composer')).toBeFocused({ timeout: 10_000 });
+  await say(win, 'Olá, tudo bem?');
+  const log = win.getByRole('log', { name: 'Mensagens da sessão' });
+  await expect(log.getByTestId('agent-message-assistant').filter({ hasText: 'Olá! Sou o agente de teste.' })).toBeVisible({
+    timeout: 30_000,
+  });
 });
 
 test('markdown seguro: HTML cru na resposta aparece como texto e não muda o console (tarefa 073)', async ({ page }) => {

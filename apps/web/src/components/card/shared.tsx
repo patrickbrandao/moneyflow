@@ -4,7 +4,9 @@ import { type ReactNode, useEffect, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useApi } from '../../lib/hooks';
 import { entityLink, titleLink } from '../../lib/links';
+import { RowButton } from '../a11y';
 import { CategoryLabel, Money, SkelRows } from '../domain';
+
 import { Badge, cx, EmptyRow } from '../ui';
 
 /* Peças comuns às telas do cartão (spec 007). */
@@ -68,7 +70,20 @@ export function InvoiceLinesTable({
                 className={cx('card-line', (carry || charge) && 'is-highlight', clickable && 'cursor-pointer')}
                 onClick={clickable ? () => onOpenPurchase?.(line.purchaseId!) : undefined}
               >
-                <td className="mono text-xs">{line.purchasedOn ? formatDate(line.purchasedOn) : '—'}</td>
+                <td className="mono text-xs">
+                  {clickable ? (
+                    <RowButton
+                      onClick={() => onOpenPurchase?.(line.purchaseId!)}
+                      label={t.common.openItem(line.description || line.entityName || t.card.purchase)}
+                    >
+                      {line.purchasedOn ? formatDate(line.purchasedOn) : '—'}
+                    </RowButton>
+                  ) : line.purchasedOn ? (
+                    formatDate(line.purchasedOn)
+                  ) : (
+                    '—'
+                  )}
+                </td>
                 <td>
                   {carry ? (
                     <span className="row-title">{t.card.carryover(line.carriedFromMonth ? monthLabel(line.carriedFromMonth) : null)}</span>

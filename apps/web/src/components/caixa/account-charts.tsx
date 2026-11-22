@@ -243,6 +243,7 @@ export function Donut<S extends DonutSlice>({
             const gap = visible.length > 1 ? Math.min(2, length / 2) : 0;
             const dash = `${Math.max(0, length - gap)} ${circumference}`;
             const el = (
+              // biome-ignore lint/a11y/noStaticElementInteractions: atalho do mouse; pelo teclado, a legenda tem um botão por fatia com a mesma ação.
               <circle
                 key={s.key}
                 cx={size / 2}

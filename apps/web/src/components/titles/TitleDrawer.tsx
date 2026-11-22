@@ -24,7 +24,9 @@ import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction, useApi } from '../../lib/hooks';
 import { invoiceLink, titleLink } from '../../lib/links';
+import { useDrawerFocus } from '../a11y';
 import { AttachmentsPanel } from '../attachments/AttachmentsPanel';
+
 import { AuditHistory } from '../audit/AuditHistory';
 import { SeriesEditModal } from '../contracts/ObligationFormModal';
 import { PlannedAccountButton, PlannedAccountLabel } from '../contracts/PlannedAccount';
@@ -45,6 +47,8 @@ const TD = t.title.drawer;
 
 export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; onClose: () => void; onChanged: () => void }) {
   const { data: title, error, reload, setData } = useApi<TitleDetail>(`/api/titles/${titleId}`);
+  // Foco no título da gaveta ao abrir; ao fechar, de volta à linha (tarefa 114).
+  const heading = useDrawerFocus<HTMLSpanElement>(titleId);
   const [modal, setModal] = useState<
     | null
     | { kind: 'settle' }
@@ -214,7 +218,9 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
   return (
     <aside className="drawer page-drawer" aria-label={title?.description ?? t.title.titleLabel}>
       <div className="dh">
-        <span className="t">{title?.description ?? t.common.loading}</span>
+        <span className="t" ref={heading} tabIndex={-1}>
+          {title?.description ?? t.common.loading}
+        </span>
         <button type="button" className="icon-btn" onClick={onClose} title={t.shell.closeEsc} aria-label={t.common.close}>
           <X />
         </button>

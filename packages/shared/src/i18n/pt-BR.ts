@@ -73,6 +73,11 @@ export const ptBR = {
     shownFirst: (shown: number) => `Mostrando os primeiros ${shown}; há mais.`,
     loadMore: 'Carregar mais',
     refineToSeeMore: 'Refine o filtro para ver o restante.',
+    /** Controles das linhas das listas, pelo teclado e no leitor de tela (tarefa 114). */
+    openItem: (name: string) => `Abrir ${name}`,
+    expandItem: (name: string) => `Expandir ${name}`,
+    collapseItem: (name: string) => `Recolher ${name}`,
+
     deletedOrArchived: (archived: boolean) => (archived ? 'Registro arquivado (tinha vínculos).' : 'Registro excluído.'),
   },
   period: {

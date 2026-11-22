@@ -48,7 +48,9 @@ export function MediaDialog({
 
   return createPortal(
     <>
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: fundo da prévia; pelo teclado, Esc fecha. */}
       <div className="overlay media-overlay" onClick={onClose} />
+
       <div
         ref={card}
         className={wide ? 'media-dialog wide' : 'media-dialog'}

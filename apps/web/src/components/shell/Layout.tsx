@@ -88,7 +88,10 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
         style={panelColumn ? ({ '--agent-panel-w': panelColumn } as CSSProperties) : undefined}
       >
         <Sidebar open={menuOpen} onClose={() => setMenuOpen(false)} onCollapse={() => setCollapsed(true)} />
-        {menuOpen && <div className="overlay" style={{ zIndex: 45 }} onClick={() => setMenuOpen(false)} />}
+        {menuOpen && (
+          // biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: fundo do menu no celular; o botão de recolher fecha pelo teclado.
+          <div className="overlay" style={{ zIndex: 45 }} onClick={() => setMenuOpen(false)} />
+        )}
 
         <header className="topbar">
           <button

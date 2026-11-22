@@ -196,6 +196,7 @@ function AuditLog() {
                       <td className="mono text-xs">{formatDateTime(entry.createdAt)}</td>
                       <td>{tableLabel(entry.tableName)}</td>
                       <td>
+                        {/* biome-ignore lint/a11y/noStaticElementInteractions: só segura o clique da linha; os controles dentro são botões próprios. */}
                         <span className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()} onKeyDown={() => {}}>
                           <button
                             type="button"

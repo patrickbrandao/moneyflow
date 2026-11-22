@@ -1,10 +1,12 @@
 import { formatDateTime, type MessageDestinationDto, type OutboxMessageDto, type OutboxStatus, t } from '@moneyflow/shared';
-import { Ban, ChevronDown, ChevronRight, History, RotateCcw } from 'lucide-react';
+import { Ban, History, RotateCcw } from 'lucide-react';
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '../../lib/api';
 import { useAction } from '../../lib/hooks';
 import { useParamState } from '../../lib/params';
+import { ExpandToggle } from '../a11y';
 import { LoadError, SkelRows } from '../domain';
+
 import { Badge, Button, cx, EmptyRow, type Tone } from '../ui';
 
 const PAGE = 50;
@@ -126,7 +128,11 @@ export function HistoryTab({ destinations }: { destinations: MessageDestinationD
                 <Fragment key={row.id}>
                   <tr className={cx('cursor-pointer', open.has(row.id) && 'is-selected')} onClick={() => toggle(row.id)}>
                     <td>
-                      <span className="report-caret">{open.has(row.id) ? <ChevronDown /> : <ChevronRight />}</span>
+                      <ExpandToggle
+                        open={open.has(row.id)}
+                        label={`${t.messages.events[row.eventKind] ?? row.eventKind} · ${formatDateTime(row.createdAt)}`}
+                        onToggle={() => toggle(row.id)}
+                      />
                     </td>
                     <td className="mono text-xs">{formatDateTime(row.createdAt)}</td>
                     <td>{row.destinationName}</td>

@@ -8,10 +8,12 @@ import {
   formatAccounting,
   t,
 } from '@moneyflow/shared';
-import { ArrowRight, Building2, ChevronDown, ChevronRight, CreditCard } from 'lucide-react';
+import { ArrowRight, Building2, CreditCard } from 'lucide-react';
 import { Fragment, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ExpandToggle } from '../a11y';
 import { negClass } from '../domain';
+
 import { Badge, cx, EmptyState } from '../ui';
 
 /** Totais por entidade, com o rastreio caixa pagadora → cartão → recebedor final. */
@@ -48,7 +50,7 @@ export function EntityReport({ data, scope }: { data: EntityReportData; scope: s
                 <tr className="report-group cursor-pointer" onClick={() => toggle(row.entityId)}>
                   <td>
                     <span className="inline-flex items-center gap-1">
-                      <span className="report-caret">{open.has(row.entityId) ? <ChevronDown /> : <ChevronRight />}</span>
+                      <ExpandToggle open={open.has(row.entityId)} label={row.entityName} onToggle={() => toggle(row.entityId)} />
                       <Link to={entityLink(row.entityId)} onClick={(e) => e.stopPropagation()} className="hover:underline">
                         {row.entityName}
                       </Link>

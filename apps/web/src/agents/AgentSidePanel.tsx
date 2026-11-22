@@ -5,6 +5,7 @@ import { useAgents } from './AgentsProvider';
 import { PaneHeader, paneTarget } from './AgentWindows';
 import { ConversationPane } from './ConversationPane';
 import { agentColor } from './format';
+import { WindowFocus } from './WindowFocus';
 
 const u = t.agentsUi;
 
@@ -81,7 +82,9 @@ export function AgentSidePanel() {
       data-agent-id={win.agentId}
       data-conversation-id={win.conversationId ?? ''}
       aria-label={u.panel.label}
+      tabIndex={-1}
     >
+      <WindowFocus id={win.id} />
       <div className="agent-side-grip" onPointerDown={startResize} title={u.window.resizePanel} aria-hidden />
       <ConversationPane
         key={win.id}

@@ -312,6 +312,7 @@ export function ImportModal({
   return (
     <Modal open title={isCard ? s.importInvoice : s.importStatement} onClose={onClose} wide>
       <div className="modal-body flex flex-col gap-4">
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: só recebe o arquivo arrastado; pelo teclado, o botão de escolher o arquivo faz o mesmo. */}
         <div
           className={cx('rec-drop', over && 'is-over')}
           onDragOver={(e) => {

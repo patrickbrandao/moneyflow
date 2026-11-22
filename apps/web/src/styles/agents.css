@@ -165,8 +165,18 @@ body.agent-resizing .shell {
   flex-direction: column;
   gap: 10px;
 }
+/* A lista das mensagens (região viva, tarefa 114): a mesma coluna do rolador. */
+.agent-log {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.agent-log:empty {
+  display: none;
+}
 .agent-empty {
   margin: auto 8px;
+
   text-align: center;
   font-size: 13px;
   color: var(--text-muted);

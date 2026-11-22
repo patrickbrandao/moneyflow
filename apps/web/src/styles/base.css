@@ -644,9 +644,22 @@ table.data tr.is-removed .row-title {
   color: var(--text);
   text-decoration: none;
 }
-a.row-title:hover {
+a.row-title:hover,
+button.row-title:hover {
   color: var(--accent-soft);
 }
+/* O nome da linha como botão (tarefa 114): parece texto, recebe o foco do teclado. */
+button.row-title {
+  text-align: left;
+  cursor: pointer;
+}
+.row-title:focus-visible,
+.row-toggle:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
 .row-sub {
   display: block;
   font-family: var(--font-mono);
