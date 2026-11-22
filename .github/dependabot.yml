@@ -1,0 +1,26 @@
+# Dependabot (tarefa 071). As versões do projeto são fixas (sem ^): no npm só entram as correções de
+# segurança, agrupadas num PR; as actions (fixadas por SHA, tarefa 184) e a base da imagem são atualizadas
+# toda semana. As correções de segurança dependem de "Dependabot security updates" ligado no repositório.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # 0 desliga as atualizações de versão; as de segurança continuam.
+    open-pull-requests-limit: 0
+    groups:
+      seguranca:
+        applies-to: security-updates
+        patterns: ['*']
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

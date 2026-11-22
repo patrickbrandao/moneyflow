@@ -21,6 +21,9 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Falha com alerta alto ou crítico numa dependência de produção (tarefa 071).
+      - name: Alertas de segurança das dependências
+        run: pnpm audit --prod --audit-level high
       - run: pnpm lint
       - run: pnpm typecheck
       - name: Testes unitários (shared)

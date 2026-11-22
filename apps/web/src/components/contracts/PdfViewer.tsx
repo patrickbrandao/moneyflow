@@ -21,7 +21,9 @@ export async function loadPdf(url: string): Promise<PdfDocument> {
   pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
   // Só o canvas da página (somente leitura): sem a camada de formulários nem o scripting do PDF.
   const task = pdfjs.getDocument({ url, withCredentials: true });
-  return (await task.promise) as unknown as PdfDocument;
+  const doc = (await task.promise) as unknown as Omit<PdfDocument, 'destroy'>;
+  // O pdf.js 6 tirou o destroy() do documento: quem libera o worker e a memória é a tarefa de carregamento.
+  return { numPages: doc.numPages, getPage: (n) => doc.getPage(n), destroy: () => task.destroy() };
 }
 
 const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
