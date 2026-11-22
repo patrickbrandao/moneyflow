@@ -4,6 +4,7 @@ import {
   categories,
   classificationRules,
   type Executor,
+  financialAccounts,
   movements,
   settlements,
   statementCsvMappings,
@@ -39,7 +40,7 @@ import { and, eq, inArray, isNull, ne, type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { notFound, translateDbError, unprocessable } from '../errors';
-import { readableFilter } from './caixas';
+import { assertAccountActive, readableFilter } from './caixas';
 import { insertChargePurchase } from './card-charges';
 import { insertPurchase, loadCard } from './card-core';
 import { assertPurchaseDeletable, deletePurchaseTx } from './cards';
@@ -404,6 +405,11 @@ async function createInTx(ctx: ServiceContext, tx: Tx, line: Line, input: z.outp
   } else {
     if (!line.financialAccountId) throw unprocessable(t.errors.lineAccountOnly);
     if (input.mode === 'adjustment') {
+      const [account] = await tx
+        .select({ archivedAt: financialAccounts.archivedAt })
+        .from(financialAccounts)
+        .where(eq(financialAccounts.id, line.financialAccountId));
+      assertAccountActive(account ?? { archivedAt: null });
       const [movement] = await tx
         .insert(movements)
         .values({

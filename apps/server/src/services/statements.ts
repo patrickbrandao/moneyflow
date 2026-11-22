@@ -76,6 +76,8 @@ export async function resolveTarget(
     if (write && account.kind !== 'checking' && account.kind !== 'savings') {
       throw unprocessable(t.errors.statementTarget, 'statement_imports_account_kind_check');
     }
+    // Conta arquivada não importa extrato novo (spec 032); os lotes antigos continuam legíveis (tarefa 080).
+    if (write && account.archivedAt) throw unprocessable(t.errors.statementAccountArchived, 'statement_account_archived');
     return {
       kind: 'account',
       accountId: account.id,

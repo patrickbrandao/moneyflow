@@ -178,6 +178,10 @@ export const ptBR = {
       'O título original é de outra caixa: pelo espelho, só quem edita também a caixa do original exclui, arquiva, cancela ou mexe na série. Conteste o espelho para avisar o autor.',
     mirrorEntityLocked: 'Título espelhado não troca de entidade.',
     accountOtherCaixa: 'A conta escolhida não é desta caixa.',
+    accountArchived: 'A conta está arquivada: restaure-a para lançar nela.',
+    accountArchiveBalance: (balance: string) =>
+      `A conta tem saldo de ${balance}: zere-o com uma transferência ou um lançamento avulso antes de excluí-la (com histórico, ela é arquivada e sai do saldo da caixa).`,
+    statementAccountArchived: 'A conta está arquivada: ela não importa extrato novo. Restaure-a para importar.',
     accountRequiredForTransfer: 'Para pagar com a conta de outra caixa, escolha também a conta desta caixa que recebe a transferência.',
     sameCaixaSource: 'A conta de origem já é desta caixa; não há transferência a gerar.',
     zeroCashTransfer: 'Com valor em dinheiro zero não há transferência a gerar.',

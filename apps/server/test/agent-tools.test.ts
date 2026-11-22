@@ -796,12 +796,12 @@ describe('caixas e contas', () => {
 
     const adjustment = await approved(adminSession, 'create_adjustment', {
       accountId: account.value.id,
-      adjustment: { occurredOn: '2026-02-01', amountCents: -1_500, description: 'Tarifa', categoryId: s.expense.id },
+      adjustment: { occurredOn: '2026-02-01', amountCents: -5_000, description: 'Tarifa', categoryId: s.expense.id },
     });
-    expect(rowsOf(adjustment.preview)).toMatchObject({ Saída: 'R$ 15,00', Descrição: 'Tarifa' });
+    expect(rowsOf(adjustment.preview)).toMatchObject({ Saída: 'R$ 50,00', Descrição: 'Tarifa' });
     expect(adjustment.value.id).toBeTruthy();
 
-    // Conta com movimento: arquivada; caixa com conta: arquivada (só admin).
+    // Conta com movimento (e saldo zero, tarefa 080): arquivada; caixa com conta: arquivada (só admin).
     const archivedAccount = await approved(adminSession, 'archive_account', { accountId: account.value.id });
     expect(archivedAccount.preview.action).toBe('delete');
     expect(archivedAccount.value).toEqual({ deleted: false, archived: true });

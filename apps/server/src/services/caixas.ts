@@ -12,6 +12,7 @@ import {
   type caixaCreateInput,
   type caixaUpdateInput,
   type DeleteResult,
+  formatBRL,
   type hiddenCategoriesInput,
   type MemberRow,
   type memberInput,
@@ -304,6 +305,11 @@ export async function listAccounts(
     .filter((a) => !opts.writable || a.canWrite);
 }
 
+/** Conta arquivada não recebe movimento novo (baixa, avulso, transferência); o estorno continua (tarefa 080). */
+export function assertAccountActive(account: { archivedAt: Date | string | null }) {
+  if (account.archivedAt) throw unprocessable(t.errors.accountArchived, 'account_archived');
+}
+
 export async function getAccount(ctx: ServiceContext, id: string, db: Executor = ctx.db) {
   const [account] = await db.select().from(financialAccounts).where(eq(financialAccounts.id, id));
   if (!account) throw notFound();
@@ -347,7 +353,15 @@ export async function deleteAccount(ctx: ServiceContext, id: string): Promise<De
     deleteOrArchive(
       tx,
       async (sp) => (await sp.delete(financialAccounts).where(eq(financialAccounts.id, id))).rowCount ?? 0,
-      (t) => t.update(financialAccounts).set({ archivedAt: sql`now()` }).where(eq(financialAccounts.id, id)),
+      async (tx) => {
+        // Arquivada, ela sai do saldo da caixa: só com saldo zero, para o total não mudar sem lançamento (tarefa 080).
+        const balance = await tx.execute<{ balance_cents: string }>(
+          sql`SELECT balance_cents FROM financial_account_balances WHERE financial_account_id = ${id}`,
+        );
+        const cents = Number(balance.rows[0]?.balance_cents ?? 0);
+        if (cents !== 0) throw unprocessable(t.errors.accountArchiveBalance(formatBRL(cents)), 'account_archive_balance');
+        await tx.update(financialAccounts).set({ archivedAt: sql`now()` }).where(eq(financialAccounts.id, id));
+      },
     ),
   );
 }
@@ -362,6 +376,7 @@ export async function restoreAccount(ctx: ServiceContext, id: string) {
 export async function addAdjustment(ctx: ServiceContext, accountId: string, input: z.output<typeof adjustmentInput>) {
   const account = await getAccount(ctx, accountId);
   ctx.access.assertWrite(account.caixaId);
+  assertAccountActive(account);
   const [row] = await withTx(ctx, (tx) =>
     tx
       .insert(movements)

@@ -8,6 +8,7 @@
 ## Exclusão
 - Registros com vínculo/movimento são **arquivados** (somem das listas, continuam nos relatórios).
 - A exclusão física só é permitida sem vínculos.
+- **Conta financeira** com histórico só é arquivada com saldo zero (422 `account_archive_balance`: zere com uma transferência ou um lançamento avulso), porque a arquivada sai do saldo da caixa. Arquivada, não recebe baixa, lançamento avulso, transferência nem extrato novo (422 `account_archived` e `statement_account_archived`); o estorno de uma baixa antiga e a leitura dos lotes continuam (2026-11-21, tarefa 080).
 
 ## Auditoria e fechamento
 - Log de auditoria de toda alteração (quem, quando, antes/depois, humano ou agente). Toda transação de escrita da aplicação define o ator (`app.user_id`, `app.actor_kind`); o histórico de um registro aparece na tela dele e o log geral fica para o admin. **Sem retenção por enquanto**: o log não é expurgado.

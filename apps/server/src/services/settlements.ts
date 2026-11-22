@@ -12,7 +12,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { forbidden, notFound, unprocessable } from '../errors';
-import { getAccount } from './caixas';
+import { assertAccountActive, getAccount } from './caixas';
 import { assertNotReconciled, clearStatementSuggestions, transferMovementIds } from './reconciliation-guards';
 import { newIds } from './title-pair';
 import { getTitle, lockTitlePair } from './titles';
@@ -34,6 +34,7 @@ const cashOf = (s: { amountCents: number; interestCents: number; fineCents: numb
 async function accountInCaixa(ctx: ServiceContext, tx: Executor, accountId: string, caixaId: string) {
   const account = await getAccount(ctx, accountId, tx);
   if (account.caixaId !== caixaId) throw unprocessable(strings.errors.accountOtherCaixa);
+  assertAccountActive(account);
   return account;
 }
 
@@ -90,6 +91,7 @@ export async function settleInTx(
   if (input.sourceAccountId) {
     const source = await getAccount(ctx, input.sourceAccountId, tx);
     ctx.access.assertWrite(source.caixaId);
+    assertAccountActive(source);
     if (source.caixaId === title.caixaId) throw unprocessable(strings.errors.sameCaixaSource);
     if (!accountId) throw unprocessable(strings.errors.accountRequiredForTransfer);
     if (cash <= 0) throw unprocessable(strings.errors.zeroCashTransfer);

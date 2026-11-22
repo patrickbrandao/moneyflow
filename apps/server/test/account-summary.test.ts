@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { todayIso } from '@moneyflow/shared';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
@@ -113,5 +116,90 @@ describe('resumo da conta (spec 004)', () => {
     expect(backwards.statusCode).toBeGreaterThanOrEqual(400);
     const tooLong = await admin.raw('GET', `/api/accounts/${s.accountA.id}/summary?from=2020-01-01&to=2026-12-31`);
     expect(tooLong.statusCode).toBeGreaterThanOrEqual(400);
+  });
+});
+
+describe('conta arquivada (tarefa 080)', () => {
+  it('só arquiva com saldo zero e não recebe movimento nem extrato novo; o histórico continua legível', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const ofx = readFileSync(join(import.meta.dirname, 'fixtures', 'extrato-ofx2.ofx'));
+    const importOfx = (accountId: string) =>
+      h.app.inject({
+        method: 'POST',
+        url: `/api/statement-imports?accountId=${accountId}&fileName=extrato.ofx`,
+        payload: ofx,
+        headers: { cookie: session.cookie, 'content-type': 'application/x-ofx' },
+      });
+    expect((await importOfx(s.accountA.id)).statusCode).toBe(200);
+    const newTitle = (amountCents: number) =>
+      admin.post('/api/titles', {
+        caixaId: s.caixaA.id,
+        direction: 'payable',
+        entityId: s.supplier.id,
+        categoryId: s.expense.id,
+        description: `Conta ${amountCents}`,
+        competenceDate: '2026-10-01',
+        dueDate: '2026-10-15',
+        amountCents,
+        mirrorCaixaId: null,
+      });
+    const title = await newTitle(10_000);
+    const paid = await admin.post(`/api/titles/${title.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 10_000,
+      financialAccountId: s.accountA.id,
+    });
+
+    // Com saldo (1.000,00 − 100,00), a conta não sai do total da caixa.
+    const refused = await admin.raw('DELETE', `/api/accounts/${s.accountA.id}`);
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json().error.code).toBe('account_archive_balance');
+    expect(refused.json().error.message).toContain('900,00');
+
+    // Zerada por um avulso, arquiva; a caixa e o calendário mostram o mesmo saldo.
+    const today = todayIso();
+    await admin.post(`/api/accounts/${s.accountA.id}/adjustments`, { occurredOn: today, amountCents: -90_000, description: 'Saque final' });
+    expect(await admin.del(`/api/accounts/${s.accountA.id}`)).toEqual({ deleted: false, archived: true });
+    const caixa = await admin.get(`/api/caixas/${s.caixaA.id}`);
+    const [day] = await admin.get(`/api/calendar/balances?caixaId=${s.caixaA.id}&from=${today}&to=${today}`);
+    expect(caixa.balanceCents).toBe(0);
+    expect(day.realizedCents).toBe(caixa.balanceCents);
+
+    // Nada novo na conta arquivada: avulso, baixa, transferência e extrato.
+    const archived = async (res: { statusCode: number; json: () => any }, code: string) => {
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error.code).toBe(code);
+    };
+    await archived(
+      await admin.raw('POST', `/api/accounts/${s.accountA.id}/adjustments`, { occurredOn: today, amountCents: 100, description: 'X' }),
+      'account_archived',
+    );
+    const other = await newTitle(5_000);
+    await archived(
+      await admin.raw('POST', `/api/titles/${other.id}/settlements`, {
+        settledOn: today,
+        amountCents: 5_000,
+        financialAccountId: s.accountA.id,
+      }),
+      'account_archived',
+    );
+    await archived(
+      await admin.raw('POST', '/api/transfers', {
+        fromAccountId: s.accountA.id,
+        toAccountId: s.accountB.id,
+        amountCents: 100,
+        transferredOn: today,
+        description: 'Resto',
+      }),
+      'account_archived',
+    );
+    await archived(await importOfx(s.accountA.id), 'statement_account_archived');
+
+    // O histórico continua: os lotes antigos e o estorno de uma baixa antiga.
+    expect(await admin.get(`/api/statement-imports?accountId=${s.accountA.id}`)).toHaveLength(1);
+    const reversed = await admin.post(`/api/settlements/${paid.settlements[0].id}/reverse`, { reason: 'erro', reversedOn: today });
+    expect(reversed.status).toBe('open');
   });
 });
