@@ -41,6 +41,8 @@ import { TitleFormModal } from './TitleFormModal';
  * Gaveta do título: dados, espelho (aceitar/contestar), baixas (estornar,
  * definir conta) e as ações do título. Toda ação também vira comando da paleta.
  */
+const TD = t.title.drawer;
+
 export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; onClose: () => void; onChanged: () => void }) {
   const { data: title, error, reload, setData } = useApi<TitleDetail>(`/api/titles/${titleId}`);
   const [modal, setModal] = useState<
@@ -89,13 +91,13 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
   async function cancel() {
     if (!title) return;
     const ok = await confirm({
-      title: 'Cancelar o título?',
-      description: title.mirrorTitleId ? 'O espelho na outra caixa também é cancelado.' : 'Ele deixa de contar como em aberto.',
+      title: TD.cancelTitle,
+      description: title.mirrorTitleId ? TD.cancelMirrorBody : TD.cancelBody,
       confirmLabel: t.title.cancelTitle,
       danger: true,
     });
     if (!ok) return;
-    const next = await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/cancel`), 'Título cancelado.');
+    const next = await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/cancel`), TD.canceled);
     if (next) saved(next);
   }
 
@@ -108,18 +110,15 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
 
   async function reopen() {
     if (!title) return;
-    const next = await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/reopen`), 'Título reaberto.');
+    const next = await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/reopen`), TD.reopened);
     if (next) saved(next);
   }
 
   async function remove(scope: 'this' | 'following') {
     if (!title) return;
     const ok = await confirm({
-      title: scope === 'following' ? 'Excluir este e os próximos?' : 'Excluir o título?',
-      description:
-        scope === 'following'
-          ? 'A série termina antes desta ocorrência; as seguintes somem.'
-          : 'Sem baixas, o título (e o espelho) é excluído; com histórico, é arquivado.',
+      title: scope === 'following' ? TD.deleteFollowingTitle : TD.deleteTitle,
+      description: scope === 'following' ? TD.deleteFollowingBody : TD.deleteBody,
       confirmLabel: t.common.delete,
       danger: true,
     });
@@ -152,7 +151,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
             ? [
                 {
                   id: 't-edit',
-                  label: `Editar: ${title.description}`,
+                  label: TD.editCommand(title.description),
                   group: 'Recurso' as const,
                   icon: <Pencil />,
                   run: () => setModal({ kind: 'edit' }),
@@ -213,10 +212,10 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
   );
 
   return (
-    <aside className="drawer page-drawer" aria-label={title?.description ?? 'Título'}>
+    <aside className="drawer page-drawer" aria-label={title?.description ?? t.title.titleLabel}>
       <div className="dh">
         <span className="t">{title?.description ?? t.common.loading}</span>
-        <button type="button" className="icon-btn" onClick={onClose} title="Fechar (Esc)" aria-label={t.common.close}>
+        <button type="button" className="icon-btn" onClick={onClose} title={t.shell.closeEsc} aria-label={t.common.close}>
           <X />
         </button>
       </div>
@@ -292,10 +291,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
               <div className="sec">
                 <div className="alert warn">
                   <span>
-                    {title.mirrorStatus === 'pending'
-                      ? 'Lançado por outra caixa e aguardando o seu aceite.'
-                      : 'Você contestou este lançamento.'}{' '}
-                    Aceite (podendo ajustar a categoria) ou conteste.
+                    {title.mirrorStatus === 'pending' ? TD.mirrorPending : TD.mirrorDisputed} {TD.mirrorDecide}
                   </span>
                 </div>
                 <div className="mt-3 flex gap-2">
@@ -328,7 +324,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                 <dd className="mono">{formatDate(title.dueDate)}</dd>
                 <dt>{t.title.competence}</dt>
                 <dd className="mono">{formatDate(title.competenceDate)}</dd>
-                <dt>Origem</dt>
+                <dt>{t.title.origin}</dt>
                 <dd>{t.title.origins[title.origin]}</dd>
                 {/* Conta prevista (spec 034): conta da caixa do título onde o dinheiro se move; trocável em aberto. */}
                 <dt>{t.contracts.payment.plannedAccount}</dt>
@@ -405,7 +401,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
               <div className="sec">
                 <p className="eyebrow">{t.title.mirror}</p>
                 <dl className="kv">
-                  <dt>Caixa</dt>
+                  <dt>{t.title.caixa}</dt>
                   <dd>
                     {title.mirror.canRead ? (
                       <Link
@@ -436,7 +432,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
 
             <div className="sec">
               <p className="eyebrow">{t.settlement.history}</p>
-              {title.settlements.length === 0 && <p className="text-[13px] text-faint">Nenhuma baixa.</p>}
+              {title.settlements.length === 0 && <p className="text-[13px] text-faint">{TD.noSettlements}</p>}
               <div className="item-list">
                 {title.settlements.map((s) => (
                   <div key={s.id} className={`item${s.reversedAt ? ' opacity-60' : ''}`}>
@@ -589,9 +585,9 @@ function MirrorDecisionModal({
       mode === 'accept'
         ? await run(
             () => api.post<TitleDetail>(`/api/titles/${title.id}/mirror/accept`, { categoryId: categoryId ?? undefined }),
-            'Espelho aceito.',
+            TD.mirrorAccepted,
           )
-        : await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/mirror/dispute`, { reason }), 'Espelho contestado.');
+        : await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/mirror/dispute`, { reason }), TD.mirrorDisputedToast);
     if (next) onSaved(next);
   }
   return (
@@ -608,7 +604,7 @@ function MirrorDecisionModal({
             />
           </Field>
         ) : (
-          <Field label="Motivo">
+          <Field label={TD.disputeReason}>
             <textarea className="field" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
           </Field>
         )}

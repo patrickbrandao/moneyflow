@@ -27,7 +27,7 @@ export function CaixasPage() {
     <div className="page wide">
       <PageHead
         title={t.nav.caixas}
-        sub="Cada caixa é o livro financeiro de um titular: contas, títulos a pagar e a receber."
+        sub={t.caixa.page.sub}
         actions={
           user.canEditRegistry && (
             <Button onClick={() => setNew('1')}>
@@ -40,8 +40,8 @@ export function CaixasPage() {
         value={archived ? 'archived' : 'active'}
         onChange={(key) => setArchived(key === 'archived' ? '1' : null)}
         items={[
-          { key: 'active', label: 'Ativas' },
-          { key: 'archived', label: 'Arquivadas' },
+          { key: 'active', label: t.caixa.page.active },
+          { key: 'archived', label: t.caixa.page.archived },
         ]}
       />
       {error ? (
@@ -51,9 +51,9 @@ export function CaixasPage() {
           <table className="data">
             <thead>
               <tr>
-                <th>Caixa</th>
+                <th>{t.caixa.page.caixa}</th>
                 <th>{t.caixa.holder}</th>
-                <th>Seu papel</th>
+                <th>{t.caixa.page.yourRole}</th>
                 <th className="num">{t.caixa.balance}</th>
                 <th className="num">{t.caixa.receivableOpen}</th>
                 <th className="num">{t.caixa.payableOpen}</th>
@@ -63,11 +63,7 @@ export function CaixasPage() {
               {!data && <SkelRows cols={6} />}
               {data && data.length === 0 && (
                 <EmptyRow colSpan={6}>
-                  {archived
-                    ? 'Nenhuma caixa arquivada.'
-                    : user.canEditRegistry
-                      ? 'Nenhuma caixa ainda: crie a primeira.'
-                      : 'Você ainda não tem acesso a nenhuma caixa.'}
+                  {archived ? t.caixa.page.noArchived : user.canEditRegistry ? t.caixa.page.noneYet : t.caixa.page.noAccess}
                 </EmptyRow>
               )}
               {data?.map((caixa) => (

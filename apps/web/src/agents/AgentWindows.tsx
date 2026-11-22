@@ -1,4 +1,4 @@
-import { t } from '@moneyflow/shared';
+import { formatDate, localDateOf, t } from '@moneyflow/shared';
 import { CircleCheckBig, Copy, GitBranch, Headphones, History, Minus, MoreHorizontal, PanelRight, Pencil, Trash2, X } from 'lucide-react';
 import { type ReactNode, type PointerEvent as ReactPointerEvent, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -81,7 +81,7 @@ export function PaneHeader({
         <span className="s">
           {agentName}
           {readOnly && conversation ? ` · @${conversation.username}` : ''}
-          {finished ? ` · ${u.list.finishedOn(new Date(conversation!.archivedAt!).toLocaleDateString('pt-BR'))}` : ''}
+          {finished ? ` · ${u.list.finishedOn(formatDate(localDateOf(conversation!.archivedAt!)))}` : ''}
         </span>
       </div>
       {conversation && (

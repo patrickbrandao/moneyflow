@@ -27,6 +27,8 @@ import { Button, Field, Modal } from '../ui';
 
 type Props<T> = { entityId: string; item?: T | null; onClose: () => void; onSaved: () => void };
 
+const C = t.entity.child;
+
 function ChildForm({
   title,
   onClose,
@@ -69,7 +71,7 @@ function useSave(entityId: string, segment: string, itemId: string | undefined, 
   const { run, busy } = useAction();
   const save = async (body: unknown) => {
     const path = `/api/entities/${entityId}/${segment}${itemId ? `/${itemId}` : ''}`;
-    const ok = await run(() => (itemId ? api.put(path, body) : api.post(path, body)), 'Salvo.');
+    const ok = await run(() => (itemId ? api.put(path, body) : api.post(path, body)), C.saved);
     if (ok) onSaved();
   };
   return { save, busy };
@@ -88,7 +90,7 @@ export function PixKeyModal({ entityId, item, onClose, onSaved }: Props<EntityPi
   const { save, busy } = useSave(entityId, 'pix-keys', item?.id, onSaved);
   return (
     <ChildForm
-      title={item ? 'Editar chave PIX' : 'Nova chave PIX'}
+      title={item ? C.editPix : C.newPix}
       onClose={onClose}
       busy={busy}
       onSubmit={() => void save({ keyType, keyValue, label, bankCode: bankCode || null, isPrimary })}
@@ -102,7 +104,7 @@ export function PixKeyModal({ entityId, item, onClose, onSaved }: Props<EntityPi
           ))}
         </select>
       </Field>
-      <Field label="Chave">
+      <Field label={C.pixKey}>
         <input
           className="field field-mono"
           value={keyValue}
@@ -124,7 +126,7 @@ export function PixKeyModal({ entityId, item, onClose, onSaved }: Props<EntityPi
           value={bankCode}
           onChange={(e) => setBankCode(e.target.value)}
           maxLength={3}
-          placeholder="opcional"
+          placeholder={t.common.optional}
         />
       </Field>
       <Field label={t.common.label}>
@@ -145,7 +147,7 @@ export function ContactModal({ entityId, item, onClose, onSaved }: Props<EntityC
   const { save, busy } = useSave(entityId, 'contacts', item?.id, onSaved);
   return (
     <ChildForm
-      title={item ? 'Editar contato' : 'Novo contato'}
+      title={item ? C.editContact : C.newContact}
       onClose={onClose}
       busy={busy}
       onSubmit={() => void save({ kind, value, label, isPrimary })}
@@ -159,11 +161,11 @@ export function ContactModal({ entityId, item, onClose, onSaved }: Props<EntityC
           ))}
         </select>
       </Field>
-      <Field label={kind === 'email' ? t.user.email : kind === 'phone' ? 'Número' : 'Valor'}>
+      <Field label={kind === 'email' ? t.user.email : kind === 'phone' ? C.phoneNumber : C.contactValue}>
         <input className="field" value={value} onChange={(e) => setValue(e.target.value)} required autoFocus />
       </Field>
       <Field label={t.common.label} className="span-all">
-        <input className="field" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="financeiro, celular…" />
+        <input className="field" value={label} onChange={(e) => setLabel(e.target.value)} placeholder={C.contactLabelPlaceholder} />
       </Field>
       <label className="check span-all">
         <input type="checkbox" checked={isPrimary} onChange={(e) => setIsPrimary(e.target.checked)} /> {t.common.primary}
@@ -209,13 +211,7 @@ export function AddressModal({ entityId, item, onClose, onSaved }: Props<EntityA
   }
 
   return (
-    <ChildForm
-      title={item ? 'Editar endereço' : 'Novo endereço'}
-      onClose={onClose}
-      busy={busy}
-      error={error}
-      onSubmit={() => void save(form)}
-    >
+    <ChildForm title={item ? C.editAddress : C.newAddress} onClose={onClose} busy={busy} error={error} onSubmit={() => void save(form)}>
       <Field label={t.entity.postalCode}>
         <div className="flex gap-2">
           <input className="field field-mono" value={form.postalCode} onChange={set('postalCode')} placeholder="00000-000" autoFocus />
@@ -230,7 +226,7 @@ export function AddressModal({ entityId, item, onClose, onSaved }: Props<EntityA
         </div>
       </Field>
       <Field label={t.common.label}>
-        <input className="field" value={form.label} onChange={set('label')} placeholder="sede, residência…" />
+        <input className="field" value={form.label} onChange={set('label')} placeholder={C.addressLabelPlaceholder} />
       </Field>
       <Field label={t.entity.street} className="span-all">
         <input className="field" value={form.street} onChange={set('street')} />
@@ -275,7 +271,7 @@ export function BankAccountModal({ entityId, item, onClose, onSaved }: Props<Ent
   const set = (key: keyof typeof form) => (e: { target: { value: string } }) => setForm((f) => ({ ...f, [key]: e.target.value }));
   return (
     <ChildForm
-      title={item ? 'Editar dado bancário' : 'Novo dado bancário'}
+      title={item ? C.editBank : C.newBank}
       onClose={onClose}
       busy={busy}
       onSubmit={() => void save({ ...form, bankCode: form.bankCode || null, ispb: form.ispb || null, branch: form.branch || null })}
@@ -319,16 +315,16 @@ export function LinkModal({ entityId, onClose, onSaved }: Props<never>) {
   const { save, busy } = useSave(entityId, 'links', undefined, onSaved);
   return (
     <ChildForm
-      title="Novo vínculo"
+      title={C.newLink}
       onClose={onClose}
       busy={busy}
       error={error}
       onSubmit={() => {
-        if (!other) return setError('Escolha a outra entidade.');
+        if (!other) return setError(C.chooseOther);
         void save({ relatedEntityId: other.id, kind, notes });
       }}
     >
-      <Field label="Esta entidade é…">
+      <Field label={C.linkKind}>
         <select className="field" value={kind} onChange={(e) => setKind(e.target.value as (typeof LINK_KINDS)[number])}>
           {LINK_KINDS.map((k) => (
             <option key={k} value={k}>
@@ -337,8 +333,8 @@ export function LinkModal({ entityId, onClose, onSaved }: Props<never>) {
           ))}
         </select>
       </Field>
-      <Field label="Outra entidade">
-        <EntityPicker value={other} onChange={setOther} ariaLabel="Outra entidade" />
+      <Field label={C.otherEntity}>
+        <EntityPicker value={other} onChange={setOther} ariaLabel={C.otherEntity} />
       </Field>
       <Field label={t.common.notes} className="span-all">
         <input className="field" value={notes} onChange={(e) => setNotes(e.target.value)} />

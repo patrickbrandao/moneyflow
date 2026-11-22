@@ -212,11 +212,11 @@ function sampleValues(user: { username: string; email: string }, agent: string) 
     'usuario.email': user.email,
     ...volatilePromptValues(),
     'lote.id': '00000000-0000-0000-0000-000000000000',
-    'lote.arquivo': 'extrato-outubro.ofx',
-    'lote.periodo': '01/10/2026 a 31/10/2026',
-    'conta.nome': 'Conta corrente',
-    'caixa.nome': 'Casa',
-    'caixa.titular': 'Titular',
+    'lote.arquivo': k.sample.file,
+    'lote.periodo': k.sample.period,
+    'conta.nome': k.sample.account,
+    'caixa.nome': k.sample.caixa,
+    'caixa.titular': k.sample.holder,
     'linhas.total': '34',
   };
 }
@@ -271,7 +271,8 @@ function RecipeFormModal({
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!agentChoice) return setError(k.noAgents);
-    if (scan.unknown.length > 0) return setError(`Variável desconhecida: ${scan.unknown.map((v) => `{{${v}}}`).join(', ')}`);
+    if (scan.unknown.length > 0) return setError(k.unknownVariables(scan.unknown.map((v) => `{{${v}}}`).join(', ')));
+
     if (runOnImport && !hasTargets) return setError(k.runOnImportHint);
     setError(null);
     const body = {

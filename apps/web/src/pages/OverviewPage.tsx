@@ -26,13 +26,13 @@ export function OverviewPage() {
   return (
     <div className="page wide">
       <PageHead
-        title={`Olá, ${user.name}`}
-        sub="Saldos das suas caixas e o que vence agora."
+        title={t.overview.greeting(user.name)}
+        sub={t.overview.sub}
         actions={
           <>
             <button type="button" className="search-trigger" onClick={() => openPalette()}>
               <Search />
-              <span className="ph">Procurar…</span>
+              <span className="ph">{t.overview.searchTrigger}</span>
               <span className="keys">
                 <Kbd>⌘</Kbd>
                 <Kbd>K</Kbd>
@@ -94,12 +94,8 @@ export function OverviewPage() {
           {data && data.caixas.length === 0 && (
             <EmptyState
               icon={<Wallet />}
-              title="Nenhuma caixa ainda"
-              description={
-                user.canEditRegistry
-                  ? 'Crie a primeira caixa para lançar contas a pagar e a receber.'
-                  : 'Peça a um administrador acesso a uma caixa.'
-              }
+              title={t.overview.noCaixas}
+              description={user.canEditRegistry ? t.overview.noCaixasCreate : t.overview.noCaixasAsk}
             />
           )}
           {data && data.caixas.length > 0 && (
@@ -107,11 +103,11 @@ export function OverviewPage() {
               <table className="data">
                 <thead>
                   <tr>
-                    <th>Caixa</th>
+                    <th>{t.overview.caixa}</th>
                     <th className="num">{t.caixa.balance}</th>
                     <th className="num">{t.caixa.receivableOpen}</th>
                     <th className="num">{t.caixa.payableOpen}</th>
-                    <th className="num">Vencidos</th>
+                    <th className="num">{t.overview.overdue}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -150,8 +146,8 @@ export function OverviewPage() {
         </Panel>
 
         {data && (data.pendingMirrors.length > 0 || data.pendingAccounts.length > 0) && (
-          <Panel title="Aguardando você" icon={<AlertTriangle />}>
-            <p className="panel-hint">Espelhos que outra caixa lançou contra as suas e baixas com a conta a definir.</p>
+          <Panel title={t.overview.awaiting} icon={<AlertTriangle />}>
+            <p className="panel-hint">{t.overview.awaitingHint}</p>
             <TitleMiniTable rows={[...data.pendingMirrors, ...data.pendingAccounts]} empty="" />
           </Panel>
         )}
@@ -159,11 +155,11 @@ export function OverviewPage() {
         <div className="grid gap-4 xl:grid-cols-2">
           <div id="vencidos">
             <Panel title={t.title.overdue} icon={<AlertTriangle />}>
-              <TitleMiniTable rows={data?.overdue} empty="Nada vencido." />
+              <TitleMiniTable rows={data?.overdue} empty={t.overview.noOverdue} />
             </Panel>
           </div>
           <Panel title={t.title.upcoming} icon={<CalendarClock />}>
-            <TitleMiniTable rows={data?.upcoming} empty="Nada vence nos próximos 30 dias." />
+            <TitleMiniTable rows={data?.upcoming} empty={t.overview.noUpcoming} />
           </Panel>
         </div>
       </div>

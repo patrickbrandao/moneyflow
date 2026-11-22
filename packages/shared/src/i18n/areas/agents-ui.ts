@@ -371,7 +371,7 @@ export const agentsUiStrings = {
       speech: 'Fala / milhão de caracteres',
       audioHint: 'Opcionais: para os modelos de áudio cobrados por minuto ou por caractere. Os cobrados por token usam entrada e saída.',
       validFrom: 'Vigente desde',
-      validFromHint: 'Vazio = agora. O preço vale para o uso a partir desta data.',
+      validFromHint: 'Vazio = agora. Horário de Brasília; o preço vale para o uso a partir deste momento.',
       created: 'Preço cadastrado.',
       removed: 'Preço removido.',
       removeConfirm: (model: string) => `Remover o preço de ${model}?`,
@@ -1013,6 +1013,17 @@ export const agentsUiStrings = {
     instructionHint: 'Vai ao agente como mensagem do usuário, numa sessão nova, a cada execução. Variáveis entre {{ }}.',
     variables: 'Variáveis',
     preview: 'Prévia (lote de exemplo)',
+    unknownVariables: (names: string) => `Variáveis desconhecidas: ${names}. A receita não é salva com elas.`,
+    /** Os valores do lote de exemplo da prévia. */
+
+    sample: {
+      file: 'extrato-outubro.ofx',
+      period: '01/10/2026 a 31/10/2026',
+      account: 'Conta corrente',
+      caixa: 'Casa',
+      holder: 'Titular',
+    },
+
     targets: 'Contas e cartões vinculados',
     targetsHint: 'Sem vínculo, a receita aparece em todos os lotes da dona (ou em todos, se global).',
     noTargets: 'Todos os lotes',

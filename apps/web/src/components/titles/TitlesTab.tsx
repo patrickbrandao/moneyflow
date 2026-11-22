@@ -16,12 +16,12 @@ import { TitleDrawer } from './TitleDrawer';
 import { TitleFormModal } from './TitleFormModal';
 
 const FILTERS = [
-  { key: 'unpaid', label: 'Em aberto' },
+  { key: 'unpaid', label: t.title.filters.unpaid! },
   { key: 'overdue', label: t.title.statuses.overdue! },
-  { key: 'paid', label: 'Liquidados' },
+  { key: 'paid', label: t.title.filters.paid! },
   { key: 'pending_acceptance', label: t.title.mirrorStatuses.pending! },
   { key: 'pending_account', label: t.title.pendingAccount },
-  { key: 'canceled', label: 'Cancelados' },
+  { key: 'canceled', label: t.title.filters.canceled! },
   { key: 'all', label: t.common.all },
 ] as const;
 
@@ -85,11 +85,11 @@ export function TitlesTab({
             className="field"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Descrição ou entidade"
-            aria-label="Buscar títulos"
+            placeholder={t.title.searchPlaceholder}
+            aria-label={t.title.searchAria}
           />
         </label>
-        <DateRangeFilter value={period} onChange={setPeriod} fromLabel="Vencimento de" toLabel="Vencimento até" />
+        <DateRangeFilter value={period} onChange={setPeriod} fromLabel={t.title.dueFrom} toLabel={t.title.dueTo} />
         <label className="check">
           <input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} /> {t.common.showArchived}
         </label>
@@ -128,7 +128,7 @@ export function TitlesTab({
             <thead>
               <tr>
                 <th>{t.title.due}</th>
-                <th>Título</th>
+                <th>{t.title.titleLabel}</th>
                 <th>{t.title.category}</th>
                 <th className="num">{t.title.amount}</th>
                 <th className="num">{t.title.open}</th>
@@ -138,7 +138,7 @@ export function TitlesTab({
             </thead>
             <tbody>
               {!data && <SkelRows cols={7} />}
-              {data && data.length === 0 && <EmptyRow colSpan={7}>Nenhum título com esse filtro.</EmptyRow>}
+              {data && data.length === 0 && <EmptyRow colSpan={7}>{t.title.emptyFiltered}</EmptyRow>}
               {data?.map((row) => (
                 <tr
                   key={row.id}
@@ -208,7 +208,7 @@ export function TitlesTab({
             {data && data.length > 0 && (
               <tfoot>
                 <tr>
-                  <td colSpan={3}>{count === null ? <Skel h={14} w={80} /> : `${count} título${count === 1 ? '' : 's'}`}</td>
+                  <td colSpan={3}>{count === null ? <Skel h={14} w={80} /> : t.title.countLabel(count)}</td>
                   <td className="num">{totals.data ? <Money cents={totals.data.amountCents} /> : <Skel h={14} w={80} />}</td>
                   <td className="num">{totals.data ? <Money cents={totals.data.openCents} /> : <Skel h={14} w={80} />}</td>
                   <td colSpan={2} />

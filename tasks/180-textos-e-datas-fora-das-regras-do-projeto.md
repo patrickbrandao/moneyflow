@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -68,9 +68,9 @@ Manutenção: vocabulário divergente entre telas ("Liquidados" na aba e "Pago" 
 5. Opcional: uma regra simples no `verify:quick` (rg) que acuse literais com letra acentuada em `.tsx` fora de `i18n`.
 
 ## Critérios de aceite
-- [ ] Os arquivos listados não têm mais literais pt-BR em JSX, toasts, `confirm` nem `aria-label`; `rg` pelos literais listados não acha mais nada nos componentes.
-- [ ] Os e2e que procuram por texto continuam passando (os textos não mudam, só a origem).
-- [ ] O cabeçalho da sessão finalizada mostra a mesma data da lista.
+- [x] Os arquivos listados não têm mais literais pt-BR em JSX, toasts, `confirm` nem `aria-label`; `rg` pelos literais listados não acha mais nada nos componentes.
+- [x] Os e2e que procuram por texto continuam passando (os textos não mudam, só a origem).
+- [x] O cabeçalho da sessão finalizada mostra a mesma data da lista.
 
 ## Testes recomendados
 Nenhum comportamento muda nos textos: os e2e existentes (que usam `getByRole(..., { name })` com estes textos) cobrem a regressão. Em `packages/shared/test/`, se entrar um helper de data no fuso de SP para o cabeçalho, teste com um instante às 23h30 de SP (02h30 UTC do dia seguinte).
@@ -79,5 +79,13 @@ Nenhum comportamento muda nos textos: os e2e existentes (que usam `getByRole(...
 Levantamento por `rg` e leitura, não exaustivo linha a linha nos arquivos grandes; pode haver outros literais não achados. Os dois levantamentos foram feitos por áreas distintas e as áreas de um não foram varridas pelo outro.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado no código atual: os literais pt-BR das listas A e B (toasts, confirmações, validações, cabeçalhos, `aria-label`/`title`, placeholders e as frases compostas da conciliação, contratos e anotações), `AgentWindows.tsx` com `toLocaleDateString('pt-BR')` no fuso do navegador e o `datetime-local` do `PricesTab` lido pelo `new Date` (fuso do navegador). Os dois casos achados no lote anterior também se confirmaram: `ContractPage.tsx` cortava `lastEditedAt` com `slice(0, 10)` (dia em UTC) e `EntrySources.tsx` usava o `dhEmi` cru (`slice(0, 10)`) na competência e na data mostrada.
 
 ## Resolução (executor)
+Textos: os literais pt-BR dos arquivos listados (toasts, confirmações, validações, cabeçalhos, `aria-label`/`title`, placeholders, estados vazios) passaram para o `t`, com o mesmo texto de antes (os e2e que procuram por texto continuam valendo). Chaves novas perto das do mesmo assunto em `packages/shared/src/i18n/pt-BR.ts`: `user.page`/`user.account` e a regra de senha única `user.passwordTooShort`/`passwordMismatch`/`confirmNewPassword` (a troca de senha em Minha conta passa a dizer "A senha precisa de ao menos 6 caracteres.", como o cadastro), `title.drawer`/`title.form`/filtros e colunas da lista de títulos, `settlement.*` (baixa, estorno, conta a definir), `entity.page`/`entity.child`, `caixa.page`/`accountsTab`/`statementTab`/`membersTab`, `category.page`, `transfer.page`, as novas seções `shell` (menu, trilha, busca, tema, "Fechar (Esc)", página não encontrada) e `overview`, e na paleta `filter`/`searching`/`dialogLabel`/as teclas. Nas áreas: `statements` (`changeFile`, `balanceOn`, `invoiceDue`, `mappingNameRequired`, `parsedLines`/`parsedErrors`/`parsedErrorRow`, `newRuleIn`, `copyRulesFor`), `contracts.numberShort` ("nº …", também na lista), `notes.monthOfYear` (título e `aria-label` do calendário), `agentsUi.recipes.unknownVariables` ("A receita não é salva com elas", já que a do agente fala do agente) e `agentsUi.recipes.sample` (os valores do lote de exemplo). "Escolha…" virou `t.common.choose` em todo o web (inclusive `forms.tsx` e `CaixaFormModal.tsx`), "Nada encontrado." o `t.common.noResults`, "Minha conta" e "Sair" o `t.nav.account` e o `t.auth.logout`, "Total" da pizza o `t.common.total`, "PDF" o `documents.formats.pdf`. Os grupos da paleta (`'Criar'`, `'Ir para'`…) continuam como chaves do registro de comandos (`CommandGroup`); o título exibido vem de `t.palette.group*` (`GROUP_LABEL` em `CommandPalette.tsx`).
+
+Datas: `AgentWindows.tsx` mostra `formatDate(localDateOf(archivedAt))` (a data em SP, a mesma da lista "Sessões anteriores"); `ContractPage.tsx` usa `localDateOf(lastEditedAt)` no lugar do `slice(0, 10)` (só essa troca e as de texto, como pedido, por causa da tarefa 182); `EntrySources.tsx` usa `localDateOf(issuedAt)` na competência e na data exibida da NF-e. `localDateOf` devolve igual uma data sem hora ('YYYY-MM-DD', o `dEmi` da NF-e antiga), que antes viraria o dia anterior pela meia-noite UTC. Helpers novos em `packages/shared/src/dates.ts`: `instantFromSpLocal('YYYY-MM-DDTHH:MM')` (horário de parede de SP → instante UTC, com a segunda passada para as trocas de fuso antigas) e `spLocalOf(instante)`; o `PricesTab` grava a vigência do preço por `instantFromSpLocal`, e o hint diz "Horário de Brasília".
+
+Decisões: o item 5 (regra de `rg` no `verify:quick`) ficou de fora, por ser opcional e acusar falso positivo em `className` e chaves de comando. Ficaram fora desta tarefa os literais de arquivos não listados (a varredura foi nos arquivos afetados da tarefa).
+
+Testes: `packages/shared/test/money-dates.test.ts` → "a sessão finalizada às 23h30 de SP é do mesmo dia no cabeçalho (tarefa 180)" (02:30 UTC do dia seguinte), "o datetime-local é horário de São Paulo, não o do navegador (tarefa 180)" (23:30 de SP, o horário de verão de 2018, datas e horas inválidas, ida e volta) e os casos novos do `localDateOf` (data sem hora e o `dhEmi` cru); conferido também com `TZ=UTC` e `TZ=Asia/Tokyo`. Os textos não mudam: os e2e existentes cobrem a regressão. Verificação: `pnpm verify:quick`.

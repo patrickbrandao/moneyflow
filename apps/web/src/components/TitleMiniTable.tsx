@@ -1,4 +1,4 @@
-import { formatDate, type TitleRow } from '@moneyflow/shared';
+import { formatDate, type TitleRow, t } from '@moneyflow/shared';
 import { Link } from 'react-router-dom';
 import { recordDragProps } from '../agents/records';
 import { titleLink } from '../lib/links';
@@ -13,11 +13,11 @@ export function TitleMiniTable({ rows, empty, showCaixa = true }: { rows: TitleR
       <table className="data">
         <thead>
           <tr>
-            <th>Vencimento</th>
-            <th>Título</th>
-            {showCaixa && <th>Caixa</th>}
-            <th className="num">Em aberto</th>
-            <th>Situação</th>
+            <th>{t.title.due}</th>
+            <th>{t.title.titleLabel}</th>
+            {showCaixa && <th>{t.title.caixa}</th>}
+            <th className="num">{t.title.open}</th>
+            <th>{t.common.status}</th>
           </tr>
         </thead>
         <tbody>

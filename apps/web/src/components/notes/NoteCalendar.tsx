@@ -134,7 +134,7 @@ export function NoteCalendar({
         >
           <ChevronLeft />
         </button>
-        <h2 className="note-cal-title">{view === 'year' ? year : `${monthLabel(month)} de ${year}`}</h2>
+        <h2 className="note-cal-title">{view === 'year' ? year : U.monthOfYear(monthLabel(month), year)}</h2>
         <button
           type="button"
           className="icon-btn"
@@ -164,12 +164,12 @@ export function NoteCalendar({
       {view === 'year' ? (
         <div className="note-year">
           {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-            <section key={m} className="note-mini" aria-label={`${monthLabel(m)} de ${year}`}>
+            <section key={m} className="note-mini" aria-label={U.monthOfYear(monthLabel(m), year)}>
               <button
                 type="button"
                 className="note-mini-title"
                 onClick={() => onNavigate({ view: 'month', year, month: m })}
-                aria-label={U.openMonth(`${monthLabel(m)} de ${year}`)}
+                aria-label={U.openMonth(U.monthOfYear(monthLabel(m), year))}
               >
                 {monthLabel(m)}
               </button>

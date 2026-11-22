@@ -234,7 +234,8 @@ export function CategorySelect({
     <div className="flex items-center gap-2">
       <CategoryDot slot={selected?.slot} />
       <select className="field" value={value ?? ''} onChange={(event) => onChange(event.target.value || null)} aria-label={ariaLabel}>
-        <option value="">{allowEmpty ?? 'Escolha…'}</option>
+        <option value="">{allowEmpty ?? t.common.choose}</option>
+
         {options
           .filter((o) => !o.hidden || o.id === value)
           .map((o) => (

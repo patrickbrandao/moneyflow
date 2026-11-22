@@ -25,6 +25,8 @@ import { Badge, Button, EmptyRow, Field, Modal, useConfirm, useDebounced } from 
 type Kind = (typeof ACCOUNT_KINDS)[number];
 
 /** Contas financeiras da caixa (spec 004): corrente, cofre e poupança/investimento, com saldo. */
+const AT = t.caixa.accountsTab;
+
 export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChanged: () => void }) {
   const [editing, setEditingState] = useState<AccountRow | 'new' | null>(null);
   // ?editAccount=<id>: atalho "Ajustar a conta" da conciliação (spec 009) abre a edição direto.
@@ -56,8 +58,8 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
 
   async function archive(account: AccountRow) {
     const ok = await confirm({
-      title: `Excluir a conta ${account.name}?`,
-      description: 'Sem movimentos ela é excluída; com histórico, é arquivada (some das listas e continua nos relatórios).',
+      title: AT.deleteTitle(account.name),
+      description: AT.deleteBody,
       confirmLabel: t.common.delete,
       danger: true,
     });
@@ -70,7 +72,7 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
   }
 
   async function restore(account: AccountRow) {
-    if (await run(() => api.post(`/api/accounts/${account.id}/restore`), 'Conta restaurada.')) onChanged();
+    if (await run(() => api.post(`/api/accounts/${account.id}/restore`), AT.restored)) onChanged();
   }
 
   const total = caixa.accounts.filter((a) => !a.archivedAt).reduce((sum, a) => sum + a.balanceCents, 0);
@@ -91,16 +93,16 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
         <table className="data">
           <thead>
             <tr>
-              <th>Conta</th>
+              <th>{AT.account}</th>
               <th>{t.common.kind}</th>
-              <th>Banco</th>
+              <th>{AT.bank}</th>
               <th className="num">{t.caixa.openingBalance}</th>
               <th className="num">{t.common.balance}</th>
               <th />
             </tr>
           </thead>
           <tbody>
-            {caixa.accounts.length === 0 && <EmptyRow colSpan={6}>Nenhuma conta nesta caixa.</EmptyRow>}
+            {caixa.accounts.length === 0 && <EmptyRow colSpan={6}>{AT.empty}</EmptyRow>}
             {caixa.accounts.map((account) => (
               <tr key={account.id} className={account.archivedAt ? 'is-off' : ''}>
                 <td>
@@ -217,13 +219,13 @@ export function AccountFormModal({
     };
     const saved = await run(
       () => (account ? api.patch(`/api/accounts/${account.id}`, body) : api.post(`/api/caixas/${caixaId}/accounts`, { ...body, kind })),
-      account ? 'Conta atualizada.' : 'Conta criada.',
+      account ? AT.updated : AT.created,
     );
     if (saved) onSaved();
   }
 
   return (
-    <Modal open title={account ? 'Editar conta' : t.palette.newAccount} onClose={onClose}>
+    <Modal open title={account ? AT.editTitle : t.palette.newAccount} onClose={onClose}>
       <form onSubmit={submit} className="form-grid cols-2">
         <Field label={t.common.kind} className="span-all">
           <select className="field" value={kind} disabled={Boolean(account)} onChange={(e) => setKind(e.target.value as Kind)}>
@@ -331,7 +333,7 @@ export function AdjustmentModal({ account, onClose, onSaved }: { account: Accoun
           categoryId,
           entityId: entity?.id ?? null,
         }),
-      'Lançamento registrado.',
+      AT.adjustmentSaved,
     );
     if (saved) onSaved();
   }
@@ -365,10 +367,10 @@ export function AdjustmentModal({ account, onClose, onSaved }: { account: Accoun
       <form onSubmit={submit} className="form-grid cols-2">
         <div className="segmented span-all" role="group">
           <button type="button" className={direction === 'in' ? 'active' : ''} onClick={() => setDirection('in')}>
-            Entrada
+            {AT.inflow}
           </button>
           <button type="button" className={direction === 'out' ? 'active' : ''} onClick={() => setDirection('out')}>
-            Saída
+            {AT.outflow}
           </button>
         </div>
         <Field label={t.common.amount}>
@@ -386,7 +388,7 @@ export function AdjustmentModal({ account, onClose, onSaved }: { account: Accoun
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             required={offer.length === 0}
-            placeholder="Rendimento, tarifa, ajuste de contagem…"
+            placeholder={AT.adjustmentPlaceholder}
           />
         </Field>
         <Field label={`${t.title.category} (${t.common.optional})`} className="span-all">

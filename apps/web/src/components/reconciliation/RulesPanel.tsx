@@ -52,8 +52,8 @@ export function RulesPanel({
   useRegisterCommands(
     canWrite
       ? [
-          { id: 'rule-new', label: `${s.newRule} em ${targetName}`, group: 'Criar', icon: <Plus />, run: () => setEditing('new') },
-          { id: 'rule-copy', label: `${s.copyRules} (${targetName})`, group: 'Criar', icon: <Copy />, run: () => setCopying(true) },
+          { id: 'rule-new', label: s.newRuleIn(targetName), group: 'Criar', icon: <Plus />, run: () => setEditing('new') },
+          { id: 'rule-copy', label: s.copyRulesFor(targetName), group: 'Criar', icon: <Copy />, run: () => setCopying(true) },
         ]
       : [],
     [canWrite, targetId, targetName],

@@ -65,7 +65,7 @@ export function ContractsTable({
                     <span className="row-title">{row.name}</span>
                     <span className="row-sub">
                       {t.contracts.directionsShort[row.direction]}
-                      {row.contractNumber ? ` · nº ${row.contractNumber}` : ''}
+                      {row.contractNumber ? ` · ${t.contracts.numberShort(row.contractNumber)}` : ''}
                     </span>
                   </span>
                 </span>

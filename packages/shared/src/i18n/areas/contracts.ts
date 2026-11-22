@@ -3,7 +3,10 @@ export const contractsStrings = {
   title: 'Contratos',
   pageSub: 'Acordos a receber e a pagar: vigência, documentos e as obrigações (séries nas contas ou cobranças no cartão).',
   contract: 'Contrato',
+  /** Número do contrato ao lado do nome. */
+  numberShort: (n: string) => `nº ${n}`,
   newContract: 'Novo contrato',
+
   editContract: 'Editar contrato',
   noContracts: 'Nenhum contrato',
   noContractsHint: 'Cadastre um contrato com as obrigações dele: cada uma é uma série na conta onde o dinheiro se move.',

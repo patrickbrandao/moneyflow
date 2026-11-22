@@ -58,7 +58,7 @@ export function PurchaseDrawer({ purchaseId, onClose, onChanged }: { purchaseId:
     <aside className="drawer page-drawer" aria-label={p?.description ?? t.card.purchase}>
       <div className="dh">
         <span className="t">{p?.description ?? t.common.loading}</span>
-        <button type="button" className="icon-btn" onClick={onClose} title="Fechar (Esc)" aria-label={t.common.close}>
+        <button type="button" className="icon-btn" onClick={onClose} title={t.shell.closeEsc} aria-label={t.common.close}>
           <X />
         </button>
       </div>

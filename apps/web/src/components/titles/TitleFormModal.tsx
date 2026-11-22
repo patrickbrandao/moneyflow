@@ -112,8 +112,8 @@ export function TitleFormModal({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!entity) return setError('Escolha a entidade.');
-    if (!categoryId) return setError('Escolha a categoria.');
+    if (!entity) return setError(t.title.form.chooseEntity);
+    if (!categoryId) return setError(t.title.form.chooseCategory);
     if (!amount || amount <= 0) return setError(t.errors.invalidAmount);
     setError(null);
 
@@ -128,7 +128,7 @@ export function TitleFormModal({
         ...(title.mirrorTitleId ? {} : { entityId: entity.id }),
         ...(plannedEditable && plannedAccountId !== title.plannedAccountId ? { plannedAccountId } : {}),
       };
-      const saved = await run(() => api.patch<TitleDetail>(`/api/titles/${title.id}`, body), 'Título atualizado.');
+      const saved = await run(() => api.patch<TitleDetail>(`/api/titles/${title.id}`, body), t.title.form.updated);
       if (saved) onSaved(saved);
       return;
     }
@@ -154,12 +154,12 @@ export function TitleFormModal({
       pixPayload,
       nfeDocumentId,
     };
-    const saved = await run(() => api.post<TitleDetail>('/api/titles', body), 'Título criado.');
+    const saved = await run(() => api.post<TitleDetail>('/api/titles', body), t.title.form.created);
     if (saved) onSaved(saved);
   }
 
   const label = direction === 'payable' ? t.title.payee : t.title.payer;
-  const heading = editing ? 'Editar título' : direction === 'payable' ? t.palette.newPayable : t.palette.newReceivable;
+  const heading = editing ? t.title.form.editTitle : direction === 'payable' ? t.palette.newPayable : t.palette.newReceivable;
 
   return (
     <Modal open title={heading} onClose={onClose} wide>
@@ -216,7 +216,7 @@ export function TitleFormModal({
                 }}
               />
             </Field>
-            <Field label={t.title.competence} hint="Mês a que a despesa ou receita pertence.">
+            <Field label={t.title.competence} hint={t.title.form.competenceHint}>
               <input
                 type="date"
                 className="field"
@@ -282,7 +282,7 @@ export function TitleFormModal({
                   />
                 </Field>
                 {seriesKind === 'recurrence' && (
-                  <Field label={t.title.endsOn} hint="Vazio = sem fim (o sistema mantém 12 meses à frente).">
+                  <Field label={t.title.endsOn} hint={t.title.form.endsOnHint}>
                     <input type="date" className="field" value={endsOn} onChange={(e) => setEndsOn(e.target.value)} />
                   </Field>
                 )}
@@ -301,7 +301,7 @@ export function TitleFormModal({
             {!editing && seriesKind !== 'none' && <SeriesTermsFields value={terms} onChange={setTerms} />}
 
             {editing && title?.recurrenceRuleId && (
-              <Field label="Aplicar a" className="span-all">
+              <Field label={t.title.form.applyTo} className="span-all">
                 <div className="segmented" role="group">
                   <button type="button" className={scope === 'this' ? 'active' : ''} onClick={() => setScope('this')}>
                     {t.title.scopeThis}

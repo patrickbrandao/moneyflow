@@ -31,6 +31,10 @@ export const statementsStrings = {
   /* import */
   dropHere: 'Arraste o arquivo OFX ou CSV aqui ou',
   chooseFile: 'escolha um arquivo',
+  changeFile: 'trocar',
+  /** "Saldo do arquivo: R$ 10,00 em 31/10/2026" (o valor fica no componente). */
+  balanceOn: (date: string) => ` em ${date}`,
+  invoiceDue: (date: string) => `venc. ${date}`,
   fileHint: 'OFX ou CSV, até 20 MB. O arquivo original fica guardado como anexo do lote.',
   inspecting: 'Lendo o arquivo…',
   importing: 'Importando…',
@@ -125,6 +129,10 @@ export const statementsStrings = {
   column: (index: number, header: string | null) => `${index + 1}${header ? ` · ${header}` : ''}`,
   preview: 'Pré-visualização (linhas cruas do arquivo)',
   previewHint: 'Linhas riscadas são puladas; a linha em destaque é o cabeçalho.',
+  mappingNameRequired: (field: string) => `${field}: obrigatório.`,
+  parsedLines: (n: number) => `${n} linha(s) lidas`,
+  parsedErrors: (n: number, examples: string) => ` · ${n} com problema (ex.: ${examples})`,
+  parsedErrorRow: (row: number, message: string) => `linha ${row}: ${message}`,
   saveAndImport: 'Salvar mapeamento e importar',
   importWithMapping: 'Importar com este mapeamento',
   deleteMapping: 'Excluir mapeamento',
@@ -258,6 +266,9 @@ export const statementsStrings = {
   copySkippedReasons: { exists: 'já existe uma regra igual no destino', archived: 'regra arquivada' } as Record<string, string>,
   cardGroup: 'Cartões',
   newRule: 'Nova regra',
+  newRuleIn: (target: string) => `Nova regra em ${target}`,
+  copyRulesFor: (target: string) => `Copiar regras de outra conta (${target})`,
+
   editRule: 'Editar regra',
   noRules: 'Nenhuma regra ainda. Ao lançar ou classificar uma linha, a regra é aprendida.',
   pattern: 'Padrão',

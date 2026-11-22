@@ -10,6 +10,7 @@ import {
   formatDate,
   formatDateTime,
   formatMonth,
+  localDateOf,
   type SeriesDto,
   t,
   titleLink,
@@ -143,7 +144,7 @@ export function ContractPage() {
               {termText(contract)}
             </span>
             {contract.autoRenew && <Badge tone="info">{C.fields.autoRenew}</Badge>}
-            {contract.contractNumber && <span className="mono text-xs">nº {contract.contractNumber}</span>}
+            {contract.contractNumber && <span className="mono text-xs">{C.numberShort(contract.contractNumber)}</span>}
             {contract.archivedAt && <Badge>{t.common.archived}</Badge>}
           </span>
         }
@@ -616,7 +617,7 @@ function Documents({
               <tr key={doc.id} className="cursor-pointer" onClick={() => onOpen(doc.id)}>
                 <td>
                   <span className="row-title">{doc.title}</span>
-                  <span className="row-sub">{doc.format === 'pdf' ? (doc.fileName ?? 'PDF') : D.formats.markdown}</span>
+                  <span className="row-sub">{doc.format === 'pdf' ? (doc.fileName ?? D.formats.pdf) : D.formats.markdown}</span>
                 </td>
                 <td>
                   <Badge tone="outline">{D.kinds[doc.kind]}</Badge>
@@ -624,9 +625,9 @@ function Documents({
                 <td className="mono text-xs">{doc.documentDate ? formatDate(doc.documentDate) : '—'}</td>
                 <td className="text-xs">
                   {doc.format === 'pdf' ? (
-                    <Badge tone="info">PDF</Badge>
+                    <Badge tone="info">{D.formats.pdf}</Badge>
                   ) : doc.currentVersion ? (
-                    D.editedAt(doc.currentVersion, doc.lastEditedAt ? formatDate(doc.lastEditedAt.slice(0, 10)) : '')
+                    D.editedAt(doc.currentVersion, doc.lastEditedAt ? formatDate(localDateOf(doc.lastEditedAt)) : '')
                   ) : (
                     '—'
                   )}

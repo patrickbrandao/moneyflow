@@ -1,4 +1,6 @@
+import { t } from '@moneyflow/shared';
 import { ChevronRight, Moon, PanelLeftOpen, Search, Sun } from 'lucide-react';
+
 import { type CSSProperties, createContext, type ReactNode, useContext, useEffect, useMemo, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AgentSidePanel, usePanelColumn } from '../../agents/AgentSidePanel';
@@ -93,12 +95,12 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
             type="button"
             className="icon-btn menu-btn"
             onClick={() => (window.matchMedia(NARROW).matches ? setMenuOpen(true) : setCollapsed(false))}
-            title="Exibir o menu"
-            aria-label="Exibir o menu"
+            title={t.shell.showMenu}
+            aria-label={t.shell.showMenu}
           >
             <PanelLeftOpen />
           </button>
-          <nav className="crumbs" aria-label="Trilha">
+          <nav className="crumbs" aria-label={t.shell.breadcrumbs}>
             {crumbs.map((crumb, index) => (
               <span key={`${crumb.label}-${index}`} className="contents">
                 {index > 0 && <ChevronRight />}
@@ -110,7 +112,13 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
               </span>
             ))}
           </nav>
-          <button type="button" className="icon-btn" onClick={() => openPalette()} title="Buscar (⌘K)" aria-label="Buscar">
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => openPalette()}
+            title={t.shell.searchShortcut}
+            aria-label={t.shell.search}
+          >
             <Search />
           </button>
           <span className="hidden items-center gap-1 pr-1 md:inline-flex" aria-hidden>
@@ -121,8 +129,8 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
             type="button"
             className="icon-btn"
             onClick={toggleTheme}
-            title={theme === 'dark' ? 'Tema claro' : 'Tema escuro'}
-            aria-label={theme === 'dark' ? 'Tema claro' : 'Tema escuro'}
+            title={theme === 'dark' ? t.shell.themeLight : t.shell.themeDark}
+            aria-label={theme === 'dark' ? t.shell.themeLight : t.shell.themeDark}
           >
             {theme === 'dark' ? <Sun /> : <Moon />}
           </button>

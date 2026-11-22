@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { addMonths, diffDays, formatDate, isIsoDate, isoWeekday, localDateOf, parseDateBR, todayIso } from '../src/dates';
+import {
+  addMonths,
+  diffDays,
+  formatDate,
+  instantFromSpLocal,
+  isIsoDate,
+  isoWeekday,
+  localDateOf,
+  parseDateBR,
+  spLocalOf,
+  todayIso,
+} from '../src/dates';
 import { formatAccounting, formatBRL, formatSignedBRL, parseBRL } from '../src/money';
 import { occurrenceCompetenceDate, occurrenceDueDate, pendingOccurrences, type RecurrenceRule } from '../src/recurrence';
 
@@ -51,6 +62,27 @@ describe('datas', () => {
     expect(localDateOf('2026-10-31T22:30:00-03:00')).toBe('2026-10-31');
     expect(localDateOf(new Date('2026-11-01T03:00:00Z'))).toBe('2026-11-01');
     expect(localDateOf('não é data')).toBe('');
+    // A data sem hora (dEmi da NF-e antiga) não vira o dia anterior pela meia-noite UTC.
+    expect(localDateOf('2026-10-31')).toBe('2026-10-31');
+    // O dhEmi cru da NF-e, como o import devolve.
+    expect(localDateOf('2026-10-31T23:59:00-03:00')).toBe('2026-10-31');
+  });
+
+  it('a sessão finalizada às 23h30 de SP é do mesmo dia no cabeçalho (tarefa 180)', () => {
+    // 02:30 UTC do dia seguinte; cortar o ISO daria 22/11.
+    expect(formatDate(localDateOf('2026-11-22T02:30:00.000Z'))).toBe('21/11/2026');
+  });
+  it('o datetime-local é horário de São Paulo, não o do navegador (tarefa 180)', () => {
+    expect(instantFromSpLocal('2026-11-21T23:30')).toBe('2026-11-22T02:30:00.000Z');
+    expect(instantFromSpLocal('2026-01-01T00:00')).toBe('2026-01-01T03:00:00.000Z');
+    // 2018 ainda tinha horário de verão (−02:00 em janeiro).
+    expect(instantFromSpLocal('2018-01-15T12:00')).toBe('2018-01-15T14:00:00.000Z');
+    expect(instantFromSpLocal('2026-02-30T10:00')).toBeNull();
+    expect(instantFromSpLocal('2026-11-21T24:00')).toBeNull();
+    expect(instantFromSpLocal('')).toBeNull();
+    expect(spLocalOf('2026-11-22T02:30:00.000Z')).toBe('2026-11-21T23:30');
+    expect(spLocalOf('não é data')).toBe('');
+    expect(instantFromSpLocal(spLocalOf('2026-06-10T15:45:00.000Z'))).toBe('2026-06-10T15:45:00.000Z');
   });
   it('dia da semana ISO e diferença', () => {
     expect(isoWeekday('2026-10-12')).toBe(1);

@@ -224,8 +224,8 @@ export function ImportModal({
             <option value="">{s.invoiceAuto}</option>
             {card.invoices.map((invoice) => (
               <option key={invoice.id} value={invoice.id}>
-                {formatMonth(invoice.referenceMonth)} · {s.invoiceStatuses[invoice.status] ?? invoice.status} · venc.{' '}
-                {formatDate(invoice.dueDate)}
+                {formatMonth(invoice.referenceMonth)} · {s.invoiceStatuses[invoice.status] ?? invoice.status} ·{' '}
+                {s.invoiceDue(formatDate(invoice.dueDate))}
               </option>
             ))}
           </select>
@@ -234,7 +234,8 @@ export function ImportModal({
       {!isCard && fileBalance && !ownBalance && (
         <div className="notice info flex flex-wrap items-center gap-2" data-testid="file-balance">
           <span className="min-w-0 flex-1">
-            {s.fileBalance}: <Money cents={fileBalance.amountCents} /> em {formatDate(fileBalance.date)}
+            {s.fileBalance}: <Money cents={fileBalance.amountCents} />
+            {s.balanceOn(formatDate(fileBalance.date))}
           </span>
           <Button
             variant="ghost"
@@ -324,7 +325,7 @@ export function ImportModal({
           <span>
             {file ? <strong>{file.name}</strong> : s.dropHere}{' '}
             <button type="button" className="link" onClick={() => input.current?.click()}>
-              {file ? 'trocar' : s.chooseFile}
+              {file ? s.changeFile : s.chooseFile}
             </button>
           </span>
           <span className="hint">{busy && !inspect ? s.inspecting : s.fileHint}</span>
@@ -388,7 +389,8 @@ export function ImportModal({
                   <>
                     <dt>{s.ledgerBalance}</dt>
                     <dd>
-                      <Money cents={ofx.ledgerBalance.amountCents} /> em {formatDate(ofx.ledgerBalance.date)}
+                      <Money cents={ofx.ledgerBalance.amountCents} />
+                      {s.balanceOn(formatDate(ofx.ledgerBalance.date))}
                     </dd>
                   </>
                 )}
@@ -582,7 +584,7 @@ function CsvMapper({
   async function submit() {
     setLocalError(null);
     if (!complete) return setLocalError(s.mappingIncomplete);
-    if (!form.name.trim()) return setLocalError(`${s.mappingName}: obrigatório.`);
+    if (!form.name.trim()) return setLocalError(s.mappingNameRequired(s.mappingName));
     const body = {
       name: form.name.trim(),
       delimiter: form.delimiter,
@@ -637,7 +639,7 @@ function CsvMapper({
         onChange={(e) => setCol(key, e.target.value === '' ? null : Number(e.target.value))}
         aria-label={label}
       >
-        <option value="">{optional ? s.colNone : 'Escolha…'}</option>
+        <option value="">{optional ? s.colNone : t.common.choose}</option>
         {colOptions.map((i) => (
           <option key={i} value={i}>
             {s.column(i, headerRow?.[i]?.trim() || null)}
@@ -802,12 +804,15 @@ function CsvMapper({
         <span className="hint">{s.previewHint}</span>
         {parsed && (
           <p className={cx('notice mt-2', parsed.errors.length ? 'warn' : 'ok')}>
-            {parsed.lines.length} linha(s) lidas
+            {s.parsedLines(parsed.lines.length)}
             {parsed.errors.length > 0 &&
-              ` · ${parsed.errors.length} com problema (ex.: ${parsed.errors
-                .slice(0, 3)
-                .map((e) => (e.row ? `linha ${e.row}: ${e.message}` : e.message))
-                .join('; ')})`}
+              s.parsedErrors(
+                parsed.errors.length,
+                parsed.errors
+                  .slice(0, 3)
+                  .map((e) => (e.row ? s.parsedErrorRow(e.row, e.message) : e.message))
+                  .join('; '),
+              )}
           </p>
         )}
       </div>
