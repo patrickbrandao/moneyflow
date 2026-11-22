@@ -10,6 +10,7 @@ export * from './export';
 export { DB_CODE_MESSAGES, DB_CONSTRAINT_MESSAGES, DB_NOT_NULL_MESSAGES } from './i18n/errors';
 export { ptBR, ptBR as t, type Strings } from './i18n/pt-BR';
 export * from './links';
+export * from './markdown';
 export * from './messages';
 export * from './money';
 export * from './notes';

@@ -15,7 +15,7 @@ O chat dos agentes passa a mostrar e tocar o que é anexado, a gravar áudio e a
 ## Prévia na conversa
 - **Imagem**: miniatura na mensagem; clicar abre ampliada, com navegação entre as imagens da conversa e "baixar".
 - **PDF**: cartão com a miniatura da 1ª página, o nome e o número de páginas; clicar abre o visualizador pdf.js, o mesmo dos contratos e carregado sob demanda.
-- **Markdown**: cartão com o início do texto; abrir mostra o conteúdo renderizado (o renderizador seguro do chat), com a alternância **renderizado / bruto** e "baixar". As respostas do agente já são markdown e não mudam.
+- **Markdown**: cartão com o início do texto; abrir mostra o conteúdo renderizado (o renderizador seguro do chat, sem HTML cru), com a alternância **renderizado / bruto** e "baixar". As respostas do agente já são markdown e não mudam.
 - **Áudio**: o player descrito abaixo, com a transcrição embaixo.
 - **Outros**: chip de download, como hoje.
 - O admin lendo a conversa de outro usuário vê e toca tudo, em somente leitura.

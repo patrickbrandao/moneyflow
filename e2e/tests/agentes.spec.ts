@@ -59,6 +59,15 @@ const FIXTURES = join(import.meta.dirname, '../../apps/server/test/fixtures');
 /** Resposta longa em vários pedaços, para derrubar o SSE no meio dela. */
 const LONG_REPLY = Array.from({ length: 16 }, (_, i) => `Trecho ${String(i + 1).padStart(2, '0')} da resposta longa.`).join(' ');
 
+/** HTML cru na resposta (tarefa 073): tudo tem de aparecer como texto, sem mudar o console. */
+const HTML_REPLY = [
+  'Oi **mundo**',
+  '',
+  '<style>body{display:none}</style><div style="position:fixed;inset:0;z-index:2147483647" popover>Tela falsa</div>',
+  '',
+  'Entre de novo: <form><input type="password"><button>Entrar</button></form> [externo](//exemplo.invalid) [interno](/caixas)',
+].join('\n');
+
 let llm: FakeLlm;
 let adminApi: APIRequestContext;
 let provider: { id: string };
@@ -120,6 +129,8 @@ test.beforeAll(async () => {
   llm = await startFakeLlm(llmPort);
   llm.brain = (view) => {
     if (view.lastRole === 'user' && /reconectar o stream/i.test(view.lastText)) return { text: LONG_REPLY, chunks: 16, delayMs: 60 };
+    // Markdown seguro (tarefa 073): a resposta traz HTML cru, como numa injeção de prompt.
+    if (view.lastRole === 'user' && /responda com html cru/i.test(view.lastText)) return { text: HTML_REPLY };
     // Conciliação com IA (spec 029): lê o lote e propõe ignorar as duas primeiras linhas novas (escritas em ask).
     if (/conciliar um lote de extrato/.test(view.system)) {
       const importId = /statementImportId ([0-9a-f-]{36})/.exec(view.lastText)?.[1];
@@ -218,6 +229,27 @@ test('agente: conversa, aprova uma escrita, ancora no painel direito e minimiza'
   // O provedor falso recebeu as tools e o prompt com cache.
   const call = llm.calls.find((c) => c.path === '/v1/messages' && Array.isArray(c.body.tools));
   expect(call?.body.system[0].cache_control).toEqual({ type: 'ephemeral' });
+});
+
+test('markdown seguro: HTML cru na resposta aparece como texto e não muda o console (tarefa 073)', async ({ page }) => {
+  await enter(page);
+  const win = await freshSession(page);
+  await say(win, 'responda com html cru');
+  const reply = win.getByTestId('agent-message-assistant').filter({ hasText: 'Tela falsa' });
+  await expect(reply).toBeVisible({ timeout: 30_000 });
+  const md = reply.locator('.agent-md');
+  // O markdown continua: negrito e o link interno, que navega sem abrir outra aba.
+  await expect(md.locator('strong')).toHaveText('mundo');
+  await expect(md.getByRole('link', { name: 'interno' })).toHaveAttribute('href', '/caixas');
+  await expect(md.getByRole('link', { name: 'interno' })).not.toHaveAttribute('target', '_blank');
+  // O HTML cru aparece escapado: nada de style, div, popover, form ou input de senha.
+  await expect(md).toContainText('<style>body{display:none}</style>');
+  await expect(md).toContainText('<input type="password">');
+  await expect(md.locator('style, div, form, button, [style], [popover], input[type="password"]')).toHaveCount(0);
+  // //host não vira link para fora.
+  await expect(md.locator('a', { hasText: 'externo' })).not.toHaveAttribute('href', /.+/);
+  await expect(page.locator('body')).toBeVisible();
+  await expect(win.getByTestId('agent-composer')).toBeVisible();
 });
 
 test('sessões: conversar, finalizar, a próxima mensagem numa sessão nova, abrir a anterior em leitura e bifurcar', async ({ page }) => {

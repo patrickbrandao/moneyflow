@@ -21,6 +21,7 @@
 - Várias janelas flutuantes (arrastar, redimensionar, minimizar numa doca no rodapé), persistidas entre páginas e recarregamentos; cada janela é um **agente** (na sessão ativa), e as sessões finalizadas abrem em janelas de leitura.
 - O agente recebe o contexto da tela (caixa aberta, registro selecionado, filtros); dá para arrastar um registro para dentro da janela.
 - **Um** agente por vez pode ser ancorado como **painel lateral direito**, com o comportamento da sidebar esquerda: colapsar, expandir, alargar, minimizar (libera o espaço e volta a ser um agente minimizado na doca) e fechar (some até o usuário reabri-lo).
+- As respostas são markdown no renderizador seguro do console (`agents/Markdown.tsx`, o mesmo das anotações, dos documentos de contrato e dos anexos .md), **sem HTML cru**: o marked escapa todo HTML do texto e uma instância própria do DOMPurify só deixa passar as tags e atributos do markdown (sem `style`, `class`, `id`, `popover`, formulários nem diálogos), com links só http(s), mailto, tel ou internos (`/…`, nunca `//host`); a política fica em `packages/shared/src/markdown.ts`.
 - O ícone **Agentes** na topbar lista os agentes (última atividade, sessão ativa, execução em andamento), com as sessões anteriores e a busca.
 
 ## Mudanças planejadas (F7–F17)

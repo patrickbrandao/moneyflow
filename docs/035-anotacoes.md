@@ -16,7 +16,7 @@ Anotações funcionam como notas, post-its e lembretes presos a um objeto do sis
   As cores passam no contraste AA e ficam fora da faixa roxa, como o resto da interface.
 - **Conteúdo**:
   - título curto (obrigatório, até 120 caracteres): aparece na tabela, no alarme, no sino e no Telegram;
-  - corpo em markdown (opcional), exibido pelo renderizador seguro que já existe (`Markdown`), com as abas bruto/renderizado.
+  - corpo em markdown (opcional), exibido pelo renderizador seguro que já existe (`Markdown`, sem HTML cru: o HTML do texto aparece escapado e só as tags e atributos do próprio markdown passam), com as abas bruto/renderizado.
 - **Data**: o campo "Data" (`YYYY-MM-DD`, fuso de São Paulo) vem com hoje e pode ser editado, o que permite registrar fatos passados. É a data em que a nota aparece no calendário. No lembrete, quem manda são as ocorrências (veja abaixo).
 - **Vínculo**: toda anotação pertence a **exatamente um objeto**, guardado como `object_type` + `object_id`.
   - Hoje `object_type` só aceita `entity`. Um objeto novo depois é um valor a mais no tipo, uma checagem de existência a mais e a aba na tela dele.
