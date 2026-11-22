@@ -32,6 +32,7 @@ import {
 import { eq, sql } from 'drizzle-orm';
 import { type Access, type Actor, loadAccess } from '../authz/access';
 import type { Config } from '../config';
+import { errorText } from '../errors';
 import { type BudgetAlert, budgetAlerts } from './ai-budgets';
 import { contractMessages, contractNotifications } from './contract-worker';
 import { type ClaimedMessage, deliver } from './messages';
@@ -547,7 +548,7 @@ export async function produceMessages(db: Database, config: Config, clock: SpClo
       subscriptionErrors.push({
         subscriptionId: sub.id,
         eventKind: sub.event_kind,
-        error: String((error as Error)?.message ?? error).slice(0, 500),
+        error: errorText(error),
       });
     }
   }

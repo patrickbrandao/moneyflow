@@ -521,7 +521,8 @@ export async function deliver(
     const permanent = code === '42501' || code === 'P0002';
     const status = await markFailed(db, message.id, 'token unavailable', null, permanent);
     if (status === 'failed') await notifyFailure(db, message.id, 'token unavailable');
-    return { status, error: String((error as Error).message ?? error) };
+    // Texto fixo: a mensagem do erro leva o SQL da função do token (tarefa 070).
+    return { status, error: 'token unavailable' };
   }
   const sent = await sendTelegramMessage(
     { apiBase: config.telegramApiBase, timeoutMs: config.telegramTimeoutMs },

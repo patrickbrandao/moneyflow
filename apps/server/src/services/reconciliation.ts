@@ -38,7 +38,7 @@ import {
 import { and, eq, inArray, isNull, ne, type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
-import { notFound, translateDbError, unprocessable } from '../errors';
+import { errorText, notFound, translateDbError, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
 import { insertChargePurchase } from './card-charges';
 import { insertPurchase, loadCard } from './card-core';
@@ -158,7 +158,7 @@ async function eachLine<T extends { lineId: string }>(
         });
         done += 1;
       } catch (error) {
-        const message = translateDbError(error)?.message ?? (error instanceof Error ? error.message : String(error));
+        const message = translateDbError(error)?.message ?? errorText(error, 2000);
         failed.push({ lineId: item.lineId, message });
       }
     }

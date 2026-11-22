@@ -15,7 +15,7 @@ import type { z } from 'zod';
 import { appendEvent, insertMessage } from '../agents/store';
 import type { Config } from '../config';
 import type { ServiceContext } from '../context';
-import { AppError, findPgError, forbidden, notFound, translateDbError, unprocessable } from '../errors';
+import { AppError, errorText, findPgError, forbidden, notFound, translateDbError, unprocessable } from '../errors';
 import { exceededBudget, lockRunRate } from './ai-budgets';
 import { withTx } from './tx';
 import { iso } from './util';
@@ -266,7 +266,7 @@ async function startClaimed(tx: Tx, config: Config, row: ClaimRow): Promise<'sta
     });
     return 'started';
   } catch (error) {
-    const reason = translateDbError(error)?.message ?? (error instanceof Error ? error.message : String(error));
+    const reason = translateDbError(error)?.message ?? errorText(error, 2000);
     await closeTaskRun(tx, row.task_run_id, 'failed', reason || t.errors.generic);
     return 'failed';
   }

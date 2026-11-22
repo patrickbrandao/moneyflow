@@ -7,7 +7,10 @@ export type CaixaRole = 'editor' | 'viewer';
 /** Papel efetivo do usuário numa caixa (admin global vê e escreve em todas). */
 export type EffectiveRole = 'admin' | CaixaRole;
 
-export type ApiError = { error: { code: string; message: string; details?: { path: string; message: string }[] } };
+/** Erro da API; `requestId` vem no 500 (o id da requisição no log, tarefa 186). */
+export type ApiError = {
+  error: { code: string; message: string; details?: { path: string; message: string }[]; requestId?: string };
+};
 
 export type Membership = { caixaId: string; caixaName: string; role: CaixaRole };
 

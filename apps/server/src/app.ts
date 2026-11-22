@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import cookie from '@fastify/cookie';
@@ -12,6 +13,7 @@ import { resolveSession, SESSION_COOKIE } from './auth/session';
 import { loadAccess } from './authz/access';
 import type { Config } from './config';
 import { AppError, translateDbError } from './errors';
+import { apiLoggerOptions } from './log';
 import { agentRoutes } from './routes/agents';
 import { attachmentRoutes, UPLOAD_BODY_LIMIT } from './routes/attachments';
 import { authRoutes } from './routes/auth';
@@ -38,6 +40,9 @@ declare module 'fastify' {
   }
 }
 
+/** Id de requisição vindo do proxy: aceito só com TRUSTED_PROXIES e neste formato (tarefa 186). */
+const PROXY_REQUEST_ID = /^[\w-]{8,64}$/;
+
 /** Rotas de /api acessíveis sem sessão. */
 const PUBLIC = new Set(['/api/auth/login', '/api/auth/logout', '/api/health']);
 
@@ -48,10 +53,17 @@ export async function buildApp({
 }: {
   db: Database;
   config: Config;
-  logger?: boolean | object;
+  logger?: boolean | Record<string, unknown>;
 }): Promise<FastifyInstance> {
+  const fromProxy = config.trustedProxies.length > 0;
   const app = Fastify({
-    logger: logger === true ? { level: config.logLevel, redact: ['req.headers.cookie', 'req.headers.authorization'] } : logger,
+    // Erros no log sem os parâmetros das consultas (senha, token, chave; tarefa 070).
+    logger: apiLoggerOptions(config, logger),
+    // Id único entre reinícios e réplicas (tarefa 186): o do proxy confiável (X-Request-Id) ou um UUID.
+    genReqId: (req) => {
+      const header = fromProxy ? req.headers['x-request-id'] : undefined;
+      return typeof header === 'string' && PROXY_REQUEST_ID.test(header) ? header : randomUUID();
+    },
     // Só os proxies de TRUSTED_PROXIES informam o IP do cliente (X-Forwarded-For); sem eles, o IP é o da
     // conexão. Nunca `true`: o cliente forjaria o IP e contornaria o limite de login (tarefa 050).
     trustProxy: config.trustedProxies.length > 0 ? config.trustedProxies : false,
@@ -93,6 +105,11 @@ export async function buildApp({
   const webDist = config.webDist ? resolve(config.webDist) : null;
   const indexHtml = webDist && existsSync(join(webDist, 'index.html')) ? readFileSync(join(webDist, 'index.html'), 'utf8') : null;
   registerSecurityHeaders(app, indexHtml === null ? null : spaCsp(indexHtml));
+  // O id da requisição em toda resposta: é o que o usuário informa e o que acha a linha no log.
+  app.addHook('onSend', async (request, reply, payload) => {
+    reply.header('x-request-id', request.id);
+    return payload;
+  });
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof AppError) {
@@ -110,7 +127,7 @@ export async function buildApp({
       return reply.status(status).send({ error: { code: 'bad_request', message: t.errors.validation } });
     }
     request.log.error(error);
-    return reply.status(500).send({ error: { code: 'internal', message: t.errors.generic } });
+    return reply.status(500).send({ error: { code: 'internal', message: t.errors.generic, requestId: request.id } });
   });
 
   // Sessão: toda rota /api (menos as públicas) exige cookie válido de usuário ativo. Decide pelo padrão

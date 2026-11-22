@@ -148,6 +148,8 @@ export const ptBR = {
 
   errors: {
     generic: 'Algo deu errado. Tente de novo.',
+    /** O 500 com o começo do id da requisição, para informar ao suporte (tarefa 186). */
+    genericWithCode: (code: string) => `Algo deu errado (código ${code}). Tente de novo.`,
     network: 'Sem conexão com o servidor.',
     notFound: 'Registro não encontrado.',
     forbidden: 'Você não tem permissão para esta ação.',

@@ -1,5 +1,5 @@
-import { type ApiError as ApiErrorBody, t } from '@moneyflow/shared';
-import { ApiError } from './api';
+import { t } from '@moneyflow/shared';
+import { ApiError, apiErrorFrom } from './api';
 
 /** Nome do arquivo no Content-Disposition (filename* em UTF-8 tem prioridade). */
 function fileNameOf(header: string | null, fallback: string) {
@@ -22,8 +22,7 @@ export async function downloadFile(path: string, fallbackName: string): Promise<
   }
   if (!response.ok) {
     const data = response.headers.get('content-type')?.includes('json') ? await response.json().catch(() => null) : null;
-    const error = (data as ApiErrorBody | null)?.error;
-    throw new ApiError(response.status, error?.code ?? 'http', error?.message ?? t.errors.generic);
+    throw apiErrorFrom(response.status, data);
   }
   const name = fileNameOf(response.headers.get('content-disposition'), fallbackName);
   const url = URL.createObjectURL(await response.blob());

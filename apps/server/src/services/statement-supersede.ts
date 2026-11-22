@@ -17,7 +17,7 @@ import { sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { extractJson } from '../agents/flows';
 import type { ServiceContext } from '../context';
-import { AppError, notFound, translateDbError, unprocessable } from '../errors';
+import { AppError, errorText, notFound, translateDbError, unprocessable } from '../errors';
 import { assertCanStartRun } from './ai-budgets';
 import { flowAgentId } from './ai-flows';
 import { createConversation, sendMessage } from './conversations';
@@ -394,7 +394,7 @@ export async function resolveSupersededLines(
         });
         done += 1;
       } catch (error) {
-        const message = translateDbError(error)?.message ?? (error instanceof Error ? error.message : String(error));
+        const message = translateDbError(error)?.message ?? errorText(error, 2000);
         failed.push({ lineId: item.lineId, message });
       }
     }

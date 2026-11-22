@@ -2,7 +2,7 @@ import type { Database } from '@moneyflow/db';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config';
-import { findPgError } from '../errors';
+import { errorText, findPgError } from '../errors';
 import { LlmError, transcribe } from './llm';
 
 /*
@@ -98,7 +98,7 @@ export async function processTranscription(deps: Deps, claimed: ClaimedTranscrip
       { language: 'pt' },
     );
   } catch (error) {
-    const message = error instanceof LlmError ? error.message : error instanceof Error ? error.message : String(error);
+    const message = error instanceof LlmError ? error.message : errorText(error, 2000);
     log.warn({ err: error, transcriptionId: claimed.id }, 'transcrição: o provedor falhou');
     await fail(db, claimed, message || 'transcription failed');
     return 'failed';
