@@ -466,6 +466,9 @@ export const ptBR = {
     payables: 'A pagar',
     receivables: 'A receber',
     balance: 'Saldo das contas',
+    /** O saldo atual é o do fim de hoje; o lançado com data futura vai à parte (tarefa 130). */
+    futureEntries: (amount: string) => `${amount} lançados com data futura`,
+    futureEntriesHint: 'Já lançados com data depois de hoje: ficam fora do saldo atual e entram no dia deles.',
     payableOpen: 'A pagar em aberto',
     receivableOpen: 'A receber em aberto',
     hiddenCategories: 'Categorias ocultas',

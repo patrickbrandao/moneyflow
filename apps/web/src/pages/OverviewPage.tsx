@@ -1,7 +1,7 @@
 import { type Overview, t } from '@moneyflow/shared';
 import { AlertTriangle, ArrowDownLeft, ArrowUpRight, CalendarClock, Landmark, Plus, Search, Wallet } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { LoadError, Money, PageHead } from '../components/domain';
+import { FutureEntries, LoadError, Money, PageHead } from '../components/domain';
 import { TitleMiniTable } from '../components/TitleMiniTable';
 import { ButtonLink, EmptyState, Kbd, Panel, Skel } from '../components/ui';
 import { useUser } from '../lib/auth';
@@ -53,6 +53,7 @@ export function OverviewPage() {
           <div className="k">
             <Landmark /> {t.caixa.balance.toLowerCase()}
           </div>
+          {totals && <FutureEntries cents={totals.futureCents} />}
         </Link>
         <Link to="/caixas" className="stat-tile">
           <div className="v">{totals ? <Money cents={totals.receivableOpenCents} /> : '—'}</div>
@@ -121,6 +122,7 @@ export function OverviewPage() {
                       </td>
                       <td className="num">
                         <Money cents={caixa.balanceCents} />
+                        <FutureEntries cents={caixa.futureCents} />
                       </td>
                       <td className="num">
                         <Money cents={caixa.receivableOpenCents} muted={caixa.receivableOpenCents === 0} />

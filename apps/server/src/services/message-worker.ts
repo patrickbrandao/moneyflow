@@ -173,9 +173,10 @@ async function openTitles(db: Executor, caixaIds: string[], where: ReturnType<ty
   }));
 }
 
+/** Saldo de hoje por caixa (o do fim do dia em São Paulo, sem o lançado com data futura; tarefa 130). */
 async function balancesByCaixa(db: Executor, caixaIds: string[]) {
   const result = await db.execute<{ caixa_name: string; cents: number }>(sql`
-    SELECT c.name AS caixa_name, coalesce(sum(b.balance_cents), 0)::bigint AS cents
+    SELECT c.name AS caixa_name, coalesce(sum(b.balance_today_cents), 0)::bigint AS cents
       FROM caixas c LEFT JOIN financial_account_balances b ON b.caixa_id = c.id AND b.archived_at IS NULL
      WHERE c.id = ANY (${uuidArray(caixaIds)}) AND c.kind = 'general'
      GROUP BY c.id, c.name ORDER BY c.name`);

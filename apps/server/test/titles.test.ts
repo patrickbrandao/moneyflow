@@ -673,7 +673,8 @@ describe('saldo em aberto pelo status (tarefa 093)', () => {
     expect(await admin.get(`/api/caixas/${s.caixaA.id}`)).toMatchObject(expected);
     const overview = await admin.get('/api/overview');
     expect(overview.caixas.find((c: { id: string }) => c.id === s.caixaA.id)).toMatchObject(expected);
-    const overdueHere = overview.overdue.filter((t: { caixaId: string }) => t.caixaId === s.caixaA.id);
+    // A lista de vencidos da visão geral corta em 50 de todas as caixas: confere-se a da caixa, pelo mesmo filtro.
+    const overdueHere = await admin.get(`/api/titles?caixaId=${s.caixaA.id}&status=overdue`);
     expect(overdueHere.map((t: { openCents: number }) => t.openCents).sort((a: number, b: number) => a - b)).toEqual([5_000, 10_000]);
     const unpaid = await admin.get(`/api/titles/totals?caixaId=${s.caixaA.id}&status=unpaid`);
     expect(unpaid).toMatchObject({ count: 4, openCents: 10_000 + 5_000 + 6_000 + 8_000 });

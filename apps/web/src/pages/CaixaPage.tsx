@@ -22,7 +22,7 @@ import { MembersTab } from '../components/caixa/MembersTab';
 import { StatementTab } from '../components/caixa/StatementTab';
 import { CardCaixaView } from '../components/card/CardCaixaView';
 import { ClosingTab } from '../components/closing/ClosingTab';
-import { LoadError, Money, PageHead, RoleBadge } from '../components/domain';
+import { FutureEntries, LoadError, Money, PageHead, RoleBadge } from '../components/domain';
 import { ReconciliationTab } from '../components/reconciliation/ReconciliationTab';
 import { useCrumbs } from '../components/shell/Layout';
 import { TitlesTab } from '../components/titles/TitlesTab';
@@ -189,6 +189,7 @@ export function CaixaPage() {
               <div className="k">
                 <Landmark /> {t.caixa.balance.toLowerCase()}
               </div>
+              <FutureEntries cents={caixa.futureCents} />
             </Link>
             <Link to={caixaTab(caixa.id, 'receivables')} className="stat-tile">
               <div className="v">

@@ -32,6 +32,16 @@ export function Money({ cents, signed, muted, className }: { cents: number; sign
   return <span className={cx('money', tone, className)}>{formatAccounting(cents)}</span>;
 }
 
+/** O que já está lançado com data futura, à parte do saldo de hoje (tarefa 130); nada quando é zero. */
+export function FutureEntries({ cents }: { cents: number }) {
+  if (!cents) return null;
+  return (
+    <span className="row-sub" title={t.caixa.futureEntriesHint}>
+      {t.caixa.futureEntries(formatAccounting(cents))}
+    </span>
+  );
+}
+
 export function TitleStatusBadge({ title }: { title: Pick<TitleRow, 'status' | 'overdue' | 'direction'> }) {
   if (title.status === 'canceled') return <Badge tone="outline">{t.title.statuses.canceled}</Badge>;
   if (title.status === 'paid')

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { addMonths, buildBrCode, todayIso } from '@moneyflow/shared';
+import { addDays, addMonths, buildBrCode, todayIso } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type MaterializeFailure, materializeAll } from '../src/services/recurrence';
@@ -447,6 +447,45 @@ describe('calendário (spec 012)', () => {
     const days = await admin.get(`/api/calendar/balances?from=2030-01-24&to=2030-01-26&caixaId=${s.caixaA.id}`);
     expect(days.map((d: any) => d.projectedCents)).toEqual([100_000, 130_000, 130_000]);
     expect((await admin.raw('GET', `/api/calendar?from=2030-01-01&to=2035-01-01`)).statusCode).toBe(422);
+  });
+
+  it('o projetado da conta desconta os previstos com ela como conta prevista (tarefa 131)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const due = addDays(today, 10);
+    await admin.post('/api/titles', {
+      caixaId: s.caixaA.id,
+      direction: 'payable',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      description: 'Prevista na conta',
+      competenceDate: due,
+      dueDate: due,
+      amountCents: 30_000,
+      plannedAccountId: s.accountA.id,
+      mirrorCaixaId: null,
+    });
+    // Sem conta prevista: só no projetado da caixa.
+    await admin.post('/api/titles', {
+      caixaId: s.caixaA.id,
+      direction: 'payable',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      description: 'Sem conta',
+      competenceDate: due,
+      dueDate: due,
+      amountCents: 5_000,
+      mirrorCaixaId: null,
+    });
+    const range = `from=${addDays(due, -1)}&to=${due}`;
+    const days = await admin.get(`/api/calendar/balances?${range}&accountId=${s.accountA.id}`);
+    expect(days).toEqual([
+      { day: addDays(due, -1), realizedCents: 100_000, scheduledCents: 0, projectedCents: 100_000 },
+      { day: due, realizedCents: 100_000, scheduledCents: -30_000, projectedCents: 70_000 },
+    ]);
+    const caixaDays = await admin.get(`/api/calendar/balances?${range}&caixaId=${s.caixaA.id}`);
+    expect(caixaDays.map((d: { projectedCents: number }) => d.projectedCents)).toEqual([100_000, 65_000]);
   });
 
   it('o título de fatura não se arrasta nem muda de vencimento pelo PATCH (tarefa 132)', async () => {

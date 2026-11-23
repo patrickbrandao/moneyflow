@@ -155,7 +155,10 @@ export type CaixaSummary = {
   /** Cartão: 4 últimos dígitos (null em caixa geral). */
   cardLast4: string | null;
   myRole: EffectiveRole;
+  /** Saldo das contas ativas no fim de hoje (São Paulo), sem o lançado com data futura (tarefa 130). */
   balanceCents: number;
+  /** O que já está lançado com data futura nas contas ativas (fora do `balanceCents`). */
+  futureCents: number;
   payableOpenCents: number;
   receivableOpenCents: number;
   overdueCount: number;
@@ -177,7 +180,10 @@ export type AccountRow = {
   openingBalanceCents: number;
   openingDate: string;
   archivedAt: string | null;
+  /** Saldo no fim de hoje (São Paulo), sem o lançado com data futura (tarefa 130). */
   balanceCents: number;
+  /** O que já está lançado com data futura (inclusive o saldo inicial de conta que abre no futuro). */
+  futureCents: number;
   canWrite: boolean;
   /** "Conciliar com IA ao importar" (spec 029). */
   aiAutoReconcile: boolean;
@@ -452,7 +458,7 @@ export type AccountSummary = {
 };
 
 export type Overview = {
-  totals: { balanceCents: number; payableOpenCents: number; receivableOpenCents: number; overdueCents: number };
+  totals: { balanceCents: number; futureCents: number; payableOpenCents: number; receivableOpenCents: number; overdueCents: number };
   caixas: CaixaSummary[];
   overdue: TitleRow[];
   upcoming: TitleRow[];
