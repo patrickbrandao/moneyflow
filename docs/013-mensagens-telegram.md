@@ -36,7 +36,8 @@
 - Corpo em HTML do Telegram (`parse_mode: HTML`), com escape de tudo o que vem do usuário, limite de 4096 caracteres (corta linhas inteiras) e link para o console quando `APP_URL` está definido.
 
 ### Fila e envio (worker)
-- Laço próprio a cada `MESSAGE_INTERVAL_MS` (padrão 30 s): produz os eventos, cria as notificações do sino e consome a outbox.
+- Laço próprio a cada `MESSAGE_INTERVAL_MS` (padrão 30 s): produz os eventos, cria as notificações do sino, dispara os lembretes das anotações e consome a outbox. Cada etapa roda isolada, e cada bloco do sino também (espelhos, faturas, limite, divergência, avisos diários, contratos, orçamentos e o INSERT de cada lote, refeito linha a linha se recusado): a que falha vai ao log com o nome (`stageErrors`) e as seguintes rodam, então uma falha no sino não segura o Telegram nem os lembretes (tarefa 104). O laço de hora em hora (séries, cartões, contratos, sessões) também isola as etapas.
+- Sem recálculo à toa (tarefa 166): o resumo diário/semanal já enfileirado para o destino não é montado de novo; o uso dos cartões (`card_limits`) sai uma vez por passada para o Telegram e o sino; e os blocos caros do sino (limite, divergência, avisos diários e contratos) rodam no máximo a cada 5 minutos por worker, além da primeira passada do dia e da primeira depois do `NOTIFY_AT`.
 - Consumo: `message_outbox_claim` (SKIP LOCKED) numa transação curta; envio pela Bot API `sendMessage` fora de transação; `mark_sent` ou `mark_failed` com `retry_after` do 429, backoff exponencial (30 s × 2^n, até 1 h, 5 tentativas) e falha permanente em 400/401/403/404. A URL base vem de `TELEGRAM_API_BASE` (testes e e2e usam uma Bot API falsa).
 - Falha definitiva gera a notificação `message_failed` para o dono (ou quem criou o destino). O histórico mostra status, tentativas e erro, com **reenviar** (falhas) e **cancelar** (pendentes e falhas).
 

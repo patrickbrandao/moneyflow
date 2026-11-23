@@ -1,13 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { type Executor, userColumns, users } from '@moneyflow/db';
+import { type Database, type Executor, userColumns, users } from '@moneyflow/db';
 import { addDays, isoWeekday, todayIso } from '@moneyflow/shared';
-import { eq, sql } from 'drizzle-orm';
+import { eq, type SQL, sql } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { TOOL_HANDLERS } from '../src/agents/tool-handlers';
 import { type Actor, loadAccess } from '../src/authz/access';
-import { consumeOutbox, emitAgentEvent, logMessageTick, produceMessages, produceNotifications } from '../src/services/message-worker';
+import {
+  consumeOutbox,
+  emitAgentEvent,
+  logMessageTick,
+  type MessageLoopState,
+  messageTick,
+  produceMessages,
+  produceNotifications,
+} from '../src/services/message-worker';
 import { deliver } from '../src/services/messages';
 import { client, type Harness, scenario, startApp, uid, userSession } from './helpers';
 
@@ -60,6 +69,30 @@ beforeEach(() => {
   telegram.mode = 'ok';
   telegram.calls = [];
 });
+
+/**
+ * O banco de verdade, guardando o SQL de cada `execute` (fora das transações) e recusando o que casar
+ * com `fail` (tarefas 104 e 166).
+ */
+function spyDb(fail: RegExp | null = null) {
+  const dialect = new PgDialect();
+  const seen: { sql: string; params: unknown[] }[] = [];
+  const db = new Proxy(h.db, {
+    get(target, prop) {
+      if (prop === 'execute') {
+        return (query: SQL) => {
+          const rendered = dialect.sqlToQuery(query);
+          seen.push(rendered);
+          if (fail?.test(rendered.sql)) return Promise.reject(new Error('falha simulada na consulta'));
+          return target.execute(query);
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as Database;
+  return { db, seen };
+}
 
 const year = todayIso().slice(0, 4);
 const period = `from=${year}-01-01&to=${year}-12-31`;
@@ -580,6 +613,129 @@ describe('mensagens (spec 013)', () => {
     );
     expect(summary.rows[0]!.text).toContain('… e mais 10');
     expect(summary.rows[0]!.text).toContain('Atrasados: 31 títulos');
+    await admin.patch(`/api/message-destinations/${dest.id}`, { isActive: false });
+  });
+
+  it('uma etapa que falha não para as outras: a mensagem sai e o lembrete dispara sem o sino (tarefa 104)', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const dest = await admin.post('/api/message-destinations', { name: `Etapas ${uid()}`, botToken: TOKEN, chatId: '104' });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, { eventKind: 'agent_completed', params: {} });
+    const runId = randomUUID();
+    await emitAgentEvent(h.db, {
+      kind: 'agent_completed',
+      userId: adminSession.id,
+      agentRunId: runId,
+      eventKey: `run:${runId}:seq:1`,
+      text: 'Pronto',
+      config: h.config,
+    });
+    const entity = await admin.post('/api/entities', { kind: 'company', name: `Lembrete ${uid()}` });
+    const note = await admin.post('/api/notes', {
+      objectType: 'entity',
+      objectId: entity.id,
+      kind: 'reminder',
+      title: 'Ligar para o banco',
+      reminder: { timeOfDay: '10:00' },
+    });
+    await h.db.execute(sql`UPDATE note_reminders SET next_fire_at = now() - interval '1 minute' WHERE note_id = ${note.id}`);
+
+    // As assinaturas (a etapa inteira do Telegram) e um bloco do sino falham; o resto da passada segue.
+    const { db } = spyDb(/FROM message_subscriptions s\b|mirror_status = 'pending'/);
+    const result = await messageTick(db, h.config);
+    expect(result.stageErrors).toEqual(
+      expect.arrayContaining([
+        { stage: 'messages', error: expect.stringContaining('falha simulada') },
+        { stage: 'notifications.mirror_pending', error: expect.stringContaining('falha simulada') },
+      ]),
+    );
+    expect(result.subscriptionErrors).toEqual([]);
+    expect(typeof result.created).toBe('number');
+    const outbox = await h.db.execute<{ status: string }>(
+      sql`SELECT status FROM message_outbox WHERE destination_id = ${dest.id} AND agent_run_id = ${runId}`,
+    );
+    expect(outbox.rows).toEqual([{ status: 'sent' }]);
+    expect(telegram.calls.some((c) => c.body.chat_id === '104')).toBe(true);
+    const firings = await h.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM note_reminder_firings WHERE note_id = ${note.id}`);
+    expect(firings.rows[0]!.n).toBe(1);
+
+    // O worker loga cada etapa que falhou, com o nome.
+    const warned: { obj: any; msg: string }[] = [];
+    logMessageTick({ info: () => {}, warn: (obj, msg) => warned.push({ obj, msg }) }, result);
+    expect(warned.map((w) => w.obj.stage)).toEqual(expect.arrayContaining(['messages', 'notifications.mirror_pending']));
+    await admin.patch(`/api/message-destinations/${dest.id}`, { isActive: false });
+  });
+
+  it('sem recálculo à toa: resumo já enfileirado, cartões uma vez por passada e o sino caro espaçado (tarefa 166)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const weekday = isoWeekday(today);
+    await admin.post('/api/titles', {
+      caixaId: s.caixaA.id,
+      direction: 'payable',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      description: 'Vence hoje',
+      competenceDate: today,
+      dueDate: today,
+      amountCents: 2_000,
+    });
+    const dest = await admin.post('/api/message-destinations', {
+      name: `Resumo ${s.tag}`,
+      ownerKind: 'caixa',
+      ownerCaixaId: s.caixaA.id,
+      botToken: TOKEN,
+      chatId: '166',
+    });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, { eventKind: 'daily_summary', params: { send_at: '00:00' } });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, {
+      eventKind: 'card_limit',
+      params: { thresholds_percent: [80] },
+    });
+    const clock = { date: today, time: '09:00', weekday };
+    const summaryQueries = (seen: { sql: string; params: unknown[] }[]) =>
+      seen.filter((q) => q.sql.includes('financial_account_balances') && JSON.stringify(q.params).includes(s.caixaA.id)).length;
+    const cardQueries = (seen: { sql: string }[]) => seen.filter((q) => q.sql.includes('card_limits')).length;
+
+    const first = spyDb();
+    await produceMessages(first.db, h.config, clock);
+    expect(summaryQueries(first.seen)).toBe(1);
+    const second = spyDb();
+    await produceMessages(second.db, h.config, clock);
+    expect(summaryQueries(second.seen)).toBe(0);
+    const summaries = await h.db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM message_outbox WHERE destination_id = ${dest.id} AND event_kind = 'daily_summary'`,
+    );
+    expect(summaries.rows[0]!.n).toBe(1);
+
+    // Com o estado do worker: os blocos caros rodam na primeira, de novo ao passar do NOTIFY_AT e depois de 5 min.
+    const state: MessageLoopState = {};
+    const t0 = Date.now();
+    const bell = async () =>
+      (
+        await h.db.execute<{ n: number }>(
+          sql`SELECT count(*)::int AS n FROM notifications WHERE dedup_key = ${`due_reminder:${s.caixaA.id}:${today}`}`,
+        )
+      ).rows[0]!.n;
+    const run = async (time: string, now: number) => {
+      const spy = spyDb();
+      await produceNotifications(spy.db, h.config, { date: today, time, weekday }, { state, now });
+      return cardQueries(spy.seen);
+    };
+    expect(h.config.notifyAt).toBe('08:00');
+    expect(await run('07:00', t0)).toBe(1);
+    expect(await run('07:01', t0 + 60_000)).toBe(0);
+    expect(await bell()).toBe(0);
+    expect(await run('08:00', t0 + 120_000)).toBe(1);
+    expect(await bell()).toBeGreaterThan(0);
+    expect(await run('08:01', t0 + 180_000)).toBe(0);
+    expect(await run('08:06', t0 + 120_000 + 5 * 60_000)).toBe(1);
+
+    // Uma passada inteira: o uso dos cartões sai uma vez para o Telegram e o sino.
+    const tick = spyDb();
+    await messageTick(tick.db, h.config, clock);
+    expect(cardQueries(tick.seen)).toBe(1);
     await admin.patch(`/api/message-destinations/${dest.id}`, { isActive: false });
   });
 
