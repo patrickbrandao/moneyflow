@@ -14,13 +14,21 @@ import {
 import { sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
+import { notFound } from '../errors';
 import { getAccount, listAccounts } from './caixas';
 import { camel } from './util';
+
+/** A linha da conta com o saldo, lida só para ela (e não a caixa inteira; tarefa 092). */
+async function accountRow(ctx: ServiceContext, accountId: string) {
+  const [row] = await listAccounts(ctx, { accountId, archived: true });
+  if (!row) throw notFound();
+  return row;
+}
 
 /** Extrato da conta: movimentos do período com saldo corrente (saldo inicial + movimentos). */
 export async function accountStatement(ctx: ServiceContext, accountId: string, query: z.output<typeof statementQuery>): Promise<Statement> {
   const account = await getAccount(ctx, accountId);
-  const summary = (await listAccounts(ctx, { caixaId: account.caixaId, archived: true })).find((a) => a.id === accountId)!;
+  const summary = await accountRow(ctx, accountId);
 
   // Saldo ao fim do dia anterior ao período (NULL antes da abertura = saldo inicial).
   let openingCents = account.openingBalanceCents;
@@ -98,7 +106,7 @@ export async function accountSummary(
   query: z.output<typeof accountSummaryQuery>,
 ): Promise<AccountSummary> {
   const account = await getAccount(ctx, accountId);
-  const summary = (await listAccounts(ctx, { caixaId: account.caixaId, archived: true })).find((a) => a.id === accountId)!;
+  const summary = await accountRow(ctx, accountId);
   const { from, to } = query;
   const today = todayIso();
 
@@ -116,17 +124,37 @@ export async function accountSummary(
        WHERE m.financial_account_id = ${accountId}
          AND m.occurred_on BETWEEN ${from}::date AND ${to}::date
        GROUP BY 1
+    ),
+    -- Saldo ao fim de cada mês (financial_account_balance_at do último dia, nulo antes da abertura) pelo
+    -- saldo antes do 1º mês mais o acumulado dos meses inteiros: duas somas, e não uma desde a abertura
+    -- por mês (tarefa 092).
+    base AS (
+      SELECT a.opening_date,
+             a.opening_balance_cents + coalesce((SELECT sum(m.amount_cents) FROM movements m
+                                                  WHERE m.financial_account_id = a.id
+                                                    AND m.occurred_on < date_trunc('month', ${from}::date)::date), 0) AS cents
+        FROM financial_accounts a
+       WHERE a.id = ${accountId}
+    ), net AS (
+      SELECT date_trunc('month', m.occurred_on)::date AS month, sum(m.amount_cents) AS cents
+        FROM movements m
+       WHERE m.financial_account_id = ${accountId}
+         AND m.occurred_on >= date_trunc('month', ${from}::date)::date
+         AND m.occurred_on < (date_trunc('month', ${to}::date) + interval '1 month')::date
+       GROUP BY 1
     )
     SELECT mo.month,
            coalesce(t.inflow_cents, 0)::bigint AS inflow_cents,
            coalesce(t.outflow_cents, 0)::bigint AS outflow_cents,
            coalesce(t.transfer_in_cents, 0)::bigint AS transfer_in_cents,
            coalesce(t.transfer_out_cents, 0)::bigint AS transfer_out_cents,
-           CASE WHEN mo.month <= ${today}::date
-                THEN financial_account_balance_at(${accountId}::uuid, (mo.month + interval '1 month' - interval '1 day')::date)
+           CASE WHEN mo.month <= ${today}::date AND (mo.month + interval '1 month' - interval '1 day')::date >= base.opening_date
+                THEN (base.cents + sum(coalesce(n.cents, 0)) OVER (ORDER BY mo.month))::bigint
            END AS closing_cents
       FROM months mo
+      CROSS JOIN base
       LEFT JOIN totals t ON t.month = mo.month
+      LEFT JOIN net n ON n.month = mo.month
      ORDER BY mo.month`);
 
   const categories = await ctx.db.execute(sql`

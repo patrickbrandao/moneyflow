@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
@@ -115,3 +115,12 @@ Migration `database/migrations/0057_balance_queries.sql` (grupo dos saldos, com 
 3. `apps/server/src/services/statement.ts` (`accountStatement` e `accountSummary`): ler só a conta pedida, por exemplo `SELECT … FROM financial_account_balances WHERE financial_account_id = $1` ou um `getAccountSummary(ctx, id)` em `caixas.ts`, em vez de `listAccounts` da caixa inteira e `.find`.
    - Opcional: no `accountSummary`, o `closing_cents` de cada mês pode vir de `financial_account_balance_at(conta, from − 1)` mais a soma acumulada dos `totals`. Fica uma soma desde a abertura, e não uma por mês.
 4. `apps/server/test/statements.test.ts`: o caso existente da divergência do intervalo entre lotes tem de continuar passando com a coluna nova.
+
+### Aplicação (app)
+
+- `pnpm db:pull` já estava feito no branch de integração (a coluna `interval_difference_cents` está no schema gerado).
+- `apps/server/src/services/statements.ts` (`importSql`): a divergência do intervalo vem de `b.interval_difference_cents` (nula no lote substituído, como antes) e o `LEFT JOIN LATERAL (…) prev` saiu. A listagem faz uma soma de saldo por lote.
+- `apps/server/src/services/statement.ts`: `accountStatement` e `accountSummary` leem só a conta pedida (`listAccounts` ganhou o filtro `accountId`), e não a caixa inteira com `.find`. O `closing_cents` de cada mês do resumo sai do saldo antes do 1º mês mais o acumulado dos meses inteiros (duas somas, e não uma desde a abertura por mês), nulo quando o fim do mês é antes da abertura, como `financial_account_balance_at`.
+- Testes: `apps/server/test/account-summary.test.ts`, no resumo, uma conta aberta no meio do período (mês antes da abertura nulo, mês da abertura e período começando no meio do mês, iguais ao `financial_account_balance_at` do fim de cada mês); o caso existente da divergência do intervalo em `test/statements.test.ts` e os de `test/statement-supersede.test.ts` passam sem mudança.
+- Verificação: `pnpm verify:quick` (nível rápido).
+

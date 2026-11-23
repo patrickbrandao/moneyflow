@@ -99,6 +99,25 @@ describe('resumo da conta (spec 004)', () => {
     expect(other.months[0]).toMatchObject({ inflowCents: 0, transferInCents: 10_000, closingCents: 10_000 });
     expect(other.categories).toEqual([]);
     expect(other.reconciliation).toBeNull();
+
+    // Saldo do fim do mês pelo acumulado (tarefa 092): nulo antes da abertura, o saldo inicial no mês dela,
+    // e o período começando no meio do mês conta o mês inteiro, como financial_account_balance_at.
+    const late = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'cash',
+      name: 'Cofre tardio',
+      openingBalanceCents: 5_000,
+      openingDate: '2026-09-15',
+    });
+    await admin.post(`/api/accounts/${late.id}/adjustments`, { occurredOn: '2026-09-20', amountCents: 300, description: 'Antes' });
+    await admin.post(`/api/accounts/${late.id}/adjustments`, { occurredOn: '2026-10-02', amountCents: 1_000, description: 'Depois' });
+    const lateSummary = await admin.get(`/api/accounts/${late.id}/summary?from=2026-08-20&to=2026-10-01`);
+    expect(lateSummary.months).toEqual([
+      expect.objectContaining({ month: '2026-08-01', inflowCents: 0, closingCents: null }),
+      expect.objectContaining({ month: '2026-09-01', inflowCents: 300, closingCents: 5_300 }),
+      expect.objectContaining({ month: '2026-10-01', inflowCents: 0, closingCents: 6_300 }),
+    ]);
+    const fromSeptember = await admin.get(`/api/accounts/${late.id}/summary?from=2026-09-25&to=2026-10-31`);
+    expect(fromSeptember.months.map((m: { closingCents: number | null }) => m.closingCents)).toEqual([5_300, 6_300]);
   });
 
   it('exige leitura na caixa e um período válido', async () => {

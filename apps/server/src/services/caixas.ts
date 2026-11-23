@@ -279,7 +279,7 @@ export async function removeMember(ctx: ServiceContext, caixaId: string, memberI
 
 export async function listAccounts(
   ctx: ServiceContext,
-  opts: { caixaId?: string; archived?: boolean; writable?: boolean } = {},
+  opts: { caixaId?: string; accountId?: string; archived?: boolean; writable?: boolean } = {},
 ): Promise<AccountRow[]> {
   if (opts.caixaId) ctx.access.assertRead(opts.caixaId);
   const result = await ctx.db.execute(sql`
@@ -290,6 +290,7 @@ export async function listAccounts(
       JOIN financial_account_balances b ON b.financial_account_id = a.id
      WHERE ${readableFilter(ctx.access, sql`a.caixa_id`)}
        ${opts.caixaId ? sql`AND a.caixa_id = ${opts.caixaId}` : sql``}
+       ${opts.accountId ? sql`AND a.id = ${opts.accountId}` : sql``}
        ${opts.archived ? sql`` : sql`AND a.archived_at IS NULL AND c.archived_at IS NULL`}
      ORDER BY c.name, a.archived_at NULLS FIRST, a.name`);
   return result.rows

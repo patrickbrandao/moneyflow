@@ -153,13 +153,18 @@ export async function closingsOverview(ctx: ServiceContext, caixaId: string): Pr
   };
 }
 
+/**
+ * Linhas pendentes por mês das contas da caixa ou do cartão que ela é. O alvo pelas colunas da linha, e não
+ * por um coalesce, e o mês por intervalo: os índices (conta, data) e (cartão, data) servem (tarefa 143).
+ */
 async function unreconciledByMonth(ctx: ServiceContext, caixaId: string, month?: string) {
   const result = await ctx.db.execute<{ month: string; lines: number }>(sql`
     SELECT date_trunc('month', l.posted_on)::date AS month, count(*)::int AS lines
       FROM statement_lines l
-      LEFT JOIN financial_accounts a ON a.id = l.financial_account_id
-     WHERE coalesce(a.caixa_id, l.card_caixa_id) = ${caixaId} AND l.status IN ('new', 'suggested')
-       ${month ? sql`AND date_trunc('month', l.posted_on)::date = ${month}::date` : sql``}
+     WHERE (l.financial_account_id IN (SELECT a.id FROM financial_accounts a WHERE a.caixa_id = ${caixaId}::uuid)
+            OR l.card_caixa_id = ${caixaId}::uuid)
+       AND l.status IN ('new', 'suggested')
+       ${month ? sql`AND l.posted_on >= ${month}::date AND l.posted_on < (${month}::date + interval '1 month')::date` : sql``}
      GROUP BY 1 ORDER BY 1 DESC`);
   return result.rows.map((r) => ({ month: r.month, lines: Number(r.lines) }));
 }

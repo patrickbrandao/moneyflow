@@ -80,6 +80,12 @@ describe('fechamento de mês (spec 008)', () => {
       payload: fixture('extrato-ofx2.ofx'),
       headers: { cookie: adminSession.cookie, 'content-type': 'application/x-ofx' },
     });
+    // As pendências por mês são só as das contas da caixa (tarefa 143: o alvo pelas colunas da linha).
+    const overview = await user.get(`/api/caixas/${s.caixaA.id}/closings`);
+    expect(overview.unreconciled).toHaveLength(1);
+    expect(overview.unreconciled[0]).toMatchObject({ month: '2026-10-01', lines: expect.any(Number) });
+    expect(overview.unreconciled[0].lines).toBeGreaterThan(0);
+    expect((await admin.get(`/api/caixas/${s.caixaB.id}/closings`)).unreconciled).toEqual([]);
     const pending = await user.raw('POST', `/api/caixas/${s.caixaA.id}/closings`, { month: '2026-10' });
     expect(pending.statusCode).toBe(422);
     expect(pending.json().error.code).toBe('closing_unreconciled');

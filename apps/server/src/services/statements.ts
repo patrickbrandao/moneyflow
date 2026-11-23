@@ -1107,7 +1107,9 @@ const importSql = sql`
          -- Lote substituído (spec 031): fora da divergência.
          CASE WHEN i.superseded_by_import_id IS NULL THEN b.app_balance_cents END AS app_balance_cents,
          CASE WHEN i.superseded_by_import_id IS NULL THEN b.difference_cents END AS difference_cents,
-         CASE WHEN i.superseded_by_import_id IS NULL THEN b.difference_cents - prev.difference_cents END AS interval_difference_cents,
+         -- Divergência do intervalo (spec 009): a do lote menos a do anterior com saldo, calculada pela visão sem
+         -- somar desde a abertura (tarefa 092).
+         CASE WHEN i.superseded_by_import_id IS NULL THEN b.interval_difference_cents END AS interval_difference_cents,
          a.opening_date AS account_opening_date,
          b.lines AS line_count, b.matched_lines, b.suggested_lines, b.new_lines, b.ignored_lines, u.username AS imported_by, i.created_at,
          i.provisional,
@@ -1124,18 +1126,7 @@ const importSql = sql`
     LEFT JOIN financial_accounts a ON a.id = b.financial_account_id
     LEFT JOIN users u ON u.id = i.imported_by_user_id
     LEFT JOIN statement_imports si ON si.id = i.superseded_by_import_id
-    LEFT JOIN attachments sf ON sf.id = si.attachment_id
-    -- Divergência do intervalo (spec 009): a acumulada menos a do lote anterior com saldo, na ordem da data do saldo.
-    LEFT JOIN LATERAL (
-      SELECT pb.difference_cents
-        FROM statement_import_balances pb
-        JOIN statement_imports pi ON pi.id = pb.statement_import_id
-       WHERE pb.financial_account_id = b.financial_account_id AND pb.bank_balance_on IS NOT NULL
-         AND pi.superseded_by_import_id IS NULL
-         AND (pb.bank_balance_on, pi.created_at) < (b.bank_balance_on, i.created_at)
-       ORDER BY pb.bank_balance_on DESC, pi.created_at DESC
-       LIMIT 1
-    ) prev ON b.bank_balance_on IS NOT NULL`;
+    LEFT JOIN attachments sf ON sf.id = si.attachment_id`;
 
 const toImport = (row: Record<string, unknown>): StatementImportSummary => {
   const r = camel<StatementImportSummary>(row);
