@@ -467,12 +467,14 @@ export type AiRunEvent =
   | { type: 'done'; status: AiRunStatus; error?: string | null }
   /**
    * Telegram de entrada (spec 029), interno: a execução veio de um chat pareado
-   * (origin), o "Recusar" pediu o motivo (reason_requested/reason_done) e o que
-   * já foi enviado ao chat (sent, por chave). O console ignora.
+   * (origin), o "Recusar" pediu o motivo (reason_requested/reason_done), o que
+   * já foi enviado ao chat (sent, por chave) e o que não chegou depois das novas
+   * tentativas (failed, por chave; reenviado na mensagem seguinte do chat,
+   * tarefa 168). O console ignora.
    */
   | {
       type: 'telegram';
-      action: 'origin' | 'reason_requested' | 'reason_done' | 'sent';
+      action: 'origin' | 'reason_requested' | 'reason_done' | 'sent' | 'failed';
       destinationId?: string;
       chatId?: string;
       confirmationId?: string;

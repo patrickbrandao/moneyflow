@@ -262,6 +262,9 @@ export const statementsStrings = {
   copyDone: (copied: number, skipped: number) =>
     `${copied} regra(s) copiada(s)${skipped ? `, ${skipped} pulada(s) (já existiam)` : ''}. Use “Aplicar regras” para reclassificar as linhas novas.`,
   copyHint: 'As cópias não reclassificam nada sozinhas: use “Aplicar regras” na conta de destino.',
+  /** O mesmo aviso para o agente (tarefa 152): ele aplica pela tool, não pelo botão. */
+  copyHintAgent:
+    'As cópias não reclassificam nada sozinhas: depois, reaplique as regras na conta de destino com apply_classification_rules.',
   copySkippedReasons: { exists: 'já existe uma regra igual no destino', archived: 'regra arquivada' } as Record<string, string>,
   cardGroup: 'Cartões',
   newRule: 'Nova regra',

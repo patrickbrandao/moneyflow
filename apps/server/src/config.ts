@@ -45,8 +45,12 @@ export type Config = {
   agentConcurrency: number;
   /** Manutenção dos agentes (retenção de eventos, expiração de confirmações, embeddings), em ms. */
   agentMaintenanceMs: number;
-  /** Espera máxima da leitura de documento por IA, em ms. */
+  /** Espera máxima da leitura de documento por IA, em ms (esgotada, a execução é cancelada: tarefa 150). */
   aiDocumentTimeoutMs: number;
+  /** Espera máxima da conversão do PDF do contrato em markdown, em ms (mais longa: a saída é o documento inteiro). */
+  aiDocumentConvertTimeoutMs: number;
+  /** Teto do tamanho estimado de uma chamada ao modelo, em bytes (tarefa 098): acima dele, falha sem chamar. */
+  aiRequestMaxBytes: number;
   /** Requisições ao provedor (spec 023): tentativas do próprio MoneyFlow por chamada (padrão 3). */
   aiRequestMaxAttempts: number;
   /** Base do backoff entre as tentativas, em ms (1 s, 2 s, 4 s…; menor nos testes). */
@@ -67,13 +71,22 @@ export type Config = {
   backupMaxUploadBytes: number;
 };
 
-function sessionIdleHours(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === '') return 72;
-  const hours = Number(raw);
-  if (!Number.isInteger(hours) || hours < 0)
-    throw new Error('SESSION_IDLE_HOURS precisa ser um inteiro >= 0 (0 desliga; veja .env.example).');
-  return hours;
+/**
+ * Inteiro da variável de ambiente (tarefa 110): vazia ou ausente = o padrão; qualquer outra coisa
+ * que não seja um inteiro dentro da faixa impede o boot com a mensagem que cita a variável. Antes,
+ * `Number(env.X ?? padrão)` virava 0 (vazia) ou NaN (`30d`) em silêncio.
+ */
+export function intEnv(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number, max: number): number {
+  const raw = env[name]?.trim();
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  if (!/^-?[0-9]+$/.test(raw) || !Number.isSafeInteger(n) || n < min || n > max) {
+    throw new Error(`${name} precisa ser um inteiro entre ${min} e ${max} (veja .env.example); recebido "${raw.slice(0, 40)}".`);
+  }
+  return n;
 }
+
+const HOUR_MS = 3_600_000;
 
 /**
  * Aviso do boot (tarefa 066): a URL pública do console em HTTPS com o cookie de sessão sem `Secure`
@@ -99,52 +112,58 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     databaseUrl,
     host: env.HOST ?? '0.0.0.0',
-    port: Number(env.PORT ?? 3001),
+    port: intEnv(env, 'PORT', 3001, 1, 65_535),
     cookieSecure: env.COOKIE_SECURE === 'true',
-    sessionDays: Number(env.SESSION_DAYS ?? 30),
-    sessionIdleHours: sessionIdleHours(env.SESSION_IDLE_HOURS),
+    sessionDays: intEnv(env, 'SESSION_DAYS', 30, 1, 3650),
+    // 0 desliga a ociosidade.
+    sessionIdleHours: intEnv(env, 'SESSION_IDLE_HOURS', 72, 0, 87_600),
     webDist: env.WEB_DIST ?? null,
     admin,
-    workerIntervalMs: Number(env.WORKER_INTERVAL_MS ?? 60 * 60 * 1000),
-    lookupTimeoutMs: Number(env.LOOKUP_TIMEOUT_MS ?? 5000),
+    workerIntervalMs: intEnv(env, 'WORKER_INTERVAL_MS', HOUR_MS, 1000, 24 * HOUR_MS),
+    lookupTimeoutMs: intEnv(env, 'LOOKUP_TIMEOUT_MS', 5000, 100, 120_000),
     cnpjAberto:
       env.CNPJ_ABERTO_ENABLED === 'true' && cnpjAbertoKey
         ? { base: (env.CNPJ_ABERTO_BASE || 'https://cnpjaberto.com.br').replace(/\/+$/, ''), apiKey: cnpjAbertoKey }
         : null,
     brasilApiBase: (env.BRASILAPI_BASE || 'https://brasilapi.com.br').replace(/\/+$/, ''),
     logLevel: env.LOG_LEVEL ?? 'info',
-    loginRateLimit: Number(env.LOGIN_RATE_LIMIT ?? 10),
+    loginRateLimit: intEnv(env, 'LOGIN_RATE_LIMIT', 10, 1, 1_000_000),
     trustedProxies: (env.TRUSTED_PROXIES ?? '')
       .split(',')
       .map((entry) => entry.trim())
       .filter(Boolean),
     cardAutoClose: env.CARD_AUTO_CLOSE === 'true',
     telegramApiBase: (env.TELEGRAM_API_BASE || 'https://api.telegram.org').replace(/\/+$/, ''),
-    telegramTimeoutMs: Number(env.TELEGRAM_TIMEOUT_MS ?? 10_000),
-    messageIntervalMs: Number(env.MESSAGE_INTERVAL_MS ?? 30_000),
+    telegramTimeoutMs: intEnv(env, 'TELEGRAM_TIMEOUT_MS', 10_000, 100, 300_000),
+    messageIntervalMs: intEnv(env, 'MESSAGE_INTERVAL_MS', 30_000, 1000, HOUR_MS),
     publicUrl: env.APP_URL ? env.APP_URL.replace(/\/+$/, '') : null,
     publicBaseUrl: env.PUBLIC_BASE_URL?.trim() ? env.PUBLIC_BASE_URL.trim().replace(/\/+$/, '') : null,
-    agentTaskIntervalMs: clampInt(env.AGENT_TASK_INTERVAL_MS, 30_000, 1000, 3_600_000),
-    notifyAt: /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(env.NOTIFY_AT ?? '') ? env.NOTIFY_AT! : '08:00',
-    agentPollMs: Number(env.AGENT_POLL_MS ?? 1000),
-    agentConcurrency: Math.max(1, Number(env.AGENT_CONCURRENCY ?? 4)),
-    agentMaintenanceMs: Number(env.AGENT_MAINTENANCE_MS ?? 5 * 60 * 1000),
-    aiDocumentTimeoutMs: Number(env.AI_DOCUMENT_TIMEOUT_MS ?? 120_000),
-    aiRequestMaxAttempts: clampInt(env.AI_REQUEST_MAX_ATTEMPTS, 3, 1, 10),
-    aiRequestBackoffMs: clampInt(env.AI_REQUEST_BACKOFF_MS, 1000, 0, 60_000),
-    aiRequestRetentionDays: clampInt(env.AI_REQUEST_RETENTION_DAYS, 30, 1, 365),
-    aiRunsPerMinute: clampInt(env.AI_RUNS_PER_MINUTE, 10, 1, 1000),
-    aiFlowRunsPerMinute: clampInt(env.AI_FLOW_RUNS_PER_MINUTE, 30, 1, 1000),
-    aiTranscriptionTimeoutMs: clampInt(env.AI_TRANSCRIPTION_TIMEOUT_MS, 120_000, 0, 600_000),
+    agentTaskIntervalMs: intEnv(env, 'AGENT_TASK_INTERVAL_MS', 30_000, 1000, HOUR_MS),
+    notifyAt: notifyAt(env.NOTIFY_AT),
+    agentPollMs: intEnv(env, 'AGENT_POLL_MS', 1000, 100, 60_000),
+    agentConcurrency: intEnv(env, 'AGENT_CONCURRENCY', 4, 1, 64),
+    agentMaintenanceMs: intEnv(env, 'AGENT_MAINTENANCE_MS', 5 * 60 * 1000, 1000, 24 * HOUR_MS),
+    aiDocumentTimeoutMs: intEnv(env, 'AI_DOCUMENT_TIMEOUT_MS', 120_000, 1000, 1_800_000),
+    aiDocumentConvertTimeoutMs: intEnv(env, 'AI_DOCUMENT_CONVERT_TIMEOUT_MS', 300_000, 1000, 1_800_000),
+    aiRequestMaxBytes: intEnv(env, 'AI_REQUEST_MAX_BYTES', 30 * 1024 * 1024, 10_000, 512 * 1024 * 1024),
+    aiRequestMaxAttempts: intEnv(env, 'AI_REQUEST_MAX_ATTEMPTS', 3, 1, 10),
+    aiRequestBackoffMs: intEnv(env, 'AI_REQUEST_BACKOFF_MS', 1000, 0, 60_000),
+    aiRequestRetentionDays: intEnv(env, 'AI_REQUEST_RETENTION_DAYS', 30, 1, 365),
+    aiRunsPerMinute: intEnv(env, 'AI_RUNS_PER_MINUTE', 10, 1, 1000),
+    aiFlowRunsPerMinute: intEnv(env, 'AI_FLOW_RUNS_PER_MINUTE', 30, 1, 1000),
+    aiTranscriptionTimeoutMs: intEnv(env, 'AI_TRANSCRIPTION_TIMEOUT_MS', 120_000, 0, 600_000),
     ownerDatabaseUrl: env.DATABASE_OWNER_URL?.trim() || null,
     pgBinDir: env.PG_BIN_DIR?.trim() || null,
-    backupMaxUploadBytes: Math.max(1, Number(env.BACKUP_MAX_UPLOAD_MB ?? 512)) * 1024 * 1024,
+    backupMaxUploadBytes: intEnv(env, 'BACKUP_MAX_UPLOAD_MB', 512, 1, 4096) * 1024 * 1024,
   };
 }
 
-/** Inteiro da variável, dentro da faixa (vazia ou inválida = o padrão). */
-function clampInt(raw: string | undefined, fallback: number, min: number, max: number): number {
-  const n = Number(raw);
-  if (raw === undefined || raw.trim() === '' || !Number.isFinite(n)) return fallback;
-  return Math.min(max, Math.max(min, Math.trunc(n)));
+/** Horário dos avisos diários do sino (HH:MM): vazio = 08:00; fora do formato impede o boot (tarefa 110). */
+function notifyAt(raw: string | undefined): string {
+  const value = raw?.trim();
+  if (!value) return '08:00';
+  if (!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value)) {
+    throw new Error(`NOTIFY_AT precisa ser um horário HH:MM (veja .env.example); recebido "${value.slice(0, 20)}".`);
+  }
+  return value;
 }

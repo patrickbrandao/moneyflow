@@ -1,5 +1,5 @@
-import { type ApiError as ApiErrorBody, t } from '@moneyflow/shared';
-import { ApiError, withQuery } from './api';
+import { t } from '@moneyflow/shared';
+import { ApiError, apiErrorFrom, withQuery } from './api';
 
 type Query = Record<string, string | number | boolean | null | undefined>;
 
@@ -20,10 +20,7 @@ export async function upload<T>(path: string, file: Blob & { name?: string }, qu
     throw new ApiError(0, 'network', t.errors.network);
   }
   const data = response.headers.get('content-type')?.includes('json') ? await response.json().catch(() => null) : null;
-  if (!response.ok) {
-    const error = (data as ApiErrorBody | null)?.error;
-    throw new ApiError(response.status, error?.code ?? 'http', error?.message ?? t.errors.generic, error?.details);
-  }
+  if (!response.ok) throw apiErrorFrom(response.status, data);
   return data as T;
 }
 

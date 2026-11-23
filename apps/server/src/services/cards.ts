@@ -192,6 +192,7 @@ export async function listPurchases(
   ctx: ServiceContext,
   cardId: string,
   query: z.output<typeof cardPurchaseListQuery>,
+  page: { offset?: number } = {},
 ): Promise<CardPurchaseRow[]> {
   ctx.access.assertRead(cardId);
   const where = [sql`p.card_caixa_id = ${cardId}`];
@@ -201,7 +202,8 @@ export async function listPurchases(
   if (query.kind) where.push(sql`p.kind = ${query.kind}`);
   if (query.q) where.push(sql`(p.description ILIKE ${`%${query.q}%`} OR e.name ILIKE ${`%${query.q}%`})`);
   const result = await ctx.db.execute(
-    sql`${purchaseSql} WHERE ${sql.join(where, sql` AND `)} ORDER BY p.purchased_on DESC, p.created_at DESC LIMIT ${query.limit}`,
+    sql`${purchaseSql} WHERE ${sql.join(where, sql` AND `)} ORDER BY p.purchased_on DESC, p.created_at DESC, p.id DESC
+     LIMIT ${query.limit} OFFSET ${page.offset ?? 0}`,
   );
   return result.rows.map((r) => camel<CardPurchaseRow>(r));
 }

@@ -235,7 +235,11 @@ function toRow(ctx: ServiceContext, raw: Record<string, unknown>): ContractRow {
   };
 }
 
-export async function listContracts(ctx: ServiceContext, query: z.output<typeof contractListQuery>): Promise<ContractRow[]> {
+export async function listContracts(
+  ctx: ServiceContext,
+  query: z.output<typeof contractListQuery>,
+  page: { offset?: number } = {},
+): Promise<ContractRow[]> {
   if (query.caixaId) ctx.access.assertRead(query.caixaId);
   const today = todayIso();
   const where: SQL[] = [visibleFilter(ctx)];
@@ -255,7 +259,7 @@ export async function listContracts(ctx: ServiceContext, query: z.output<typeof 
     SELECT ${listSelect(ctx)} ${listFrom(ctx)}
      WHERE ${sql.join(where, sql` AND `)}
      ORDER BY CASE c.status WHEN 'active' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END, c.name, c.id
-     LIMIT ${query.limit}`);
+     LIMIT ${query.limit} OFFSET ${page.offset ?? 0}`);
   return result.rows.map((row) => toRow(ctx, row));
 }
 

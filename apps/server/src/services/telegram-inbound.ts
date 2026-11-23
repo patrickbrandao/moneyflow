@@ -261,8 +261,16 @@ export async function handleUpdate(deps: InboundDeps, destinationId: string, upd
 
 type Bot = {
   token: string;
+  /** Respostas do webhook (comandos, avisos): uma tentativa, a falha só no log. */
   say: (chatId: number | string, html: string, keyboard?: InlineKeyboard) => Promise<void>;
+  /** A resposta do agente e os botões (no worker): com as novas tentativas; devolve se chegou (tarefa 168). */
+  deliver: (chatId: number | string, html: string, keyboard?: InlineKeyboard) => Promise<{ ok: true } | { ok: false; error: string }>;
 };
+
+/** Espera antes de cada nova tentativa da resposta ao chat, em falha passageira (tarefa 168). */
+const REPLY_RETRY_DELAYS_MS = [1000, 3000];
+/** Rede, tempo esgotado, 5xx ou 429 (o de até 30 s o sendChatMessage já esperou): vale tentar de novo. */
+const transientFailure = (status: number) => status === 0 || status === 429 || status >= 500;
 
 function bot(deps: InboundDeps, token: string): Bot {
   return {
@@ -271,7 +279,33 @@ function bot(deps: InboundDeps, token: string): Bot {
       const result = await sendChatMessage(botOptions(deps.config), token, chatId, html, keyboard);
       if (!result.ok) deps.log.warn({ error: result.error }, 'telegram: resposta não enviada');
     },
+    deliver: async (chatId, html, keyboard) => {
+      let result = await sendChatMessage(botOptions(deps.config), token, chatId, html, keyboard);
+      for (const delay of REPLY_RETRY_DELAYS_MS) {
+        if (result.ok || !transientFailure(result.status)) break;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        result = await sendChatMessage(botOptions(deps.config), token, chatId, html, keyboard);
+      }
+      if (result.ok) return { ok: true };
+      deps.log.warn({ error: result.error }, 'telegram: resposta não enviada');
+      return { ok: false, error: result.error };
+    },
   };
+}
+
+/**
+ * Reenvia o que não chegou ao chat (tarefa 168): as execuções recentes da sessão com um envio
+ * `failed` passam de novo por deliverRunToTelegram, que manda só o que não tem a marca `sent`
+ * (os botões das confirmações ainda pendentes e o resto da resposta).
+ */
+async function redeliverFailed(deps: InboundDeps, sessionId: string) {
+  const runs = await deps.db.execute<{ id: string }>(sql`
+    SELECT r.id FROM ai_runs r
+     WHERE r.conversation_id = ${sessionId}
+       AND EXISTS (SELECT 1 FROM ai_run_events e
+                    WHERE e.run_id = r.id AND e.event_type = 'telegram' AND e.payload ->> 'action' = 'failed')
+     ORDER BY r.created_at DESC LIMIT 3`);
+  for (const run of runs.rows) await deliverRunToTelegram(deps, run.id);
 }
 
 async function loadDestination(db: Executor, destinationId: string): Promise<DestinationRow | null> {
@@ -349,6 +383,8 @@ async function processUpdate(deps: InboundDeps, destinationId: string, update: T
   // Execução anterior ainda ativa: não manda ao agente.
   const sessionId = await activeSessionId(ctx.db, userId, agentId);
   if (sessionId) {
+    // O que não chegou ao chat numa falha do Telegram (botões, resposta) vai antes (tarefa 168).
+    await redeliverFailed(deps, sessionId);
     const active = await ctx.db.execute<{ status: string }>(sql`
       SELECT status FROM ai_runs WHERE conversation_id = ${sessionId} AND status IN ('queued', 'running', 'awaiting_confirmation')`);
     const status = active.rows[0]?.status;
@@ -675,7 +711,11 @@ export function confirmationHtml(c: ToolConfirmationDto, secret: boolean): strin
 /**
  * Depois de cada passada do worker numa execução vinda do Telegram: os
  * botões das confirmações novas (esperando aprovação) ou a resposta final.
- * O que já foi enviado fica marcado em eventos `telegram/sent` (não repete).
+ * Cada envio é marcado em `telegram/sent` depois de chegar (tarefa 168: antes,
+ * a marca vinha antes e a falha perdia a resposta), com novas tentativas na
+ * falha passageira; a resposta longa, por parte (`final:<n>`, e `final` no fim).
+ * O que não chegou fica em `telegram/failed` e vai de novo na próxima mensagem
+ * do chat. O risco de repetir fica no intervalo entre o envio e a marca.
  */
 export async function deliverRunToTelegram(deps: InboundDeps, runId: string) {
   const { db } = deps;
@@ -688,7 +728,18 @@ export async function deliverRunToTelegram(deps: InboundDeps, runId: string) {
   if (!token) return;
   const b = bot(deps, token);
   const sent = new Set((await telegramEvents(db, runId)).filter((e) => e.action === 'sent').map((e) => (e as { key?: string }).key));
-  const mark = (key: string) => appendEvent(db, runId, { type: 'telegram', action: 'sent', key, chatId: origin.chatId });
+  /** Envia o que ainda não tem a marca; chegou = marca; não chegou = `failed` (e para, mantendo a ordem). */
+  const send = async (key: string, html: string, keyboard?: InlineKeyboard) => {
+    if (sent.has(key)) return true;
+    const result = await b.deliver(origin.chatId, html, keyboard);
+    if (result.ok) {
+      await appendEvent(db, runId, { type: 'telegram', action: 'sent', key, chatId: origin.chatId });
+      sent.add(key);
+      return true;
+    }
+    await appendEvent(db, runId, { type: 'telegram', action: 'failed', key, chatId: origin.chatId });
+    return false;
+  };
 
   if (run.status === 'awaiting_confirmation') {
     for (const c of await loadConfirmations(db, runId, true)) {
@@ -703,17 +754,22 @@ export async function deliverRunToTelegram(deps: InboundDeps, runId: string) {
           ],
         ],
       };
-      await mark(key);
-      await b.say(origin.chatId, confirmationHtml(c, secret), keyboard);
+      if (!(await send(key, confirmationHtml(c, secret), keyboard))) return;
     }
     return;
   }
+  // `final` (sem parte) também é a marca das execuções de antes da tarefa 168.
   if (!['completed', 'failed', 'canceled'].includes(run.status) || sent.has('final')) return;
-  await mark('final');
-  if (run.status === 'failed') return b.say(origin.chatId, escapeTelegramHtml(t.agents.telegram.failed(run.error ?? t.errors.generic)));
-  if (run.status === 'canceled') return b.say(origin.chatId, escapeTelegramHtml(t.agents.telegram.canceled));
-  const messages = await loadMessages(db, run.conversation_id);
-  const last = [...messages].reverse().find((m) => m.role === 'assistant' && m.run_id === runId && blocksText(m.content).trim());
-  const chunks = markdownToTelegramHtml(last ? blocksText(last.content) : t.agents.telegram.emptyAnswer);
-  for (const chunk of chunks) await b.say(origin.chatId, chunk);
+  let chunks: string[];
+  if (run.status === 'failed') chunks = [escapeTelegramHtml(t.agents.telegram.failed(run.error ?? t.errors.generic))];
+  else if (run.status === 'canceled') chunks = [escapeTelegramHtml(t.agents.telegram.canceled)];
+  else {
+    const messages = await loadMessages(db, run.conversation_id);
+    const last = [...messages].reverse().find((m) => m.role === 'assistant' && m.run_id === runId && blocksText(m.content).trim());
+    chunks = markdownToTelegramHtml(last ? blocksText(last.content) : t.agents.telegram.emptyAnswer);
+  }
+  for (const [i, chunk] of chunks.entries()) {
+    if (!(await send(`final:${i}`, chunk))) return;
+  }
+  await appendEvent(db, runId, { type: 'telegram', action: 'sent', key: 'final', chatId: origin.chatId });
 }

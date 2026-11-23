@@ -3,9 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   type ADMIN_TOOLS,
-  type AiAgentDto,
   type AiBudgetDto,
-  agentTool,
   aiAgentCreateInput,
   aiAgentUpdateInput,
   aiPriceInput,
@@ -39,6 +37,7 @@ import * as aiAdmin from '../services/ai-admin';
 import * as aiBudgets from '../services/ai-budgets';
 import * as aiRequests from '../services/ai-requests';
 import * as apiTokens from '../services/api-tokens';
+import { MAX_ATTACHMENT_BYTES } from '../services/attachments';
 import * as audit from '../services/audit';
 import { backupStatus, createDumpZip } from '../services/backup/dump';
 import { backupStamp, exportFullZip, exportResource } from '../services/backup/export';
@@ -49,7 +48,7 @@ import * as entityTags from '../services/entity-tags';
 import * as messages from '../services/messages';
 import { listNotifications } from '../services/notifications';
 import * as users from '../services/users';
-import { type GeneratedFile, type Handlers, nameOf, toolAttachment } from './tool-helpers';
+import { agentSummary, type GeneratedFile, type Handlers, listed, listPage, nameOf, toolAttachment, yesNo } from './tool-helpers';
 
 /*
  * Executores do lote F13b (spec 027): Configuração de IA, Usuários e
@@ -78,11 +77,7 @@ async function userName(ctx: ServiceContext, id: string) {
   if (!r.rows[0]) throw notFound();
   return r.rows[0].username;
 }
-async function agentNameOf(ctx: ServiceContext, id: string) {
-  const r = await ctx.db.execute<{ name: string }>(sql`SELECT name FROM ai_agents WHERE id = ${id}`);
-  if (!r.rows[0]) throw notFound(t.agents.errors.agentNotFound);
-  return r.rows[0].name;
-}
+const agentNameOf = async (ctx: ServiceContext, id: string) => (await agentSummary(ctx, id)).name;
 const budgetPreviewValues = (b: AiBudgetDto) => ({
   limit: formatMicros(b.monthlyLimitMicros, b.currency),
   currency: b.currency,
@@ -90,9 +85,6 @@ const budgetPreviewValues = (b: AiBudgetDto) => ({
   active: b.isActive,
 });
 
-const listed = (items: string[], max = 12) =>
-  items.length > max ? `${items.slice(0, max).join(', ')} e mais ${items.length - max}` : items.join(', ') || '—';
-const yesNo = (v: boolean) => (v ? 'Sim' : 'Não');
 const COLOR = (v: unknown) => `Cor ${v}`;
 
 /* ---------------- segredos ---------------- */
@@ -164,13 +156,10 @@ const PROVIDER_FIELDS: PreviewField[] = [
   { key: 'notes', label: 'Observações' },
 ];
 
-const PRICE = (v: unknown) => (v === null || v === undefined ? '—' : String(v));
+/** Quanto do prompt (ou das instructions do MCP) vai na listagem; o inteiro, pela leitura de um só. */
+const PROMPT_START = 300;
 
-async function agentById(ctx: ServiceContext, agentId: string): Promise<AiAgentDto> {
-  const agent = (await aiAdmin.listAgents(ctx)).find((a) => a.id === agentId);
-  if (!agent) throw notFound(t.agents.errors.agentNotFound);
-  return agent;
-}
+const PRICE = (v: unknown) => (v === null || v === undefined ? '—' : String(v));
 
 async function providerName(ctx: ServiceContext, providerId: string | null | undefined) {
   if (!providerId) return null;
@@ -182,7 +171,45 @@ async function kitName(ctx: ServiceContext, kitId: string | null | undefined) {
   return (await aiAdmin.getToolKit(ctx, kitId)).name;
 }
 
-/** Valores do agente legíveis para o diff (nomes no lugar dos ids). */
+/** Parâmetros do modelo, um por linha do diff (tarefa 100): a gravação substitui o conjunto inteiro. */
+const AGENT_PARAMS = [
+  ['temperature', 'Temperatura'],
+  ['top_p', 'Top P'],
+  ['max_tokens', 'Máximo de tokens'],
+  ['max_tool_iterations', 'Máximo de passos com tools'],
+  ['thinking_budget_tokens', 'Orçamento de raciocínio (tokens)'],
+  ['reasoning_effort', 'Esforço de raciocínio'],
+] as const;
+
+type InferenceValue = { capability: string; providerId: string; providerName?: string; model: string | null; voice?: string | null };
+type McpLinkValue = { mcpServerId: string; name?: string; enabledTools: string[] | null };
+
+/** "Visão: Provedor · modelo" de cada inferência (o modelo nulo é o padrão do provedor). */
+async function inferencesText(ctx: ServiceContext, list: InferenceValue[]) {
+  const parts: string[] = [];
+  for (const x of list) {
+    const provider = x.providerName ?? (await providerName(ctx, x.providerId)) ?? x.providerId;
+    const voice = x.voice ? ` · voz ${x.voice}` : '';
+    parts.push(`${t.agents.capabilities[x.capability] ?? x.capability}: ${provider} · ${x.model ?? 'modelo padrão'}${voice}`);
+  }
+  return parts.join('; ') || '—';
+}
+
+/** Os servidores MCP pelo nome, com as tools liberadas quando a lista é parcial. */
+async function mcpLinksText(ctx: ServiceContext, list: McpLinkValue[]) {
+  const parts: string[] = [];
+  for (const x of list) {
+    const name = x.name ?? (await aiAdmin.getMcpServer(ctx.db, x.mcpServerId).catch(() => null))?.name ?? x.mcpServerId;
+    parts.push(x.enabledTools ? `${name} (${listed(x.enabledTools, 8)})` : name);
+  }
+  return parts.join('; ') || '—';
+}
+
+/**
+ * Valores do agente legíveis para o diff (nomes no lugar dos ids). Cada parâmetro vira um campo `param:<nome>`
+ * (ausente = null, porque a gravação troca o conjunto), as inferências mostram provedor e modelo, e os
+ * servidores MCP, os nomes (tarefa 100).
+ */
 async function agentValues(ctx: ServiceContext, values: Record<string, unknown>) {
   const out: Record<string, unknown> = { ...values };
   if ('providerId' in values) out.providerId = (await providerName(ctx, values.providerId as string | null)) ?? '—';
@@ -191,11 +218,12 @@ async function agentValues(ctx: ServiceContext, values: Record<string, unknown>)
     const prompt = values.systemPrompt;
     out.systemPrompt = prompt.length > 160 ? `${prompt.slice(0, 160)}… (${prompt.length} caracteres)` : prompt || '—';
   }
-  if (Array.isArray(values.inferences)) {
-    out.inferences =
-      (values.inferences as { capability: string }[]).map((x) => t.agents.capabilities[x.capability] ?? x.capability).join(', ') || '—';
+  if (values.params && typeof values.params === 'object') {
+    const params = values.params as Record<string, unknown>;
+    for (const [key] of AGENT_PARAMS) out[`param:${key}`] = params[key] ?? null;
   }
-  if (Array.isArray(values.mcpServers)) out.mcpServers = `${(values.mcpServers as unknown[]).length} servidor(es)`;
+  if (Array.isArray(values.inferences)) out.inferences = await inferencesText(ctx, values.inferences as InferenceValue[]);
+  if (Array.isArray(values.mcpServers)) out.mcpServers = await mcpLinksText(ctx, values.mcpServers as McpLinkValue[]);
   return out;
 }
 
@@ -205,20 +233,43 @@ const AGENT_FIELDS: PreviewField[] = [
   { key: 'providerId', label: 'Provedor' },
   { key: 'model', label: 'Modelo' },
   { key: 'systemPrompt', label: 'Prompt' },
+  ...AGENT_PARAMS.map(([key, label]) => ({ key: `param:${key}`, label })),
   { key: 'toolKitId', label: 'Kit de ferramentas' },
   { key: 'inferences', label: 'Inferências' },
   { key: 'mcpServers', label: 'Servidores MCP' },
   { key: 'colorSlot', label: 'Cor', format: COLOR },
+  { key: 'icon', label: 'Ícone' },
   { key: 'isActive', label: 'Ativo', format: 'bool' },
   { key: 'useForFlows', label: 'Usar nos fluxos automáticos', format: 'bool' },
 ];
 
-/** Tools do kit validadas contra o registro (a de segredo fica em ask). */
+/**
+ * A entrada do agente como o serviço a grava: com o provedor padrão (spec 024), o texto (se não veio) e as
+ * inferências que ele suporta e que não vieram (applyDefaultProvider, o mesmo do createAgent/updateAgent).
+ */
+async function agentInputAsSaved(ctx: ServiceContext, input: Record<string, unknown>) {
+  const out = { ...input };
+  delete out.defaultProviderId;
+  delete out.promptNote;
+  if (!input.defaultProviderId) return out;
+  const filled = await aiAdmin.applyDefaultProvider(ctx.db, input as Parameters<typeof aiAdmin.applyDefaultProvider>[1]);
+  if (filled.providerId !== undefined) out.providerId = filled.providerId;
+  if (filled.inferences !== undefined) out.inferences = filled.inferences;
+  return out;
+}
+
+const defaultProviderWarning = async (ctx: ServiceContext, input: { defaultProviderId?: string }) =>
+  input.defaultProviderId
+    ? [
+        `O provedor padrão ${await providerName(ctx, input.defaultProviderId)} preenche o texto (se não veio) e as inferências que ele suporta e que não vieram.`,
+      ]
+    : [];
+
+/** Tools do kit pela mesma validação do serviço (tarefa 155): fora do registro é recusada, a de segredo fica em ask. */
 function kitRows(tools: { name: string; mode: 'allow' | 'ask' }[]): PreviewRow[] {
-  const unknown = tools.filter((x) => !agentTool(x.name)).map((x) => x.name);
-  if (unknown.length > 0) throw badRequest(t.agents.errors.toolUnknown(unknown.join(', ')));
-  const allow = tools.filter((x) => x.mode === 'allow' && !agentTool(x.name)!.secrets?.length).map((x) => x.name);
-  const ask = tools.filter((x) => !allow.includes(x.name)).map((x) => x.name);
+  const saved = aiAdmin.kitToolRows(tools);
+  const allow = saved.filter((x) => x.mode === 'allow').map((x) => x.name);
+  const ask = saved.filter((x) => x.mode === 'ask').map((x) => x.name);
   return [
     { label: 'Ferramentas', after: String(tools.length) },
     ...(allow.length ? [{ label: 'Sem aprovação (allow)', after: listed(allow, 20) }] : []),
@@ -226,10 +277,10 @@ function kitRows(tools: { name: string; mode: 'allow' | 'ask' }[]): PreviewRow[]
   ];
 }
 
+/** Um servidor MCP pelo id, sem carregar a lista inteira (tarefa 155). */
 async function mcpById(ctx: ServiceContext, serverId: string) {
-  const server = (await aiAdmin.listMcpServers(ctx)).find((s) => s.id === serverId);
-  if (!server) throw notFound();
-  return server;
+  ctx.access.assertAdmin();
+  return aiAdmin.getMcpServer(ctx.db, serverId);
 }
 
 const MCP_FIELDS: PreviewField[] = [
@@ -261,8 +312,6 @@ const BACKUP_LABEL: Record<string, string> = {
   dump: 'Dump do PostgreSQL (.zip)',
 };
 
-const MAX_FILE_BYTES = 20 * 1024 * 1024;
-
 /** Gera um arquivo num diretório temporário, lê (até 20 MB) e apaga. */
 async function tempFile(fileName: string, produce: (path: string) => Promise<void>): Promise<Buffer> {
   const dir = await mkdtemp(join(tmpdir(), 'moneyflow-agent-'));
@@ -270,7 +319,7 @@ async function tempFile(fileName: string, produce: (path: string) => Promise<voi
     const path = join(dir, fileName);
     await produce(path);
     const size = (await stat(path)).size;
-    if (size > MAX_FILE_BYTES) throw unprocessable(t.agents.errors.fileTooLarge(formatFileSize(size)), 'file_too_large');
+    if (size > MAX_ATTACHMENT_BYTES) throw unprocessable(t.agents.errors.fileTooLarge(formatFileSize(size)), 'file_too_large');
     return await readFile(path);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -473,11 +522,8 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
         ],
       };
     },
-    run: async (ctx, i) => {
-      for (const sub of i.subscriptions) await messages.upsertSubscription(ctx, i.destinationId, sub);
-      for (const kind of i.remove) await messages.deleteSubscription(ctx, i.destinationId, kind);
-      return messages.listSubscriptions(ctx, i.destinationId);
-    },
+    // Numa transação só (tarefa 153): uma falha em qualquer item não deixa nada do lote gravado.
+    run: (ctx, i) => messages.setSubscriptions(ctx, i.destinationId, { upsert: i.subscriptions, remove: i.remove }),
   },
   send_test_message: {
     preview: async (ctx, i) => {
@@ -533,7 +579,9 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
     },
     run: (ctx, i) => audit.reopenMonth(ctx, i.caixaId, i.month),
   },
-  get_audit_history: { run: (ctx, i) => audit.recordHistory(ctx, i.table, i.recordId) },
+  get_audit_history: {
+    run: async (ctx, i) => listPage(await audit.recordHistory(ctx, i.table, i.recordId, { limit: i.limit + 1, offset: i.offset }), i),
+  },
 
   /* ---- usuários e permissões ---- */
   list_users: {
@@ -590,7 +638,12 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
         summary: user.username,
         action: 'update',
         rows: [{ label: 'Senha', before: '•••', after: 'digitada no cartão' }],
-        warnings: i.userId === ctx.access.actor.id ? [] : ['As sessões do usuário são encerradas.'],
+        // Na própria conta também (tarefa 100): updateUser encerra as outras sessões e mantém a do console que aprova.
+        warnings: [
+          i.userId === ctx.access.actor.id
+            ? 'As suas outras sessões são encerradas (fica só a do console em que você aprovar).'
+            : 'As sessões do usuário são encerradas.',
+        ],
         secretFields: [PASSWORD_FIELD],
       };
     },
@@ -730,6 +783,7 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
           { label: 'Texto→áudio (por milhão de caracteres)', after: PRICE(parsed.speechPerMillionChars) },
           { label: 'Vale a partir de', after: parsed.validFrom ?? 'agora' },
         ],
+        warnings: ['O custo do uso já gravado não muda: o preço vale para as chamadas gravadas daqui em diante.'],
       };
     },
     run: (ctx, i) => aiAdmin.createPrice(ctx, i),
@@ -738,6 +792,9 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
     preview: async (ctx, i) => {
       const price = (await aiAdmin.listPrices(ctx)).find((p) => p.id === i.priceId);
       if (!price) throw notFound();
+      // O preço que já precificou alguma chamada não sai (tarefa 156): a prévia recusa com a contagem.
+      const calls = await aiAdmin.priceUsageCount(ctx.db, i.priceId);
+      if (calls > 0) throw unprocessable(t.agents.errors.priceInUse(calls), 'ai_usage_price_id_fkey');
       return {
         title: 'Excluir preço de modelo',
         summary: `${price.providerName} · ${price.model}`,
@@ -750,23 +807,31 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
           },
           { label: 'Vale a partir de', before: price.validFrom, after: '—' },
         ],
-        warnings: ['O custo do uso passa a seguir o preço anterior do modelo, se houver.'],
+        warnings: ['As próximas chamadas do modelo usam o preço anterior, se houver. O uso já gravado não muda.'],
       };
     },
     run: (ctx, i) => aiAdmin.deletePrice(ctx, i.priceId),
   },
 
   /* ---- agentes ---- */
-  list_ai_agents: { run: (ctx) => aiAdmin.listAgents(ctx) },
+  // Na lista, só o começo do prompt (até 200 mil caracteres por agente); com agentId, o agente inteiro (tarefa 101).
+  list_ai_agents: {
+    run: async (ctx, i) => {
+      ctx.access.assertAdmin();
+      if (i.agentId) return aiAdmin.getAgent(ctx.db, i.agentId);
+      return (await aiAdmin.listAgents(ctx)).map(({ systemPrompt, ...agent }) => ({
+        ...agent,
+        systemPromptStart: systemPrompt.length > PROMPT_START ? `${systemPrompt.slice(0, PROMPT_START)}…` : systemPrompt,
+        systemPromptLength: systemPrompt.length,
+      }));
+    },
+  },
   create_ai_agent: {
     preview: async (ctx, i) => {
       ctx.access.assertAdmin();
       const parsed = aiAgentCreateInput.parse(i);
-      const values = await agentValues(ctx, {
-        ...parsed,
-        providerId: parsed.providerId ?? parsed.defaultProviderId ?? null,
-      });
-      const warnings: string[] = [];
+      const values = await agentValues(ctx, await agentInputAsSaved(ctx, parsed as unknown as Record<string, unknown>));
+      const warnings = await defaultProviderWarning(ctx, parsed);
       if (parsed.useForFlows) warnings.push('Só um agente atende os fluxos automáticos: o atual deixa de ser.');
       if (!parsed.toolKitId) warnings.push('Sem kit: o agente tem todas as tools, sem pedir aprovação (salvo as de segredo).');
       return { title: 'Criar agente', summary: i.name, action: 'create', rows: diffRows(AGENT_FIELDS, values), warnings };
@@ -776,14 +841,15 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
   update_ai_agent: {
     preview: async (ctx, i) => {
       ctx.access.assertAdmin();
-      const before = await agentById(ctx, i.agentId);
-      const changes = aiAgentUpdateInput.parse(i.changes) as Record<string, unknown>;
+      const before = await aiAdmin.getAgent(ctx.db, i.agentId);
+      const parsed = aiAgentUpdateInput.parse(i.changes);
+      const changes = await agentInputAsSaved(ctx, parsed as unknown as Record<string, unknown>);
       const rows = diffRows(
         AGENT_FIELDS,
         await agentValues(ctx, changes),
         await agentValues(ctx, before as unknown as Record<string, unknown>),
       );
-      const warnings: string[] = [];
+      const warnings = await defaultProviderWarning(ctx, parsed);
       if (changes.systemPrompt !== undefined && changes.systemPrompt !== before.systemPrompt) {
         warnings.push(`O prompt muda criando a versão ${(before.promptVersion ?? 0) + 1}.`);
       }
@@ -795,7 +861,8 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
   },
   archive_ai_agent: {
     preview: async (ctx, i) => {
-      const agent = await agentById(ctx, i.agentId);
+      ctx.access.assertAdmin();
+      const agent = await aiAdmin.getAgent(ctx.db, i.agentId);
       if (agent.archivedAt) throw unprocessable(t.agents.errors.alreadyArchived, 'already_archived');
       return {
         title: 'Arquivar agente',
@@ -812,9 +879,18 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
   },
 
   /* ---- kits de ferramentas ---- */
+  // Sem as descrições e sem os falsos, o catálogo inteiro cabe no resultado (tarefa 101).
   list_agent_tools: {
     run: async (ctx, i) =>
-      aiAdmin.listToolCatalog(ctx).filter((tool) => (!i.kind || tool.kind === i.kind) && (!i.category || tool.category === i.category)),
+      aiAdmin
+        .listToolCatalog(ctx)
+        .filter((tool) => (!i.kind || tool.kind === i.kind) && (!i.category || tool.category === i.category))
+        .map(({ description: _description, destructive, adminOnly, secret, ...tool }) => ({
+          ...tool,
+          ...(destructive ? { destructive } : {}),
+          ...(adminOnly ? { adminOnly } : {}),
+          ...(secret ? { secret } : {}),
+        })),
   },
   list_tool_kits: { run: (ctx) => aiAdmin.listToolKits(ctx) },
   create_tool_kit: {
@@ -898,7 +974,17 @@ export const ADMIN_HANDLERS: Handlers<AdminToolName> = {
   },
 
   /* ---- servidores MCP ---- */
-  list_mcp_servers: { run: (ctx) => aiAdmin.listMcpServers(ctx) },
+  // Na lista, os nomes das tools em cache e o começo das instructions; com serverId, o servidor inteiro (tarefa 101).
+  list_mcp_servers: {
+    run: async (ctx, i) => {
+      if (i.serverId) return mcpById(ctx, i.serverId);
+      return (await aiAdmin.listMcpServers(ctx)).map(({ tools, instructions, ...server }) => ({
+        ...server,
+        toolNames: tools?.map((tool) => tool.name) ?? null,
+        instructionsStart: instructions && instructions.length > PROMPT_START ? `${instructions.slice(0, PROMPT_START)}…` : instructions,
+      }));
+    },
+  },
   create_mcp_server: {
     preview: async (ctx, i) => {
       ctx.access.assertAdmin();

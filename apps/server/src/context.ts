@@ -1,4 +1,5 @@
 import type { Database } from '@moneyflow/db';
+import type { FastifyBaseLogger } from 'fastify';
 import type { Access } from './authz/access';
 import type { Config } from './config';
 
@@ -26,8 +27,9 @@ export type ServiceContext = {
    */
   sessionId?: string | null;
   /**
-   * Log da requisição, quando houver: falhas que o serviço contorna sem erro (a baixa automática que
-   * vira sugestão, tarefa 136) ficam registradas com o motivo, sem dados da linha.
+   * Logger de quem montou o contexto (a requisição, o /mcp ou o worker). As tools registram por ele os
+   * erros que viram mensagem segura para o modelo (tarefa 099), e os serviços, as falhas que contornam sem
+   * erro (a baixa automática que vira sugestão, tarefa 136), sem dados da linha. Sem ele, nada é registrado.
    */
-  log?: { warn: (obj: object, msg: string) => void };
+  log?: FastifyBaseLogger;
 };

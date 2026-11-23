@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -87,4 +87,11 @@ Nada foi executado. A afirmação de que "as mesmas 500 voltam" depois de reinic
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `syncEmbeddingSources` paginava por `updated_at > since` com `since = max(updated_at)` do lote; `updated_at` é o início da transação, então empates acima do lote e COMMITs tardios ficavam de fora para sempre.
+
 ## Resolução (executor)
+
+- `apps/server/src/agents/embeddings.ts`: paginação pela chave composta `(updated_at, object_id)`, com o cursor no último registro do lote (`IndexState.since` guarda `{ at, id }`). Quando a passada alcança o fim (lote incompleto), o cursor volta à janela de COMMIT tardio (`least(último carimbo, now() − 10 minutes)`): reler é barato, porque o upsert só grava o texto que mudou e não conta como fonte nova.
+- Não feitos (opcionais da tarefa): cache do `indexComplete` e trava consultiva no `embedPending` com vários workers.
+- Teste: `capabilities.test.ts` "o cursor da indexação não perde registros com o mesmo updated_at nem o COMMIT tardio": 25 entidades numa transação com lote de 10, e 3 entidades de uma transação confirmada depois de o cursor passar por outra gravada mais tarde.
+- Verificação: `pnpm verify:quick` (rápida), com `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s2`.

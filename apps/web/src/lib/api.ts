@@ -12,9 +12,19 @@ export class ApiError extends Error {
     public code: string,
     message: string,
     public details?: { path: string; message: string }[],
+    /** Id da requisição no log do servidor (500, tarefa 186). */
+    public requestId?: string,
   ) {
     super(message);
   }
+}
+
+/** O erro de uma resposta da API; no 500, a mensagem leva o começo do id da requisição (tarefa 186). */
+export function apiErrorFrom(status: number, data: unknown): ApiError {
+  const error = (data as ApiErrorBody | null)?.error;
+  const requestId = error?.requestId;
+  const message = requestId && error?.code === 'internal' ? t.errors.genericWithCode(requestId.slice(0, 8)) : error?.message;
+  return new ApiError(status, error?.code ?? 'http', message ?? t.errors.generic, error?.details, requestId);
 }
 
 type Query = Record<string, string | number | boolean | null | undefined>;
@@ -51,9 +61,8 @@ export async function request<T>(method: string, path: string, body?: unknown): 
   }
   const data = response.headers.get('content-type')?.includes('json') ? await response.json().catch(() => null) : null;
   if (!response.ok) {
-    const error = (data as ApiErrorBody | null)?.error;
     if (response.status === 401 && !path.startsWith('/api/auth/login')) onUnauthorized?.();
-    throw new ApiError(response.status, error?.code ?? 'http', error?.message ?? t.errors.generic, error?.details);
+    throw apiErrorFrom(response.status, data);
   }
   return data as T;
 }

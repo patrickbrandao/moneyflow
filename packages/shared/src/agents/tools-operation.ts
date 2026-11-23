@@ -35,7 +35,7 @@ import {
   seriesCreateInput,
   seriesUpdateInput,
 } from '../schemas';
-import { attachmentId, date, define, limit } from './tool-def';
+import { attachmentId, date, define, limit, offset } from './tool-def';
 
 /*
  * Tools de controle total, lote F13a (spec 027): Contratos, Importação (a
@@ -66,7 +66,7 @@ export const OPERATION_TOOLS = [
     category: 'contracts',
     title: 'Listar contratos',
     description:
-      'Contratos a receber e a pagar das caixas que o usuário vê, com a vigência, o número de obrigações e a próxima ocorrência. Filtros: caixa, entidade, direção, status (current = vigente), fim da vigência nos próximos N dias e texto.',
+      'Contratos a receber e a pagar das caixas que o usuário vê, com a vigência, o número de obrigações e a próxima ocorrência. Filtros: caixa, entidade, direção, status (current = vigente), fim da vigência nos próximos N dias e texto. Paginado: { items, offset, nextOffset } (offset = nextOffset para a próxima página).',
     kind: 'read',
     input: z.object({
       caixaId: id.optional(),
@@ -76,7 +76,8 @@ export const OPERATION_TOOLS = [
       withinDays: z.number().int().min(0).max(3650).optional().describe('A vigência termina nos próximos N dias.'),
       q: z.string().trim().max(200).optional(),
       archived: z.boolean().default(false).describe('true = só os arquivados.'),
-      limit: limit(500, 100),
+      limit: limit(200, 100),
+      offset,
     }),
   }),
   define({
@@ -228,6 +229,7 @@ export const OPERATION_TOOLS = [
     description:
       'Converte um documento PDF do contrato em markdown pela IA (agente dos fluxos): cria um documento markdown novo (versão 1) ligado ao PDF. Pode levar até alguns minutos.',
     kind: 'write',
+    external: true,
     input: z.object({ documentId: id.describe('Documento PDF do contrato.') }),
   }),
 
@@ -321,6 +323,7 @@ export const OPERATION_TOOLS = [
     description:
       'Lê um boleto, nota ou comprovante (PDF ou imagem) anexado na sessão pela IA (agente dos fluxos) e devolve os dados do título (tipo, beneficiário, documento, valor, vencimento, linha digitável, PIX), sem gravar nada.',
     kind: 'read',
+    external: true,
     input: z.object({ attachmentId }),
   }),
   define({
@@ -587,9 +590,27 @@ export const OPERATION_TOOLS = [
     category: 'categories',
     title: 'Copiar regras de classificação',
     description:
-      'Copia regras de outras contas ou cartões (ruleIds, de qualquer conta que o usuário vê) para a conta (accountId) ou cartão (cardCaixaId) de destino: mesma regra, origem "cópia", uso zerado. As que já existem iguais no destino (tipo + padrão + direção) são puladas. Copiar não reclassifica as linhas: depois, aplique as regras.',
+      'Copia regras de outras contas ou cartões (ruleIds, de qualquer conta que o usuário vê) para a conta (accountId) ou cartão (cardCaixaId) de destino: mesma regra, origem "cópia", uso zerado. As que já existem iguais no destino (tipo + padrão + direção) são puladas. Copiar não reclassifica as linhas já importadas: depois, reaplique as regras com apply_classification_rules.',
     kind: 'write',
     input: copyRulesInput,
+  }),
+  define({
+    name: 'apply_classification_rules',
+    category: 'categories',
+    title: 'Aplicar regras de classificação',
+    description:
+      'Reaplica as regras de classificação às linhas novas já importadas (o "Aplicar regras" da tela): num lote (importId) ou em todos os lotes da conta (accountId) ou do cartão (cardCaixaId) — informe um só. Só mexe nas linhas novas sem classificação ou classificadas por regra (a do usuário e a sugestão pendente ficam) e conta o uso de cada regra. A importação já aplica as regras: use depois de criar, editar ou copiar regras.',
+    kind: 'write',
+    input: z
+      .object({
+        importId: id.optional().describe('O lote (as linhas novas dele).'),
+        accountId: id.optional().describe('A conta corrente/poupança (todos os lotes dela).'),
+        cardCaixaId: id.optional().describe('O cartão (todos os lotes das faturas dele).'),
+      })
+      .refine((v) => [v.importId, v.accountId, v.cardCaixaId].filter(Boolean).length === 1, {
+        path: ['importId'],
+        message: 'Informe um só: importId, accountId ou cardCaixaId.',
+      }),
   }),
   define({
     name: 'update_classification_rule',

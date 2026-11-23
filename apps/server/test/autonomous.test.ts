@@ -594,6 +594,29 @@ describe('Telegram de entrada', () => {
     await api.del(`/api/message-destinations/${twin.id}`);
   });
 
+  it('regravar o token do mesmo bot só religa o webhook; trocar de bot desliga o do antigo (tarefa 167)', async () => {
+    const callsSince = (from: number, method: string) => tg.calls.slice(from).filter((c) => c.method === method);
+    let from = tg.calls.length;
+    await api.patch(`/api/message-destinations/${destination.id}`, { botToken });
+    expect(callsSince(from, 'setWebhook').map((c) => c.token)).toEqual([botToken]);
+    expect(callsSince(from, 'deleteWebhook')).toEqual([]);
+    expect(tg.webhooks.get(botToken)?.url).toBe(`https://moneyflow.test/api/telegram/webhook/${destination.id}`);
+
+    // Outro bot: o webhook liga no novo e sai do antigo.
+    const other = token();
+    from = tg.calls.length;
+    await api.patch(`/api/message-destinations/${destination.id}`, { botToken: other });
+    expect(callsSince(from, 'setWebhook').map((c) => c.token)).toEqual([other]);
+    expect(callsSince(from, 'deleteWebhook').map((c) => c.token)).toEqual([botToken]);
+    expect(tg.webhooks.has(botToken)).toBe(false);
+
+    // De volta ao bot dos outros casos.
+    from = tg.calls.length;
+    await api.patch(`/api/message-destinations/${destination.id}`, { botToken });
+    expect(callsSince(from, 'deleteWebhook').map((c) => c.token)).toEqual([other]);
+    expect(tg.webhooks.get(botToken)?.url).toBe(`https://moneyflow.test/api/telegram/webhook/${destination.id}`);
+  });
+
   it('segredo errado ou ausente dá 401; update_id repetido é ignorado; chat não pareado recebe o aviso; grupo é ignorado', async () => {
     expect((await hook(destination.id, textUpdate(chat + 1, 'oi'), 'segredo-errado')).statusCode).toBe(401);
     expect((await hook(destination.id, textUpdate(chat + 1, 'oi'), null)).statusCode).toBe(401);
@@ -680,6 +703,59 @@ describe('Telegram de entrada', () => {
     await drain();
     expect((await h.db.execute(sql`SELECT 1 FROM entities WHERE name = ${other}`)).rows).toHaveLength(0);
   });
+
+  it('falha do Telegram na resposta: nova tentativa, a marca só depois do envio e os botões reenviados na mensagem seguinte (tarefa 168)', async () => {
+    const lastRun = async () =>
+      (await h.db.execute<{ id: string }>(sql`SELECT id FROM ai_runs WHERE user_id = ${user.id} ORDER BY created_at DESC, id DESC LIMIT 1`))
+        .rows[0]!.id;
+    const telegramMarks = async (runId: string) =>
+      (
+        await h.db.execute<{ action: string; key: string }>(sql`
+          SELECT payload ->> 'action' AS action, payload ->> 'key' AS key FROM ai_run_events
+           WHERE run_id = ${runId} AND event_type = 'telegram' AND payload ->> 'action' IN ('sent', 'failed') ORDER BY seq`)
+      ).rows;
+
+    // Um 502 passageiro: a resposta chega na nova tentativa, uma vez só, e a marca vem depois.
+    const before = tg.messagesTo(chat).length;
+    tg.failStatus.sendMessage = 502;
+    tg.failNext.sendMessage = 1;
+    await hook(destination.id, textUpdate(chat, 'Oi de novo'));
+    await drain();
+    const replies = tg.messagesTo(chat).slice(before);
+    expect(replies.map((c) => c.body.text)).toEqual(['Olá! Sou o agente de teste.']);
+    expect(tg.calls.filter((c) => c.method === 'sendMessage' && c.failed && String(c.body.chat_id) === String(chat))).toHaveLength(1);
+    expect(await telegramMarks(await lastRun())).toEqual([
+      { action: 'sent', key: 'final:0' },
+      { action: 'sent', key: 'final' },
+    ]);
+
+    // O Telegram fora nas três tentativas do cartão de aprovação: fica `failed`, sem a marca de enviado.
+    const name = `Entidade 168 ${uid()}`;
+    tg.failNext.sendMessage = 3;
+    await hook(destination.id, textUpdate(chat, `criar entidade ${name}`));
+    await drain();
+    const awaiting = await lastRun();
+    expect((await runOf(awaiting)).status).toBe('awaiting_confirmation');
+    expect((await telegramMarks(awaiting)).map((m) => m.action)).toEqual(['failed']);
+    const cardsBefore = tg.messagesTo(chat).filter((c) => buttonData(c, 'Aprovar')).length;
+
+    // A mensagem seguinte do chat leva os botões antes do "aguarde".
+    tg.failStatus.sendMessage = 400;
+    await hook(destination.id, textUpdate(chat, 'Cadê os botões?'));
+    const after = tg.messagesTo(chat);
+    const card = after.at(-2)!;
+    expect(after.filter((c) => buttonData(c, 'Aprovar')).length).toBe(cardsBefore + 1);
+    expect(String(card.body.text)).toContain('<b>Aprovar?</b>');
+    expect(String(after.at(-1)!.body.text)).toContain('esperando a sua aprovação');
+    expect((await telegramMarks(awaiting)).map((m) => m.action)).toEqual(['failed', 'sent']);
+    await hook(destination.id, callbackUpdate(chat, buttonData(card, 'Aprovar')!));
+    await drain();
+    expect((await h.db.execute(sql`SELECT 1 FROM entities WHERE name = ${name}`)).rows).toHaveLength(1);
+    // O que já foi não se repete.
+    const count = tg.messagesTo(chat).length;
+    await hook(destination.id, textUpdate(chat, '/agente'));
+    expect(tg.messagesTo(chat).length).toBe(count + 1);
+  }, 30_000);
 
   it('comandos /agente, /parar, /nova e /ajuda', async () => {
     await hook(destination.id, textUpdate(chat, '/agente'));

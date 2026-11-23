@@ -217,6 +217,8 @@ export const outboxQuery = z.object({
 export const notificationQuery = z.object({
   unread: queryBool,
   limit: z.coerce.number().int().min(1).max(200).default(30),
+  /** O `nextCursor` da página anterior (tarefa 169). */
+  cursor: z.string().max(200).optional(),
 });
 
 export type ReportQuery = z.input<typeof reportQuery>;

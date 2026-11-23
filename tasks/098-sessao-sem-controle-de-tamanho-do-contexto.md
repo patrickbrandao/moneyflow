@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -65,4 +65,15 @@ Nada foi executado. Os limites (32 MB, janelas de contexto) vêm da documentaç�
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: o histórico ia inteiro em toda chamada, o 400/413 de contexto terminava como erro genérico do provedor e a mensagem seguinte falhava igual, sem orientar o usuário.
+
 ## Resolução (executor)
+
+- `apps/server/src/agents/llm/types.ts`: `providerError`/`isContextOverflow` reconhecem 413 e o 400 de contexto ("prompt is too long", `context_length_exceeded`, "maximum context"…) como `LlmError` com `code: 'context_overflow'`, não repetível; usados por `anthropic.ts` e `openai.ts`.
+- `runner.ts`: `context_overflow` grava o evento `error` com o código e termina `failed` com `t.agents.errors.contextOverflow` (finalizar a sessão e começar outra). Antes de cada chamada, o tamanho estimado (prompt, tools, histórico e anexos em base64) acima de `AI_REQUEST_MAX_BYTES` (config nova, padrão 30 MiB, no `.env.example` e no `docker-compose.yml`) falha do mesmo jeito sem chamar o provedor.
+- Corte do histórico enviado (`compactToolResults` em `packages/shared/src/agents/blocks.ts`): resultados de tool com mais de 2 mil caracteres das voltas antigas viram o começo e um marcador com o tamanho; as voltas inteiras andam em degraus de 10 (de 10 a 19 recentes), para o corte só mudar a cada 10 voltas e não quebrar o cache do histórico (tarefa 096). O gravado não muda.
+- `request-log.ts`: o adaptador avisa que o chat é streaming (`RequestCall.streaming`), e o `describeBody` não faz mais o `JSON.parse` do corpo inteiro.
+- Decisões: teto global por variável (um teto por provedor ou agente precisaria do banco, porque `ai_agent_params_valid` recusa chaves novas); anexos não são cortados; o console não ganhou botão próprio (a mensagem manda usar o "Finalizar sessão" do cabeçalho).
+- Specs: `docs/011` (Execução) e `docs/026` (Tamanho da sessão).
+- Testes: `agents.test.ts` "sessão acima do limite do provedor" (400 do provedor falso com a mensagem, opção `errorMessage` nova em `e2e/fakes/fake-llm.ts`; uma tentativa só; e o teto estimado com um anexo, sem chamada ao provedor); unitário `packages/shared/test/agents.test.ts` "corte do histórico enviado" (30 voltas → só as 10 últimas inteiras, degraus e resultados curtos intactos).
+- Verificação: `pnpm verify:quick` (rápida), com `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s2`.

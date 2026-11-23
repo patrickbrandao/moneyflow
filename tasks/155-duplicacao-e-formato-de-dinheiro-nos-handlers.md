@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -69,4 +69,14 @@ Refatoração sem mudança de regra, salvo o filtro dos zeros; os testes de inte
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: dinheiro formatado à mão (sem R$) em várias prévias, o filtro de zeros do `settle_title` comparando com o espaço comum (nunca casava), dois `lineLabel`, o laço das prévias de lote copiado, `classify_statement_lines` e `apply_classification_suggestions` sem o aviso das linhas não mostradas, `resolve_superseded_lines` sem limite, `listed`/`yesNo` e os leitores de agente e de MCP repetidos, a validação do kit duas vezes e o limite de anexo repetido.
+
 ## Resolução (executor)
+
+- `settle_title`: juros, multa e desconto zerados saem pelo valor, não pelo texto; "Em aberto" em R$.
+- `tool-helpers.ts`: `listed`, `yesNo`, `agentSummary` (nome e kit do agente, 404 se não existe; usado pelas prévias de tarefas e receitas, que antes devolviam o id), um `lineLabel` só (dd/mm/aaaa e R$), `lineCaixa`, `PREVIEW_LINES`, `moreLines` e `linesPreview` (o laço das prévias de lote, que agora confere a escrita em todas as linhas e avisa as não mostradas), usado por confirmar, ignorar, voltar, classificar e aprovar; `resolve_superseded_lines` mostra até 50 e avisa o resto.
+- Dinheiro e datas pelo `formatBRL`/`formatDate` em `tool-handlers.ts` (casamento, criação de título, compra, parcelas) e o tamanho do arquivo pelo `formatFileSize`.
+- `ai-admin.ts` exporta `getAgent`, `getMcpServer` e `kitToolRows`: as prévias de agente e de MCP leem um registro (sem carregar a lista) e o kit usa a validação do serviço; o limite de anexo é o `MAX_ATTACHMENT_BYTES` de `services/attachments.ts`.
+- Fora do escopo desta rodada (registrado aqui, sem tarefa nova): a divisão de `tool-handlers.ts` em leituras e conciliação e o `memberOf` por consulta única, para não abrir conflito com as outras frentes.
+- Testes: `agent-tools.test.ts` (a prévia do `settle_title` sem encargos, só com Em aberto, Data, Valor e Conta em R$; `classify_statement_lines` com 60 sugestões mostra 50, avisa "E mais 10 linha(s)" e a linha formatada).
+- Verificação: `pnpm verify:quick` (Biome, typecheck, os testes do shared relacionados e, passados depois de `--`, os de integração `agents`, `agent-tools`, `agent-tools-admin`, `titles`, `cards`, `contracts`, `statements`, `vision`, `reconcile-recipes`, `statement-supersede`, `autonomous` e `budgets` no Postgres local). Não rodei `verify:full` nem o e2e.

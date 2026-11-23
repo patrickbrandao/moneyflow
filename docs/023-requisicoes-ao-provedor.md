@@ -31,7 +31,7 @@ Registro de tudo o que é enviado ao provedor de IA e recebido dele, as retentat
 - Cada tentativa é gravada em `ai_request_attempts`:
   - número, início, duração, status HTTP, tipo e mensagem do erro, `retry-after` e cabeçalhos de rate limit da resposta;
   - com `log_bodies`, também o corpo da resposta de erro.
-- **Streaming**: só repete quando a falha veio antes do primeiro byte. Se o stream cai no meio, os deltas já foram ao SSE do console. Nesse caso a requisição termina em erro, e vale a regra de hoje: a execução volta à fila até `max_attempts` ([011](011-agentes-de-ia.md), Execução).
+- **Streaming**: só repete quando a falha veio antes do primeiro byte. Se o stream cai no meio, os deltas já foram ao SSE do console. Nesse caso a requisição termina em erro, e vale a regra da execução: ela volta à fila depois de uma espera, até `max_attempts − 1` vezes seguidas, e então falha ([011](011-agentes-de-ia.md), Execução; tarefa 074). O evento `error` com `code: 'provider_retry'` avisa o console, que descarta o texto parcial da tentativa que caiu (tarefa 151).
 - Esgotadas as tentativas, o erro segue como hoje (`LlmError` com `retryable`).
 - Cada tentativa espera os cabeçalhos da resposta por até 5 min (depois, `timeout` e nova tentativa). `AI_REQUEST_BACKOFF_MS` (padrão 1000) muda a base do backoff; os testes usam poucos milissegundos.
 - Uma chamada HTTP ao provedor = uma linha. Listar modelos com paginação grava uma linha por página; a última recebe o desfecho da chamada.

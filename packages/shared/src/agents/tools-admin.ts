@@ -31,7 +31,7 @@ import {
   toolKitUpdateInput,
 } from './schemas';
 import { agentTaskCreateInput, agentTaskUpdateInput } from './tasks';
-import { AGENT_TOOL_CATEGORIES, attachmentId, date, define, limit } from './tool-def';
+import { AGENT_TOOL_CATEGORIES, attachmentId, date, define, limit, offset } from './tool-def';
 
 /*
  * Tools de controle total, lote F13b (spec 027): administração e segredos.
@@ -182,6 +182,7 @@ export const ADMIN_TOOLS = [
     title: 'Arquivar destino do Telegram',
     description: 'Arquiva e desativa um destino com histórico (as mensagens pendentes são canceladas); sem histórico, ele é excluído.',
     kind: 'write',
+    external: true,
     destructive: true,
     input: z.object({ destinationId: id }),
   }),
@@ -189,13 +190,28 @@ export const ADMIN_TOOLS = [
     name: 'set_message_subscriptions',
     category: 'messages',
     title: 'Definir assinaturas do destino',
-    description: `Cria ou atualiza as assinaturas de eventos de um destino (cada item: eventKind, params, isActive e caixaIds) e remove as dos eventos em remove. Eventos: ${MESSAGE_EVENT_KINDS.join(', ')}.`,
+    description: `Cria ou atualiza as assinaturas de eventos de um destino (cada item: eventKind, params, isActive e caixaIds) e remove as dos eventos em remove, tudo numa gravação só (ou tudo, ou nada). Cada evento aparece uma vez, numa das duas listas. Eventos: ${MESSAGE_EVENT_KINDS.join(', ')}.`,
     kind: 'write',
-    input: z.object({
-      destinationId: id,
-      subscriptions: z.array(subscriptionInput).max(MESSAGE_EVENT_KINDS.length).default([]),
-      remove: z.array(z.enum(MESSAGE_EVENT_KINDS)).max(MESSAGE_EVENT_KINDS.length).default([]),
-    }),
+    input: z
+      .object({
+        destinationId: id,
+        subscriptions: z.array(subscriptionInput).max(MESSAGE_EVENT_KINDS.length).default([]),
+        remove: z.array(z.enum(MESSAGE_EVENT_KINDS)).max(MESSAGE_EVENT_KINDS.length).default([]),
+      })
+      // O mesmo evento duas vezes (ou criado e removido) não tem resultado claro (tarefa 153).
+      .superRefine((v, ctx) => {
+        const seen = new Set<string>();
+        const items = [
+          ...v.subscriptions.map((s, index) => ({ kind: s.eventKind, path: ['subscriptions', index, 'eventKind'] })),
+          ...v.remove.map((kind, index) => ({ kind, path: ['remove', index] })),
+        ];
+        for (const item of items) {
+          if (seen.has(item.kind)) {
+            ctx.addIssue({ code: 'custom', path: item.path, message: `o evento ${item.kind} aparece mais de uma vez` });
+          }
+          seen.add(item.kind);
+        }
+      }),
   }),
   define({
     name: 'send_test_message',
@@ -203,13 +219,14 @@ export const ADMIN_TOOLS = [
     title: 'Enviar mensagem de teste',
     description: 'Envia uma mensagem de teste a um destino do Telegram (confere o token e o chat_id).',
     kind: 'write',
+    external: true,
     input: z.object({ destinationId: id }),
   }),
   define({
     name: 'list_notifications',
     category: 'messages',
     title: 'Listar notificações',
-    description: 'Notificações do sino do próprio usuário (as mais recentes primeiro).',
+    description: 'Notificações do sino do próprio usuário (as não lidas primeiro, depois as mais recentes).',
     kind: 'read',
     input: z.object({ unread: z.boolean().default(false).describe('true = só as não lidas.'), limit: limit(100, 30) }),
   }),
@@ -252,7 +269,7 @@ export const ADMIN_TOOLS = [
     category: 'closing',
     title: 'Histórico de alterações',
     description:
-      'Histórico de alterações (auditoria) de um registro: quem, quando, antes e depois. table = nome da tabela (titles, entities, caixas, settlements, contracts…).',
+      'Histórico de alterações (auditoria) de um registro: quem, quando, antes e depois, da mais recente para a mais antiga. table = nome da tabela (titles, entities, caixas, settlements, contracts…). Paginado: { items, offset, nextOffset } (offset = nextOffset para a próxima página).',
     kind: 'read',
     input: z.object({
       table: z
@@ -260,6 +277,8 @@ export const ADMIN_TOOLS = [
         .regex(/^[a-z][a-z0-9_]{0,62}$/)
         .describe('Tabela do registro (ex.: titles).'),
       recordId: id,
+      limit: limit(100, 50),
+      offset,
     }),
   }),
 
@@ -408,6 +427,7 @@ export const ADMIN_TOOLS = [
     title: 'Testar provedor de IA',
     description: 'Testa a conexão do provedor (lista os modelos e faz uma chamada mínima por capacidade ligada).',
     kind: 'read',
+    external: true,
     adminOnly: true,
     input: z.object({ providerId: id }),
   }),
@@ -417,6 +437,7 @@ export const ADMIN_TOOLS = [
     title: 'Listar modelos do provedor',
     description: 'Modelos que o provedor oferece (a listagem do próprio provedor).',
     kind: 'read',
+    external: true,
     adminOnly: true,
     input: z.object({ providerId: id }),
   }),
@@ -434,7 +455,7 @@ export const ADMIN_TOOLS = [
     category: 'ai',
     title: 'Cadastrar preço de modelo',
     description:
-      'Cadastra o preço de um modelo de um provedor (vale a partir de validFrom; omitido = agora). Mudar o preço = cadastrar um novo com a nova vigência.',
+      'Cadastra o preço de um modelo de um provedor (vale a partir de validFrom; omitido = agora). Mudar o preço = cadastrar um novo com a nova vigência. O custo de cada chamada é calculado quando ela é gravada: o uso já registrado não muda, mesmo com validFrom no passado.',
     kind: 'write',
     adminOnly: true,
     input: aiPriceInput,
@@ -443,7 +464,8 @@ export const ADMIN_TOOLS = [
     name: 'delete_ai_price',
     category: 'ai',
     title: 'Excluir preço de modelo',
-    description: 'Exclui um preço cadastrado (o custo do uso passa a seguir o preço anterior, se houver).',
+    description:
+      'Exclui um preço que ainda não precificou nenhuma chamada (as chamadas seguintes do modelo usam o preço anterior, se houver). O custo do uso já gravado não muda, e o preço já usado não pode ser excluído: para corrigir, cadastre um preço novo com a vigência certa.',
     kind: 'write',
     destructive: true,
     adminOnly: true,
@@ -453,10 +475,11 @@ export const ADMIN_TOOLS = [
     name: 'list_ai_agents',
     category: 'ai',
     title: 'Listar agentes',
-    description: 'Agentes de IA com o prompt, provedor e modelo, inferências, kit de ferramentas, servidores MCP e "usar nos fluxos".',
+    description:
+      'Agentes de IA com o provedor e o modelo, os parâmetros, as inferências, o kit de ferramentas, os servidores MCP e "usar nos fluxos". Na lista, o prompt vem só com o começo e o tamanho; com agentId, só aquele agente, com o prompt inteiro.',
     kind: 'read',
     adminOnly: true,
-    input: z.object({}),
+    input: z.object({ agentId: id.optional().describe('Só este agente, com o prompt inteiro.') }),
   }),
   define({
     name: 'create_ai_agent',
@@ -493,7 +516,7 @@ export const ADMIN_TOOLS = [
     category: 'ai',
     title: 'Listar ferramentas dos agentes',
     description:
-      'Catálogo das tools internas (nome, título, tipo read/write, categoria, destrutiva, só admin, segredo e o modo sugerido). Use para montar kits.',
+      'Catálogo das tools internas (nome, título, tipo read/write, categoria e o modo sugerido; destructive, adminOnly e secret só quando verdadeiros), sem as descrições. Use para montar kits.',
     kind: 'read',
     adminOnly: true,
     input: z.object({
@@ -554,10 +577,10 @@ export const ADMIN_TOOLS = [
     category: 'ai',
     title: 'Listar servidores MCP',
     description:
-      'Servidores MCP (URL, visibilidade, modo das instruções, nomes dos cabeçalhos secretos, tools em cache). Os valores dos cabeçalhos nunca são devolvidos.',
+      'Servidores MCP (URL, visibilidade, modo das instruções, nomes dos cabeçalhos secretos e os nomes das tools em cache). Os valores dos cabeçalhos nunca são devolvidos. Com serverId, só aquele servidor, com as tools (schemas) e as instructions inteiras.',
     kind: 'read',
     adminOnly: true,
-    input: z.object({}),
+    input: z.object({ serverId: id.optional().describe('Só este servidor, com as tools e as instructions inteiras.') }),
   }),
   define({
     name: 'create_mcp_server',
@@ -597,6 +620,7 @@ export const ADMIN_TOOLS = [
     title: 'Atualizar tools do servidor MCP',
     description: 'Conecta ao servidor MCP e atualiza a lista de tools e as instruções em cache (ou grava o erro).',
     kind: 'write',
+    external: true,
     suggestedMode: 'allow',
     adminOnly: true,
     input: z.object({ serverId: id }),
@@ -717,6 +741,7 @@ export const ADMIN_TOOLS = [
     description:
       'Dispara uma tarefa agendada agora (também desligada), numa sessão própria; não muda o próximo disparo. Pulada se a execução anterior ainda roda.',
     kind: 'write',
+    external: true,
     input: z.object({ taskId: id }),
   }),
   define({

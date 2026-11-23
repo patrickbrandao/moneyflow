@@ -87,6 +87,9 @@ services:
       # Proxies que podem informar o IP do cliente (X-Forwarded-For); vazio = nenhum (docs/002).
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       AI_DOCUMENT_TIMEOUT_MS: ${AI_DOCUMENT_TIMEOUT_MS:-120000}
+      AI_DOCUMENT_CONVERT_TIMEOUT_MS: ${AI_DOCUMENT_CONVERT_TIMEOUT_MS:-300000}
+      # Teto do tamanho estimado de uma chamada ao modelo, em bytes (tarefa 098; padrão 30 MiB).
+      AI_REQUEST_MAX_BYTES: ${AI_REQUEST_MAX_BYTES:-31457280}
       # Backup e restauração (spec 019): o dump e a restauração do banco usam a conexão do DONO do banco
       # (pg_dump/pg_restore/psql; a aplicação continua como moneyflow_app). Vazia = dump desligado. O dono é o
       # moneyflow_owner, sem SUPERUSER/CREATEROLE/CREATEDB (tarefa 054, docs/016), nunca o superusuário da imagem.

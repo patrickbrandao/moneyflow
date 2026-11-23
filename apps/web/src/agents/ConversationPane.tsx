@@ -246,13 +246,15 @@ function Messages({ state, detail, audioMode }: { state: ConversationState; deta
           <Loader2 className="spin" />
           {state.reconnecting
             ? u.chat.reconnecting
-            : state.run?.status === 'queued'
-              ? u.chat.queued
-              : state.run?.status === 'awaiting_confirmation'
-                ? u.tool.awaiting
-                : state.run?.cancelRequested
-                  ? u.chat.stopping
-                  : u.chat.working}
+            : state.retrying
+              ? u.chat.retrying
+              : state.run?.status === 'queued'
+                ? u.chat.queued
+                : state.run?.status === 'awaiting_confirmation'
+                  ? u.tool.awaiting
+                  : state.run?.cancelRequested
+                    ? u.chat.stopping
+                    : u.chat.working}
         </div>
       )}
       {state.streamError && !state.busy && (

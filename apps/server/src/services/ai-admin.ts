@@ -422,9 +422,20 @@ export async function createPrice(ctx: ServiceContext, input: z.output<typeof ai
   return all.find((p) => p.id === id)!;
 }
 
+/** Chamadas já precificadas por um preço (ai_usage.price_id): o custo é calculado na gravação e não muda depois. */
+export async function priceUsageCount(db: Executor, id: string): Promise<number> {
+  const result = await db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM ai_usage WHERE price_id = ${id}`);
+  return Number(result.rows[0]?.n ?? 0);
+}
+
+/** Exclui um preço sem uso (tarefa 156): o usado fica, porque o custo das chamadas já foi gravado com ele. */
 export async function deletePrice(ctx: ServiceContext, id: string) {
   ctx.access.assertAdmin();
-  const deleted = await withTx(ctx, (tx) => tx.execute(sql`DELETE FROM ai_model_prices WHERE id = ${id} RETURNING id`));
+  const deleted = await withTx(ctx, async (tx) => {
+    const calls = await priceUsageCount(tx, id);
+    if (calls > 0) throw unprocessable(t.agents.errors.priceInUse(calls), 'ai_usage_price_id_fkey');
+    return tx.execute(sql`DELETE FROM ai_model_prices WHERE id = ${id} RETURNING id`);
+  });
   if (deleted.rows.length === 0) throw notFound();
   return { deleted: true };
 }
@@ -541,7 +552,8 @@ export async function listAgents(ctx: ServiceContext): Promise<AiAgentDto[]> {
   return loadAgents(ctx.db);
 }
 
-async function getAgent(db: Executor, id: string) {
+/** Um agente pelo id (sem o assertAdmin: quem chama confere). */
+export async function getAgent(db: Executor, id: string) {
   const [agent] = await loadAgents(db, sql`a.id = ${id}`);
   if (!agent) throw notFound(t.agents.errors.agentNotFound);
   return agent;
@@ -573,7 +585,7 @@ type InferenceInput = NonNullable<z.output<typeof aiAgentCreateInput>['inference
  * Provedor padrão (spec 024): preenche o texto (se não veio) e as inferências que o provedor suporta e que não
  * vieram explicitamente.
  */
-async function applyDefaultProvider(
+export async function applyDefaultProvider(
   db: Executor,
   input: { defaultProviderId?: string; providerId?: string | null; inferences?: InferenceInput[] },
 ): Promise<{ providerId: string | null | undefined; inferences: InferenceInput[] | undefined }> {
@@ -814,7 +826,7 @@ export async function getToolKit(ctx: ServiceContext, id: string) {
 }
 
 /** Valida as tools contra o registro; as de segredo ficam sempre em ask. */
-function kitToolRows(tools: { name: string; mode: 'allow' | 'ask' }[]) {
+export function kitToolRows(tools: { name: string; mode: 'allow' | 'ask' }[]) {
   const unknown = tools.filter((x) => !internalTool(x.name)).map((x) => x.name);
   if (unknown.length > 0) throw badRequest(t.agents.errors.toolUnknown(unknown.join(', ')));
   return tools.map((x) => ({ name: x.name, mode: internalTool(x.name)!.secrets?.length ? ('ask' as const) : x.mode }));
@@ -948,7 +960,8 @@ export async function listMcpServers(ctx: ServiceContext): Promise<McpServerDto[
   return result.rows.map(mcpDto);
 }
 
-async function getMcpServer(db: Executor, id: string) {
+/** Um servidor MCP pelo id (sem o assertAdmin: quem chama confere). */
+export async function getMcpServer(db: Executor, id: string) {
   const result = await db.execute<McpRow>(sql`SELECT ${MCP_COLUMNS} FROM mcp_servers s WHERE s.id = ${id}`);
   if (!result.rows[0]) throw notFound();
   return mcpDto(result.rows[0]);

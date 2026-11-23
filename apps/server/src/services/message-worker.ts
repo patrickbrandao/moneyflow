@@ -22,6 +22,7 @@ import {
   reconciliationLink,
   reminderDueDates,
   type SpClock,
+  SUMMARY_MAX_ITEMS,
   type SummaryData,
   spClock,
   summaryMessage,
@@ -32,6 +33,7 @@ import {
 import { eq, sql } from 'drizzle-orm';
 import { type Access, type Actor, loadAccess } from '../authz/access';
 import type { Config } from '../config';
+import { errorText } from '../errors';
 import { type BudgetAlert, budgetAlerts } from './ai-budgets';
 import { contractMessages, contractNotifications } from './contract-worker';
 import { type ClaimedMessage, deliver } from './messages';
@@ -119,10 +121,23 @@ async function applyFilter(db: Database, scope: string[], filter: string[] | nul
 
 type TitleRow = ReminderTitle & { id: string; caixa_id: string };
 
+/** Filtro dos títulos em aberto das caixas (sem o lado a receber de um par cujas duas caixas estão no escopo). */
+function openTitleFilter(caixaIds: string[]) {
+  const arr = uuidArray(caixaIds);
+  return sql`t.caixa_id = ANY (${arr}) AND t.archived_at IS NULL AND t.status IN ('open', 'partial') AND b.open_cents > 0
+       AND NOT (t.direction = 'receivable' AND coalesce(t.counterparty_caixa_id = ANY (${arr}), false))`;
+}
+
+/**
+ * A mensagem com a chave `key` (expressão SQL sobre `t`) ainda não está na fila do destino (tarefa 105):
+ * o `LIMIT` anda, e o que passou do teto numa passada entra na seguinte. A chave tem de ser a de `dedupKeys`.
+ */
+const notQueued = (destinationId: string, key: ReturnType<typeof sql>) =>
+  sql`NOT EXISTS (SELECT 1 FROM message_outbox o WHERE o.destination_id = ${destinationId}::uuid AND o.dedup_key = ${key})`;
+
 /** Títulos em aberto das caixas (sem o lado a receber de um par cujas duas caixas estão no escopo). */
 async function openTitles(db: Executor, caixaIds: string[], where: ReturnType<typeof sql>, limit = 500): Promise<TitleRow[]> {
   if (caixaIds.length === 0) return [];
-  const arr = uuidArray(caixaIds);
   const result = await db.execute<Record<string, unknown>>(sql`
     SELECT t.id, t.caixa_id, t.description, t.direction, t.due_date, b.open_cents, c.name AS caixa_name,
            coalesce(e.trade_name, e.name) AS entity_name, t.boleto_barcode, t.pix_payload,
@@ -133,8 +148,7 @@ async function openTitles(db: Executor, caixaIds: string[], where: ReturnType<ty
       JOIN entities e ON e.id = t.entity_id
       LEFT JOIN contracts ct ON ct.id = t.contract_id
       LEFT JOIN contract_cycles cy ON cy.id = t.contract_cycle_id
-     WHERE t.caixa_id = ANY (${arr}) AND t.archived_at IS NULL AND t.status IN ('open', 'partial') AND b.open_cents > 0
-       AND NOT (t.direction = 'receivable' AND coalesce(t.counterparty_caixa_id = ANY (${arr}), false))
+     WHERE ${openTitleFilter(caixaIds)}
        AND ${where}
      ORDER BY t.due_date, c.name, t.description, t.id
      LIMIT ${limit}`);
@@ -187,10 +201,18 @@ async function flowByCaixa(db: Executor, caixaIds: string[], from: string, to: s
   return result.rows.map((r) => ({ caixaName: r.caixa_name, inflowCents: Number(r.inflow), outflowCents: Number(r.outflow) }));
 }
 
-async function overdueTotals(db: Executor, caixaIds: string[], today: string) {
-  const rows = await openTitles(db, caixaIds, sql`t.due_date < ${today}::date AND t.direction = 'payable'`, 5000);
-  return { count: rows.length, cents: rows.reduce((acc, r) => acc + r.openCents, 0) };
+/** Quantos títulos em aberto e o saldo deles, pela soma no banco (sem cortar numa lista; tarefa 105). */
+async function openTitleTotals(db: Executor, caixaIds: string[], where: ReturnType<typeof sql>) {
+  if (caixaIds.length === 0) return { count: 0, cents: 0 };
+  const result = await db.execute<{ n: number; cents: number }>(sql`
+    SELECT count(*)::int AS n, coalesce(sum(b.open_cents), 0)::bigint AS cents
+      FROM titles t JOIN title_balances b ON b.title_id = t.id
+     WHERE ${openTitleFilter(caixaIds)} AND ${where}`);
+  return { count: Number(result.rows[0]?.n ?? 0), cents: Number(result.rows[0]?.cents ?? 0) };
 }
+
+const overdueTotals = (db: Executor, caixaIds: string[], today: string) =>
+  openTitleTotals(db, caixaIds, sql`t.due_date < ${today}::date AND t.direction = 'payable'`);
 
 async function closedInvoices(db: Executor, since: Date | string) {
   const result = await db.execute<{
@@ -241,7 +263,7 @@ async function closedInvoices(db: Executor, since: Date | string) {
   return [...byInvoice.values()];
 }
 
-async function cardUsage(db: Executor, caixaIds?: string[]) {
+async function cardUsage(db: Executor) {
   const result = await db.execute<{
     id: string;
     name: string;
@@ -251,8 +273,30 @@ async function cardUsage(db: Executor, caixaIds?: string[]) {
   }>(sql`
     SELECT c.id, c.name, c.default_payer_caixa_id, l.used_cents, c.credit_limit_cents
       FROM caixas c JOIN card_limits l ON l.card_caixa_id = c.id
-     WHERE c.kind = 'credit_card' AND c.archived_at IS NULL ${caixaIds ? sql`AND c.id = ANY (${uuidArray(caixaIds)})` : sql``}`);
+     WHERE c.kind = 'credit_card' AND c.archived_at IS NULL`);
   return result.rows.map((r) => ({ ...r, used_cents: Number(r.used_cents), credit_limit_cents: Number(r.credit_limit_cents) }));
+}
+
+type CardUsage = Awaited<ReturnType<typeof cardUsage>>[number];
+
+/**
+ * Memória de uma passada do laço (tarefa 166): o uso dos cartões (a view `card_limits`, que soma todas as
+ * parcelas) sai uma vez e serve ao Telegram e ao sino. Sem ela, cada chamada consulta de novo.
+ */
+export type TickCache = { cards?: Promise<CardUsage[]> };
+
+function cardsOf(db: Executor, cache?: TickCache) {
+  if (!cache) return cardUsage(db);
+  cache.cards ??= cardUsage(db);
+  return cache.cards;
+}
+
+/** A mensagem com essa chave já está na fila do destino (consulta pelo índice único; tarefa 166). */
+async function alreadyQueued(db: Executor, destinationId: string, dedupKey: string) {
+  const result = await db.execute(
+    sql`SELECT 1 FROM message_outbox WHERE destination_id = ${destinationId}::uuid AND dedup_key = ${dedupKey} LIMIT 1`,
+  );
+  return result.rows.length > 0;
 }
 
 async function divergences(db: Executor, minDifference: number, since: Date | string, caixaIds?: string[]) {
@@ -289,7 +333,14 @@ const invoiceMonthLabel = (referenceMonth: string) => `${referenceMonth.slice(5,
 
 /* ---------------- produtor de mensagens ---------------- */
 
-async function eventsFor(db: Database, config: Config, sub: SubscriptionRow, caixaIds: string[], clock: SpClock): Promise<Outgoing[]> {
+async function eventsFor(
+  db: Database,
+  config: Config,
+  sub: SubscriptionRow,
+  caixaIds: string[],
+  clock: SpClock,
+  cache?: TickCache,
+): Promise<Outgoing[]> {
   const kind = sub.event_kind as keyof typeof messageParamsSchemas;
   const parsed = messageParamsSchemas[kind]?.safeParse(sub.params);
   if (!parsed?.success || caixaIds.length === 0) return [];
@@ -303,7 +354,14 @@ async function eventsFor(db: Database, config: Config, sub: SubscriptionRow, cai
       const targets = reminderDueDates(today, params.days_before as number[]);
       const out: Outgoing[] = [];
       for (const target of targets) {
-        const titles = await openTitles(db, caixaIds, sql`t.due_date = ${target.dueDate}::date`, MAX_TITLE_MESSAGES);
+        // Chave de dedupKeys.dueReminder: os já enfileirados ficam fora, e o teto anda (tarefa 105).
+        const key = sql`'due_reminder:' || t.id::text || ${`:D-${target.daysBefore}:${target.dueDate}`}`;
+        const titles = await openTitles(
+          db,
+          caixaIds,
+          sql`t.due_date = ${target.dueDate}::date AND ${notQueued(sub.destination_id, key)}`,
+          MAX_TITLE_MESSAGES,
+        );
         for (const title of titles) {
           out.push({
             dedupKey: dedupKeys.dueReminder(title.id, target.daysBefore, title.dueDate),
@@ -320,7 +378,17 @@ async function eventsFor(db: Database, config: Config, sub: SubscriptionRow, cai
     }
     case 'overdue': {
       const repeat = (params.repeat_every_days as number | undefined) ?? null;
-      const titles = await openTitles(db, caixaIds, sql`t.due_date < ${today}::date`, 1000);
+      // Como overdueSchedule: com repetição, só nos dias dela e a chave do dia; sem, uma vez por título.
+      // Os já enfileirados ficam fora, e o teto anda (tarefa 105).
+      const key = repeat ? sql`'overdue:' || t.id::text || ${`:${today}`}` : sql`'overdue:' || t.id::text`;
+      const titles = await openTitles(
+        db,
+        caixaIds,
+        sql`t.due_date < ${today}::date
+            ${repeat ? sql`AND (${today}::date - t.due_date - 1) % ${repeat}::int = 0` : sql``}
+            AND ${notQueued(sub.destination_id, key)}`,
+        MAX_TITLE_MESSAGES,
+      );
       const out: Outgoing[] = [];
       for (const title of titles) {
         const schedule = overdueSchedule(title.dueDate, today, repeat);
@@ -341,10 +409,15 @@ async function eventsFor(db: Database, config: Config, sub: SubscriptionRow, cai
     case 'weekly_summary': {
       const weekly = kind === 'weekly_summary';
       if (weekly && clock.weekday !== params.weekday) return [];
+      // Já enfileirado hoje (ou nesta semana): nada de recalcular o resumo só para a dedup descartar (tarefa 166).
+      const dedupKey = weekly ? dedupKeys.weekly(weekStart(today)) : dedupKeys.daily(today);
+      if (await alreadyQueued(db, sub.destination_id, dedupKey)) return [];
       const until = weekly ? addDays(today, 6) : today;
       const flowFrom = weekly ? addDays(today, -7) : addDays(today, -1);
-      const [due, overdue, balances, flow] = await Promise.all([
-        openTitles(db, caixaIds, sql`t.due_date BETWEEN ${today}::date AND ${until}::date`, 200),
+      const dueWhere = sql`t.due_date BETWEEN ${today}::date AND ${until}::date`;
+      const [due, dueTotals, overdue, balances, flow] = await Promise.all([
+        openTitles(db, caixaIds, dueWhere, SUMMARY_MAX_ITEMS),
+        openTitleTotals(db, caixaIds, dueWhere),
         overdueTotals(db, caixaIds, today),
         balancesByCaixa(db, caixaIds),
         flowByCaixa(db, caixaIds, flowFrom, addDays(today, -1)),
@@ -354,15 +427,14 @@ async function eventsFor(db: Database, config: Config, sub: SubscriptionRow, cai
         heading: weekly ? T.weeklyTitle(formatDate(today), formatDate(until)) : T.dailyTitle(formatDate(today)),
         dueLabel: weekly ? T.dueWeek : T.dueToday,
         due,
+        dueCount: dueTotals.count,
         overdue,
         balances,
         flowLabel: weekly ? T.flowWeek : T.flowYesterday,
         flow,
         showDueDate: weekly,
       };
-      return [
-        { dedupKey: weekly ? dedupKeys.weekly(weekStart(today)) : dedupKeys.daily(today), caixaId: null, payload: summaryMessage(data) },
-      ];
+      return [{ dedupKey, caixaId: null, payload: summaryMessage(data) }];
     }
     case 'invoice_closed': {
       const scope = new Set(caixaIds);
@@ -383,7 +455,8 @@ async function eventsFor(db: Database, config: Config, sub: SubscriptionRow, cai
       }));
     }
     case 'card_limit': {
-      const cards = await cardUsage(db, caixaIds);
+      const scope = new Set(caixaIds);
+      const cards = (await cardsOf(db, cache)).filter((card) => scope.has(card.id));
       const out: Outgoing[] = [];
       for (const card of cards) {
         const percent = limitPercent(card.used_cents, card.credit_limit_cents);
@@ -525,7 +598,7 @@ function budgetNotifications(alerts: BudgetAlert[], admins: Set<string>): NewNot
 }
 
 /** Gera e enfileira as mensagens do momento para todas as assinaturas. */
-export async function produceMessages(db: Database, config: Config, clock: SpClock = spClock()) {
+export async function produceMessages(db: Database, config: Config, clock: SpClock = spClock(), cache?: TickCache) {
   const scopes = new Map<string, Promise<string[]>>();
   let budget: Promise<{ alerts: BudgetAlert[]; admins: Set<string> }> | null = null;
   let queued = 0;
@@ -540,14 +613,14 @@ export async function produceMessages(db: Database, config: Config, clock: SpClo
       }
       if (!scopes.has(sub.destination_id)) scopes.set(sub.destination_id, destinationScope(db, sub));
       const caixaIds = await applyFilter(db, await scopes.get(sub.destination_id)!, sub.caixa_filter);
-      const items = await eventsFor(db, config, sub, caixaIds, clock);
+      const items = await eventsFor(db, config, sub, caixaIds, clock, cache);
       queued += await enqueue(db, sub.destination_id, sub.id, sub.event_kind, items);
     } catch (error) {
       // Uma assinatura que falha não para as outras; o worker loga cada uma (tarefa 063).
       subscriptionErrors.push({
         subscriptionId: sub.id,
         eventKind: sub.event_kind,
-        error: String((error as Error)?.message ?? error).slice(0, 500),
+        error: errorText(error),
       });
     }
   }
@@ -556,15 +629,23 @@ export async function produceMessages(db: Database, config: Config, clock: SpClo
 
 export type SubscriptionError = { subscriptionId: string; eventKind: string; error: string };
 
+/** Etapa do laço de mensagens (ou bloco do sino, `notifications.<bloco>`) que falhou numa passada (tarefa 104). */
+export type StageError = { stage: string; error: string };
+
 type TickLog = { info: (obj: object, msg: string) => void; warn: (obj: object, msg: string) => void };
 
 /**
  * Log de uma passada do laço de mensagens (worker.ts): o resumo quando algo
- * aconteceu e um aviso por assinatura que falhou ao gerar as mensagens.
+ * aconteceu, um aviso por assinatura que falhou ao gerar as mensagens e um
+ * por etapa (ou bloco do sino) que falhou.
  */
-export function logMessageTick(log: TickLog, result: { subscriptionErrors: SubscriptionError[] } & Record<string, unknown>) {
-  const { subscriptionErrors, ...summary } = result;
+export function logMessageTick(
+  log: TickLog,
+  result: { subscriptionErrors: SubscriptionError[]; stageErrors?: StageError[] } & Record<string, unknown>,
+) {
+  const { subscriptionErrors, stageErrors = [], ...summary } = result;
   for (const error of subscriptionErrors) log.warn(error, 'worker: assinatura de mensagem falhou');
+  for (const error of stageErrors) log.warn(error, 'worker: etapa do laço de mensagens falhou');
   if (Object.values(summary).some((value) => typeof value === 'number' && value > 0)) log.info(summary, 'worker: mensagens');
 }
 
@@ -592,132 +673,186 @@ export async function recipientsByCaixa(db: Executor, caixaIds: string[], editor
   return map;
 }
 
-/** Notificações in-app dos eventos do momento (dedup por usuário). */
-export async function produceNotifications(db: Database, config: Config, clock: SpClock = spClock()) {
+/** Blocos caros do sino (limite dos cartões, divergências, avisos diários e contratos): no máximo a cada 5 min (tarefa 166). */
+const HEAVY_NOTIFICATIONS_EVERY_MS = 5 * 60_000;
+
+/**
+ * Estado do laço de mensagens entre as passadas, guardado pelo worker (tarefa 166): quando os blocos
+ * caros do sino rodaram pela última vez. Sem ele (testes, chamadas avulsas), toda passada calcula tudo.
+ */
+export type MessageLoopState = { heavyAt?: number; heavyDate?: string; heavyDaily?: boolean };
+
+/**
+ * Os blocos caros rodam nesta passada? Sim sem estado, na primeira do dia, na primeira depois do
+ * NOTIFY_AT (os avisos diários saem no horário) e passados 5 min da última; e o estado anda.
+ */
+function heavyDue(state: MessageLoopState | undefined, config: Config, clock: SpClock, now: number) {
+  const daily = clock.time >= config.notifyAt;
+  if (!state) return true;
+  const fresh = state.heavyAt !== undefined && now - state.heavyAt < HEAVY_NOTIFICATIONS_EVERY_MS;
+  if (fresh && state.heavyDate === clock.date && state.heavyDaily === daily) return false;
+  Object.assign(state, { heavyAt: now, heavyDate: clock.date, heavyDaily: daily });
+  return true;
+}
+
+/**
+ * Notificações in-app dos eventos do momento (dedup por usuário). Cada bloco roda isolado (tarefa 104):
+ * o que falha entra em `errors` (`notifications.<bloco>`) e não impede os outros nem o INSERT.
+ */
+export async function produceNotifications(
+  db: Database,
+  config: Config,
+  clock: SpClock = spClock(),
+  opts: { state?: MessageLoopState; cache?: TickCache; now?: number } = {},
+) {
   const items: NewNotification[] = [];
+  const errors: StageError[] = [];
   const N = t.notifications;
   const add = (userIds: string[] | undefined, base: Omit<NewNotification, 'userId'>) => {
     for (const userId of userIds ?? []) items.push({ ...base, userId });
   };
+  const block = async (name: string, fn: () => Promise<void>) => {
+    try {
+      await fn();
+    } catch (error) {
+      errors.push({ stage: `notifications.${name}`, error: errorText(error) });
+    }
+  };
+  const heavy = heavyDue(opts.state, config, clock, opts.now ?? Date.now());
 
   // Espelhos aguardando aceite: para quem escreve na caixa do espelho.
-  const pending = await db.execute<{
-    id: string;
-    caixa_id: string;
-    direction: 'payable' | 'receivable';
-    description: string;
-    amount_cents: number;
-    caixa_name: string;
-    from_name: string;
-  }>(sql`
+  await block('mirror_pending', async () => {
+    const pending = await db.execute<{
+      id: string;
+      caixa_id: string;
+      direction: 'payable' | 'receivable';
+      description: string;
+      amount_cents: number;
+      caixa_name: string;
+      from_name: string;
+    }>(sql`
     SELECT t.id, t.caixa_id, t.direction, t.description, t.amount_cents, c.name AS caixa_name, o.name AS from_name
       FROM titles t JOIN caixas c ON c.id = t.caixa_id JOIN caixas o ON o.id = t.counterparty_caixa_id
      WHERE t.mirror_status = 'pending' AND t.archived_at IS NULL AND t.status <> 'canceled'
        AND t.created_at >= now() - interval '60 days'`);
-  const pendingRecipients = await recipientsByCaixa(db, [...new Set(pending.rows.map((r) => r.caixa_id))], true);
-  for (const r of pending.rows) {
-    add(pendingRecipients.get(r.caixa_id), {
-      kind: 'mirror_pending',
-      title: N.mirrorPending(r.description),
-      body: N.mirrorPendingBody(r.caixa_name, formatBRL(Number(r.amount_cents)), r.from_name),
-      link: titleLink({ id: r.id, caixaId: r.caixa_id, direction: r.direction }),
-      caixaId: r.caixa_id,
-      dedupKey: `mirror_pending:${r.id}`,
-    });
-  }
+    const pendingRecipients = await recipientsByCaixa(db, [...new Set(pending.rows.map((r) => r.caixa_id))], true);
+    for (const r of pending.rows) {
+      add(pendingRecipients.get(r.caixa_id), {
+        kind: 'mirror_pending',
+        title: N.mirrorPending(r.description),
+        body: N.mirrorPendingBody(r.caixa_name, formatBRL(Number(r.amount_cents)), r.from_name),
+        link: titleLink({ id: r.id, caixaId: r.caixa_id, direction: r.direction }),
+        caixaId: r.caixa_id,
+        dedupKey: `mirror_pending:${r.id}`,
+      });
+    }
+  });
 
   // Espelhos contestados: para quem escreve na caixa do original.
-  const disputed = await db.execute<{
-    original_id: string;
-    original_caixa_id: string;
-    direction: 'payable' | 'receivable';
-    description: string;
-    amount_cents: number;
-    caixa_name: string;
-    updated_at: string;
-  }>(sql`
+  await block('mirror_disputed', async () => {
+    const disputed = await db.execute<{
+      original_id: string;
+      original_caixa_id: string;
+      direction: 'payable' | 'receivable';
+      description: string;
+      amount_cents: number;
+      caixa_name: string;
+      updated_at: string;
+    }>(sql`
     SELECT o.id AS original_id, o.caixa_id AS original_caixa_id, o.direction, o.description, o.amount_cents, c.name AS caixa_name,
            to_char(t.updated_at, 'YYYYMMDDHH24MISS') AS updated_at
       FROM titles t JOIN titles o ON o.id = t.mirror_title_id JOIN caixas c ON c.id = t.caixa_id
      WHERE t.mirror_status = 'disputed' AND t.archived_at IS NULL AND t.updated_at >= now() - interval '60 days'`);
-  const disputedRecipients = await recipientsByCaixa(db, [...new Set(disputed.rows.map((r) => r.original_caixa_id))], true);
-  for (const r of disputed.rows) {
-    add(disputedRecipients.get(r.original_caixa_id), {
-      kind: 'mirror_disputed',
-      title: N.mirrorDisputed(r.description),
-      body: N.mirrorDisputedBody(r.caixa_name, formatBRL(Number(r.amount_cents))),
-      link: titleLink({ id: r.original_id, caixaId: r.original_caixa_id, direction: r.direction }),
-      caixaId: r.original_caixa_id,
-      dedupKey: `mirror_disputed:${r.original_id}:${r.updated_at}`,
-    });
-  }
+    const disputedRecipients = await recipientsByCaixa(db, [...new Set(disputed.rows.map((r) => r.original_caixa_id))], true);
+    for (const r of disputed.rows) {
+      add(disputedRecipients.get(r.original_caixa_id), {
+        kind: 'mirror_disputed',
+        title: N.mirrorDisputed(r.description),
+        body: N.mirrorDisputedBody(r.caixa_name, formatBRL(Number(r.amount_cents))),
+        link: titleLink({ id: r.original_id, caixaId: r.original_caixa_id, direction: r.direction }),
+        caixaId: r.original_caixa_id,
+        dedupKey: `mirror_disputed:${r.original_id}:${r.updated_at}`,
+      });
+    }
+  });
 
   // Faturas fechadas: cartão e pagadoras.
-  const invoices = await closedInvoices(db, new Date(0));
-  const invoiceRecipients = await recipientsByCaixa(db, [
-    ...new Set(invoices.flatMap((i) => [i.cardCaixaId, ...i.payers.map((p) => p.caixaId)])),
-  ]);
-  for (const inv of invoices) {
-    const total = inv.payers.reduce((acc, p) => acc + p.cents, 0);
-    const users = new Set([inv.cardCaixaId, ...inv.payers.map((p) => p.caixaId)].flatMap((id) => invoiceRecipients.get(id) ?? []));
-    add([...users], {
-      kind: 'invoice_closed',
-      title: N.invoiceClosed(inv.cardName, invoiceMonthLabel(inv.referenceMonth)),
-      body: N.invoiceClosedBody(formatBRL(total), formatDate(inv.dueDate)),
-      link: invoiceLink(inv.id),
-      caixaId: inv.cardCaixaId,
-      dedupKey: dedupKeys.invoiceClosed(inv.id),
-    });
-  }
+  await block('invoice_closed', async () => {
+    const invoices = await closedInvoices(db, new Date(0));
+    const invoiceRecipients = await recipientsByCaixa(db, [
+      ...new Set(invoices.flatMap((i) => [i.cardCaixaId, ...i.payers.map((p) => p.caixaId)])),
+    ]);
+    for (const inv of invoices) {
+      const total = inv.payers.reduce((acc, p) => acc + p.cents, 0);
+      const users = new Set([inv.cardCaixaId, ...inv.payers.map((p) => p.caixaId)].flatMap((id) => invoiceRecipients.get(id) ?? []));
+      add([...users], {
+        kind: 'invoice_closed',
+        title: N.invoiceClosed(inv.cardName, invoiceMonthLabel(inv.referenceMonth)),
+        body: N.invoiceClosedBody(formatBRL(total), formatDate(inv.dueDate)),
+        link: invoiceLink(inv.id),
+        caixaId: inv.cardCaixaId,
+        dedupKey: dedupKeys.invoiceClosed(inv.id),
+      });
+    }
+  });
 
   // Limite do cartão (80% e 100%), uma vez por mês por patamar.
-  const cards = await cardUsage(db);
-  const cardRecipients = await recipientsByCaixa(db, [...new Set(cards.flatMap((c) => [c.id, c.default_payer_caixa_id]))]);
-  for (const card of cards) {
-    const percent = limitPercent(card.used_cents, card.credit_limit_cents);
-    const reached = NOTIFY_LIMIT_THRESHOLDS.filter((thr) => percent >= thr);
-    if (reached.length === 0) continue;
-    const top = Math.max(...reached);
-    const users = new Set([...(cardRecipients.get(card.id) ?? []), ...(cardRecipients.get(card.default_payer_caixa_id) ?? [])]);
-    add([...users], {
-      kind: 'card_limit',
-      title: N.cardLimit(card.name, top),
-      body: N.cardLimitBody(formatBRL(card.used_cents), formatBRL(card.credit_limit_cents)),
-      link: `/caixas/${card.id}/limit`,
-      caixaId: card.id,
-      dedupKey: dedupKeys.cardLimit(card.id, top, monthOf(clock.date)),
+  if (heavy)
+    await block('card_limit', async () => {
+      const cards = await cardsOf(db, opts.cache);
+      const cardRecipients = await recipientsByCaixa(db, [...new Set(cards.flatMap((c) => [c.id, c.default_payer_caixa_id]))]);
+      for (const card of cards) {
+        const percent = limitPercent(card.used_cents, card.credit_limit_cents);
+        const reached = NOTIFY_LIMIT_THRESHOLDS.filter((thr) => percent >= thr);
+        if (reached.length === 0) continue;
+        const top = Math.max(...reached);
+        const users = new Set([...(cardRecipients.get(card.id) ?? []), ...(cardRecipients.get(card.default_payer_caixa_id) ?? [])]);
+        add([...users], {
+          kind: 'card_limit',
+          title: N.cardLimit(card.name, top),
+          body: N.cardLimitBody(formatBRL(card.used_cents), formatBRL(card.credit_limit_cents)),
+          link: `/caixas/${card.id}/limit`,
+          caixaId: card.id,
+          dedupKey: dedupKeys.cardLimit(card.id, top, monthOf(clock.date)),
+        });
+      }
     });
-  }
 
   // Divergência de conciliação: para quem escreve na caixa da conta.
-  const divs = await divergences(db, 0, new Date(0));
-  const divRecipients = await recipientsByCaixa(db, [...new Set(divs.map((d) => d.caixa_id))], true);
-  for (const d of divs) {
-    add(divRecipients.get(d.caixa_id), {
-      kind: 'reconciliation_divergence',
-      title: N.divergence(`${d.account_name} (${d.caixa_name})`),
-      body: N.divergenceBody(formatBRL(d.bank_balance_cents - d.app_balance_cents), formatDate(d.bank_balance_on)),
-      link: reconciliationLink(d.caixa_id, d.account_id, d.id),
-      caixaId: d.caixa_id,
-      dedupKey: dedupKeys.divergence(d.id),
+  if (heavy)
+    await block('reconciliation_divergence', async () => {
+      const divs = await divergences(db, 0, new Date(0));
+      const divRecipients = await recipientsByCaixa(db, [...new Set(divs.map((d) => d.caixa_id))], true);
+      for (const d of divs) {
+        add(divRecipients.get(d.caixa_id), {
+          kind: 'reconciliation_divergence',
+          title: N.divergence(`${d.account_name} (${d.caixa_name})`),
+          body: N.divergenceBody(formatBRL(d.bank_balance_cents - d.app_balance_cents), formatDate(d.bank_balance_on)),
+          link: reconciliationLink(d.caixa_id, d.account_id, d.id),
+          caixaId: d.caixa_id,
+          dedupKey: dedupKeys.divergence(d.id),
+        });
+      }
     });
-  }
 
   // Avisos diários por caixa (no horário NOTIFY_AT): vence hoje e atrasados; e os dos contratos (spec 020).
-  if (clock.time >= config.notifyAt) {
-    items.push(...(await contractNotifications(db, clock, (ids) => recipientsByCaixa(db, ids))));
-    const caixas = await db.execute<{ id: string }>(sql`SELECT id FROM caixas WHERE archived_at IS NULL AND kind = 'general'`);
-    const ids = caixas.rows.map((c) => c.id);
-    const recipients = await recipientsByCaixa(db, ids);
-    const rows = await db.execute<{
-      caixa_id: string;
-      caixa_name: string;
-      due_today: number;
-      payable: number;
-      receivable: number;
-      overdue: number;
-      overdue_cents: number;
-    }>(sql`
+  if (heavy && clock.time >= config.notifyAt) {
+    await block('contracts', async () => {
+      items.push(...(await contractNotifications(db, clock, (ids) => recipientsByCaixa(db, ids))));
+    });
+    await block('daily', async () => {
+      const caixas = await db.execute<{ id: string }>(sql`SELECT id FROM caixas WHERE archived_at IS NULL AND kind = 'general'`);
+      const ids = caixas.rows.map((c) => c.id);
+      const recipients = await recipientsByCaixa(db, ids);
+      const rows = await db.execute<{
+        caixa_id: string;
+        caixa_name: string;
+        due_today: number;
+        payable: number;
+        receivable: number;
+        overdue: number;
+        overdue_cents: number;
+      }>(sql`
       SELECT c.id AS caixa_id, c.name AS caixa_name,
              count(*) FILTER (WHERE b.due_date = ${clock.date}::date)::int AS due_today,
              coalesce(sum(b.open_cents) FILTER (WHERE b.due_date = ${clock.date}::date AND b.direction = 'payable'), 0)::bigint AS payable,
@@ -727,37 +862,55 @@ export async function produceNotifications(db: Database, config: Config, clock: 
         FROM caixas c JOIN title_balances b ON b.caixa_id = c.id
        WHERE c.archived_at IS NULL AND c.kind = 'general' AND b.archived_at IS NULL AND b.open_cents > 0 AND b.due_date <= ${clock.date}::date
        GROUP BY c.id, c.name`);
-    for (const r of rows.rows) {
-      if (r.due_today > 0) {
-        add(recipients.get(r.caixa_id), {
-          kind: 'due_reminder',
-          title: N.dueToday(r.due_today, r.caixa_name),
-          body: N.dueTodayBody(formatBRL(Number(r.payable)), formatBRL(Number(r.receivable))),
-          link: `/calendar?view=agenda&caixas=${r.caixa_id}`,
-          caixaId: r.caixa_id,
-          dedupKey: `due_reminder:${r.caixa_id}:${clock.date}`,
-        });
+      for (const r of rows.rows) {
+        if (r.due_today > 0) {
+          add(recipients.get(r.caixa_id), {
+            kind: 'due_reminder',
+            title: N.dueToday(r.due_today, r.caixa_name),
+            body: N.dueTodayBody(formatBRL(Number(r.payable)), formatBRL(Number(r.receivable))),
+            link: `/calendar?view=agenda&caixas=${r.caixa_id}`,
+            caixaId: r.caixa_id,
+            dedupKey: `due_reminder:${r.caixa_id}:${clock.date}`,
+          });
+        }
+        if (r.overdue > 0) {
+          add(recipients.get(r.caixa_id), {
+            kind: 'overdue',
+            title: N.overdue(r.overdue, r.caixa_name),
+            body: N.overdueBody(formatBRL(Number(r.overdue_cents))),
+            link: `/caixas/${r.caixa_id}/payables?status=overdue`,
+            caixaId: r.caixa_id,
+            dedupKey: `overdue:${r.caixa_id}:${clock.date}`,
+          });
+        }
       }
-      if (r.overdue > 0) {
-        add(recipients.get(r.caixa_id), {
-          kind: 'overdue',
-          title: N.overdue(r.overdue, r.caixa_name),
-          body: N.overdueBody(formatBRL(Number(r.overdue_cents))),
-          link: `/caixas/${r.caixa_id}/payables?status=overdue`,
-          caixaId: r.caixa_id,
-          dedupKey: `overdue:${r.caixa_id}:${clock.date}`,
-        });
-      }
-    }
+    });
   }
 
   // Orçamentos de IA (spec 028): aviso no percentual e a 100%.
-  const [alerts, admins] = await Promise.all([budgetAlerts(db), activeAdminIds(db)]);
-  items.push(...budgetNotifications(alerts, admins));
+  await block('ai_budget_alert', async () => {
+    const [alerts, admins] = await Promise.all([budgetAlerts(db), activeAdminIds(db)]);
+    items.push(...budgetNotifications(alerts, admins));
+  });
 
+  // Em lotes de 200; o lote recusado (uma linha ruim) é refeito linha a linha, para as boas entrarem.
   let created = 0;
-  for (let i = 0; i < items.length; i += 200) created += await createNotifications(db, items.slice(i, i + 200));
-  return { created };
+  for (let i = 0; i < items.length; i += 200) {
+    const batch = items.slice(i, i + 200);
+    try {
+      created += await createNotifications(db, batch);
+    } catch (error) {
+      errors.push({ stage: 'notifications.insert', error: errorText(error) });
+      for (const item of batch) {
+        try {
+          created += await createNotifications(db, [item]);
+        } catch {
+          // Já registrado no erro do lote.
+        }
+      }
+    }
+  }
+  return { created, notificationErrors: errors };
 }
 
 /* ---------------- consumidor ---------------- */
@@ -866,12 +1019,35 @@ export async function emitAgentEvent(
   return { queued };
 }
 
-/** Uma passada completa do laço de mensagens. */
-export async function messageTick(db: Database, config: Config, clock: SpClock = spClock()) {
-  const produced = await produceMessages(db, config, clock);
-  const notifications = await produceNotifications(db, config, clock);
+/**
+ * Uma passada completa do laço de mensagens. Cada etapa roda isolada (tarefa 104): a que falha vai
+ * para `stageErrors` e as seguintes rodam (o consumo da outbox e os lembretes não dependem do sino).
+ * `state` é do worker (os blocos caros do sino espaçados, tarefa 166); a memória da passada
+ * (o uso dos cartões) é criada aqui.
+ */
+export async function messageTick(db: Database, config: Config, clock: SpClock = spClock(), state?: MessageLoopState) {
+  const stageErrors: StageError[] = [];
+  const cache: TickCache = {};
+  const stage = async <T>(name: string, fn: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await fn();
+    } catch (error) {
+      stageErrors.push({ stage: name, error: errorText(error) });
+      return null;
+    }
+  };
+  const produced = await stage('messages', () => produceMessages(db, config, clock, cache));
+  const notifications = await stage('notifications', () => produceNotifications(db, config, clock, { state, cache }));
   // Lembretes das anotações (spec 035): sino e outbox antes do consumo, para o Telegram sair nesta passada.
-  const reminders = await noteRemindersTick(db, config);
-  const consumed = await consumeOutbox(db, config);
-  return { ...produced, ...notifications, ...reminders, ...consumed };
+  const reminders = await stage('reminders', () => noteRemindersTick(db, config));
+  const consumed = await stage('outbox', () => consumeOutbox(db, config));
+  const { notificationErrors = [], ...notified } = notifications ?? {};
+  return {
+    ...produced,
+    subscriptionErrors: produced?.subscriptionErrors ?? [],
+    ...notified,
+    ...reminders,
+    ...consumed,
+    stageErrors: [...stageErrors, ...notificationErrors],
+  };
 }

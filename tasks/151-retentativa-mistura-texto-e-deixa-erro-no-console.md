@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -65,4 +65,11 @@ Nada foi executado. A parte do console fica em `apps/web`, fora da área desta r
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado na leitura do hook: o `error` da volta à fila não tinha código, o texto ao vivo só era zerado na mensagem do assistente e o `streamError` ficava depois do sucesso.
+
 ## Resolução (executor)
+
+- Servidor (com a tarefa 074): a volta à fila grava `{ type: 'error', code: 'provider_retry' }` e, depois da espera, `{ type: 'status', status: 'queued' }`.
+- `apps/web/src/agents/useConversation.ts`: no `provider_retry`, zera o texto e o raciocínio ao vivo e liga `retrying` (não o `streamError`); o primeiro delta, a mensagem do assistente ou o `done` desligam. `done` com `completed` limpa o `streamError`; o `failed` continua mostrando o erro. `ConversationPane.tsx` mostra `t.agentsUi.chat.retrying` ("O provedor de IA falhou; tentando de novo…") na linha de trabalho.
+- Testes: `ai-requests.test.ts` (queda no meio do stream: os eventos `provider_retry` e `queued` no fim) e o e2e novo em `e2e/tests/agentes.spec.ts` "o stream do provedor cai no meio; a nova tentativa recomeça sem o texto parcial e sem aviso de erro" (não rodado aqui; fica para o e2e completo da sessão principal).
+- Verificação: `pnpm verify:quick` (rápida), com `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s2`.

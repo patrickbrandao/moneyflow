@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -80,4 +80,14 @@ Nada foi executado. O caminho do limite foi lido no Fastify 5.12.5 instalado.
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no Fastify 5.12.5 instalado: o parser registrado com `bodyLimit` próprio vale para toda rota sem `bodyLimit` (`_parserOptions.limit = null` → o limite do parser), então todas as rotas liam até 20 MB, e a checagem manual de 1 MB depois da leitura recusava o `/mcp` (que declara ~7 MB, mas não é `rawUpload`). Todas as rotas `rawUpload` já declaram `bodyLimit: UPLOAD_BODY_LIMIT`; o backup tem parser próprio no escopo dele.
+
 ## Resolução (executor)
+
+- `apps/server/src/app.ts`: os parsers de `application/json` e de `text/plain`/`*` ficam sem `bodyLimit` (assim vale o da rota ou o de 1 MB do servidor, e o Fastify recusa pelo `content-length` antes de ler) e sem a checagem manual de 1 MB. O 413 responde `payload_too_large` com `t.errors.payloadTooLarge` (antes, `bad_request` com "Dados inválidos.").
+- Efeito: o `/mcp` aceita o `upload_file` de até 5 MB, como a spec 027 promete; o login, o logout e o webhook do Telegram, sem sessão, não leem mais de 1 MB; os uploads crus seguem em 20 MB pela rota; as demais rotas JSON continuam em 1 MB.
+- Testes: `apps/server/test/agent-tools.test.ts` ("o upload_file pelo /mcp aceita até 5 MB…": 4 MB de arquivo pelo cliente MCP grava o anexo, e um PDF de ~3 MB pela rota de upload cru continua aceito) e `apps/server/test/auth.test.ts` ("limite do corpo nas rotas sem sessão": 2 MB em JSON no login e no webhook, e em texto puro no login, dão 413 `payload_too_large`).
+- Spec: `docs/001`, linha "Limite do corpo".
+- Verificação: `pnpm verify:quick` (com `test/auth.test.ts` e o caso novo de `test/agent-tools.test.ts`).

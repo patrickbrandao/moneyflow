@@ -595,6 +595,25 @@ tr.msg-detail td {
   width: 14px;
   height: 14px;
 }
+/* "Ver mais" no fim da lista do sino (tarefa 169). */
+.notif-more {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.notif-more:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.notif-more:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
 .react-flow__handle.flow-handle.is-hidden {
   opacity: 0;
 }

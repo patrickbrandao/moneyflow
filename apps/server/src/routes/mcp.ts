@@ -18,7 +18,7 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { TOOL_HANDLERS } from '../agents/tool-handlers';
 import { MCP_ONLY_HANDLERS } from '../agents/tool-handlers-mcp';
-import { resultText, toolErrorMessage } from '../agents/tools-runtime';
+import { reportToolError, resultText } from '../agents/tools-runtime';
 import { type Actor, loadAccess } from '../authz/access';
 import type { ServiceContext } from '../context';
 import { authenticateApiToken } from '../services/api-tokens';
@@ -53,32 +53,39 @@ function mcpServerFor(ctx: ServiceContext) {
         readOnlyHint: tool.kind === 'read',
         destructiveHint: tool.kind === 'write' ? tool.destructive === true || tool.name.startsWith('update_') : false,
         idempotentHint: tool.kind === 'read',
-        openWorldHint: tool.name === 'send_telegram_message' || tool.name === 'notify_user',
+        // Fala com um serviço externo ou gasta IA (tarefa 157): a marca do registro, não uma lista de nomes.
+        openWorldHint: tool.external === true,
       },
     })),
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    // Erros registrados no log da requisição (tarefa 099): o cliente MCP recebe só a mensagem segura.
+    const failed = (name: string, write: boolean, toolUseId: string | null, error: unknown) => ({
+      content: [{ type: 'text', text: reportToolError(ctx.log, error, { tool: name, toolUseId, stage: 'mcp', write }) }],
+      isError: true,
+    });
     const mcpOnly = mcpOnlyTool(request.params.name);
     if (mcpOnly) {
       try {
         const value = await MCP_ONLY_HANDLERS[mcpOnly.name].run(ctx, mcpOnly.input.parse(request.params.arguments ?? {}));
         return { content: [{ type: 'text', text: resultText(value) }] };
       } catch (error) {
-        return { content: [{ type: 'text', text: toolErrorMessage(error) }], isError: true };
+        return failed(mcpOnly.name, mcpOnly.kind === 'write', null, error);
       }
     }
     const tool = agentTool(request.params.name);
     if (!tool || !offered(ctx, tool))
       return { content: [{ type: 'text', text: t.agents.errors.toolUnknown(request.params.name) }], isError: true };
+    const toolUseId = randomUUID();
     try {
       const input = tool.input.parse(request.params.arguments ?? {});
       const handler = TOOL_HANDLERS[tool.name as keyof typeof TOOL_HANDLERS] as {
         run: (ctx: ServiceContext, input: unknown, meta: { toolUseId: string; runId: string | null }) => Promise<unknown>;
       };
-      const value = await handler.run(ctx, input, { toolUseId: randomUUID(), runId: null });
+      const value = await handler.run(ctx, input, { toolUseId, runId: null });
       return { content: [{ type: 'text', text: resultText(value) }] };
     } catch (error) {
-      return { content: [{ type: 'text', text: toolErrorMessage(error) }], isError: true };
+      return failed(tool.name, tool.kind === 'write', toolUseId, error);
     }
   });
   return server;
@@ -117,6 +124,7 @@ export async function mcpRoutes(app: FastifyInstance) {
       access: await loadAccess(app.db, actor),
       actorKind: 'agent',
       agentRunId: null,
+      log: request.log,
     };
 
     const server = mcpServerFor(ctx);

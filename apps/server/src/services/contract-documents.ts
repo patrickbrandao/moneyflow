@@ -24,7 +24,7 @@ import { loadMessages, loadRun } from '../agents/store';
 import type { ServiceContext } from '../context';
 import { AppError, notFound, unprocessable } from '../errors';
 import { assertCanStartRun } from './ai-budgets';
-import { flowAgentId, waitRun } from './ai-flows';
+import { awaitFlowRun, flowAgentId } from './ai-flows';
 import { assertUpload, cleanFileName, storeAttachment } from './attachments';
 import { contractReadMode, loadContract } from './contracts';
 import { createConversation, sendMessage } from './conversations';
@@ -347,7 +347,10 @@ export async function restoreVersion(
 
 /* ---------------- IA: leitura do contrato e PDF → markdown ---------------- */
 
-/** Abre a conversa arquivada do fluxo, envia o arquivo e espera a execução (até AI_DOCUMENT_TIMEOUT_MS). */
+/**
+ * Abre a conversa arquivada do fluxo, envia o arquivo e espera a execução: até AI_DOCUMENT_TIMEOUT_MS na leitura e
+ * AI_DOCUMENT_CONVERT_TIMEOUT_MS na conversão em markdown (a saída é o documento inteiro); esgotado, cancela (tarefa 150).
+ */
 async function runFlow(
   ctx: ServiceContext,
   purpose: 'contract_reading' | 'contract_markdown',
@@ -368,10 +371,8 @@ async function runFlow(
     storeAttachment(tx, ctx, { name: file.name, mime: 'application/pdf', content: file.content }),
   );
   const sent = await sendMessage(ctx, conversation.id, { text, attachmentIds: [attachmentId] });
-  const run = await waitRun(ctx.db, sent.run.id, ctx.config.aiDocumentTimeoutMs);
-  if (run?.status !== 'completed') {
-    throw new AppError(422, 'document_unreadable', run?.status === 'failed' && run.error ? run.error : failure);
-  }
+  const timeout = purpose === 'contract_markdown' ? ctx.config.aiDocumentConvertTimeoutMs : ctx.config.aiDocumentTimeoutMs;
+  await awaitFlowRun(ctx, sent.run.id, conversation.id, timeout, failure);
   const messages = await loadMessages(ctx.db, conversation.id);
   const answer = [...messages].reverse().find((m) => m.role === 'assistant');
   return { text: answer ? blocksText(answer.content) : '', runId: sent.run.id, conversationId: conversation.id };

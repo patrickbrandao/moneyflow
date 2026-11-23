@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
 import * as recipes from '../services/reconcile-recipes';
 import { getImport } from '../services/statements';
-import type { Handlers } from './tool-helpers';
+import { agentSummary, type Handlers, yesNo } from './tool-helpers';
 
 /*
  * Tools das receitas de conciliação (spec 030, categoria Conciliação), sobre o
@@ -12,15 +12,6 @@ import type { Handlers } from './tool-helpers';
  */
 
 type RecipeToolName = (typeof RECIPE_TOOLS)[number]['name'];
-
-const yesNo = (v: boolean) => (v ? 'Sim' : 'Não');
-
-async function agentName(ctx: ServiceContext, id: string) {
-  const r = await ctx.db.execute<{ name: string; has_kit: boolean }>(
-    sql`SELECT name, tool_kit_id IS NOT NULL AS has_kit FROM ai_agents WHERE id = ${id}`,
-  );
-  return r.rows[0] ?? { name: id, has_kit: true };
-}
 
 async function ownerName(ctx: ServiceContext, caixaId: string | null) {
   if (caixaId === null) return 'Global';
@@ -53,7 +44,7 @@ export const RECIPE_HANDLERS: Handlers<RecipeToolName> = {
     preview: async (ctx, i) => {
       if (i.caixaId === null) ctx.access.assertAdmin();
       else ctx.access.assertWrite(i.caixaId);
-      const agent = await agentName(ctx, i.agentId);
+      const agent = await agentSummary(ctx, i.agentId);
       return {
         title: 'Criar receita de conciliação',
         summary: i.name,
@@ -65,7 +56,7 @@ export const RECIPE_HANDLERS: Handlers<RecipeToolName> = {
           { label: 'Rodar ao importar', after: yesNo(i.runOnImport) },
           { label: 'Instrução', after: i.instruction.slice(0, 500) },
         ],
-        warnings: agent.has_kit ? [] : [t.agents.recipes.noKit(agent.name)],
+        warnings: agent.hasKit ? [] : [t.agents.recipes.noKit(agent.name)],
       };
     },
     run: (ctx, i) => recipes.createRecipe(ctx, i),
@@ -82,9 +73,9 @@ export const RECIPE_HANDLERS: Handlers<RecipeToolName> = {
       const warnings: string[] = [];
       if (c.name !== undefined && c.name !== recipe.name) rows.push({ label: 'Nome', before: recipe.name, after: c.name });
       if (c.agentId !== undefined && c.agentId !== recipe.agentId) {
-        const agent = await agentName(ctx, c.agentId);
+        const agent = await agentSummary(ctx, c.agentId);
         rows.push({ label: 'Agente', before: recipe.agentName, after: agent.name });
-        if (!agent.has_kit) warnings.push(t.agents.recipes.noKit(agent.name));
+        if (!agent.hasKit) warnings.push(t.agents.recipes.noKit(agent.name));
       }
       if (c.accountIds !== undefined || c.cardCaixaIds !== undefined) {
         const accounts = c.accountIds ?? recipe.targets.filter((x) => x.kind === 'account').map((x) => x.id);
@@ -142,7 +133,7 @@ export const RECIPE_HANDLERS: Handlers<RecipeToolName> = {
       const detail = await getImport(ctx, i.statementImportId);
       ctx.access.assertWrite(detail.caixaId);
       const pending = detail.lines.filter((l) => l.status === 'new' || l.status === 'suggested').length;
-      const agent = await agentName(ctx, recipe.agentId);
+      const agent = await agentSummary(ctx, recipe.agentId);
       return {
         title: 'Rodar receita de conciliação',
         summary: `${recipe.name} · ${detail.fileName}`,
@@ -153,7 +144,7 @@ export const RECIPE_HANDLERS: Handlers<RecipeToolName> = {
           { label: 'Linhas', after: i.lineIds ? `${i.lineIds.length} selecionada(s)` : `${pending} pendente(s)` },
           { label: 'Instrução', after: recipe.instruction.slice(0, 500) },
         ],
-        warnings: [t.agents.recipes.previewWarning, ...(agent.has_kit ? [] : [t.agents.recipes.noKit(agent.name)])],
+        warnings: [t.agents.recipes.previewWarning, ...(agent.hasKit ? [] : [t.agents.recipes.noKit(agent.name)])],
       };
     },
     run: (ctx, i) => recipes.runRecipe(ctx, i.statementImportId, i.recipeId, i.lineIds),

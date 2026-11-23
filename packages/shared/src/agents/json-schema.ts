@@ -30,10 +30,17 @@ function polish(node: unknown, key?: string): unknown {
     delete out.pattern;
     if (!out.description) out.description = UUID_HINT;
   }
-  if (key && !out.description) {
-    const types = Array.isArray(out.type) ? out.type : [out.type];
-    if (/Cents$/.test(key) && types.includes('integer')) out.description = CENTS_HINT;
-    else if (/(Date|On)$|^(from|to)$/.test(key) && (types.includes('string') || out.anyOf)) out.description = DATE_HINT;
+  if (key) {
+    // Campo anulável vira anyOf [tipo, null] sem `type` no nível dele (tarefa 154): os tipos vêm das alternativas.
+    const types = [out.type, ...((out.anyOf as JsonSchema[] | undefined) ?? []).map((alt) => alt.type)].flat();
+    const own = typeof out.description === 'string' ? out.description : '';
+    const hint = (text: string) => (own ? `${own} ${text}` : text);
+    if (/Cents$/.test(key) && types.includes('integer')) {
+      if (!/centavos/i.test(own)) out.description = hint(CENTS_HINT);
+    } else if (/(Date|On)$|^(from|to)$/.test(key) && types.includes('string')) {
+      // A descrição própria fica, com o formato acrescentado (o mês AAAA-MM já diz o seu).
+      if (!/AAAA-MM/.test(own)) out.description = hint(DATE_HINT);
+    }
   }
   return out;
 }

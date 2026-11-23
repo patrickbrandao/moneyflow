@@ -2,6 +2,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
@@ -368,6 +369,26 @@ describe('mensagens', () => {
     expect(subs.value.map((x: any) => x.eventKind).sort()).toEqual(['invoice_closed', 'overdue']);
     const removed = await approved(adminSession, 'set_message_subscriptions', { destinationId, remove: ['overdue'] });
     expect(removed.value.map((x: any) => x.eventKind)).toEqual(['invoice_closed']);
+    // Tarefa 153: o lote grava numa transação só. O 2º item falha no banco (caixa inexistente) e o 1º não fica gravado.
+    const partial = await call(adminSession, 'set_message_subscriptions', {
+      destinationId,
+      subscriptions: [
+        { eventKind: 'invoice_closed', isActive: false },
+        { eventKind: 'overdue', params: { send_at: '09:00', repeat_every_days: 2 }, caixaIds: ['0192d8e4-0000-7000-8000-00000000dead'] },
+      ],
+    });
+    expect(partial.preview).toBeTruthy();
+    expect(partial.error).toBeTruthy();
+    const afterPartial = await admin.get(`/api/message-destinations/${destinationId}/subscriptions`);
+    expect(afterPartial.map((x: any) => [x.eventKind, x.isActive])).toEqual([['invoice_closed', true]]);
+    // O mesmo evento duas vezes (ou criado e removido) é recusado na entrada, sem cartão.
+    const repeated = await call(adminSession, 'set_message_subscriptions', {
+      destinationId,
+      subscriptions: [{ eventKind: 'invoice_closed' }],
+      remove: ['invoice_closed'],
+    });
+    expect(repeated.confirmation).toBeUndefined();
+    expect(repeated.error).toBe('Entrada inválida para a tool: remove.0: o evento invoice_closed aparece mais de uma vez');
     expect((await call(viewerSession, 'list_message_subscriptions', { destinationId })).value).toHaveLength(1);
     expect((await call(viewerSession, 'send_test_message', { destinationId })).error).toBe('Você não tem permissão para esta ação.');
 
@@ -412,7 +433,7 @@ describe('fechamento e auditoria', () => {
     expect(reopened.value.closings).toHaveLength(0);
 
     const history = await call(viewerSession, 'get_audit_history', { table: 'caixas', recordId: s.caixaA.id });
-    expect(history.value.length).toBeGreaterThan(0);
+    expect(history.value.items.length).toBeGreaterThan(0);
     expect((await call(viewerSession, 'get_audit_history', { table: 'caixas', recordId: s.caixaB.id })).error).toBe(
       'Registro não encontrado.',
     );
@@ -484,6 +505,83 @@ describe('usuários e permissões', () => {
 });
 
 describe('configuração de IA', () => {
+  it('agente: a prévia mostra os parâmetros, o provedor de cada inferência, o ícone e o efeito do provedor padrão (tarefa 100)', async () => {
+    const newProvider = (name: string) =>
+      admin.post('/api/admin/ai/providers', {
+        name: `${name} ${uid()}`,
+        kind: 'anthropic',
+        baseUrl: llm.url,
+        apiKey: 'sk-ant-test-previa',
+        defaultModels: { text: 'claude-sonnet-5-5' },
+      });
+    const visionA = await newProvider('Visão A');
+    const visionB = await newProvider('Visão B');
+    const created = await approved(adminSession, 'create_ai_agent', {
+      name: `Prévia ${uid()}`,
+      defaultProviderId: visionA.id,
+      model: 'claude-sonnet-5-5',
+      params: { temperature: 0.2, max_tokens: 1000 },
+    });
+    expect(rowsOf(created.preview)).toMatchObject({
+      Provedor: visionA.name,
+      Inferências: `Visão: ${visionA.name} · modelo padrão`,
+      Temperatura: '0.2',
+      'Máximo de tokens': '1000',
+    });
+    expect(created.preview.warnings[0]).toContain(`O provedor padrão ${visionA.name}`);
+    const agentId = created.value.id;
+    // Só os parâmetros: uma linha por parâmetro, inclusive o que sai (a gravação troca o conjunto).
+    const params = await approved(adminSession, 'update_ai_agent', { agentId, changes: { params: { temperature: 1.5 } } });
+    expect(rowsOf(params.preview)).toEqual({ Temperatura: '0.2 → 1.5', 'Máximo de tokens': '1000 → null' });
+    expect(params.value.params).toEqual({ temperature: 1.5 });
+    // Trocar o provedor da visão aparece (antes, "Visão → Visão" sumia do cartão).
+    const vision = await approved(adminSession, 'update_ai_agent', {
+      agentId,
+      changes: { inferences: [{ capability: 'vision', providerId: visionB.id }] },
+    });
+    expect(rowsOf(vision.preview)).toEqual({
+      Inferências: `Visão: ${visionA.name} · modelo padrão → Visão: ${visionB.name} · modelo padrão`,
+    });
+    const icon = await approved(adminSession, 'update_ai_agent', { agentId, changes: { icon: 'robot' } });
+    expect(rowsOf(icon.preview)).toEqual({ Ícone: 'null → robot' });
+    // A própria senha também encerra as outras sessões: o cartão avisa.
+    const own = await call(adminSession, 'set_user_password', { userId: adminSession.id }, { approve: false });
+    expect(own.preview.warnings).toEqual([expect.stringContaining('As suas outras sessões são encerradas')]);
+  });
+
+  it('preço já usado numa chamada não sai: a mensagem diz quantas e o custo gravado fica (tarefa 156)', async () => {
+    const provider = await admin.post('/api/admin/ai/providers', {
+      name: `Preços ${uid()}`,
+      kind: 'anthropic',
+      baseUrl: llm.url,
+      apiKey: 'sk-ant-test-precos',
+      defaultModels: { text: 'claude-sonnet-5-5' },
+    });
+    const providerId = provider.id;
+    const usedPrice = await approved(adminSession, 'create_ai_price', {
+      providerId,
+      model: 'claude-sonnet-5-5',
+      inputPricePerMillion: 3000,
+      outputPricePerMillion: 15000,
+    });
+    const usedRow = await h.db.execute<{ id: string; cost_micros: string; price_id: string }>(sql`
+      INSERT INTO ai_usage (provider_id, model, purpose, input_tokens, output_tokens)
+      VALUES (${providerId}, 'claude-sonnet-5-5', 'title', 1000, 100) RETURNING id, cost_micros, price_id`);
+    expect(usedRow.rows[0]!.price_id).toBe(usedPrice.value.id);
+    const refused = await call(adminSession, 'delete_ai_price', { priceId: usedPrice.value.id });
+    expect(refused.confirmation).toBeUndefined();
+    expect(refused.error).toBe(t.agents.errors.priceInUse(1));
+    const viaApi = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/admin/ai/prices/${usedPrice.value.id}`,
+      headers: { cookie: adminSession.cookie },
+    });
+    expect(viaApi.statusCode).toBe(422);
+    expect(viaApi.json().error.message).toBe(t.agents.errors.priceInUse(1));
+    const after = await h.db.execute<{ cost_micros: string }>(sql`SELECT cost_micros FROM ai_usage WHERE id = ${usedRow.rows[0]!.id}`);
+    expect(after.rows[0]!.cost_micros).toBe(usedRow.rows[0]!.cost_micros);
+  });
+
   it('provedor com a chave do cartão, testar, modelos, preços, agentes, kits, MCP com cabeçalho secreto, configurações, uso e requisições', async () => {
     const key1 = secret('sk-ant');
     const created = await approved(
@@ -526,9 +624,10 @@ describe('configuração de IA', () => {
     });
     expect(rowsOf(price.preview)).toMatchObject({ 'Entrada (por milhão)': '3', 'Saída (por milhão)': '15' });
     expect((await call(adminSession, 'list_ai_prices', {})).value.map((p: any) => p.id)).toContain(price.value.id);
+    expect(price.preview.warnings[0]).toMatch(/uso já gravado não muda/);
     const priceGone = await approved(adminSession, 'delete_ai_price', { priceId: price.value.id });
     expect(priceGone.value).toEqual({ deleted: true });
-
+    expect(priceGone.preview.warnings[0]).toMatch(/uso já gravado não muda/);
     // Kits: o "só de leitura" a partir do catálogo.
     const reads = (await call(adminSession, 'list_agent_tools', { kind: 'read' })).value as any[];
     expect(reads.every((x) => x.kind === 'read')).toBe(true);
@@ -651,7 +750,8 @@ describe('configuração de IA', () => {
     const removedBudget = await approved(adminSession, 'delete_ai_budget', { budgetId: budget.value.id });
     expect(removedBudget.preview.action).toBe('delete');
     expect(removedBudget.value).toEqual({ deleted: true });
-  });
+    // Muitas tools em sequência: com o banco local dividido entre os testes, passa dos 30 s padrão.
+  }, 120_000);
 });
 
 describe('backup (admin)', () => {

@@ -1,13 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { type Executor, userColumns, users } from '@moneyflow/db';
+import { type Database, type Executor, userColumns, users } from '@moneyflow/db';
 import { addDays, isoWeekday, todayIso } from '@moneyflow/shared';
-import { eq, sql } from 'drizzle-orm';
+import { eq, type SQL, sql } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { TOOL_HANDLERS } from '../src/agents/tool-handlers';
 import { type Actor, loadAccess } from '../src/authz/access';
-import { consumeOutbox, emitAgentEvent, logMessageTick, produceMessages, produceNotifications } from '../src/services/message-worker';
+import {
+  consumeOutbox,
+  emitAgentEvent,
+  logMessageTick,
+  type MessageLoopState,
+  messageTick,
+  produceMessages,
+  produceNotifications,
+} from '../src/services/message-worker';
 import { deliver } from '../src/services/messages';
 import { client, type Harness, scenario, startApp, uid, userSession } from './helpers';
 
@@ -60,6 +69,30 @@ beforeEach(() => {
   telegram.mode = 'ok';
   telegram.calls = [];
 });
+
+/**
+ * O banco de verdade, guardando o SQL de cada `execute` (fora das transações) e recusando o que casar
+ * com `fail` (tarefas 104 e 166).
+ */
+function spyDb(fail: RegExp | null = null) {
+  const dialect = new PgDialect();
+  const seen: { sql: string; params: unknown[] }[] = [];
+  const db = new Proxy(h.db, {
+    get(target, prop) {
+      if (prop === 'execute') {
+        return (query: SQL) => {
+          const rendered = dialect.sqlToQuery(query);
+          seen.push(rendered);
+          if (fail?.test(rendered.sql)) return Promise.reject(new Error('falha simulada na consulta'));
+          return target.execute(query);
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as Database;
+  return { db, seen };
+}
 
 const year = todayIso().slice(0, 4);
 const period = `from=${year}-01-01&to=${year}-12-31`;
@@ -530,6 +563,182 @@ describe('mensagens (spec 013)', () => {
     expect(await count()).toBe(2);
   });
 
+  it('mais de 30 títulos no mesmo dia: o teto anda entre as passadas e o resumo conta todos (tarefa 105)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const yesterday = addDays(today, -1);
+    const create = (description: string, dueDate: string) =>
+      admin.post('/api/titles', {
+        caixaId: s.caixaA.id,
+        direction: 'payable',
+        entityId: s.supplier.id,
+        categoryId: s.expense.id,
+        description,
+        competenceDate: dueDate,
+        dueDate,
+        amountCents: 1_000,
+      });
+    for (let i = 0; i < 35; i += 1) await create(`Hoje ${String(i).padStart(2, '0')}`, today);
+    for (let i = 0; i < 31; i += 1) await create(`Atrasado ${String(i).padStart(2, '0')}`, yesterday);
+    const dest = await admin.post('/api/message-destinations', {
+      name: `Teto ${s.tag}`,
+      ownerKind: 'caixa',
+      ownerCaixaId: s.caixaA.id,
+      botToken: TOKEN,
+      chatId: '105',
+    });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, {
+      eventKind: 'due_reminder',
+      params: { days_before: [0], send_at: '00:00' },
+    });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, { eventKind: 'overdue', params: { send_at: '00:00' } });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, { eventKind: 'daily_summary', params: { send_at: '00:00' } });
+    const counts = async () => {
+      const rows = await h.db.execute<{ event_kind: string; n: number }>(
+        sql`SELECT event_kind, count(*)::int AS n FROM message_outbox WHERE destination_id = ${dest.id} GROUP BY event_kind`,
+      );
+      return Object.fromEntries(rows.rows.map((r) => [r.event_kind, r.n]));
+    };
+    const clock = { date: today, time: '23:00', weekday: isoWeekday(today) };
+    await produceMessages(h.db, h.config, clock);
+    expect(await counts()).toEqual({ due_reminder: 30, overdue: 30, daily_summary: 1 });
+    await produceMessages(h.db, h.config, clock);
+    expect(await counts()).toEqual({ due_reminder: 35, overdue: 31, daily_summary: 1 });
+    await produceMessages(h.db, h.config, clock);
+    expect(await counts()).toEqual({ due_reminder: 35, overdue: 31, daily_summary: 1 });
+    // O resumo lista 25 e conta os 35 do dia pela soma no banco; o total atrasado também.
+    const summary = await h.db.execute<{ text: string }>(
+      sql`SELECT payload->>'text' AS text FROM message_outbox WHERE destination_id = ${dest.id} AND event_kind = 'daily_summary'`,
+    );
+    expect(summary.rows[0]!.text).toContain('… e mais 10');
+    expect(summary.rows[0]!.text).toContain('Atrasados: 31 títulos');
+    await admin.patch(`/api/message-destinations/${dest.id}`, { isActive: false });
+  });
+
+  it('uma etapa que falha não para as outras: a mensagem sai e o lembrete dispara sem o sino (tarefa 104)', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const dest = await admin.post('/api/message-destinations', { name: `Etapas ${uid()}`, botToken: TOKEN, chatId: '104' });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, { eventKind: 'agent_completed', params: {} });
+    const runId = randomUUID();
+    await emitAgentEvent(h.db, {
+      kind: 'agent_completed',
+      userId: adminSession.id,
+      agentRunId: runId,
+      eventKey: `run:${runId}:seq:1`,
+      text: 'Pronto',
+      config: h.config,
+    });
+    const entity = await admin.post('/api/entities', { kind: 'company', name: `Lembrete ${uid()}` });
+    const note = await admin.post('/api/notes', {
+      objectType: 'entity',
+      objectId: entity.id,
+      kind: 'reminder',
+      title: 'Ligar para o banco',
+      reminder: { timeOfDay: '10:00' },
+    });
+    await h.db.execute(sql`UPDATE note_reminders SET next_fire_at = now() - interval '1 minute' WHERE note_id = ${note.id}`);
+
+    // As assinaturas (a etapa inteira do Telegram) e um bloco do sino falham; o resto da passada segue.
+    const { db } = spyDb(/FROM message_subscriptions s\b|mirror_status = 'pending'/);
+    const result = await messageTick(db, h.config);
+    expect(result.stageErrors).toEqual(
+      expect.arrayContaining([
+        { stage: 'messages', error: expect.stringContaining('falha simulada') },
+        { stage: 'notifications.mirror_pending', error: expect.stringContaining('falha simulada') },
+      ]),
+    );
+    expect(result.subscriptionErrors).toEqual([]);
+    expect(typeof result.created).toBe('number');
+    const outbox = await h.db.execute<{ status: string }>(
+      sql`SELECT status FROM message_outbox WHERE destination_id = ${dest.id} AND agent_run_id = ${runId}`,
+    );
+    expect(outbox.rows).toEqual([{ status: 'sent' }]);
+    expect(telegram.calls.some((c) => c.body.chat_id === '104')).toBe(true);
+    const firings = await h.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM note_reminder_firings WHERE note_id = ${note.id}`);
+    expect(firings.rows[0]!.n).toBe(1);
+
+    // O worker loga cada etapa que falhou, com o nome.
+    const warned: { obj: any; msg: string }[] = [];
+    logMessageTick({ info: () => {}, warn: (obj, msg) => warned.push({ obj, msg }) }, result);
+    expect(warned.map((w) => w.obj.stage)).toEqual(expect.arrayContaining(['messages', 'notifications.mirror_pending']));
+    await admin.patch(`/api/message-destinations/${dest.id}`, { isActive: false });
+  });
+
+  it('sem recálculo à toa: resumo já enfileirado, cartões uma vez por passada e o sino caro espaçado (tarefa 166)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const weekday = isoWeekday(today);
+    await admin.post('/api/titles', {
+      caixaId: s.caixaA.id,
+      direction: 'payable',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      description: 'Vence hoje',
+      competenceDate: today,
+      dueDate: today,
+      amountCents: 2_000,
+    });
+    const dest = await admin.post('/api/message-destinations', {
+      name: `Resumo ${s.tag}`,
+      ownerKind: 'caixa',
+      ownerCaixaId: s.caixaA.id,
+      botToken: TOKEN,
+      chatId: '166',
+    });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, { eventKind: 'daily_summary', params: { send_at: '00:00' } });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, {
+      eventKind: 'card_limit',
+      params: { thresholds_percent: [80] },
+    });
+    const clock = { date: today, time: '09:00', weekday };
+    const summaryQueries = (seen: { sql: string; params: unknown[] }[]) =>
+      seen.filter((q) => q.sql.includes('financial_account_balances') && JSON.stringify(q.params).includes(s.caixaA.id)).length;
+    const cardQueries = (seen: { sql: string }[]) => seen.filter((q) => q.sql.includes('card_limits')).length;
+
+    const first = spyDb();
+    await produceMessages(first.db, h.config, clock);
+    expect(summaryQueries(first.seen)).toBe(1);
+    const second = spyDb();
+    await produceMessages(second.db, h.config, clock);
+    expect(summaryQueries(second.seen)).toBe(0);
+    const summaries = await h.db.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM message_outbox WHERE destination_id = ${dest.id} AND event_kind = 'daily_summary'`,
+    );
+    expect(summaries.rows[0]!.n).toBe(1);
+
+    // Com o estado do worker: os blocos caros rodam na primeira, de novo ao passar do NOTIFY_AT e depois de 5 min.
+    const state: MessageLoopState = {};
+    const t0 = Date.now();
+    const bell = async () =>
+      (
+        await h.db.execute<{ n: number }>(
+          sql`SELECT count(*)::int AS n FROM notifications WHERE dedup_key = ${`due_reminder:${s.caixaA.id}:${today}`}`,
+        )
+      ).rows[0]!.n;
+    const run = async (time: string, now: number) => {
+      const spy = spyDb();
+      await produceNotifications(spy.db, h.config, { date: today, time, weekday }, { state, now });
+      return cardQueries(spy.seen);
+    };
+    expect(h.config.notifyAt).toBe('08:00');
+    expect(await run('07:00', t0)).toBe(1);
+    expect(await run('07:01', t0 + 60_000)).toBe(0);
+    expect(await bell()).toBe(0);
+    expect(await run('08:00', t0 + 120_000)).toBe(1);
+    expect(await bell()).toBeGreaterThan(0);
+    expect(await run('08:01', t0 + 180_000)).toBe(0);
+    expect(await run('08:06', t0 + 120_000 + 5 * 60_000)).toBe(1);
+
+    // Uma passada inteira: o uso dos cartões sai uma vez para o Telegram e o sino.
+    const tick = spyDb();
+    await messageTick(tick.db, h.config, clock);
+    expect(cardQueries(tick.seen)).toBe(1);
+    await admin.patch(`/api/message-destinations/${dest.id}`, { isActive: false });
+  });
+
   it('evento de agente: o mesmo evento emitido duas vezes (duas réplicas) gera um aviso por destino; outro seq gera outro', async () => {
     const owner = await userSession(h);
     const user = client(h, owner.cookie);
@@ -640,6 +849,42 @@ describe('mensagens (spec 013)', () => {
 });
 
 describe('notificações (sino)', () => {
+  it('não lidas primeiro e todas alcançáveis pelo cursor, mesmo lendo entre as páginas (tarefa 169)', async () => {
+    const session = await userSession(h);
+    const me = client(h, session.cookie);
+    // 35 avisos, um por minuto; o mais novo é o 0.
+    await h.db.execute(sql`
+      INSERT INTO notifications (user_id, kind, title, created_at, dedup_key)
+      SELECT ${session.id}::uuid, 'system', 'Aviso ' || lpad(i::text, 2, '0'), now() - make_interval(mins => i), 'sino-169:' || i
+        FROM generate_series(0, 34) i`);
+    const ids = async () =>
+      (
+        await h.db.execute<{ id: string; title: string }>(
+          sql`SELECT id, title FROM notifications WHERE user_id = ${session.id} ORDER BY created_at DESC`,
+        )
+      ).rows;
+    const all = await ids();
+    // Lidas as 5 mais recentes.
+    for (const n of all.slice(0, 5)) await me.post(`/api/notifications/${n.id}/read`);
+
+    const page1 = await me.get('/api/notifications?limit=30');
+    expect(page1.unread).toBe(30);
+    expect(page1.items.map((n: any) => n.title)).toEqual(all.slice(5).map((n) => n.title));
+    expect(page1.items.every((n: any) => n.readAt === null)).toBe(true);
+    expect(page1.nextCursor).toEqual(expect.any(String));
+    const page2 = await me.get(`/api/notifications?limit=30&cursor=${page1.nextCursor}`);
+    expect(page2.items.map((n: any) => n.title)).toEqual(all.slice(0, 5).map((n) => n.title));
+    expect(page2.nextCursor).toBeNull();
+
+    // Ler a última da página entre as páginas não pula as não lidas que faltam.
+    const small = await me.get('/api/notifications?limit=20');
+    await me.post(`/api/notifications/${small.items.at(-1).id}/read`);
+    const rest = await me.get(`/api/notifications?limit=50&cursor=${small.nextCursor}`);
+    const restUnread = rest.items.filter((n: any) => n.readAt === null).map((n: any) => n.title);
+    expect(restUnread).toEqual(all.slice(25).map((n) => n.title));
+    await me.get('/api/notifications?cursor=xyz', 400);
+  });
+
   it('espelho pendente vira notificação do editor da outra caixa; marcar lida e todas', async () => {
     const admin = client(h, (await userSession(h, 'admin')).cookie);
     const s = await scenario(h, admin);

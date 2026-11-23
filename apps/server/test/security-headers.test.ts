@@ -82,3 +82,30 @@ describe('cabeçalhos de segurança (tarefa 065)', () => {
     }
   });
 });
+
+describe('id da requisição (tarefa 186)', () => {
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+  it('toda resposta leva x-request-id, um UUID diferente a cada requisição; sem TRUSTED_PROXIES o do cliente não vale', async () => {
+    const ids = new Set<string>();
+    for (const url of ['/api/health', '/api/auth/me', '/api/nao-existe', '/']) {
+      const res = await h.app.inject({ method: 'GET', url, headers: { 'x-request-id': 'forjado-pelo-cliente-1' } });
+      const id = String(res.headers['x-request-id']);
+      expect(id, url).toMatch(UUID);
+      ids.add(id);
+    }
+    expect(ids.size).toBe(4);
+  });
+
+  it('com TRUSTED_PROXIES, vale o id do proxy no formato certo; fora do formato, um UUID', async () => {
+    const proxied = await startApp({ TRUSTED_PROXIES: '127.0.0.1' });
+    try {
+      const ok = await proxied.app.inject({ method: 'GET', url: '/api/health', headers: { 'x-request-id': 'proxy-abc_12345' } });
+      expect(ok.headers['x-request-id']).toBe('proxy-abc_12345');
+      const bad = await proxied.app.inject({ method: 'GET', url: '/api/health', headers: { 'x-request-id': 'ruim\ninjeta linha' } });
+      expect(String(bad.headers['x-request-id'])).toMatch(UUID);
+    } finally {
+      await proxied.close();
+    }
+  });
+});

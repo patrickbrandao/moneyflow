@@ -435,7 +435,7 @@ describe('reconhecer o pagamento pela série (specs 033 e 034)', () => {
       db: h.db,
       access: await loadAccess(h.db, actor),
       config: h.config,
-      log: { warn: (obj) => warnings.push(obj as Record<string, unknown>) },
+      log: { warn: (obj: object) => warnings.push(obj as Record<string, unknown>) } as unknown as ServiceContext['log'],
     };
     const imp = await importStatement(ctx, statementImportQuery.parse({ accountId: s.accountA.id, fileName: 'extrato.ofx' }), {
       mime: 'application/x-ofx',

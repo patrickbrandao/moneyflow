@@ -39,7 +39,7 @@
 ## IA
 
 - Ao subir o PDF do contrato, `POST /api/contracts/document` pede ao agente dos fluxos ([011](011-agentes-de-ia.md)) uma leitura que sugere: contraparte (CNPJ/CPF → entidade cadastrada, ou dados para cadastrar), direção em relação ao titular da caixa, objeto, número, início, duração, valor total ou por parcela, periodicidade, dia de vencimento, renovação automática, aviso prévio, índice e data-base de reajuste e multa rescisória. O formulário converte em vigência (fim = início + duração) e numa obrigação (calendário pela periodicidade, valor por ocorrência, primeiro vencimento pelo dia). O usuário revisa antes de salvar; nada é gravado pela leitura. Sem agente, 501 e cadastro manual.
-- A conversão PDF → markdown usa o mesmo agente e espera até `AI_DOCUMENT_TIMEOUT_MS`.
+- A conversão PDF → markdown usa o mesmo agente e espera até `AI_DOCUMENT_CONVERT_TIMEOUT_MS` (padrão 5 min, porque a saída é o documento inteiro; a leitura espera `AI_DOCUMENT_TIMEOUT_MS`). Esgotado o prazo, a execução é cancelada e a resposta é 422 "demorou demais" (tarefa 150). Cortada pelo `max_tokens` do agente dos fluxos, a conversão falha com a mensagem que manda aumentá-lo e nenhum documento é gravado (tarefa 095).
 - Tools de contrato ([034](034-contratos-sobre-series.md)): `list_contracts`, `get_contract`, `create_contract` (com as obrigações), `update_contract`, `activate_contract`, `add_contract_obligation`, `link_series_to_contract`, `add_contract_amendment`, `terminate_contract`, `renew_contract`, os documentos (`get_contract_document`, `save_contract_markdown`, `convert_contract_pdf`) e as de série (`get_series`, `create_series`, `update_series`, `end_series` com `titleId` ou `ruleId`), todas com prévia nas escritas.
 
 ## Espelho

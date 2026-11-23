@@ -7,6 +7,8 @@ export const notificationsStrings = {
   emptyHint: 'Avisos de vencimentos, espelhos, faturas e mensagens aparecem aqui.',
   markAllRead: 'Marcar todas como lidas',
   markRead: 'Marcar como lida',
+  loadMore: 'Ver mais',
+  invalidCursor: 'Cursor inválido.',
   onlyUnread: 'Só não lidas',
   kinds: {
     agent_completed: 'Agente',

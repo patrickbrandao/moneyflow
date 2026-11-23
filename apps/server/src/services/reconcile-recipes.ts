@@ -23,7 +23,7 @@ import { appendEvent, insertMessage } from '../agents/store';
 import { type Access, type Actor, loadAccess } from '../authz/access';
 import type { Config } from '../config';
 import type { ServiceContext } from '../context';
-import { AppError, forbidden, notFound, translateDbError, unprocessable } from '../errors';
+import { AppError, errorText, forbidden, notFound, translateDbError, unprocessable } from '../errors';
 import { assertCanStartRun, exceededBudget, lockRunRate } from './ai-budgets';
 import { assertNotSuperseded, getImport } from './statements';
 import { withTx } from './tx';
@@ -648,7 +648,7 @@ async function startClaimed(tx: Tx, config: Config, row: ClaimRow): Promise<'sta
     });
     return 'started';
   } catch (error) {
-    const reason = translateDbError(error)?.message ?? (error instanceof Error ? error.message : String(error));
+    const reason = translateDbError(error)?.message ?? errorText(error, 2000);
     await closeRun(tx, row.recipe_run_id, 'failed', reason || t.errors.generic);
     return 'failed';
   }

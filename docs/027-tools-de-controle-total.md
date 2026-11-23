@@ -30,9 +30,10 @@ Os agentes passam a ter **controle completo** do MoneyFlow: tudo o que se faz pe
 ## Tools novas por categoria
 Os nomes são indicativos; o executor fecha os schemas a partir das rotas existentes.
 
-**Contratos** ([020](020-contratos.md)):
-- `list_contracts`, `get_contract` (ciclos, parcelas, documentos, tarefa de renovação);
-- `create_contract` (sempre rascunho: a tool não tem o `activate` da API), `update_contract` (vigente: só a configuração livre; a prévia recusa o resto), `activate_contract` (gera as parcelas; a prévia lista o calendário), `add_contract_amendment` e `terminate_contract` (destrutiva), com a prévia pelo `dryRun` do serviço, `decide_contract_renewal` (`approve` com o próximo ciclo em `renewal`, prévia pelo `dryRun`; `decline` exige a tarefa aberta);
+**Contratos** ([020](020-contratos.md), sobre séries desde a F20, [034](034-contratos-sobre-series.md)):
+- `list_contracts`, `get_contract` (vigência e vigências anteriores, obrigações com a próxima ocorrência e os ajustes de reconhecimento, títulos avulsos, documentos, aditivos e histórico);
+- `create_contract` (com as obrigações nasce vigente; sem elas, `activate: false` deixa em rascunho), `update_contract` (vigente: só a configuração livre; a vigência muda por `renew_contract`/`terminate_contract` e os valores por aditivo ou `update_series`), `activate_contract` (só ativa o rascunho), `add_contract_obligation` (série numa conta ou cobrança esperada no cartão), `link_series_to_contract`, `add_contract_amendment` ("esta e as próximas" nas séries escolhidas) e `terminate_contract` (destrutiva), com a prévia pelo `dryRun` do serviço, e `renew_contract` (estende a vigência e o fim das séries);
+- séries, na categoria Títulos e baixas: `get_series`, `create_series` e `update_series` (ajustes de reconhecimento na hora; valor, dia, categoria, conta ou pagadora "esta e as próximas", com as ocorrências que mudam na prévia);
 - `get_contract_document` (o markdown atual ou uma versão, com a lista de versões), `save_contract_markdown` (com `documentId`, uma versão nova, com o diff de linhas na prévia; com `contractId` e `title`, um documento markdown novo; autor `agent` e a execução na versão), `convert_contract_pdf` (PDF → markdown por IA).
 
 **Importação** (a partir de anexo):
@@ -61,7 +62,7 @@ Os nomes são indicativos; o executor fecha os schemas a partir das rotas existe
 
 **Categorias e regras**:
 - `create_category`, `update_category`, `archive_category` (admin, como a rota; `archive_category` exclui a categoria sem uso, destrutiva); `list_categories` passa para esta categoria;
-- `list_classification_rules`, `create_classification_rule`, `update_classification_rule`, `archive_classification_rule` (a regra é arquivada, como na tela; a regra global exige admin).
+- `list_classification_rules`, `create_classification_rule`, `update_classification_rule`, `archive_classification_rule` (a regra é arquivada, como na tela). Desde a F18 ([032](032-regras-de-classificacao-por-conta.md)) toda regra é de uma conta ou de um cartão, sem regra global; `copy_classification_rules` copia as de outra conta e `apply_classification_rules` (o "Aplicar regras" da tela) reclassifica as linhas novas de um lote ou de todos os lotes da conta.
 
 **Entidades** (lote F13b): `create_entity_tag`, `update_entity_tag`, `archive_entity_tag` (admin; em uso, arquivar mantém a tag nas entidades, sem uso exclui: destrutiva). Revoga a regra de [011](011-agentes-de-ia.md) de que as tags ficam fora dos agentes.
 
@@ -71,7 +72,7 @@ Os nomes são indicativos; o executor fecha os schemas a partir das rotas existe
 
 **Configuração de IA** (admin):
 - **Provedores**: `list_ai_providers`, `create_ai_provider` e `update_ai_provider` (a chave é segredo; `clearApiKey` apaga), `archive_ai_provider` (destrutiva), `test_provider`, `list_provider_models` (leituras que chamam o provedor, registradas nas Requisições como `test_connection`/`list_models`).
-- **Preços**: `list_ai_prices`, `create_ai_price` (mudar o preço = cadastrar um novo com a vigência), `delete_ai_price` (destrutiva).
+- **Preços**: `list_ai_prices`, `create_ai_price` (mudar o preço = cadastrar um novo com a vigência), `delete_ai_price` (destrutiva). O custo de cada chamada é calculado quando ela é gravada (`ai_usage`), pelo preço vigente nesse instante: cadastrar ou excluir um preço nunca recalcula o uso já gravado, e o preço que já precificou alguma chamada não pode ser excluído (a prévia e a execução recusam dizendo quantas chamadas; para corrigir, cadastre um preço novo).
 - **Agentes**: `list_ai_agents`, `create_ai_agent`, `update_ai_agent` (prompt com versão nova e nota, inferências, kit, MCP e "usar nos fluxos"), `archive_ai_agent` (destrutiva).
 - **Kits**: `list_agent_tools` (o catálogo, com filtro por tipo e categoria, para montar kits), `list_tool_kits`, `create_tool_kit`, `update_tool_kit`, `duplicate_tool_kit`, `delete_tool_kit` (destrutiva; em uso, recusa com os agentes).
 - **MCP**: `list_mcp_servers`, `create_mcp_server` e `update_mcp_server` (os nomes dos cabeçalhos secretos vêm na entrada — `secretHeaderNames`, `setHeaderNames` —, os valores são digitados no cartão; `removeHeaders`; modo das instruções), `archive_mcp_server` (destrutiva), `refresh_mcp_tools` (modo sugerido `allow`).

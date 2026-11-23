@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -75,4 +75,15 @@ O tamanho de uma linha de título foi estimado com um objeto montado com os camp
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `resultText` cortava o JSON no meio em 60 mil caracteres; `list_titles`, `list_transfers`, `list_card_purchases`, `list_contracts` e `get_audit_history` não paginavam; `get_account_statement` sem período trazia o histórico inteiro em ordem crescente; `list_agent_tools` sem filtro passava do limite e `list_ai_agents`/`list_mcp_servers` levavam prompts e schemas inteiros.
+
 ## Resolução (executor)
+
+- `packages/shared/src/agents/result.ts`: `MAX_RESULT_CHARS` e `fitResult`, que corta a lista (ou a maior lista do objeto) por item inteiro com `truncated: { field, shown, total, omitted, hint }`, corta o texto solto com a contagem e nunca devolve JSON inválido; `resultText` (runtime e `/mcp`) passa a usá-lo.
+- Paginação `offset`/`limit` com `{ items, offset, nextOffset }` (`listPage` em `tool-helpers.ts`; o serviço busca `limit + 1`): `list_titles` (máximo 100, sem os campos nulos), `list_transfers` e `list_card_purchases` (100), `list_contracts` (200) e `get_audit_history` (100). Os serviços ganharam o `offset` (`titles.ts`, `transfers.ts`, `cards.ts`, `contracts.ts`, `audit.ts`) e a ordem com o id no fim, para a página ser estável.
+- `get_account_statement`: sem `from`/`to`, a janela da tela (60 dias atrás a 30 à frente), avisada em `notes`; `limit` (padrão 150, até 300) que mantém os mais recentes, com `rowCount` e a nota dos mais antigos omitidos.
+- `list_ai_agents` sem o prompt inteiro (`systemPromptStart` e `systemPromptLength`; com `agentId`, o agente inteiro); `list_mcp_servers` com os nomes das tools e o começo das instructions (com `serverId`, o servidor inteiro); `list_agent_tools` sem as descrições e sem os falsos, e o catálogo inteiro cabe.
+- Decisão: a rota `GET /api/accounts/:id/statement` sem período ficou como está (a tela sempre manda o período, spec 004); o teto ficou na tool.
+- Spec 011 atualizada (a regra dos resultados e das listas).
+- Testes: `packages/shared/test/agents.test.ts` (`fitResult` com lista, objeto com `rows`, texto e item gigante; o catálogo cabe) e `apps/server/test/agent-tools.test.ts` (`list_titles` em três páginas sem repetir, `list_contracts` paginado, o extrato sem período e com `limit`).
+- Verificação: `pnpm verify:quick` (Biome, typecheck, os testes do shared relacionados e, passados depois de `--`, os de integração `agents`, `agent-tools`, `agent-tools-admin`, `titles`, `cards`, `contracts`, `statements`, `vision`, `reconcile-recipes`, `statement-supersede`, `autonomous` e `budgets` no Postgres local). Não rodei `verify:full` nem o e2e.
