@@ -23,7 +23,7 @@ import {
 } from '../src/services/message-worker';
 import { deliver } from '../src/services/messages';
 import { startMessageLoop } from '../src/worker';
-import { client, type Harness, scenario, startApp, uid, userSession } from './helpers';
+import { cancelLeftoverMessages, client, type Harness, scenario, startApp, uid, userSession } from './helpers';
 
 /*
  * Fase 3: relatórios (permissão por caixa e is_internal), canvas de fluxo
@@ -86,6 +86,8 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => mock.listen(0, '127.0.0.1', resolve));
   const port = (mock.address() as AddressInfo).port;
   h = await startApp({ TELEGRAM_API_BASE: `http://127.0.0.1:${port}`, TELEGRAM_TIMEOUT_MS: '3000' });
+  // O consumeOutbox reserva as mensagens mais antigas: as sobras de outros arquivos saem antes.
+  await cancelLeftoverMessages(h);
 });
 afterAll(async () => {
   await h.close();

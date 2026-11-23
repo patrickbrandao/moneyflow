@@ -8,7 +8,7 @@ import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { startAgentWorker } from '../src/agents/worker';
 import { produceMessages, produceNotifications } from '../src/services/message-worker';
-import { client, type Harness, scenario, startApp, uid, userSession } from './helpers';
+import { client, type Harness, scenario, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * Orçamentos, limite por minuto e painel de uso (spec 028), com o provedor
@@ -57,6 +57,8 @@ async function notificationsOf(userId: string) {
 beforeAll(async () => {
   llm = await startFakeLlm(0, '127.0.0.1');
   h = await startApp();
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   provider = await admin.post('/api/admin/ai/providers', {

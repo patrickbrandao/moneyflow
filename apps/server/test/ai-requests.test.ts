@@ -8,7 +8,7 @@ import { embed } from '../src/agents/llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { closeStaleAiRequests, purgeAiRequests } from '../src/agents/worker';
 import { EXCLUDED_TABLES, fullTables, loadCatalog } from '../src/services/backup/catalog';
-import { client, type Harness, newSession, startApp, uid, userSession } from './helpers';
+import { client, type Harness, newSession, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * Requisições ao provedor (spec 023), com o provedor FALSO: cada chamada vira
@@ -60,6 +60,8 @@ beforeAll(async () => {
   llm = await startFakeLlm(0, '127.0.0.1');
   // Backoff curto: as esperas de 1 s, 2 s… viram milissegundos (o retry-after continua valendo).
   h = await startApp({ AI_REQUEST_BACKOFF_MS: '5', AI_REQUEST_MAX_ATTEMPTS: '3', AI_REQUEST_RETENTION_DAYS: '30' });
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminCookie = (await userSession(h, 'admin')).cookie;
   admin = client(h, adminCookie);
   provider = await admin.post('/api/admin/ai/providers', {

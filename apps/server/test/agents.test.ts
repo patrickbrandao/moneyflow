@@ -24,7 +24,7 @@ import { loadAccess } from '../src/authz/access';
 import { translateDbError } from '../src/errors';
 import { withTx } from '../src/services/tx';
 import { type FakeMcp, startFakeMcp } from './fakes/fake-mcp';
-import { client, type Harness, newSession, scenario, startApp, uid, userSession } from './helpers';
+import { client, type Harness, newSession, scenario, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * Fase 4 (agentes de IA, spec 011), sem chamar APIs reais: provedor falso
@@ -108,6 +108,8 @@ beforeAll(async () => {
   mcp = await startFakeMcp(MCP_SECRET);
   // Backoff curto: as tentativas e as voltas à fila por erro do provedor (tarefa 074) levam milissegundos.
   h = await startApp({ AI_REQUEST_BACKOFF_MS: '5' });
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   // Anthropic compatível (base_url): modelo de texto obrigatório; cache e raciocínio ligados à mão (spec 024).

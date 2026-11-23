@@ -10,7 +10,7 @@ import { type FakeTelegram, startFakeTelegram } from '../../../e2e/fakes/fake-te
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { consumeOutbox } from '../src/services/message-worker';
 import { noteRemindersTick } from '../src/services/note-worker';
-import { client, type Harness, newSession, startApp, uid, userSession } from './helpers';
+import { cancelLeftoverMessages, client, type Harness, newSession, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * Anotações e lembretes (spec 035): visibilidade (privada, global, admin) e
@@ -38,6 +38,10 @@ let entity: { id: string; name: string };
 beforeAll(async () => {
   tg = await startFakeTelegram(0, '127.0.0.1');
   h = await startApp({ TELEGRAM_API_BASE: tg.url, TELEGRAM_TIMEOUT_MS: '3000', APP_URL: 'https://moneyflow.test' });
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
+  // O consumeOutbox reserva as mensagens mais antigas: as sobras de outros arquivos saem antes.
+  await cancelLeftoverMessages(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   aliceSession = await userSession(h);

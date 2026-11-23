@@ -1133,6 +1133,29 @@ test('prompt: editar o prompt, ver o histórico e o diff, restaurar; variáveis 
   expect(versions.map((v: { version: number }) => v.version)).toEqual([3, 2, 1]);
 });
 
+test('prompt: versões muito diferentes mostram o aviso de diff resumido (tarefa 112)', async ({ page }) => {
+  // 2.000 linhas trocadas por outras 2.000: passa do teto do diff exato (DIFF_MAX_EDITS).
+  const lines = (prefix: string) => Array.from({ length: 2000 }, (_, i) => `${prefix} ${i}`).join('\n');
+  const bigAgent = await postJson(adminApi, '/api/admin/ai/agents', {
+    name: `E2E Prompt grande ${tag}`,
+    systemPrompt: lines('Linha antiga'),
+  });
+  extraAgents.push(bigAgent.id);
+  const res = await adminApi.patch(`/api/admin/ai/agents/${bigAgent.id}`, { data: { systemPrompt: lines('Linha nova') } });
+  expect(res.ok()).toBeTruthy();
+  await enter(page);
+  await page.goto('/admin/ai/agents');
+  await page.getByRole('row').filter({ hasText: bigAgent.name }).getByRole('button', { name: 'Editar' }).click();
+  const form = page.getByRole('dialog', { name: 'Editar agente' });
+  await form.getByRole('button', { name: 'Histórico' }).click();
+  const history = page.getByRole('dialog', { name: `Histórico do prompt — ${bigAgent.name}` });
+  await history.getByLabel('A: versão 1').check();
+  await history.getByLabel('B: versão 2').check();
+  await expect(history.getByTestId('prompt-diff-truncated')).toContainText('o diff foi resumido');
+  await expect(history).toContainText('+2000');
+  await expect(history).toContainText('−2000');
+});
+
 test('Minha conta → IA: as instruções do usuário ficam salvas', async ({ page }) => {
   await enter(page);
   await page.goto('/account');

@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { type FakeMcp, startFakeMcp } from './fakes/fake-mcp';
-import { client, type Harness, newSession, scenario, startApp, uid, userSession } from './helpers';
+import { client, type Harness, newSession, scenario, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * Tools de controle total, lote F13b (spec 027), com o provedor falso:
@@ -171,6 +171,8 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => telegram.listen(0, '127.0.0.1', resolve));
   const port = (telegram.address() as AddressInfo).port;
   h = await startApp({ TELEGRAM_API_BASE: `http://127.0.0.1:${port}`, TELEGRAM_TIMEOUT_MS: '3000' });
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   viewerSession = await userSession(h);

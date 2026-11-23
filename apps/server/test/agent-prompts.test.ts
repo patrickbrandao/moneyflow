@@ -6,7 +6,7 @@ import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { startAgentWorker } from '../src/agents/worker';
 import { type FakeMcp, startFakeMcp } from './fakes/fake-mcp';
-import { client, type Harness, newSession, scenario, startApp, uid, userSession } from './helpers';
+import { client, type Harness, newSession, scenario, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * F8 (spec 022): montagem do prompt na ordem com os dois pontos de cache, instruções do usuário (Minha conta → IA),
@@ -66,6 +66,8 @@ beforeAll(async () => {
   mcp = await startFakeMcp(MCP_SECRET, { instructions: MCP_TEXT });
   bigMcp = await startFakeMcp(MCP_SECRET, { instructions: 'x'.repeat(60_000) });
   h = await startApp();
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   provider = await admin.post('/api/admin/ai/providers', {

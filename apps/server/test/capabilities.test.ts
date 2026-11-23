@@ -7,7 +7,19 @@ import { type IndexState, indexEmbeddings, syncEmbeddingSources, touchEmbeddingI
 import { resolveInference } from '../src/agents/inferences';
 import { speak, transcribe } from '../src/agents/llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
-import { client, type Harness, minimalPdf, newSession, startApp, TINY_PNG, uid, userSession } from './helpers';
+import {
+  client,
+  dropFreshDatabases,
+  freshDatabase,
+  type Harness,
+  minimalPdf,
+  newSession,
+  startApp,
+  stopLeftoverRuns,
+  TINY_PNG,
+  uid,
+  userSession,
+} from './helpers';
 
 /*
  * Capacidades dos provedores e provedor por inferência (spec 024), com o
@@ -30,7 +42,7 @@ let claude: any;
 /** OpenAI compatível com todas as flags. */
 let openai: any;
 let kit: any;
-const created = { agents: [] as string[], providers: [] as string[] };
+let created = { agents: [] as string[], providers: [] as string[] };
 
 async function newProvider(body: Record<string, unknown>) {
   const p = await admin.post('/api/admin/ai/providers', { name: `Cap ${uid()}`, apiKey: `sk-cap-${uid()}`, ...body });
@@ -95,6 +107,8 @@ const messagesCall = (marker: string) =>
 beforeAll(async () => {
   llm = await startFakeLlm(0, '127.0.0.1');
   h = await startApp();
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   claude = await newProvider({ kind: 'anthropic', baseUrl: llm.url, defaultModels: { text: 'claude-sonnet-5-5' } });
@@ -465,6 +479,43 @@ describe('visão: direta, por descrição, camada de texto do PDF e recusa', () 
 });
 
 describe('embeddings por par (provedor, modelo)', () => {
+  /*
+   * Banco novo só para estes casos (tarefa 126): a passada completa do índice
+   * lê todas as fontes do banco (entidades, títulos, mensagens…), e no banco
+   * compartilhado da suíte isso cresce com o que os outros arquivos gravaram (na
+   * suíte inteira, milhares de vetores por par, bem acima dos 30 s). Sem a
+   * conexão do dono (banco externo), segue no banco compartilhado.
+   */
+  let shared: {
+    h: Harness;
+    admin: typeof admin;
+    adminSession: typeof adminSession;
+    claude: any;
+    kit: any;
+    created: typeof created;
+  } | null = null;
+  beforeAll(async () => {
+    const url = await freshDatabase();
+    if (!url) return;
+    shared = { h, admin, adminSession, claude, kit, created };
+    created = { agents: [], providers: [] };
+    h = await startApp({}, url);
+    adminSession = await userSession(h, 'admin');
+    admin = client(h, adminSession.cookie);
+    claude = await newProvider({ kind: 'anthropic', baseUrl: llm.url, defaultModels: { text: 'claude-sonnet-5-5' } });
+    const catalog: any[] = await admin.get('/api/admin/ai/tools');
+    kit = await admin.post('/api/admin/ai/tool-kits', {
+      name: `Kit cap ${uid()}`,
+      tools: catalog.filter((x) => x.kind === 'read').map((x) => ({ name: x.name, mode: 'allow' })),
+    });
+  });
+  afterAll(async () => {
+    if (!shared) return;
+    await h.close();
+    ({ h, admin, adminSession, claude, kit, created } = shared);
+    await dropFreshDatabases();
+  });
+
   it('dois agentes com modelos diferentes geram dois índices; a busca usa o do agente; índice incompleto avisa e completa com trigramas', async () => {
     const provider = await newProvider({
       kind: 'openai',
