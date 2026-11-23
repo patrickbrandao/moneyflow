@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
@@ -95,3 +95,11 @@ Migration `database/migrations/0057_balance_queries.sql` (grupo dos saldos); tes
    - Mapear `realizedCents = balance_cents`, `scheduledCents = scheduled_cents` e `projectedCents = projected_cents`.
 3. Teste em `apps/server/test/operation.test.ts` (`describe('calendário (spec 012)')`): conta com saldo 1.000 e uma ocorrência prevista nela de 300 vencendo em 10 dias. O dia do vencimento cai para 700, e `scheduledCents` = −300 a partir dele.
 4. `docs/012`: o projetado por conta vem dos títulos com a conta prevista; os sem conta prevista só entram no da caixa.
+
+### Aplicação (app)
+
+- `apps/server/src/services/calendar.ts` (`dailyBalances` com `accountId`): `account_daily_balances(conta, de, até, todayIso())` com `realizedCents = balance_cents`, `scheduledCents = scheduled_cents` e `projectedCents = projected_cents` (nulos antes da abertura, como antes). A tela do calendário já mostrava o previsto da série escolhida: passa a ver o da conta sem mudança.
+- `docs/012-calendario.md`: o projetado da caixa e o da conta (só os títulos com ela como conta prevista; os sem conta prevista só no da caixa); linha da 012 no `docs/INDEX.md`.
+- Teste: `apps/server/test/operation.test.ts`, no `describe('calendário (spec 012)')`, "o projetado da conta desconta os previstos com ela como conta prevista": saldo 1.000 e uma ocorrência de 300 na conta vencendo em 10 dias cai para 700 no dia, com `scheduledCents` −300; o título sem conta prevista entra só no projetado da caixa.
+- Verificação: `pnpm verify:quick` (nível rápido).
+

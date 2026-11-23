@@ -11,6 +11,7 @@ import {
   lineUnmatchInput,
   pixKeyInput,
   settlementCreateInput,
+  settlementReversalDateInput,
   settlementReverseInput,
   TITLE_FILTERS,
   titleCreateInput,
@@ -449,18 +450,30 @@ export const AGENT_TOOLS = [
     category: 'titles',
     title: 'Estornar baixa',
     description:
-      'Estorna uma baixa (get_title lista as baixas do título, com o id): a baixa e a perna do espelho ficam estornadas, cada perna com conta recebe o movimento oposto e o título volta a ter o valor em aberto. Use para corrigir uma baixa errada, inclusive a criada ao casar uma linha do extrato com o título errado (desfaça antes a conciliação com unmatch_statement_line).',
+      'Estorna uma baixa (get_title lista as baixas do título, com o id): a baixa e a perna do espelho ficam estornadas, cada perna com conta recebe o movimento oposto e o título volta a ter o valor em aberto. Use para corrigir uma baixa errada, inclusive a criada ao casar uma linha do extrato com o título errado (desfaça antes a conciliação com unmatch_statement_line). Para REFAZER a baixa (trocar a conta, o valor ou a data), passe reversedOn = settledOn da própria baixa: assim o movimento original e o estorno se anulam no mesmo dia e os lotes de extrato do intervalo não ficam divergentes. Só um estorno de verdade (o dinheiro voltou depois) usa outra data. Estorno com a data errada se corrige com set_reversal_date.',
     kind: 'write',
     destructive: true,
     input: z.object({
       settlementId: id.describe('Baixa a estornar.'),
       reason: settlementReverseInput.shape.reason.describe('Motivo do estorno (fica na baixa).'),
       reversedOn: settlementReverseInput.shape.reversedOn.describe(
-        'Data do estorno (AAAA-MM-DD); omitida = hoje. Não pode ser antes da baixa.',
+        'Data do estorno (AAAA-MM-DD); omitida = hoje. Não pode ser antes da baixa. Para refazer a baixa, a data da própria baixa (settledOn).',
       ),
       undoTransfer: settlementReverseInput.shape.undoTransfer.describe(
         'Baixa paga com conta de outra caixa: true (padrão) desfaz a transferência gerada.',
       ),
+    }),
+  }),
+  define({
+    name: 'set_reversal_date',
+    category: 'titles',
+    title: 'Corrigir data do estorno',
+    description:
+      'Muda a data do estorno de uma baixa já estornada (get_title lista as baixas, com o id e reversalOn): o movimento oposto de cada perna com conta, a do espelho inclusive, passa para reversedOn, com auditoria. Use quando o estorno saiu com a data errada; ao refazer uma baixa, a data certa é a da própria baixa (settledOn). Não pode ser antes da baixa nem cair (ou sair) de um mês fechado; estorno conciliado com uma linha do extrato precisa da conciliação desfeita antes (unmatch_statement_line).',
+    kind: 'write',
+    input: z.object({
+      settlementId: id.describe('Baixa estornada (qualquer das pernas).'),
+      reversedOn: settlementReversalDateInput.shape.reversedOn.describe('Nova data do estorno (AAAA-MM-DD).'),
     }),
   }),
   define({

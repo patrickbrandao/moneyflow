@@ -17,7 +17,7 @@ import { useRegisterCommands } from '../../lib/commands';
 import { useAction } from '../../lib/hooks';
 import { accountLink } from '../../lib/links';
 import { useParamState } from '../../lib/params';
-import { Money } from '../domain';
+import { FutureEntries, Money } from '../domain';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
 import { ImportRecipesHint } from '../reconciliation/RecipesPanel';
 import { Badge, Button, EmptyRow, Field, Modal, useConfirm, useDebounced } from '../ui';
@@ -75,13 +75,16 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
     if (await run(() => api.post(`/api/accounts/${account.id}/restore`), AT.restored)) onChanged();
   }
 
-  const total = caixa.accounts.filter((a) => !a.archivedAt).reduce((sum, a) => sum + a.balanceCents, 0);
+  const active = caixa.accounts.filter((a) => !a.archivedAt);
+  const total = active.reduce((sum, a) => sum + a.balanceCents, 0);
+  const future = active.reduce((sum, a) => sum + a.futureCents, 0);
 
   return (
     <>
       <div className="mb-3 flex items-center justify-between gap-2">
         <p className="text-[13px] text-muted">
           {t.caixa.balance}: <Money cents={total} />
+          <FutureEntries cents={future} />
         </p>
         {caixa.canWrite && (
           <Button onClick={() => setEditing('new')}>
@@ -125,6 +128,7 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
                 </td>
                 <td className="num">
                   <Money cents={account.balanceCents} />
+                  <FutureEntries cents={account.futureCents} />
                 </td>
                 <td className="text-right">
                   <span className="row-actions">

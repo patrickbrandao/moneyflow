@@ -15,6 +15,7 @@ Cada conta pertence a uma única caixa.
 - **Corrente/pagamento**: banco (COMPE/ISPB), agência, conta, saldo inicial, import OFX/CSV ([009](009-extratos-e-conciliacao.md)).
 - **Cofre/dinheiro**: espécie física, lançamentos manuais e ajuste por contagem.
 - **Poupança/investimento**: aportes, resgates e rendimento lançado; sem cotação de ativos.
+- **Saldo atual** (da conta, da caixa e da visão geral, também no resumo diário do Telegram): o saldo no fim de hoje em America/Sao_Paulo (`financial_account_balances.balance_today_cents`), o mesmo do realizado do calendário no dia. O que já está lançado com data futura (uma baixa ou um avulso agendado, ou o saldo inicial de conta que abre depois de hoje) fica fora dele e aparece à parte, "R$ X lançados com data futura" (`futureCents` na API), até a data chegar (tarefa 130).
 
 ## Navegação: a caixa e a conta
 

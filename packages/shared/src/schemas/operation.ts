@@ -167,6 +167,17 @@ export const csvMappingColumns = z
 
 export const CSV_DELIMITERS = [',', ';', '\t', '|'] as const;
 export const CSV_ENCODINGS = ['utf-8', 'latin1', 'windows-1252'] as const;
+/**
+ * Sinal dos valores do CSV (tarefa 091): `as_is` como vêm, `invert` trocando todos (a fatura que traz as compras
+ * positivas, ou o banco que escreve o débito positivo). Gravado no mapeamento; nunca decidido pela maioria das linhas.
+ */
+export const CSV_AMOUNT_SIGNS = ['as_is', 'invert'] as const;
+export type CsvAmountSign = (typeof CSV_AMOUNT_SIGNS)[number];
+const csvAmountSign = z
+  .enum(CSV_AMOUNT_SIGNS)
+  .describe(
+    'Sinal dos valores: as_is (como vêm) ou invert (troca todos; a fatura do cartão com as compras positivas). Omitido na criação: invert no cartão, as_is na conta.',
+  );
 
 export const csvMappingInput = z.object({
   financialAccountId: id.nullish(),
@@ -179,6 +190,7 @@ export const csvMappingInput = z.object({
   dateFormat: requiredText(20).default('dd/MM/yyyy'),
   decimalSeparator: z.enum([',', '.']).default(','),
   columns: csvMappingColumns,
+  amountSign: csvAmountSign.optional(),
   isDefault: z.boolean().default(false),
 });
 
@@ -191,6 +203,7 @@ export const csvMappingUpdateInput = z.object({
   dateFormat: requiredText(20).optional(),
   decimalSeparator: z.enum([',', '.']).optional(),
   columns: csvMappingColumns.optional(),
+  amountSign: csvAmountSign.optional(),
   isDefault: z.boolean().optional(),
 });
 

@@ -43,13 +43,21 @@ export function readableFilter(access: Access, column = sql`c.id`) {
   )})`;
 }
 
+/**
+ * Em aberto pelo status (tarefa 093): `open_cents > 0` ⇔ aberto ou parcial pelas invariantes do banco, e o status
+ * deixa o planejador usar titles_caixa_id_status_due_date_idx em vez de ler todo o histórico da caixa.
+ */
+const openStatus = sql`tb.status IN ('open', 'partial')`;
+
 const summarySql = (today: string) => sql`
   c.id, c.name, c.kind, c.holder_entity_id, e.name AS holder_name, c.is_primary, c.description, c.archived_at, c.card_last4,
-  coalesce((SELECT sum(b.balance_cents) FROM financial_account_balances b WHERE b.caixa_id = c.id AND b.archived_at IS NULL), 0)::bigint AS balance_cents,
-  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.direction = 'payable' AND tb.archived_at IS NULL), 0)::bigint AS payable_open_cents,
-  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.direction = 'receivable' AND tb.archived_at IS NULL), 0)::bigint AS receivable_open_cents,
-  (SELECT count(*)::int FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.open_cents > 0 AND tb.archived_at IS NULL AND tb.due_date < ${today}::date) AS overdue_count,
-  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.open_cents > 0 AND tb.archived_at IS NULL AND tb.due_date < ${today}::date), 0)::bigint AS overdue_cents`;
+  -- Saldo atual = o do fim de hoje em São Paulo; o lançado com data futura vai à parte (tarefa 130).
+  coalesce((SELECT sum(b.balance_today_cents) FROM financial_account_balances b WHERE b.caixa_id = c.id AND b.archived_at IS NULL), 0)::bigint AS balance_cents,
+  coalesce((SELECT sum(b.balance_cents - b.balance_today_cents) FROM financial_account_balances b WHERE b.caixa_id = c.id AND b.archived_at IS NULL), 0)::bigint AS future_cents,
+  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND ${openStatus} AND tb.direction = 'payable' AND tb.archived_at IS NULL), 0)::bigint AS payable_open_cents,
+  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND ${openStatus} AND tb.direction = 'receivable' AND tb.archived_at IS NULL), 0)::bigint AS receivable_open_cents,
+  (SELECT count(*)::int FROM title_balances tb WHERE tb.caixa_id = c.id AND ${openStatus} AND tb.open_cents > 0 AND tb.archived_at IS NULL AND tb.due_date < ${today}::date) AS overdue_count,
+  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND ${openStatus} AND tb.open_cents > 0 AND tb.archived_at IS NULL AND tb.due_date < ${today}::date), 0)::bigint AS overdue_cents`;
 
 function toSummary(access: Access, row: Record<string, unknown>): CaixaSummary {
   const r = camel<CaixaSummary & { archivedAt: Date | null }>(row);
@@ -279,17 +287,20 @@ export async function removeMember(ctx: ServiceContext, caixaId: string, memberI
 
 export async function listAccounts(
   ctx: ServiceContext,
-  opts: { caixaId?: string; archived?: boolean; writable?: boolean } = {},
+  opts: { caixaId?: string; accountId?: string; archived?: boolean; writable?: boolean } = {},
 ): Promise<AccountRow[]> {
   if (opts.caixaId) ctx.access.assertRead(opts.caixaId);
   const result = await ctx.db.execute(sql`
     SELECT a.id, a.caixa_id, c.name AS caixa_name, a.kind, a.name, a.bank_code, a.ispb, a.branch, a.account_number,
-           a.opening_balance_cents, a.opening_date, a.archived_at, b.balance_cents, a.ai_auto_reconcile
+           a.opening_balance_cents, a.opening_date, a.archived_at, a.ai_auto_reconcile,
+           -- Saldo atual = o do fim de hoje; o lançado com data futura à parte (tarefa 130).
+           b.balance_today_cents AS balance_cents, (b.balance_cents - b.balance_today_cents)::bigint AS future_cents
       FROM financial_accounts a
       JOIN caixas c ON c.id = a.caixa_id
       JOIN financial_account_balances b ON b.financial_account_id = a.id
      WHERE ${readableFilter(ctx.access, sql`a.caixa_id`)}
        ${opts.caixaId ? sql`AND a.caixa_id = ${opts.caixaId}` : sql``}
+       ${opts.accountId ? sql`AND a.id = ${opts.accountId}` : sql``}
        ${opts.archived ? sql`` : sql`AND a.archived_at IS NULL AND c.archived_at IS NULL`}
      ORDER BY c.name, a.archived_at NULLS FIRST, a.name`);
   return result.rows

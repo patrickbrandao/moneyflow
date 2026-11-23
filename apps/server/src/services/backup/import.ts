@@ -255,6 +255,9 @@ const FLOW_PURPOSES = new Set(['document_reading', 'classify_lines', 'contract_r
  *   conversas dos fluxos em screen_context.purpose; a finalidade vem de lá.
  * - notes: a entidade (object_id) vai também em entity_id, a coluna da FK,
  *   para ser traduzida pela chave natural (spec 035).
+ * - statement_csv_mappings: um arquivo anterior ao sinal (0063, tarefa 091)
+ *   entra invertido no cartão (o padrão da migração sem evidência) e como vem
+ *   na conta.
  */
 function normalizeRow(table: string, data: BackupRow, state: { flowAgentTaken: boolean }): BackupRow {
   // A requisição ao provedor nunca vem no arquivo (spec 023): o uso entra sem o vínculo, como sem a execução.
@@ -266,6 +269,9 @@ function normalizeRow(table: string, data: BackupRow, state: { flowAgentTaken: b
   // tradução da FK (entidade casada pelo documento = o id deste banco); a gravação leva o object_id traduzido.
   if (table === 'notes' && data.object_type === 'entity' && typeof data.object_id === 'string') {
     return { ...data, entity_id: data.object_id };
+  }
+  if (table === 'statement_csv_mappings' && data.amount_sign === undefined) {
+    return { ...data, amount_sign: data.card_caixa_id ? 'invert' : 'as_is' };
   }
   if (table === 'ai_agents' && data.use_for_flows === true && state.flowAgentTaken) {
     return { ...data, use_for_flows: false };

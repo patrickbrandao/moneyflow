@@ -1,4 +1,13 @@
-import { type AccountRow, formatAccounting, type SettlementCreateInput, type TitleDetail, t, todayIso } from '@moneyflow/shared';
+import {
+  type AccountRow,
+  formatAccounting,
+  formatDate,
+  type SettlementCreateInput,
+  type SettlementReversalInfo,
+  type TitleDetail,
+  t,
+  todayIso,
+} from '@moneyflow/shared';
 import { type FormEvent, useMemo, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
@@ -180,26 +189,38 @@ export function SettlementModal({
   );
 }
 
-/** Estorno de uma baixa (e da perna do espelho), com motivo. */
+/**
+ * Estorno de uma baixa (e da perna do espelho), com motivo. Para refazer a baixa, a data certa é a dela (tarefa 045).
+ * Desfazer a transferência pede escrita na caixa da outra conta: sem ela, a opção fica desmarcada e travada (tarefa 081).
+ */
 export function ReverseModal({
   settlementId,
+  settledOn,
   hasTransfer,
+  undoAllowed,
   onClose,
   onSaved,
 }: {
   settlementId: string;
+  settledOn: string;
   hasTransfer: boolean;
+  undoAllowed: boolean;
   onClose: () => void;
   onSaved: (title: TitleDetail) => void;
 }) {
   const [reason, setReason] = useState('');
   const [reversedOn, setReversedOn] = useState(todayIso());
-  const [undoTransfer, setUndoTransfer] = useState(true);
+  const [undoTransfer, setUndoTransfer] = useState(undoAllowed);
   const { run, busy } = useAction();
   async function submit(event: FormEvent) {
     event.preventDefault();
     const saved = await run(
-      () => api.post<TitleDetail>(`/api/settlements/${settlementId}/reverse`, { reason, reversedOn, undoTransfer }),
+      () =>
+        api.post<TitleDetail>(`/api/settlements/${settlementId}/reverse`, {
+          reason,
+          reversedOn,
+          undoTransfer: undoAllowed && undoTransfer,
+        }),
       t.settlement.reversedToast,
     );
     if (saved) onSaved(saved);
@@ -212,19 +233,130 @@ export function ReverseModal({
           <input className="field" value={reason} onChange={(e) => setReason(e.target.value)} required autoFocus />
         </Field>
         <Field label={t.common.date}>
-          <input type="date" className="field" value={reversedOn} onChange={(e) => setReversedOn(e.target.value)} required />
+          <input
+            type="date"
+            className="field"
+            value={reversedOn}
+            min={settledOn}
+            onChange={(e) => setReversedOn(e.target.value)}
+            required
+          />
+          <span className="hint">
+            {t.settlement.reverseRedoHint(formatDate(settledOn))}{' '}
+            {reversedOn !== settledOn && (
+              <button type="button" className="link" onClick={() => setReversedOn(settledOn)}>
+                {formatDate(settledOn)}
+              </button>
+            )}
+          </span>
         </Field>
         {hasTransfer && (
           <label className="check">
-            <input type="checkbox" checked={undoTransfer} onChange={(e) => setUndoTransfer(e.target.checked)} /> {t.settlement.undoTransfer}
+            <input
+              type="checkbox"
+              checked={undoAllowed && undoTransfer}
+              disabled={!undoAllowed}
+              onChange={(e) => setUndoTransfer(e.target.checked)}
+            />{' '}
+            {t.settlement.undoTransfer}
           </label>
         )}
+        {hasTransfer && !undoAllowed && <p className="notice info">{t.settlement.undoTransferLocked}</p>}
         <ModalActions>
           <Button variant="ghost" onClick={onClose}>
             {t.common.cancel}
           </Button>
           <Button type="submit" variant="danger" disabled={busy || !reason.trim()}>
             {t.settlement.reverse}
+          </Button>
+        </ModalActions>
+      </form>
+    </Modal>
+  );
+}
+
+/**
+ * Corrige a data do estorno (tarefa 045): a prévia das pernas e contas que mudam (de /reversal) e a nova data, com a
+ * da baixa como sugestão. Estorno conciliado ou perna noutra caixa sem escrita: a tela explica e não deixa salvar.
+ */
+export function ReversalDateModal({
+  settlementId,
+  onClose,
+  onSaved,
+}: {
+  settlementId: string;
+  onClose: () => void;
+  onSaved: (title: TitleDetail) => void;
+}) {
+  const info = useApi<SettlementReversalInfo>(`/api/settlements/${settlementId}/reversal`);
+  const [reversedOn, setReversedOn] = useState<string | null>(null);
+  const { run, busy } = useAction();
+  const data = info.data;
+  const date = reversedOn ?? data?.settledOn ?? '';
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const saved = await run(
+      () => api.post<TitleDetail>(`/api/settlements/${settlementId}/reversal-date`, { reversedOn: date }),
+      t.settlement.reversalDateSaved,
+    );
+    if (saved) onSaved(saved);
+  }
+  return (
+    <Modal open title={t.settlement.reversalDate} onClose={onClose}>
+      <form onSubmit={submit} className="form-grid">
+        <p className="d">{t.settlement.reversalDateHint}</p>
+        <Field label={t.settlement.reversalNewDate}>
+          <input
+            type="date"
+            className="field"
+            value={date}
+            min={data?.settledOn}
+            onChange={(e) => setReversedOn(e.target.value)}
+            required
+            disabled={!data}
+          />
+          {data && <span className="hint">{t.settlement.reverseRedoHint(formatDate(data.settledOn))}</span>}
+        </Field>
+        {data && (
+          <div>
+            <span className="label">{t.settlement.reversalLegs}</span>
+            <div className="item-list">
+              {data.legs.map((leg) => (
+                <div key={leg.settlementId} className="item">
+                  <div className="grow text-[13px]">
+                    <div className="text-ink">
+                      {leg.caixaName}
+                      {leg.accountName ? ` · ${leg.accountName}` : ''}
+                    </div>
+                    <div className="text-[12px] text-muted">
+                      {leg.occurredOn
+                        ? `${formatDate(leg.occurredOn)} → ${date ? formatDate(date) : '—'}`
+                        : t.settlement.reversalNoMovement}
+                      {leg.reconciled && ` · ${t.settlement.reversalReconciled}`}
+                      {leg.occurredOn && !leg.canWrite && ` · ${t.settlement.reversalReadOnly}`}
+                    </div>
+                  </div>
+                  {leg.amountCents !== null && <span className="money">{formatAccounting(leg.amountCents)}</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {data && !data.canChange && (
+          <p className="notice warn">
+            {data.legs.some((l) => l.reconciled)
+              ? t.settlement.reversalReconciled
+              : data.legs.some((l) => l.occurredOn && !l.canWrite)
+                ? t.errors.reversalDateOtherCaixa
+                : t.settlement.reversalNoMovement}
+          </p>
+        )}
+        <ModalActions>
+          <Button variant="ghost" onClick={onClose}>
+            {t.common.cancel}
+          </Button>
+          <Button type="submit" disabled={busy || !data?.canChange || !date}>
+            {t.common.save}
           </Button>
         </ModalActions>
       </form>

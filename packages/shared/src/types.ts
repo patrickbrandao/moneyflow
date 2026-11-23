@@ -155,7 +155,10 @@ export type CaixaSummary = {
   /** Cartão: 4 últimos dígitos (null em caixa geral). */
   cardLast4: string | null;
   myRole: EffectiveRole;
+  /** Saldo das contas ativas no fim de hoje (São Paulo), sem o lançado com data futura (tarefa 130). */
   balanceCents: number;
+  /** O que já está lançado com data futura nas contas ativas (fora do `balanceCents`). */
+  futureCents: number;
   payableOpenCents: number;
   receivableOpenCents: number;
   overdueCount: number;
@@ -177,7 +180,10 @@ export type AccountRow = {
   openingBalanceCents: number;
   openingDate: string;
   archivedAt: string | null;
+  /** Saldo no fim de hoje (São Paulo), sem o lançado com data futura (tarefa 130). */
   balanceCents: number;
+  /** O que já está lançado com data futura (inclusive o saldo inicial de conta que abre no futuro). */
+  futureCents: number;
   canWrite: boolean;
   /** "Conciliar com IA ao importar" (spec 029). */
   aiAutoReconcile: boolean;
@@ -279,10 +285,43 @@ export type SettlementRow = {
   mirrorSettlementId: string | null;
   transferId: string | null;
   transferOtherAccountName: string | null;
+  /** Quem estorna pode desfazer a transferência: edita as caixas das duas contas (tarefa 081). */
+  transferUndoAllowed: boolean;
   notes: string | null;
   reversedAt: string | null;
   reversalReason: string | null;
+  /** Data do movimento de estorno desta perna (nula sem conta ou sem estorno; tarefa 045). */
+  reversalOn: string | null;
   createdAt: string;
+};
+
+/** Uma perna da baixa estornada e o movimento de estorno dela (tarefa 045). */
+export type SettlementReversalLeg = {
+  settlementId: string;
+  titleId: string;
+  caixaId: string;
+  caixaName: string;
+  financialAccountId: string | null;
+  /** Nula quando quem pergunta não lê a caixa da perna. */
+  accountName: string | null;
+  /** Movimento de estorno: nulo sem conta. */
+  movementId: string | null;
+  occurredOn: string | null;
+  amountCents: number | null;
+  /** Conciliado com uma linha do extrato: a data não muda (desfaça a conciliação antes). */
+  reconciled: boolean;
+  canWrite: boolean;
+};
+
+/** A baixa estornada com as pernas, para corrigir a data do estorno (tarefa 045). */
+export type SettlementReversalInfo = {
+  settlementId: string;
+  titleId: string;
+  settledOn: string;
+  reversedAt: string | null;
+  legs: SettlementReversalLeg[];
+  /** Estornada, com algum movimento a mudar, todos em caixas que quem pergunta edita e nenhum conciliado. */
+  canChange: boolean;
 };
 
 export type RecurrenceRuleDto = {
@@ -452,7 +491,7 @@ export type AccountSummary = {
 };
 
 export type Overview = {
-  totals: { balanceCents: number; payableOpenCents: number; receivableOpenCents: number; overdueCents: number };
+  totals: { balanceCents: number; futureCents: number; payableOpenCents: number; receivableOpenCents: number; overdueCents: number };
   caixas: CaixaSummary[];
   overdue: TitleRow[];
   upcoming: TitleRow[];
@@ -850,6 +889,8 @@ export type CsvMappingRow = {
   dateFormat: string;
   decimalSeparator: string;
   columns: Record<string, string | number>;
+  /** Sinal dos valores do arquivo (tarefa 091): como vêm ou invertidos. */
+  amountSign: 'as_is' | 'invert';
   isDefault: boolean;
 };
 

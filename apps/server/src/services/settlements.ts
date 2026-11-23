@@ -1,8 +1,10 @@
 import { type Executor, financialAccounts, movements, settlements, type Tx, titles, transfers } from '@moneyflow/db';
 import {
   diffDays,
+  type SettlementReversalInfo,
   type settlementAccountInput,
   type settlementCreateInput,
+  type settlementReversalDateInput,
   type settlementReverseInput,
   t as strings,
   type TitleDetail,
@@ -277,6 +279,98 @@ export async function reverseSettlement(
         );
     }
     return title.id;
+  });
+  return getTitle(ctx, titleId);
+}
+
+/* ---- data do estorno (tarefa 045) ---- */
+
+type ReversalRow = {
+  settlement_id: string;
+  title_id: string;
+  caixa_id: string;
+  caixa_name: string;
+  settled_on: string;
+  reversed_at: Date | string | null;
+  movement_id: string | null;
+  financial_account_id: string | null;
+  account_name: string | null;
+  occurred_on: string | null;
+  amount_cents: number | string | null;
+  statement_line_id: string | null;
+};
+
+/** As pernas da baixa (a pedida primeiro) e o movimento de estorno de cada uma, por settlement_reversal_movements. */
+async function reversalRows(db: Executor, settlementId: string) {
+  const result = await db.execute<ReversalRow>(sql`
+    SELECT x.settlement_id, x.title_id, x.caixa_id, c.name AS caixa_name, x.settled_on, x.reversed_at, x.movement_id,
+           x.financial_account_id, a.name AS account_name, x.occurred_on, x.amount_cents, x.statement_line_id
+      FROM settlement_reversal_movements(${settlementId}::uuid) x
+      JOIN caixas c ON c.id = x.caixa_id
+      LEFT JOIN financial_accounts a ON a.id = x.financial_account_id
+     ORDER BY x.settlement_id = ${settlementId}::uuid DESC, x.settlement_id`);
+  return result.rows;
+}
+
+function toReversalInfo(ctx: ServiceContext, rows: ReversalRow[]): SettlementReversalInfo {
+  const first = rows[0]!;
+  const legs = rows.map((r) => ({
+    settlementId: r.settlement_id,
+    titleId: r.title_id,
+    caixaId: r.caixa_id,
+    caixaName: r.caixa_name,
+    financialAccountId: ctx.access.canRead(r.caixa_id) ? r.financial_account_id : null,
+    accountName: ctx.access.canRead(r.caixa_id) ? r.account_name : null,
+    movementId: r.movement_id,
+    occurredOn: r.occurred_on,
+    amountCents: r.amount_cents === null ? null : Number(r.amount_cents),
+    reconciled: r.statement_line_id !== null,
+    canWrite: ctx.access.canWrite(r.caixa_id),
+  }));
+  const moving = legs.filter((l) => l.movementId);
+  return {
+    settlementId: first.settlement_id,
+    titleId: first.title_id,
+    settledOn: first.settled_on,
+    reversedAt: first.reversed_at ? new Date(first.reversed_at).toISOString() : null,
+    legs,
+    canChange:
+      first.reversed_at !== null &&
+      ctx.access.canWrite(first.caixa_id) &&
+      moving.length > 0 &&
+      moving.every((l) => l.canWrite && !l.reconciled),
+  };
+}
+
+/** A baixa estornada com as pernas e os movimentos de estorno: a prévia da correção da data (tela e tool). */
+export async function reversalInfo(ctx: ServiceContext, settlementId: string): Promise<SettlementReversalInfo> {
+  const rows = await reversalRows(ctx.db, settlementId);
+  if (rows.length === 0) throw notFound();
+  ctx.access.assertRead(rows[0]!.caixa_id);
+  return toReversalInfo(ctx, rows);
+}
+
+/**
+ * Corrige a data do estorno (tarefa 045): o movimento de estorno de cada perna com conta, a do espelho inclusive,
+ * passa para `reversedOn`, numa transação só (settlement_reversal_set_date, com a auditoria do ator). Escrita na
+ * caixa da baixa pedida e nas caixas das pernas que mudam; o banco recusa a data antes da baixa, o mês fechado (na
+ * data antiga ou na nova, em qualquer perna) e o estorno conciliado com uma linha do extrato.
+ */
+export async function setReversalDate(
+  ctx: ServiceContext,
+  settlementId: string,
+  input: z.output<typeof settlementReversalDateInput>,
+): Promise<TitleDetail> {
+  const titleId = await withTx(ctx, async (tx) => {
+    const rows = await reversalRows(tx, settlementId);
+    const first = rows[0];
+    if (!first) throw notFound();
+    ctx.access.assertWrite(first.caixa_id);
+    if (!first.reversed_at) throw unprocessable(strings.errors.settlementNotReversed, 'settlement_not_reversed');
+    if (diffDays(first.settled_on, input.reversedOn) < 0) throw unprocessable(strings.errors.reversalBeforeSettlement);
+    if (rows.some((r) => r.movement_id && !ctx.access.canWrite(r.caixa_id))) throw forbidden(strings.errors.reversalDateOtherCaixa);
+    await tx.execute(sql`SELECT movement_id FROM settlement_reversal_set_date(${settlementId}::uuid, ${input.reversedOn}::date)`);
+    return first.title_id;
   });
   return getTitle(ctx, titleId);
 }

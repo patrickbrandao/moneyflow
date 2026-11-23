@@ -15,11 +15,12 @@ export async function overview(ctx: ServiceContext): Promise<Overview> {
     listTitles(ctx, { status: 'pending_acceptance', archived: false, limit: 50 }, { writableOnly: true }),
     listTitles(ctx, { status: 'pending_account', archived: false, limit: 50 }, { writableOnly: true }),
   ]);
-  const sum = (key: 'balanceCents' | 'payableOpenCents' | 'receivableOpenCents' | 'overdueCents') =>
+  const sum = (key: 'balanceCents' | 'futureCents' | 'payableOpenCents' | 'receivableOpenCents' | 'overdueCents') =>
     caixas.reduce((acc, c) => acc + c[key], 0);
   return {
     totals: {
       balanceCents: sum('balanceCents'),
+      futureCents: sum('futureCents'),
       payableOpenCents: sum('payableOpenCents'),
       receivableOpenCents: sum('receivableOpenCents'),
       overdueCents: sum('overdueCents'),

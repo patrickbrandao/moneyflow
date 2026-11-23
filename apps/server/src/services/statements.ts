@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto';
 import { attachments, type Executor, statementCsvMappings, statementImports, statementLines, type Tx } from '@moneyflow/db';
 import {
   addDays,
+  applyCsvAmountSign,
   applyCsvMapping,
   type CardChargeOccurrence,
   type CardChargeSuggestion,
+  type CsvAmountSign,
   type CsvMapping,
   cardChargeMatch,
   csvBankBalance,
@@ -18,6 +20,7 @@ import {
   type importRenameInput,
   type LineStatus,
   type MatchCandidate,
+  normalizeDescription,
   normalizeDescriptionForDedup,
   type ObligationMatch,
   type OfxInspectStatement,
@@ -192,11 +195,17 @@ async function findMapping(db: Executor, target: StatementTarget, mappingId?: st
   return row ?? null;
 }
 
-/** Mapeamento CSV ainda não salvo (prévia da tool import_statement, spec 027). */
+/** Mapeamento CSV ainda não salvo (prévia da tool import_statement, spec 027); sem o sinal, o padrão do alvo. */
 export type InlineCsvMapping = Pick<
   typeof statementCsvMappings.$inferSelect,
   'delimiter' | 'encoding' | 'hasHeader' | 'skipRows' | 'dateFormat' | 'decimalSeparator' | 'columns'
->;
+> & { amountSign?: string };
+
+/**
+ * Sinal do mapeamento criado sem ele (tarefa 091), o mesmo da migração sem evidência: a fatura do cartão em CSV
+ * costuma trazer as compras positivas (spec 009), e a conta vem como está.
+ */
+export const defaultCsvAmountSign = (target: { kind: 'account' | 'card' }): CsvAmountSign => (target.kind === 'card' ? 'invert' : 'as_is');
 
 /**
  * Lê o arquivo (OFX ou CSV com o mapeamento) e devolve as linhas no ponto de
@@ -244,10 +253,8 @@ export async function parseStatementFile(
     fitid: line.fitid,
     raw: line.raw as Record<string, unknown>,
   }));
-  // Fatura de cartão em CSV costuma trazer compras positivas: no app, compra sai (−).
-  if (target.kind === 'card' && lines.filter((l) => l.amountCents > 0).length > lines.length / 2) {
-    lines = lines.map((l) => ({ ...l, amountCents: -l.amountCents }));
-  }
+  // O sinal é o do mapeamento (tarefa 091), nunca a maioria das linhas do arquivo: no app, compra e débito saem (−).
+  lines = applyCsvAmountSign(lines, (mapping.amountSign as CsvAmountSign | undefined) ?? defaultCsvAmountSign(target));
   return {
     format: 'csv',
     lines,
@@ -590,11 +597,13 @@ export async function rulesFor(
   lines: { description: string; amountCents: number }[],
 ): Promise<(Rule | null)[]> {
   if (lines.length === 0) return [];
-  const items = lines.map((l, i) => ({ i, d: l.description, v: l.amountCents }));
+  // A descrição normalizada vai junto (tarefa 076): a regra aprendida guarda o padrão normalizado
+  // (rulePatternOf), sem acentos, pontuação, números de documento nem datas, e casa por ela.
+  const items = lines.map((l, i) => ({ i, d: l.description, v: l.amountCents, n: normalizeDescription(l.description) }));
   const result = await tx.execute<{ i: number; id: string; entity_id: string | null; category_id: string | null }>(sql`
     WITH x AS MATERIALIZED (
-      SELECT x.i, classification_rule_for(${target.accountId}::uuid, ${target.cardCaixaId}::uuid, x.d, x.v) AS rule_id
-        FROM json_to_recordset(${JSON.stringify(items)}::json) AS x(i int, d text, v bigint))
+      SELECT x.i, classification_rule_for(${target.accountId}::uuid, ${target.cardCaixaId}::uuid, x.d, x.v, x.n) AS rule_id
+        FROM json_to_recordset(${JSON.stringify(items)}::json) AS x(i int, d text, v bigint, n text))
     SELECT x.i, r.id, r.entity_id, r.category_id FROM x JOIN classification_rules r ON r.id = x.rule_id`);
   const out: (Rule | null)[] = lines.map(() => null);
   for (const row of result.rows) out[Number(row.i)] = { id: row.id, entityId: row.entity_id, categoryId: row.category_id };
@@ -1107,7 +1116,9 @@ const importSql = sql`
          -- Lote substituído (spec 031): fora da divergência.
          CASE WHEN i.superseded_by_import_id IS NULL THEN b.app_balance_cents END AS app_balance_cents,
          CASE WHEN i.superseded_by_import_id IS NULL THEN b.difference_cents END AS difference_cents,
-         CASE WHEN i.superseded_by_import_id IS NULL THEN b.difference_cents - prev.difference_cents END AS interval_difference_cents,
+         -- Divergência do intervalo (spec 009): a do lote menos a do anterior com saldo, calculada pela visão sem
+         -- somar desde a abertura (tarefa 092).
+         CASE WHEN i.superseded_by_import_id IS NULL THEN b.interval_difference_cents END AS interval_difference_cents,
          a.opening_date AS account_opening_date,
          b.lines AS line_count, b.matched_lines, b.suggested_lines, b.new_lines, b.ignored_lines, u.username AS imported_by, i.created_at,
          i.provisional,
@@ -1124,18 +1135,7 @@ const importSql = sql`
     LEFT JOIN financial_accounts a ON a.id = b.financial_account_id
     LEFT JOIN users u ON u.id = i.imported_by_user_id
     LEFT JOIN statement_imports si ON si.id = i.superseded_by_import_id
-    LEFT JOIN attachments sf ON sf.id = si.attachment_id
-    -- Divergência do intervalo (spec 009): a acumulada menos a do lote anterior com saldo, na ordem da data do saldo.
-    LEFT JOIN LATERAL (
-      SELECT pb.difference_cents
-        FROM statement_import_balances pb
-        JOIN statement_imports pi ON pi.id = pb.statement_import_id
-       WHERE pb.financial_account_id = b.financial_account_id AND pb.bank_balance_on IS NOT NULL
-         AND pi.superseded_by_import_id IS NULL
-         AND (pb.bank_balance_on, pi.created_at) < (b.bank_balance_on, i.created_at)
-       ORDER BY pb.bank_balance_on DESC, pi.created_at DESC
-       LIMIT 1
-    ) prev ON b.bank_balance_on IS NOT NULL`;
+    LEFT JOIN attachments sf ON sf.id = si.attachment_id`;
 
 const toImport = (row: Record<string, unknown>): StatementImportSummary => {
   const r = camel<StatementImportSummary>(row);

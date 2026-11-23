@@ -251,6 +251,9 @@ export const ptBR = {
     settlementReversed: 'Esta baixa já foi estornada.',
     settlementHasAccount: 'Esta baixa já tem conta definida.',
     reversalBeforeSettlement: 'O estorno não pode ser antes da data da baixa.',
+    /** Data do estorno (tarefa 045). */
+    settlementNotReversed: 'Esta baixa não está estornada.',
+    reversalDateOtherCaixa: 'O estorno tem uma perna noutra caixa que você não edita: peça a quem edita aquela caixa para corrigir a data.',
     transferFromSettlement: 'Esta transferência nasceu de uma baixa: estorne a baixa.',
     undoTransferOtherCaixa:
       'A transferência desta baixa mexe numa conta de outra caixa que você não edita: estorne sem desfazer a transferência ou peça a quem edita aquela caixa.',
@@ -468,6 +471,9 @@ export const ptBR = {
     payables: 'A pagar',
     receivables: 'A receber',
     balance: 'Saldo das contas',
+    /** O saldo atual é o do fim de hoje; o lançado com data futura vai à parte (tarefa 130). */
+    futureEntries: (amount: string) => `${amount} lançados com data futura`,
+    futureEntriesHint: 'Já lançados com data depois de hoje: ficam fora do saldo atual e entram no dia deles.',
     payableOpen: 'A pagar em aberto',
     receivableOpen: 'A receber em aberto',
     hiddenCategories: 'Categorias ocultas',
@@ -742,6 +748,23 @@ export const ptBR = {
     registered: 'Baixa registrada.',
     reversedToast: 'Baixa estornada.',
     reverseHint: 'O estorno lança o movimento oposto na conta (o histórico fica) e reabre o saldo do título.',
+    /** Para refazer a baixa, o estorno na data dela (tarefa 045). */
+    reverseRedoHint: (date: string) =>
+      `Para refazer a baixa (trocar a conta, o valor ou a data), estorne na data dela, ${date}: o movimento original e o estorno se anulam no mesmo dia.`,
+    reverseOtherDate: (settledOn: string, reversedOn: string) =>
+      `A baixa é de ${settledOn} e o estorno cai em ${reversedOn}: entre as duas datas o movimento e o estorno valem ao mesmo tempo no saldo da conta.`,
+    undoTransferLocked: 'A transferência mexe numa conta de outra caixa que você não edita: o estorno mantém a transferência.',
+    /** Corrigir a data do estorno (tarefa 045). */
+    reversalDate: 'Corrigir data do estorno',
+    reversalDateHint:
+      'Muda a data do movimento de estorno em cada perna com conta (a do espelho inclusive). Para refazer a baixa, a data certa é a da própria baixa.',
+    reversalOn: (date: string) => `Estorno em ${date}`,
+    reversalNewDate: 'Nova data do estorno',
+    reversalLegs: 'Movimentos que mudam',
+    reversalNoMovement: 'Sem conta: nada a mudar nesta perna.',
+    reversalReconciled: 'Conciliado com o extrato: desfaça a conciliação antes.',
+    reversalReadOnly: 'Você não edita esta caixa.',
+    reversalDateSaved: 'Data do estorno corrigida.',
     accountSet: 'Conta definida.',
   },
 

@@ -168,6 +168,9 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   settlements_account_immutable_check: 'A conta da baixa só pode ser definida uma vez, enquanto ela estiver ativa.',
   settlements_immutable_check: 'Baixa não se edita: estorne e lance de novo.',
   settlements_reversal_check: 'Informe o motivo do estorno.',
+  /** Data do estorno (tarefa 045): settlement_reversal_set_date. */
+  settlements_reversal_date_check: 'A baixa não está estornada, ou a data do estorno é anterior à da baixa.',
+  settlements_reversal_reconciled_check: 'O estorno está conciliado com uma linha do extrato: desfaça a conciliação antes de mudar a data.',
   settlements_mirror_match_check: 'As duas pernas da baixa do espelho precisam ser iguais.',
   settlements_mirror_title_check: 'As pernas da baixa precisam estar no par de títulos espelhados.',
   // movimentos e transferências

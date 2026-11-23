@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { type Database, pg, userColumns, users } from '@moneyflow/db';
-import { AGENT_TOOLS, formatBRL, SseParser } from '@moneyflow/shared';
+import { AGENT_TOOLS, formatBRL, SseParser, t } from '@moneyflow/shared';
 import { eq, type SQL, sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { FastifyBaseLogger } from 'fastify';
@@ -1718,7 +1718,9 @@ describe('conciliação pelo agente', () => {
         { label: 'Motivo', after: reversal.reason },
       ]),
     );
-    expect(card.preview.warnings).toHaveLength(1);
+    // O estorno no dia seguinte ao da baixa: a prévia avisa e orienta a data da baixa para refazer (tarefa 045).
+    expect(card.preview.warnings).toHaveLength(2);
+    expect(card.preview.warnings[1]).toContain(t.settlement.reverseOtherDate('22/10/2026', '23/10/2026'));
     await admin.post(`/api/runs/${asked.runId}/confirmations`, { decision: 'approved' });
     await drain();
     expect((await runStatus(asked.runId)).status).toBe('completed');

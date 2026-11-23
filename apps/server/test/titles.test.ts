@@ -1,6 +1,7 @@
-import { addMonths, daysInMonth, todayIso } from '@moneyflow/shared';
+import { addDays, addMonths, daysInMonth, t, todayIso } from '@moneyflow/shared';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { materializeAll, materializeRule } from '../src/services/recurrence';
+import { MATERIALIZE_LOCK, materializeAll, materializeRule } from '../src/services/recurrence';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
 let h: Harness;
@@ -511,6 +512,66 @@ describe('esta e as próximas no formulário do título (tarefa 075)', () => {
     // Termina na última: os testes seguintes do arquivo contam o que o worker cria.
     await admin.post(`/api/series/${ruleId}/end`, { endsOn: last.dueDate });
   });
+
+  it('a mudança espera a materialização em curso e alcança a ocorrência nova (tarefa 149)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const first = await admin.post('/api/titles', {
+      ...base(s),
+      description: 'Mensalidade',
+      dueDate: today,
+      competenceDate: today,
+      amountCents: 40_000,
+      mirrorCaixaId: null,
+      series: { kind: 'recurrence', frequency: 'monthly' },
+    });
+    const ruleId = first.recurrenceRuleId;
+    const before = await seriesOf(admin, s.caixaA.id, ruleId);
+
+    // Um "worker" segura a trava da série e materializa depois que a mudança já pediu a trava.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => {
+      holding = resolve;
+    });
+    let created = 0;
+    const worker = h.db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${ruleId}))`);
+      holding();
+      await released;
+      created = await materializeRule(tx, ruleId, addMonths(today, 14));
+    });
+    await held;
+    const second = await admin.get(`/api/titles/${before[1]!.id}`);
+    const patch = admin.patch(`/api/titles/${second.id}`, formBody(second, { amountCents: 45_000 }));
+    // A mudança fica esperando a trava da série (a mesma chave do worker).
+    let waiting = 0;
+    try {
+      for (let i = 0; i < 60 && waiting === 0; i++) {
+        const locks = await h.db.execute<{ n: number }>(sql`
+          SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = ${MATERIALIZE_LOCK}`);
+        waiting = Number(locks.rows[0]?.n ?? 0);
+        if (waiting === 0) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      release();
+      await worker;
+      await patch;
+    }
+    expect(waiting).toBe(1);
+    expect(created).toBeGreaterThan(0);
+
+    const after = await seriesOf(admin, s.caixaA.id, ruleId);
+    expect(after).toHaveLength(before.length + created);
+    expect(after[0]!.amountCents).toBe(40_000);
+    // Inclusive as que o worker criou com o modelo de antes: a mudança as viu depois da trava.
+    expect(after.slice(1).every((t) => t.amountCents === 45_000)).toBe(true);
+    await admin.post(`/api/series/${ruleId}/end`, { endsOn: after.at(-1)!.dueDate });
+  });
 });
 
 describe('encerrar série (spec 005)', () => {
@@ -662,5 +723,221 @@ describe('listagem cortada e os totais do filtro (tarefa 116)', () => {
     // Sem acesso à caixa, os totais respondem 404, como a lista.
     const outsider = client(h, (await userSession(h)).cookie);
     await outsider.get(`/api/titles/totals?caixaId=${s.caixaA.id}`, 404);
+  });
+});
+
+describe('saldo em aberto pelo status (tarefa 093)', () => {
+  it('a caixa e a visão geral somam só o aberto e o parcial, com o estornado de volta em aberto', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const past = addDays(today, -5);
+    const future = addDays(today, 5);
+    const title = (amountCents: number, dueDate: string, direction: 'payable' | 'receivable' = 'payable') =>
+      admin.post('/api/titles', {
+        ...base(s),
+        direction,
+        categoryId: direction === 'payable' ? s.expense.id : s.income.id,
+        description: `Aberto ${amountCents}`,
+        competenceDate: dueDate,
+        dueDate,
+        amountCents,
+        mirrorCaixaId: null,
+      });
+    const pay = (id: string, amountCents: number) =>
+      admin.post(`/api/titles/${id}/settlements`, { settledOn: past, amountCents, financialAccountId: s.accountA.id });
+
+    await title(10_000, past); // aberto e vencido
+    const partial = await title(9_000, past); // parcial e vencido: 5.000 em aberto
+    await pay(partial.id, 4_000);
+    const paid = await title(7_000, past); // pago: fora
+    await pay(paid.id, 7_000);
+    const canceled = await title(3_000, past); // cancelado: fora
+    await admin.post(`/api/titles/${canceled.id}/cancel`, {});
+    const archived = await title(2_000, past); // arquivado (tem baixa estornada): fora
+    const archivedPaid = await pay(archived.id, 2_000);
+    await admin.post(`/api/settlements/${archivedPaid.settlements[0].id}/reverse`, { reason: 'Errado', reversedOn: past });
+    expect(await admin.del(`/api/titles/${archived.id}`)).toMatchObject({ archived: true });
+    const reversed = await title(6_000, future); // pago e estornado: volta a 6.000 em aberto, a vencer
+    const reversedPaid = await pay(reversed.id, 6_000);
+    await admin.post(`/api/settlements/${reversedPaid.settlements[0].id}/reverse`, { reason: 'Refazer', reversedOn: past });
+    await title(8_000, future, 'receivable');
+
+    const expected = {
+      payableOpenCents: 10_000 + 5_000 + 6_000,
+      receivableOpenCents: 8_000,
+      overdueCount: 2,
+      overdueCents: 15_000,
+    };
+    expect(await admin.get(`/api/caixas/${s.caixaA.id}`)).toMatchObject(expected);
+    const overview = await admin.get('/api/overview');
+    expect(overview.caixas.find((c: { id: string }) => c.id === s.caixaA.id)).toMatchObject(expected);
+    // A lista de vencidos da visão geral corta em 50 de todas as caixas: confere-se a da caixa, pelo mesmo filtro.
+    const overdueHere = await admin.get(`/api/titles?caixaId=${s.caixaA.id}&status=overdue`);
+    expect(overdueHere.map((t: { openCents: number }) => t.openCents).sort((a: number, b: number) => a - b)).toEqual([5_000, 10_000]);
+    const unpaid = await admin.get(`/api/titles/totals?caixaId=${s.caixaA.id}&status=unpaid`);
+    expect(unpaid).toMatchObject({ count: 4, openCents: 10_000 + 5_000 + 6_000 + 8_000 });
+  });
+});
+
+describe('busca de títulos (tarefa 147)', () => {
+  it('acha pelo trecho da descrição e pelo nome da entidade', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const byDescription = await admin.post('/api/titles', {
+      ...base(s),
+      description: `Manutenção do elevador ${s.tag}`,
+      mirrorCaixaId: null,
+    });
+    const other = await admin.post('/api/entities', { kind: 'company', name: `Zeladoria Ômega ${s.tag}` });
+    const byEntity = await admin.post('/api/titles', {
+      ...base(s),
+      entityId: other.id,
+      description: 'Serviço mensal',
+      mirrorCaixaId: null,
+    });
+    const ids = async (q: string) =>
+      (await admin.get(`/api/titles?caixaId=${s.caixaA.id}&q=${encodeURIComponent(q)}`)).map((r: { id: string }) => r.id);
+
+    expect(await ids(`elevador ${s.tag}`)).toEqual([byDescription.id]);
+    expect(await ids('ELEVADOR')).toEqual([byDescription.id]);
+    expect(await ids(`ômega ${s.tag}`)).toEqual([byEntity.id]);
+    // O mesmo texto na descrição de um e no nome da entidade de outro: os dois.
+    expect((await ids(s.tag)).sort()).toEqual([byDescription.id, byEntity.id].sort());
+    expect(await ids('nada-disso-aqui')).toEqual([]);
+    expect((await admin.get(`/api/titles/totals?caixaId=${s.caixaA.id}&q=${encodeURIComponent(`ômega ${s.tag}`)}`)).count).toBe(1);
+  });
+});
+
+/** OFX mínimo de uma conta (SGML), para conciliar uma linha com um movimento. */
+function ofxOf(lines: { date: string; cents: number; memo: string }[]) {
+  const key = Math.random().toString(36).slice(2, 10);
+  const trn = lines
+    .map(
+      (l, i) =>
+        `<STMTTRN><TRNTYPE>${l.cents < 0 ? 'DEBIT' : 'CREDIT'}</TRNTYPE><DTPOSTED>${l.date.replaceAll('-', '')}120000</DTPOSTED>` +
+        `<TRNAMT>${(l.cents / 100).toFixed(2)}</TRNAMT><FITID>${key}-${i}</FITID><NAME>${l.memo}</NAME></STMTTRN>`,
+    )
+    .join('\n');
+  const dates = lines.map((l) => l.date.replaceAll('-', '')).sort();
+  return Buffer.from(`OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+
+<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>BRL</CURDEF>
+<BANKACCTFROM><BANKID>077</BANKID><ACCTID>9</ACCTID><ACCTTYPE>CHECKING</ACCTTYPE></BANKACCTFROM>
+<BANKTRANLIST><DTSTART>${dates[0]}</DTSTART><DTEND>${dates.at(-1)}</DTEND>
+${trn}
+</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`);
+}
+
+describe('data do estorno (tarefa 045)', () => {
+  it('muda as duas pernas com auditoria; recusa antes da baixa, mês fechado, estorno conciliado e quem não edita a outra caixa', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    // A pagar na A contra o titular da B: espelho aceito, baixa com as duas pernas com conta.
+    const title = await admin.post('/api/titles', { ...base(s), amountCents: 43_210, dueDate: '2026-10-15' });
+    expect(title.mirror).not.toBeNull();
+    const paid = await admin.post(`/api/titles/${title.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 43_210,
+      financialAccountId: s.accountA.id,
+      mirrorAccountId: s.accountB.id,
+    });
+    const settlementId = paid.settlements[0].id;
+    // Sem a data, o estorno cai hoje (o caso do agente que estornou para refazer a baixa).
+    const reversed = await admin.post(`/api/settlements/${settlementId}/reverse`, { reason: 'Refazer na outra conta' });
+    expect(reversed.settlements[0]).toMatchObject({ reversalOn: today });
+
+    const info = await admin.get(`/api/settlements/${settlementId}/reversal`);
+    expect(info).toMatchObject({ settlementId, titleId: title.id, settledOn: '2026-10-15', canChange: true });
+    expect(info.legs.map((l: any) => [l.caixaId, l.financialAccountId, l.occurredOn, l.amountCents, l.reconciled])).toEqual([
+      [s.caixaA.id, s.accountA.id, today, 43_210, false],
+      [s.caixaB.id, s.accountB.id, today, -43_210, false],
+    ]);
+    const post = (c: ReturnType<typeof client>, id: string, reversedOn: string) =>
+      c.raw('POST', `/api/settlements/${id}/reversal-date`, { reversedOn });
+    const refused = async (res: { statusCode: number; json: () => any }, status: number, code: string) => {
+      expect(res.statusCode).toBe(status);
+      expect(res.json().error.code).toBe(code);
+    };
+
+    // Antes da baixa e baixa sem estorno: recusados.
+    await refused(await post(admin, settlementId, '2026-10-14'), 422, 'unprocessable');
+    const active = await admin.post('/api/titles', { ...base(s), amountCents: 1_000, mirrorCaixaId: null });
+    const activePaid = await admin.post(`/api/titles/${active.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 1_000,
+      financialAccountId: s.accountA.id,
+    });
+    await refused(await post(admin, activePaid.settlements[0].id, '2026-10-15'), 422, 'settlement_not_reversed');
+
+    // Permissões: quem edita só a A não muda a perna da B; leitor e quem não vê a caixa também não.
+    const editor = await userSession(h);
+    await admin.put(`/api/users/${editor.id}/memberships`, {
+      memberships: [
+        { caixaId: s.caixaA.id, role: 'editor' },
+        { caixaId: s.caixaB.id, role: 'viewer' },
+      ],
+    });
+    const editorApi = client(h, editor.cookie);
+    expect((await editorApi.get(`/api/settlements/${settlementId}/reversal`)).canChange).toBe(false);
+    const other = await post(editorApi, settlementId, '2026-10-15');
+    expect(other.statusCode).toBe(403);
+    expect(other.json().error.message).toBe(t.errors.reversalDateOtherCaixa);
+    const viewer = await userSession(h);
+    await admin.put(`/api/users/${viewer.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
+    expect((await post(client(h, viewer.cookie), settlementId, '2026-10-15')).statusCode).toBe(403);
+    const outsider = await userSession(h);
+    expect((await post(client(h, outsider.cookie), settlementId, '2026-10-15')).statusCode).toBe(404);
+
+    // Pela perna do espelho: as duas mudam para a data da baixa, com o ator na auditoria.
+    const moved = await admin.post(`/api/settlements/${info.legs[1].settlementId}/reversal-date`, { reversedOn: '2026-10-15' });
+    expect(moved.id).toBe(title.mirrorTitleId);
+    const after = await admin.get(`/api/settlements/${settlementId}/reversal`);
+    expect(after.legs.map((l: any) => l.occurredOn)).toEqual(['2026-10-15', '2026-10-15']);
+    for (const leg of after.legs) {
+      const audit = await h.db.execute<{ actor_kind: string; user_id: string | null; changed: string[] | null }>(sql`
+        SELECT actor_kind, user_id, changed_columns AS changed FROM audit_log
+         WHERE table_name = 'movements' AND record_id = ${leg.movementId} ORDER BY id DESC LIMIT 1`);
+      expect(audit.rows[0]).toMatchObject({ actor_kind: 'human', user_id: session.id });
+      expect(audit.rows[0]!.changed).toContain('occurred_on');
+    }
+    const statementA = await admin.get(`/api/accounts/${s.accountA.id}/statement?from=2026-10-01&to=2026-10-31`);
+    expect(statementA.rows.map((r: any) => [r.occurredOn, r.amountCents, r.isReversal])).toEqual([
+      ['2026-10-15', -43_210, false],
+      ['2026-10-15', 43_210, true],
+      ['2026-10-15', -1_000, false],
+    ]);
+
+    // Mês fechado na caixa do espelho (na data antiga): nenhuma perna muda.
+    await admin.post(`/api/caixas/${s.caixaB.id}/closings`, { month: '2026-10', force: true });
+    await refused(await post(admin, settlementId, '2026-11-01'), 422, 'period_closings_locked_check');
+    expect((await admin.get(`/api/settlements/${settlementId}/reversal`)).legs.map((l: any) => l.occurredOn)).toEqual([
+      '2026-10-15',
+      '2026-10-15',
+    ]);
+    await admin.del(`/api/caixas/${s.caixaB.id}/closings/2026-10-01`);
+
+    // Estorno conciliado com uma linha do extrato: só depois de desfazer a conciliação.
+    const imported = await h.app.inject({
+      method: 'POST',
+      url: `/api/statement-imports?accountId=${s.accountA.id}&fileName=estorno.ofx`,
+      payload: ofxOf([{ date: '2026-10-15', cents: 43_210, memo: 'ESTORNO' }]),
+      headers: { cookie: session.cookie, 'content-type': 'application/x-ofx' },
+    });
+    expect(imported.statusCode, imported.body).toBe(200);
+    const line = imported.json().lines[0];
+    if (line.movementId !== after.legs[0].movementId || line.status !== 'matched') {
+      if (line.status !== 'new') await admin.post(`/api/statement-lines/${line.id}/unmatch`, {});
+      await admin.post(`/api/statement-lines/${line.id}/match`, { movementId: after.legs[0].movementId });
+    }
+    expect((await admin.get(`/api/settlements/${settlementId}/reversal`)).legs[0]).toMatchObject({ reconciled: true });
+    await refused(await post(admin, settlementId, '2026-10-16'), 422, 'settlements_reversal_reconciled_check');
+    await admin.post(`/api/statement-lines/${line.id}/unmatch`, {});
+    const fixed = await admin.post(`/api/settlements/${settlementId}/reversal-date`, { reversedOn: '2026-10-16' });
+    expect(fixed.settlements.find((x: any) => x.id === settlementId).reversalOn).toBe('2026-10-16');
   });
 });

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { todayIso } from '@moneyflow/shared';
+import { addDays, todayIso } from '@moneyflow/shared';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
@@ -99,6 +100,25 @@ describe('resumo da conta (spec 004)', () => {
     expect(other.months[0]).toMatchObject({ inflowCents: 0, transferInCents: 10_000, closingCents: 10_000 });
     expect(other.categories).toEqual([]);
     expect(other.reconciliation).toBeNull();
+
+    // Saldo do fim do mês pelo acumulado (tarefa 092): nulo antes da abertura, o saldo inicial no mês dela,
+    // e o período começando no meio do mês conta o mês inteiro, como financial_account_balance_at.
+    const late = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'cash',
+      name: 'Cofre tardio',
+      openingBalanceCents: 5_000,
+      openingDate: '2026-09-15',
+    });
+    await admin.post(`/api/accounts/${late.id}/adjustments`, { occurredOn: '2026-09-20', amountCents: 300, description: 'Antes' });
+    await admin.post(`/api/accounts/${late.id}/adjustments`, { occurredOn: '2026-10-02', amountCents: 1_000, description: 'Depois' });
+    const lateSummary = await admin.get(`/api/accounts/${late.id}/summary?from=2026-08-20&to=2026-10-01`);
+    expect(lateSummary.months).toEqual([
+      expect.objectContaining({ month: '2026-08-01', inflowCents: 0, closingCents: null }),
+      expect.objectContaining({ month: '2026-09-01', inflowCents: 300, closingCents: 5_300 }),
+      expect.objectContaining({ month: '2026-10-01', inflowCents: 0, closingCents: 6_300 }),
+    ]);
+    const fromSeptember = await admin.get(`/api/accounts/${late.id}/summary?from=2026-09-25&to=2026-10-31`);
+    expect(fromSeptember.months.map((m: { closingCents: number | null }) => m.closingCents)).toEqual([5_300, 6_300]);
   });
 
   it('exige leitura na caixa e um período válido', async () => {
@@ -201,5 +221,60 @@ describe('conta arquivada (tarefa 080)', () => {
     expect(await admin.get(`/api/statement-imports?accountId=${s.accountA.id}`)).toHaveLength(1);
     const reversed = await admin.post(`/api/settlements/${paid.settlements[0].id}/reverse`, { reason: 'erro', reversedOn: today });
     expect(reversed.status).toBe('open');
+  });
+});
+
+describe('saldo atual sem o lançado com data futura (tarefa 130)', () => {
+  it('a conta, a caixa e a visão geral mostram o saldo de hoje, com o agendado à parte', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const title = await admin.post('/api/titles', {
+      caixaId: s.caixaA.id,
+      direction: 'payable',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      description: 'Pagamento agendado',
+      competenceDate: today,
+      dueDate: addDays(today, 10),
+      amountCents: 20_000,
+      mirrorCaixaId: null,
+    });
+    await admin.post(`/api/titles/${title.id}/settlements`, {
+      settledOn: addDays(today, 10),
+      amountCents: 20_000,
+      financialAccountId: s.accountA.id,
+    });
+    // Uma conta que abre amanhã: o saldo inicial é lançado com data futura.
+    await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'cash',
+      name: 'Abre amanhã',
+      openingBalanceCents: 3_000,
+      openingDate: addDays(today, 1),
+    });
+
+    const atToday = await h.db.execute<{ cents: string }>(
+      sql`SELECT financial_account_balance_at(${s.accountA.id}::uuid, ${today}::date) AS cents`,
+    );
+    expect(Number(atToday.rows[0]!.cents)).toBe(100_000);
+    const accounts = await admin.get(`/api/accounts?caixaId=${s.caixaA.id}`);
+    expect(accounts.find((a: { id: string }) => a.id === s.accountA.id)).toMatchObject({ balanceCents: 100_000, futureCents: -20_000 });
+    expect(accounts.find((a: { name: string }) => a.name === 'Abre amanhã')).toMatchObject({ balanceCents: 0, futureCents: 3_000 });
+
+    const caixa = await admin.get(`/api/caixas/${s.caixaA.id}`);
+    expect(caixa).toMatchObject({ balanceCents: 100_000, futureCents: -17_000 });
+    const [day] = await admin.get(`/api/calendar/balances?caixaId=${s.caixaA.id}&from=${today}&to=${today}`);
+    expect(day.realizedCents).toBe(caixa.balanceCents);
+    const [accountDay] = await admin.get(`/api/calendar/balances?accountId=${s.accountA.id}&from=${today}&to=${today}`);
+    expect(accountDay.realizedCents).toBe(100_000);
+
+    const statement = await admin.get(`/api/accounts/${s.accountA.id}/statement`);
+    expect(statement.account).toMatchObject({ balanceCents: 100_000, futureCents: -20_000 });
+    const overview = await admin.get('/api/overview');
+    expect(overview.caixas.find((c: { id: string }) => c.id === s.caixaA.id)).toMatchObject({
+      balanceCents: 100_000,
+      futureCents: -17_000,
+    });
+    expect(overview.totals.futureCents).toBe(overview.caixas.reduce((sum: number, c: { futureCents: number }) => sum + c.futureCents, 0));
   });
 });

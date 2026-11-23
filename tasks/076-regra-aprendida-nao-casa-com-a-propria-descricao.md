@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
@@ -122,3 +122,12 @@ Migration `database/migrations/0062_classification_rule_normalized.sql`; teste `
 3. Testes em `apps/server/test/statements.test.ts`, no caso "importa OFX, deduplica…":
    - Depois do `create` da `OFX2-0002` com "Aprender regra", importar um segundo OFX (outro mês, outro FITID) com a mesma descrição e esperar `classificationSource: 'rule'` com o id da regra `correction`.
    - O mesmo para uma descrição com número de documento no meio e pelo "Aplicar regras".
+
+### Aplicação (app)
+
+- `pnpm db:pull` já estava feito no branch de integração (o schema gerado não lista funções).
+- `apps/server/src/services/statements.ts` (`rulesFor`, que o `ruleFor` usa): a importação em lote (tarefa 139) e o "Aplicar regras" passam `normalizeDescription(descrição)` como 5º argumento de `classification_rule_for`, uma coluna a mais no `json_to_recordset`. É o único caminho até a função no app.
+- `docs/009-extratos-e-conciliacao.md`: a crua ou a normalizada no casamento das regras.
+- Testes: `apps/server/test/statements.test.ts`, no "importa OFX, deduplica…": depois de aprender a regra com o `OFX2-0002`, um OFX do mês seguinte com a mesma descrição e com o número do documento no meio entra com `classificationSource: 'rule'` e o id da regra `correction`; e a correção de uma TED com documento vira regra que, pelo "Aplicar regras", alcança a outra TED com outro documento. Sem o 5º argumento o teste falha (conferido).
+- Verificação: `pnpm verify:quick` (nível rápido).
+

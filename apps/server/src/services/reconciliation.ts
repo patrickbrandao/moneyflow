@@ -47,7 +47,7 @@ import { assertPurchaseDeletable, deletePurchaseTx } from './cards';
 import { settleFromLine } from './line-settle';
 import { assertNotReconciled, clearStatementSuggestions } from './reconciliation-guards';
 import { uuidArray } from './reports';
-import { bumpRuleUsage, candidatesFor, listLines, type RuleTarget, resolveTarget, rulesFor } from './statements';
+import { bumpRuleUsage, candidatesFor, defaultCsvAmountSign, listLines, type RuleTarget, resolveTarget, rulesFor } from './statements';
 import { insertTitlePair } from './title-pair';
 import { resolveMirror } from './titles';
 import { withTx } from './tx';
@@ -542,6 +542,7 @@ const toMapping = (row: typeof statementCsvMappings.$inferSelect): CsvMappingRow
   dateFormat: row.dateFormat,
   decimalSeparator: row.decimalSeparator,
   columns: row.columns as Record<string, string | number>,
+  amountSign: row.amountSign as CsvMappingRow['amountSign'],
   isDefault: row.isDefault,
 });
 
@@ -580,6 +581,8 @@ export async function createMapping(ctx: ServiceContext, input: z.output<typeof 
         dateFormat: input.dateFormat,
         decimalSeparator: input.decimalSeparator,
         columns: input.columns,
+        // Sem o sinal, o padrão do alvo (tarefa 091): invertido no cartão, como vem na conta.
+        amountSign: input.amountSign ?? defaultCsvAmountSign(target),
         isDefault: input.isDefault,
       })
       .returning();

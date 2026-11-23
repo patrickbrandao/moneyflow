@@ -92,3 +92,8 @@ Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o ap
 - `packages/shared/src/i18n/pt-BR.ts`: `errors.mirrorPairOriginal`. `docs/006-espelhamento-entre-caixas.md`: a regra.
 - Testes: `apps/server/test/titles.test.ts`, "pelo espelho, só quem edita também o original exclui, arquiva, cancela ou encerra a série (tarefa 079)" (avulso e série, 403 e o original intacto; o admin continua podendo); `apps/server/test/agent-tools.test.ts`, no caso "cancelar, arquivar, excluir…", a tool `archive_title` pelo editor só da caixa B.
 - Verificação: `pnpm verify:quick` (nível rápido).
+
+### Complemento (revisão de 2026-11-22, frente P2a)
+
+- As prévias de `cancel_title`, `archive_title` e `delete_title` (`assertPairOwnerPreview` em `apps/server/src/agents/tool-handlers-operation.ts`) recusam pelo lado espelho sem escrita na caixa do original, com o mesmo 403 `t.errors.mirrorPairOriginal` do serviço, antes do cartão.
+- Teste: `apps/server/test/agent-tools.test.ts`, "as prévias recusam antes do cartão…" (as três tools pelo editor só da caixa B, sem prévia, e o original intacto). Verificação: `pnpm verify:quick`.

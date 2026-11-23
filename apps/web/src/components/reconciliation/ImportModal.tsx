@@ -1,4 +1,5 @@
 import {
+  applyCsvAmountSign,
   applyCsvMapping,
   type CardOverview,
   CSV_DELIMITERS,
@@ -13,6 +14,7 @@ import {
   type StatementImportSummary,
   type StatementInspect,
   statementImportNotices,
+  suggestCsvAmountSign,
   t,
   todayIso,
 } from '@moneyflow/shared';
@@ -45,6 +47,8 @@ type MappingForm = {
   decimalSeparator: ',' | '.';
   split: boolean;
   cols: Cols;
+  /** Sinal dos valores (tarefa 091); null no mapeamento novo até a escolha: vale a sugestão pelas linhas lidas. */
+  amountSign: CsvMappingRow['amountSign'] | null;
   isDefault: boolean;
 };
 
@@ -501,6 +505,7 @@ function CsvMapper({
       decimalSeparator: ',',
       split: cols.amount === null && cols.debit !== null && cols.credit !== null,
       cols,
+      amountSign: null,
       isDefault: (mappings.data ?? []).length === 0,
     };
   };
@@ -538,6 +543,7 @@ function CsvMapper({
       decimalSeparator: mapping.decimalSeparator as ',' | '.',
       split: cols.amount === null,
       cols,
+      amountSign: mapping.amountSign,
       isDefault: mapping.isDefault,
     });
   }
@@ -579,6 +585,9 @@ function CsvMapper({
       return { headers: null, lines: [], errors: [{ row: 0, message: err instanceof Error ? err.message : String(err) }] };
     }
   }, [rows, form.hasHeader, form.skipRows, form.dateFormat, form.decimalSeparator, form.cols, form.split, complete]);
+  // O sinal gravado no mapeamento; no novo, pré-marcado pela maioria das linhas lidas (só como sugestão, tarefa 091).
+  const amountSign = form.amountSign ?? suggestCsvAmountSign(parsed?.lines ?? [], isCard);
+  const signed = useMemo(() => (parsed ? applyCsvAmountSign(parsed.lines, amountSign) : []), [parsed, amountSign]);
 
   async function submit() {
     setLocalError(null);
@@ -593,6 +602,7 @@ function CsvMapper({
       dateFormat: form.dateFormat,
       decimalSeparator: form.decimalSeparator,
       columns,
+      amountSign,
       isDefault: form.isDefault,
     };
     let id = mappingId === 'new' ? undefined : mappingId;
@@ -770,6 +780,17 @@ function CsvMapper({
         )}
         {colSelect('fitid', s.colFitid, true)}
         {colSelect('balance', s.colBalance, true)}
+        <div className="span-all">
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={amountSign === 'invert'}
+              onChange={(e) => set({ amountSign: e.target.checked ? 'invert' : 'as_is' })}
+            />{' '}
+            {isCard ? s.amountSignInvertCard : s.amountSignInvertAccount}
+          </label>
+          <span className="hint">{s.amountSignHint}</span>
+        </div>
       </fieldset>
 
       <div>
@@ -813,6 +834,29 @@ function CsvMapper({
                   .join('; '),
               )}
           </p>
+        )}
+        {signed.length > 0 && (
+          <div className="mt-2" data-testid="csv-signed-preview">
+            <span className="label">
+              {s.signedPreview} · {s.signedPreviewIn(signed.filter((l) => l.amountCents > 0).length)} ·{' '}
+              {s.signedPreviewOut(signed.filter((l) => l.amountCents < 0).length)}
+            </span>
+            <div className="rec-preview">
+              <table>
+                <tbody>
+                  {signed.slice(0, 5).map((line) => (
+                    <tr key={line.row}>
+                      <td>{formatDate(line.postedOn)}</td>
+                      <td>{line.description}</td>
+                      <td className="num">
+                        <Money cents={line.amountCents} signed />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         )}
       </div>
 

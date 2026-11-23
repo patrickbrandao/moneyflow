@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { recordDragProps } from '../agents/records';
 import { RowLink } from '../components/a11y';
 import { CaixaFormModal } from '../components/CaixaFormModal';
-import { LoadError, Money, PageHead, RoleBadge, SkelRows } from '../components/domain';
+import { FutureEntries, LoadError, Money, PageHead, RoleBadge, SkelRows } from '../components/domain';
 
 import { Badge, Button, EmptyRow, Tabs } from '../components/ui';
 import { useUser } from '../lib/auth';
@@ -98,6 +98,7 @@ export function CaixasPage() {
                   </td>
                   <td className="num">
                     <Money cents={caixa.balanceCents} />
+                    <FutureEntries cents={caixa.futureCents} />
                   </td>
                   <td className="num">
                     <Money cents={caixa.receivableOpenCents} muted={caixa.receivableOpenCents === 0} />

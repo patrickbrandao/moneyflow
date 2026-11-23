@@ -489,6 +489,9 @@ export const settlementReverseInput = z.object({
   undoTransfer: z.boolean().default(true),
 });
 
+/** Nova data do estorno de uma baixa já estornada (tarefa 045): o movimento oposto de cada perna com conta. */
+export const settlementReversalDateInput = z.object({ reversedOn: isoDate });
+
 /* ---------------- transferências ---------------- */
 
 export const transferCreateInput = z

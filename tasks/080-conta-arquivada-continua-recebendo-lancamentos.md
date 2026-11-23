@@ -91,3 +91,8 @@ Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o ap
 - Testes: `apps/server/test/account-summary.test.ts`, `describe('conta arquivada (tarefa 080)')` (recusa com saldo, arquiva zerada com a caixa e o calendário iguais, 422 no avulso, na baixa, na transferência e no extrato, lotes antigos legíveis e o estorno); `apps/server/test/agent-tools.test.ts`, o caso de arquivar conta pela tool passa a zerar o saldo antes.
 - Limite: contas já arquivadas com saldo antes desta mudança continuam fora do total da caixa e dentro do calendário; o estorno de uma baixa antiga também muda o saldo de uma arquivada. Para isso, restaurar a conta e zerar.
 - Verificação: `pnpm verify:quick` (nível rápido).
+
+### Complemento (revisão de 2026-11-22, frente P2a)
+
+- A prévia da tool `archive_account` (`apps/server/src/agents/tool-handlers-operation.ts`) antecipa a recusa: conta com movimentos e saldo ≠ 0 sai com o mesmo 422 `account_archive_balance` do serviço, antes do cartão; com saldo e sem movimentos, a prévia mostra o saldo e avisa que ela só sai se puder ser excluída.
+- Teste: `apps/server/test/agent-tools.test.ts`, "as prévias recusam antes do cartão…" (com saldo, recusada sem prévia; zerada, a prévia sai). Verificação: `pnpm verify:quick`.

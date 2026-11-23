@@ -18,7 +18,7 @@ import { useAgentScreenContext } from '../agents/AgentsProvider';
 import { AccountOverview, monthEnd, monthStart } from '../components/caixa/AccountOverview';
 import { AccountFormModal, AdjustmentModal } from '../components/caixa/AccountsTab';
 import { StatementTab } from '../components/caixa/StatementTab';
-import { LoadError, Money, PageHead } from '../components/domain';
+import { FutureEntries, LoadError, Money, PageHead } from '../components/domain';
 import { RulesPanel } from '../components/reconciliation/RulesPanel';
 import { StatementImportPanel } from '../components/reconciliation/StatementImportPanel';
 import { useCrumbs } from '../components/shell/Layout';
@@ -205,6 +205,7 @@ export function FinancialAccountPage() {
           <div className="k">
             <Landmark /> {a.balanceNow.toLowerCase()}
           </div>
+          <FutureEntries cents={account.futureCents} />
         </Link>
         <div className="stat-tile">
           <div className="v">{thisMonth ? <Money cents={thisMonth.inflowCents} /> : <Skel h={24} w={110} />}</div>

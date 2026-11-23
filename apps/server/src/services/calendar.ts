@@ -54,14 +54,22 @@ export async function dailyBalances(
 ): Promise<DailyBalance[]> {
   if (query.accountId) {
     await getAccount(ctx, query.accountId);
-    const result = await ctx.db.execute<{ day: string; balance_cents: number | null }>(
-      sql`SELECT day, balance_cents FROM account_daily_balances(${query.accountId}::uuid, ${query.from}::date, ${query.to}::date)`,
-    );
+    // O previsto da conta vem dos títulos com ela como conta prevista (tarefa 131); os sem conta prevista
+    // entram só no projetado da caixa.
+    const result = await ctx.db.execute<{
+      day: string;
+      balance_cents: number | null;
+      scheduled_cents: number | null;
+      projected_cents: number | null;
+    }>(sql`
+      SELECT day, balance_cents, scheduled_cents, projected_cents
+        FROM account_daily_balances(${query.accountId}::uuid, ${query.from}::date, ${query.to}::date, ${todayIso()}::date)`);
+    const cents = (v: number | string | null) => (v === null ? null : Number(v));
     return result.rows.map((r) => ({
       day: r.day,
-      realizedCents: r.balance_cents === null ? null : Number(r.balance_cents),
-      scheduledCents: 0,
-      projectedCents: r.balance_cents === null ? null : Number(r.balance_cents),
+      realizedCents: cents(r.balance_cents),
+      scheduledCents: Number(r.scheduled_cents ?? 0),
+      projectedCents: cents(r.projected_cents),
     }));
   }
   ctx.access.assertRead(query.caixaId!);

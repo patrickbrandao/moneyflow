@@ -10,6 +10,7 @@ import {
 } from '@moneyflow/shared';
 import {
   Ban,
+  CalendarClock,
   CalendarDays,
   CalendarX,
   Check,
@@ -44,7 +45,7 @@ import { CategorySelect, ModalActions } from '../forms';
 import { SeriesEditModal } from '../series/SeriesEditModal';
 import { Badge, Button, Field, Modal, Skel, useConfirm, useEscapeLayer } from '../ui';
 import { SeriesEndModal } from './SeriesEndModal';
-import { ReverseModal, SetAccountModal, SettlementModal } from './SettlementModal';
+import { ReversalDateModal, ReverseModal, SetAccountModal, SettlementModal } from './SettlementModal';
 import { TitleFormModal } from './TitleFormModal';
 
 /**
@@ -65,7 +66,8 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
     | { kind: 'seriesEnd' }
     | { kind: 'seriesEdit'; series: SeriesDto }
     | { kind: 'dispute' }
-    | { kind: 'reverse'; id: string; hasTransfer: boolean }
+    | { kind: 'reverse'; id: string; settledOn: string; hasTransfer: boolean; undoAllowed: boolean }
+    | { kind: 'reversalDate'; id: string }
     | { kind: 'account'; id: string }
     | { kind: 'history'; table: 'titles' | 'settlements'; id: string }
   >(null);
@@ -471,6 +473,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                       {s.reversedAt && (
                         <div className="text-[12px] text-faint">
                           {formatDateTime(s.reversedAt)} · {s.reversalReason}
+                          {s.reversalOn && ` · ${t.settlement.reversalOn(formatDate(s.reversalOn))}`}
                         </div>
                       )}
                       <AttachmentsPanel target="settlement" targetId={s.id} canWrite={title.canWrite} compact />
@@ -495,12 +498,31 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                       >
                         <History />
                       </button>
+                      {title.canWrite && s.reversedAt && s.reversalOn && (
+                        <button
+                          type="button"
+                          className="row-action"
+                          title={t.settlement.reversalDate}
+                          aria-label={t.settlement.reversalDate}
+                          onClick={() => setModal({ kind: 'reversalDate', id: s.id })}
+                        >
+                          <CalendarClock />
+                        </button>
+                      )}
                       {title.canWrite && !s.reversedAt && (
                         <button
                           type="button"
                           className="row-action danger"
                           title={t.settlement.reverse}
-                          onClick={() => setModal({ kind: 'reverse', id: s.id, hasTransfer: Boolean(s.transferId) })}
+                          onClick={() =>
+                            setModal({
+                              kind: 'reverse',
+                              id: s.id,
+                              settledOn: s.settledOn,
+                              hasTransfer: Boolean(s.transferId),
+                              undoAllowed: s.transferUndoAllowed,
+                            })
+                          }
                         >
                           <Undo2 />
                         </button>
@@ -562,7 +584,17 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
         />
       )}
       {title && modal?.kind === 'reverse' && (
-        <ReverseModal settlementId={modal.id} hasTransfer={modal.hasTransfer} onClose={() => setModal(null)} onSaved={saved} />
+        <ReverseModal
+          settlementId={modal.id}
+          settledOn={modal.settledOn}
+          hasTransfer={modal.hasTransfer}
+          undoAllowed={modal.undoAllowed}
+          onClose={() => setModal(null)}
+          onSaved={saved}
+        />
+      )}
+      {title && modal?.kind === 'reversalDate' && (
+        <ReversalDateModal settlementId={modal.id} onClose={() => setModal(null)} onSaved={saved} />
       )}
       {title && modal?.kind === 'account' && (
         <SetAccountModal settlementId={modal.id} caixaId={title.caixaId} onClose={() => setModal(null)} onSaved={saved} />

@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
@@ -88,3 +88,15 @@ Migration `database/migrations/0057_balance_queries.sql` (grupo dos saldos); tes
 3. Quando `balance_cents ≠ balance_today_cents`, mostrar à parte "inclui R$ X lançados com data futura" (texto no shared).
 4. Teste em `apps/server/test/account-summary.test.ts`: baixa com `settledOn` = hoje + 10. `GET /api/accounts?caixaId=…` e `GET /api/caixas/:id` mostram o saldo de hoje igual a `financial_account_balance_at(conta, hoje)` e ao realizado do calendário no dia.
 5. `docs/004` (saldo atual = saldo do dia; os agendados à parte).
+
+### Aplicação (app)
+
+- Decisão: a da triagem (opção 2). O `balanceCents` da API passa a ser o saldo de hoje e ganha ao lado o `futureCents` (o lançado com data futura, `balance_cents − balance_today_cents`). Mantive o nome `balanceCents` para todas as telas, tools e exportações passarem a mostrar o saldo de hoje sem mudar cada uma.
+- `apps/server/src/services/caixas.ts`: `summarySql` soma `balance_today_cents` das contas ativas e devolve `future_cents`; `listAccounts` devolve `balance_today_cents AS balance_cents` e `future_cents`. O arquivamento da conta (tarefa 080) continua conferindo o `balance_cents` com os futuros, porque a conta só sai da caixa zerada de vez.
+- `apps/server/src/services/overview.ts`: `totals.futureCents`. `apps/server/src/services/message-worker.ts` (resumo diário do Telegram): `balance_today_cents`.
+- `packages/shared/src/types.ts`: `futureCents` em `AccountRow`, `CaixaSummary` e `Overview.totals`; textos `t.caixa.futureEntries`/`futureEntriesHint` em `i18n/pt-BR.ts`.
+- `apps/web`: `FutureEntries` em `components/domain.tsx` (nada quando é zero; "R$ X lançados com data futura" no formato contábil, com a dica), no saldo da tela da caixa (`CaixaPage`), da conta (`FinancialAccountPage`), da aba Contas (total e cada conta, `AccountsTab`), da lista de caixas (`CaixasPage`) e da visão geral (total e cada caixa, `OverviewPage`).
+- `docs/004-caixas-e-contas.md`: o saldo atual e o lançado com data futura; linha da 004 no `docs/INDEX.md`.
+- Teste: `apps/server/test/account-summary.test.ts`, "a conta, a caixa e a visão geral mostram o saldo de hoje, com o agendado à parte" — baixa com `settledOn` = hoje + 10 e uma conta que abre amanhã: `GET /api/accounts`, `GET /api/caixas/:id`, o extrato e a visão geral com o saldo igual a `financial_account_balance_at(conta, hoje)` e ao realizado do calendário no dia, e o `futureCents`.
+- Verificação: `pnpm verify:quick` (nível rápido).
+
