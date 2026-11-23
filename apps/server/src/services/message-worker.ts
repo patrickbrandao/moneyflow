@@ -36,7 +36,7 @@ import type { Config } from '../config';
 import { errorText } from '../errors';
 import { type BudgetAlert, budgetAlerts } from './ai-budgets';
 import { contractMessages, contractNotifications } from './contract-worker';
-import { type ClaimedMessage, deliver } from './messages';
+import { type ClaimedMessage, deliver, releaseMessage } from './messages';
 import { noteRemindersTick } from './note-worker';
 import { createNotifications, type NewNotification } from './notifications';
 import { uuidArray } from './reports';
@@ -920,16 +920,27 @@ export async function consumeOutbox(db: Database, config: Config, opts: { batch?
   let sent = 0;
   let failed = 0;
   let retried = 0;
+  // Destinos que levaram 429 nesta passada (tarefa 109): até quando o Telegram pediu para esperar.
+  const blocked = new Map<string, number>();
   for (let round = 0; round < (opts.rounds ?? 5); round += 1) {
     // Transação curta (autocommit): a reserva fica gravada antes de qualquer envio.
-    const claimed = await db.execute<{ id: string; chat_id: string; name: string; payload: MessagePayload }>(sql`
-      SELECT c.id, d.chat_id, d.name, c.payload
+    const claimed = await db.execute<{ id: string; destination_id: string; chat_id: string; name: string; payload: MessagePayload }>(sql`
+      SELECT c.id, c.destination_id, d.chat_id, d.name, c.payload
         FROM message_outbox_claim(${opts.batch ?? 10}, interval '5 minutes') c
         JOIN message_destinations d ON d.id = c.destination_id`);
     if (claimed.rows.length === 0) break;
     for (const row of claimed.rows) {
+      const until = blocked.get(row.destination_id);
+      if (until !== undefined && until > Date.now()) {
+        // Reservada de um destino em espera: volta à fila sem envio e sem gastar tentativa, para depois do prazo.
+        const status = await releaseMessage(db, row.id, (until - Date.now()) / 1000, RATE_LIMITED_RELEASE);
+        if (status === 'failed') failed += 1;
+        else retried += 1;
+        continue;
+      }
       const message: ClaimedMessage = { id: row.id, chatId: row.chat_id, destinationName: row.name, payload: row.payload };
       const outcome = await deliver(db, config, message);
+      if (outcome.retryAfterSec !== undefined) blocked.set(row.destination_id, Date.now() + outcome.retryAfterSec * 1000);
       if (outcome.status === 'sent') sent += 1;
       else if (outcome.status === 'failed') failed += 1;
       else retried += 1;
@@ -937,6 +948,9 @@ export async function consumeOutbox(db: Database, config: Config, opts: { batch?
   }
   return { sent, failed, retried };
 }
+
+/** Motivo gravado na mensagem liberada sem envio porque o destino levou 429 na mesma passada (tarefa 109). */
+const RATE_LIMITED_RELEASE = '429 rate limited: destination waiting for retry_after (not sent)';
 
 /* ---------------- ponto de extensão da F4 (agentes) ---------------- */
 
