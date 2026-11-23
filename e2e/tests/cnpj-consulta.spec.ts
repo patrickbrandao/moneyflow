@@ -1,6 +1,19 @@
 import { expect, test } from '@playwright/test';
 import { loginAsAdmin } from '../support/session';
 
+/** Um CNPJ numérico válido e novo a cada execução: o fixo dava duplicidade na segunda rodada contra a mesma pilha. */
+function randomCnpj(): string {
+  const dv = (s: string) => {
+    const w = s.length === 12 ? [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2] : [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    const r = [...s].reduce((acc, c, i) => acc + Number(c) * w[i]!, 0) % 11;
+    return r < 2 ? 0 : 11 - r;
+  };
+  const base = `${String(Math.floor(10_000_000 + Math.random() * 89_999_999))}0001`;
+  const d1 = dv(base);
+  const digits = `${base}${d1}${dv(`${base}${d1}`)}`;
+  return digits.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+}
+
 /*
  * A consulta de um CNPJ vale só para o CNPJ consultado (tarefa 177): trocado o
  * documento sem consultar de novo, o endereço e os contatos dela não entram na
@@ -42,7 +55,7 @@ test('consulta de CNPJ: trocado o documento, o endereço da consulta não entra'
   await expect(form.getByText('Incluir endereço e contatos da consulta')).toBeVisible();
 
   // Outro CNPJ, sem consultar de novo: a caixa some e nada da consulta entra.
-  await cnpj.fill('45.997.418/0001-53');
+  await cnpj.fill(randomCnpj());
   await expect(form.getByText('Incluir endereço e contatos da consulta')).toBeHidden();
   const name = `E2E Outra ${tag}`;
   await form.getByLabel('Nome', { exact: true }).fill(name);
