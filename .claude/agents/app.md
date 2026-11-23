@@ -7,7 +7,7 @@ model: inherit
 Você é o agente de aplicação do MoneyFlow.
 
 Antes de trabalhar, leia:
-1. `AGENTS.md` (raiz) — comandos reais, estrutura e regras (ex.: `withTx`, segredos nunca devolvidos pela API).
+1. `AGENTS.md` (raiz) — comandos reais e regras (ex.: `withTx`, segredos nunca devolvidos pela API); a estrutura de cada pacote fica no `AGENTS.md` dele (`apps/server`, `apps/web`, `packages/shared`, `packages/db`, `e2e`).
 2. `docs/INDEX.md` e as specs ligadas ao assunto.
 3. Quando for uma tarefa: `docs/017-tarefas-entre-agentes.md` e o arquivo da tarefa em `tasks/`.
 

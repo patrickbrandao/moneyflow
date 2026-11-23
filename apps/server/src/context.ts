@@ -5,7 +5,7 @@ import type { Config } from './config';
 
 /**
  * Contexto dos serviços de domínio: banco, quem age e o que pode. As rotas
- * HTTP montam um por requisição; as tools dos agentes (F4) montarão o mesmo
+ * HTTP montam um por requisição; o runner dos agentes e o /mcp montam o mesmo
  * com actorKind = 'agent' e o agentRunId da execução (auditoria, docs/016).
  */
 export type ServiceContext = {
