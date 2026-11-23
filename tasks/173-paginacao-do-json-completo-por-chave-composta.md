@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -67,4 +67,13 @@ Não executado contra o banco. O erro de operador foi deduzido da tipagem do Pos
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: a continuação do lote convertia cada parte da chave em `uuid` (FK) ou em `text`; em `card_recurring_charge_amounts` (`from_occurrence smallint`), o segundo lote compararia `smallint > text`. Nenhum teste passava de um lote.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/backup/catalog.ts`: o catálogo guarda o tipo de cada coluna (`format_type(a.atttypid, a.atttypmod)`, em `ColumnMeta.type`).
+- `apps/server/src/services/backup/export.ts`: a continuação da paginação converte cada parte da chave no tipo da coluna (`::smallint`, `::uuid`, `::text`…, com `sql.raw` sobre o nome vindo do `pg_catalog`). O laço dos lotes virou `tableBatches(tx, catálogo, tabela, ator, { maxRows })`, exportado; `exportFullZip` aceita `maxRows` (padrão 500).
+- Teste em `apps/server/test/backup.test.ts`, "a paginação do JSON completo com lote 2 dá o mesmo conteúdo…": 3 ligações de tag, um kit com 3 tools e uma cobrança no cartão com degraus nas ocorrências 2, 3 e 10 (aditivos); `tableBatches` com lote 2 dá as mesmas linhas que com 500 em `entity_tag_links`, `ai_tool_kit_tools` e `card_recurring_charge_amounts`, e os degraus saem na ordem numérica.
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

@@ -12,6 +12,7 @@ import type { ServiceContext } from '../../context';
 import { AppError, unprocessable } from '../../errors';
 import { resetCatalog } from './catalog';
 import { schemaVersion } from './export';
+import { withBackupLock } from './lock';
 import { backupUnzipLimit, UnzipTooLarge, unzipLimited } from './unzip';
 
 /*
@@ -190,18 +191,6 @@ export async function backupStatus(ctx: ServiceContext): Promise<BackupStatus> {
   };
 }
 
-let busy = false;
-
-async function exclusive<T>(fn: () => Promise<T>): Promise<T> {
-  if (busy) throw new AppError(409, 'backup_busy', t.backup.errors.busy);
-  busy = true;
-  try {
-    return await fn();
-  } finally {
-    busy = false;
-  }
-}
-
 async function assertAvailable(config: Config) {
   const availability = await dumpAvailability(config);
   if (availability.error) throw unprocessable(`${t.backup.errors.dumpUnavailable} (${availability.error})`, 'dump_unavailable');
@@ -211,8 +200,9 @@ async function assertAvailable(config: Config) {
 /** Gera o dump (formato custom do pg_dump) e o grava em `zipPath` com um manifest. */
 export async function createDumpZip(ctx: ServiceContext, zipPath: string, log: BackupLog): Promise<void> {
   ctx.access.assertAdmin();
-  const version = await assertAvailable(ctx.config);
-  await exclusive(async () => {
+  // A trava antes de tudo (tarefa 172): com outra operação em andamento, 409 na hora.
+  await withBackupLock(ctx.db, async () => {
+    const version = await assertAvailable(ctx.config);
     const dir = await mkdtemp(join(tmpdir(), 'moneyflow-dump-'));
     try {
       const dumpPath = join(dir, DUMP_FILE);
@@ -332,10 +322,11 @@ async function dumpSchemaVersion(config: Config, dumpPath: string): Promise<stri
 /** Restaura o banco inteiro a partir do dump (destrói o conteúdo atual). */
 export async function restoreDump(ctx: ServiceContext, body: unknown, log: BackupLog): Promise<DumpRestoreResult> {
   ctx.access.assertAdmin();
-  await assertAvailable(ctx.config);
   const started = Date.now();
-  const { dump, manifest } = extractDump(body, backupUnzipLimit(ctx.config));
-  return exclusive(async () => {
+  // A trava antes de tudo (tarefa 172): com uma importação ou exportação em andamento, 409 na hora.
+  return withBackupLock(ctx.db, async () => {
+    await assertAvailable(ctx.config);
+    const { dump, manifest } = extractDump(body, backupUnzipLimit(ctx.config));
     const dir = await mkdtemp(join(tmpdir(), 'moneyflow-restore-'));
     try {
       const dumpPath = join(dir, DUMP_FILE);
