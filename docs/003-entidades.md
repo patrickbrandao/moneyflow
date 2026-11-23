@@ -1,5 +1,7 @@
 # 003 — Entidades, PIX e dados bancários
 
+> **Conteúdo:** Pessoas e empresas, validação de CPF e CNPJ (inclusive alfanumérico), autopreenchimento (consulta de CNPJ no CNPJ Aberto, ligada por `CNPJ_ABERTO_ENABLED`, com fallback na BrasilAPI; CEP no ViaCEP), contatos, dados bancários, chaves PIX e vínculos; tags (catálogo global do admin, só cor, arquivadas quando em uso) e favoritas (globais), a listagem com a aba Favoritas inicial e filtro por tags (qualquer uma/todas), e o CNPJ alfanumérico em todo o sistema (normalização, validação, busca, NF-e, PIX, extrato, testes obrigatórios).
+
 Entidades são **globais** (cadastradas uma vez, usadas por todas as caixas).
 
 - Pessoa (CPF, dados pessoais) ou Empresa (CNPJ numérico **e alfanumérico**, razão social, nome fantasia).

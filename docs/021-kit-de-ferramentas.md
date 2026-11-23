@@ -1,5 +1,7 @@
 # 021 — Kit de Ferramentas (F7)
 
+> **Conteúdo:** F7: kits de ferramentas dos agentes (um kit por agente, um kit para vários agentes), cada tool em `allow` ou `ask`, categorias das tools (com as de administração do F13b), agente sem kit com poder completo, migração de `enabled_tools`/`require_write_confirmation`, guia "Kit de Ferramentas", API (CRUD e duplicar), execução relendo o kit a cada chamada e o kit no backup (inclusive a conversão de arquivos antigos).
+
 Perfis de ferramentas dos agentes de IA. O kit diz quais tools internas do MoneyFlow um agente pode usar e, para cada uma, se ela roda direto (`allow`) ou pede aprovação ao usuário (`ask`). Substitui a lista `enabled_tools` e a flag `require_write_confirmation` do agente ([011](011-agentes-de-ia.md)). Decisões da entrevista de 2026-10-13.
 
 ## Regras

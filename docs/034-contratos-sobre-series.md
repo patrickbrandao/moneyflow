@@ -1,5 +1,7 @@
 # 034 — Contratos sobre séries recorrentes (F20)
 
+> **Conteúdo:** F20: contrato como documento e vínculo (vigência, documentos, avisos) com obrigações em séries recorrentes comuns presas à conta (corrente, poupança, cofre) ou ao cartão (cobrança esperada, casada na fatura, "não cobrada"); reconhecimento do pagamento para toda série com os ajustes na série; aditivo, renovar e rescindir como operações da série; previstos no Extrato da conta e o "É o pagamento de…?" do cofre; migração dos contratos existentes (e dos backups antigos); substitui o ciclo de parcelas da 020 e a conta das parcelas/passagem da 033.
+
 O contrato deixa de gerar parcelas próprias. Passa a ser o **documento e o vínculo**: a entidade, a vigência, os documentos com as cláusulas, os avisos e as **obrigações** — séries recorrentes comuns ([005](005-titulos-baixas-e-movimentos.md)), cada uma presa à conta (ou ao cartão) onde o dinheiro de fato se move. O pagamento é sempre um fato: a movimentação na conta (extrato importado ou lançamento manual no cofre) ou a compra na fatura do cartão. Substitui o ciclo de parcelas da [020](020-contratos.md) e a conta das parcelas e a de passagem da [033](033-pagamentos-de-contrato-no-extrato.md).
 
 Decisões do usuário (2026-10-20): o contrato lança séries recorrentes nas contas em vez de registros próprios; contas corrente, poupança e cofre, e também cartão de crédito; há contratos em produção a migrar; a regra de reconhecimento do pagamento fica para a sessão decidir (decidido: vale para toda série recorrente, com os ajustes na série).

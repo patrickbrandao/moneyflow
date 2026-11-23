@@ -1,5 +1,7 @@
 # 008 — Categorias, exclusão e auditoria
 
+> **Conteúdo:** Plano global de categorias, regime de competência e de caixa, arquivamento em vez de exclusão, auditoria (sem retenção por enquanto) e fechamento de mês após a conciliação.
+
 ## Categorias
 - Plano **global**, separado em receita e despesa, em dois níveis (grupo → subcategoria), com cor e ícone; tags livres opcionais.
 - Cada caixa pode ocultar as categorias que não usa.

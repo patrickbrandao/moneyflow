@@ -1,5 +1,7 @@
 # 014 — Visualização e relatórios
 
+> **Conteúdo:** O canvas de fluxo de dinheiro (layout, agrupamento, gaveta, posições por usuário), os relatórios (categoria, projeção, entidade; competência × caixa; consolidado sem o interno), o filtro por entidade (tags e favoritas: filtra os relatórios, destaca no canvas) a exportação CSV/PDF e o formato contábil dos valores (negativo entre parênteses, sem sinal, em vermelho escuro).
+
 ## Canvas de fluxo (React Flow)
 - Nós: caixas (hubs, com saldo) e entidades externas (folhas, agrupadas por categoria quando forem muitas).
 - Arestas: valor que fluiu no período, com espessura proporcional, cor por tipo (pagamento, recebimento, transferência, fatura) e tracejado animado para o previsto.

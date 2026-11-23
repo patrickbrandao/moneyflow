@@ -1,5 +1,7 @@
 # 030 — Receitas de conciliação (F16)
 
+> **Conteúdo:** F16: receitas de conciliação — instrução reutilizável com o agente responsável, dona caixa ou global, contas vinculadas, variáveis do lote, play na tela do lote numa sessão nova (`reconcile_statement`) sobre as linhas selecionadas ou pendentes com o escopo garantido nas tools, uma execução por lote, aprovação em lote, sugestão de regra de classificação, sequência ao importar (no lugar da conciliação genérica) e histórico das execuções.
+
 Uma **receita de conciliação** é uma instrução reutilizável (o texto enviado como mensagem do usuário) com o **agente responsável** por ela, executada sobre um lote de extrato importado ([009](009-extratos-e-conciliacao.md)) pelo botão **play**, sempre numa **sessão nova**. Ela estende a conciliação completa da [029](029-fluxos-autonomos.md): lá o agente dos fluxos roda uma instrução fixa; aqui cada caso variante ("PIX do condomínio", "tarifas do banco X", "fatura do cartão") tem a sua instrução e o seu agente, em vez de um prompt único que vale para tudo. Decisões de 2026-10-16.
 
 O que é repetitivo e determinístico continua nas **regras de classificação** (gratuitas e previsíveis); a receita fica para o que é ambíguo. Em todas as execuções, **o kit do agente decide** o que roda direto (`allow`) e o que espera aprovação (`ask`), conforme a [021](021-kit-de-ferramentas.md).

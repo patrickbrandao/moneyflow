@@ -1,5 +1,7 @@
 # 023 — Requisições ao provedor e detalhe do provedor (F9)
 
+> **Conteúdo:** F9: registro de toda requisição ao provedor por um invólucro no `fetch` dos SDKs (metadados sempre; corpo completo, com base64, só com `log_bodies`), tentativas próprias gravadas (`AI_REQUEST_MAX_ATTEMPTS`, retry-after, sem repetir stream iniciado), retenção por `AI_REQUEST_RETENTION_DAYS` com valor no banco (`app_settings`) vencendo, guia "Requisições" e detalhe do provedor.
+
 Registro de tudo o que é enviado ao provedor de IA e recebido dele, as retentativas feitas pelo próprio MoneyFlow e uma tela de detalhe por provedor. Decisões da entrevista de 2026-10-13.
 
 ## O que é registrado

@@ -1,5 +1,7 @@
 # 024 — Capacidades dos provedores e provedor por inferência (F10)
 
+> **Conteúdo:** F10: dois tipos (OpenAI e Anthropic, com compatíveis por `base_url`: modelo de texto obrigatório, interruptores de cache e raciocínio), flags de capacidade (texto, visão, embeddings, áudio→texto, texto→áudio) com modelo padrão e teste flag a flag, provedor por inferência no agente ("Provedor padrão"; agentes antigos migrados sem mudar de comportamento), visão direta, por descrição ou pela camada de texto do PDF (imagem recusada sem visão), índice de embeddings por par em uso com a busca pelo par do agente, uso e preços de áudio, backup de arquivos antigos.
+
 Os provedores declaram o que sabem fazer. O agente escolhe um provedor (e um modelo) para cada tipo de inferência. O tipo `anthropic` passa a cobrir formalmente as APIs compatíveis com a Messages API. Decisões da entrevista de 2026-10-13.
 
 ## Tipos de provedor

@@ -1,5 +1,7 @@
 # 028 — Orçamentos, limites e painel de uso (F14)
 
+> **Conteúdo:** F14: orçamentos mensais (usuário, agente, fluxos, global) com aviso em 80% e bloqueio em 100% (admin isento), limite de execuções por minuto (variável e banco) e o painel de uso com gráficos, tabelas com CSV e saúde dos modelos; o uso próprio em Minha conta.
+
 O uso de IA deixa de ser só medição. Entram orçamentos mensais com aviso e bloqueio, um limite de execuções por minuto e um painel de uso mais rico. Decisões da entrevista de 2026-10-13.
 
 ## Orçamentos mensais

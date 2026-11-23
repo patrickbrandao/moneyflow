@@ -1,5 +1,7 @@
 # 027 — Tools de controle total do sistema (F13)
 
+> **Conteúdo:** F13: tools para todo o sistema (contratos, importação de anexo, fatura, caixas, categorias e regras, mensagens, tags, configuração de IA, usuários e tokens, backup, fechamento e auditoria), tools de admin, segredos gravados e nunca lidos (digitados no cartão de aprovação, fora do schema do modelo, executados pela API na própria decisão com o resultado ao worker pelo evento `tool_result`; ordem, falha parcial e campo vazio), arquivos gerados como anexo da mensagem da tool na sessão (até 20 MB), backup no chat nunca enviado ao modelo, restauração do dump só na tela, anexo da sessão como entrada (no `/mcp`, um anexo que o dono do token lê), lotes F13a e F13b (entregues).
+
 Os agentes passam a ter **controle completo** do MoneyFlow: tudo o que se faz pela interface pode ser feito por uma tool, inclusive a configuração do próprio sistema de IA. O controle continua sempre limitado às permissões de quem aciona. Decisões da entrevista de 2026-10-13. O que cada agente realmente pode usar, e com ou sem aprovação, é decidido pelo kit ([021](021-kit-de-ferramentas.md)).
 
 ## Princípios

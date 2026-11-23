@@ -1,5 +1,7 @@
 # 035 — Anotações e lembretes (F21)
 
+> **Conteúdo:** F21: anotações (informação, boa, ruim, grave, lembrete, cada uma com a sua cor) presas a exatamente um objeto (hoje a entidade), do autor, privadas ou globais (admin vê todas); lembretes com horário e repetição (uma vez, todo dia, a cada X dias, todo dia N) com vigência, disparados pelo worker só para o autor, alarme com som em loop pelos segundos configurados e ícone entre o tema e os agentes (dispensar, adiar, log com marcar todos como lidos, uma aba toca — eleita pelo Web Locks, com o aviso de autoplay), sino e Telegram opcional, sons em `apps/web/public/sounds`, tela com calendário anual e mensal de bolinhas e a tabela filtrável, aba e selo na entidade, tools e `/mcp`.
+
 Anotações funcionam como notas, post-its e lembretes presos a um objeto do sistema. Hoje esse objeto é sempre uma entidade ([003](003-entidades.md)), e o modelo já está pronto para outros tipos de objeto. O lembrete é a anotação que vira alarme: toca um som na interface administrativa, acende um ícone no topo e fica registrado num log. Decisões da entrevista de 2026-10-21.
 
 ## Anotação

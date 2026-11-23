@@ -1,5 +1,7 @@
 # 032 — Regras de classificação por conta (F18)
 
+> **Conteúdo:** F18: regras de classificação exclusivas de cada conta (`checking`/`savings`) e de cada cartão, sem regra global nem da caixa inteira; migração das regras de caixa e globais copiadas para cada conta (linhas reapontadas, contadores por conta), copiar regras de outra conta (origem `copy`, pula as que já existem) pela tela e pela tool `copy_classification_rules`, o "Aplicar regras" pela tool `apply_classification_rules`, e os agentes lendo as regras de todas as contas legíveis.
+
 As regras de classificação ([009](009-extratos-e-conciliacao.md)) deixam de ser da caixa ou globais e passam a ser **de uma conta**: cada conta que recebe extrato tem as suas, e uma regra só classifica as linhas dos extratos dessa conta. Duas contas da mesma caixa (a corrente e a poupança, por exemplo) não compartilham regra nenhuma. Os agentes de IA leem as regras de todas as contas que o usuário vê para decidir se vale copiar uma regra de outra conta para a conta em que estão trabalhando.
 
 Decisões do usuário (2026-10-20): as regras de caixa já existentes são copiadas para cada conta da caixa; as globais deixam de existir, copiadas para todas as contas; copiar regras entre contas existe nos agentes (tool com prévia) e na tela.

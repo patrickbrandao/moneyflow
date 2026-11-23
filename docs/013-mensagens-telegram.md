@@ -1,5 +1,7 @@
 # 013 — Mensagens (Telegram)
 
+> **Conteúdo:** Cadastro central de destinos Telegram (token write-only, dono pessoal, de caixa ou global), eventos com parâmetros e dedup, a fila de envio no worker (retry, o 429 que adia sem gastar tentativa, histórico de 180 dias), as notificações do sino e a entrada ("Receber mensagens": webhook ligado e desligado com o destino, F15).
+
 - **Cadastro central de destinos Telegram**: token do bot + chat_id (pessoa ou grupo), com vários bots/contas. Cada destino escolhe quais eventos recebe.
 - Eventos selecionáveis:
   - vencimentos (D-N configurável, D-0, atrasados), com PIX/linha digitável para copiar;

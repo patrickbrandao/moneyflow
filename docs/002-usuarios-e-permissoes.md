@@ -1,5 +1,7 @@
 # 002 — Usuários, autenticação e permissões
 
+> **Conteúdo:** Campos do usuário, senha em texto puro e suas restrições de exposição, login e sessão (validade em dias e ociosidade `SESSION_IDLE_HOURS`, cookie `Secure` com aviso no boot, troca de senha encerrando as outras sessões, sessão que cai com o console aberto: janela de login por cima e os pedidos repetidos), admin inicial, papéis globais e por caixa.
+
 - Campos: username, email, password (**texto puro, intencional**), ativo/inativo.
 - A senha nunca sai em respostas da API, logs, exports ou tools de agentes; só o admin a vê, via ação "revelar" na tela do usuário. A única exceção é o backup do admin (exportar usuários e o JSON completo), que leva a senha para permitir a restauração ([019](019-backup-e-restauracao.md)).
 - Login por username **ou** email. Sessão em cookie httpOnly com tabela de sessões no Postgres; desativar o usuário revoga as sessões na hora.
