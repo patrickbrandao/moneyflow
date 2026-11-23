@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
@@ -101,3 +101,10 @@ Migration `database/migrations/0061_recurrence_occurrence_lock.sql`; teste `data
    - Em `endSeriesFrom` (`:616-650`), a mesma chamada antes do `SELECT … FOR UPDATE` da regra, como no diff da tarefa.
    - Com isso, o worker (`pg_try_advisory_xact_lock`) pula a série naquela volta e a materializa na próxima, já a partir do modelo novo. A trava do banco só garante o "n de N": sem a trava consultiva, a ocorrência nova ainda pode sair com o valor, a descrição ou a conta prevista de antes.
 2. Teste em `apps/server/test/titles.test.ts` (`describe('séries …')`): `materializeAll` em paralelo com `updateTitle(scope: 'following')`; a ocorrência nova tem de sair com o valor novo.
+
+### Aplicação (app)
+
+- O código já tinha as duas travas: `updateTitle` com `scope = 'following'` pega `pg_advisory_xact_lock(MATERIALIZE_LOCK, hashtext(regra))` antes de travar o par (tarefa 075), e `endSeriesFrom` antes do `SELECT … FOR UPDATE` da regra (tarefa 079). O `applyToFollowing` só trava a regra com `FOR UPDATE`, sem uma segunda trava consultiva; não mudei nada no serviço.
+- Teste: `apps/server/test/titles.test.ts`, no `describe` do "esta e as próximas", "a mudança espera a materialização em curso e alcança a ocorrência nova": um "worker" segura a trava da série, a mudança de valor fica esperando a mesma chave (conferido em `pg_locks`), o worker materializa com o modelo de antes e, depois do COMMIT dele, a mudança alcança também as ocorrências novas. Sem a trava no `updateTitle` o teste falha (conferido tirando a chamada).
+- Verificação: `pnpm verify:quick` (nível rápido).
+

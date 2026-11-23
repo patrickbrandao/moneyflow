@@ -109,7 +109,12 @@ function titleListWhere(
   if (query.plannedAccountId) where.push(sql`t.planned_account_id = ${query.plannedAccountId}`);
   if (query.from) where.push(sql`t.due_date >= ${query.from}::date`);
   if (query.to) where.push(sql`t.due_date <= ${query.to}::date`);
-  if (query.q) where.push(sql`(t.description ILIKE ${`%${query.q}%`} OR e.name ILIKE ${`%${query.q}%`})`);
+  // Pela descrição ou pela entidade, cada lado pelo seu índice trigram (titles_description_trgm_idx e
+  // entities_name_trgm_idx, num BitmapOr), e não pelo nome do JOIN, que o índice não alcança (tarefa 147).
+  if (query.q) {
+    const like = `%${query.q}%`;
+    where.push(sql`(t.description ILIKE ${like} OR t.entity_id IN (SELECT x.id FROM entities x WHERE x.name ILIKE ${like}))`);
+  }
   where.push(query.archived ? sql`t.archived_at IS NOT NULL` : sql`t.archived_at IS NULL`);
   switch (query.status) {
     case 'open':

@@ -1,6 +1,7 @@
 import { addDays, addMonths, todayIso } from '@moneyflow/shared';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { materializeAll } from '../src/services/recurrence';
+import { MATERIALIZE_LOCK, materializeAll, materializeRule } from '../src/services/recurrence';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
 let h: Harness;
@@ -473,6 +474,66 @@ describe('esta e as próximas no formulário do título (tarefa 075)', () => {
     // Termina na última: os testes seguintes do arquivo contam o que o worker cria.
     await admin.post(`/api/series/${ruleId}/end`, { endsOn: last.dueDate });
   });
+
+  it('a mudança espera a materialização em curso e alcança a ocorrência nova (tarefa 149)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const first = await admin.post('/api/titles', {
+      ...base(s),
+      description: 'Mensalidade',
+      dueDate: today,
+      competenceDate: today,
+      amountCents: 40_000,
+      mirrorCaixaId: null,
+      series: { kind: 'recurrence', frequency: 'monthly' },
+    });
+    const ruleId = first.recurrenceRuleId;
+    const before = await seriesOf(admin, s.caixaA.id, ruleId);
+
+    // Um "worker" segura a trava da série e materializa depois que a mudança já pediu a trava.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => {
+      holding = resolve;
+    });
+    let created = 0;
+    const worker = h.db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${ruleId}))`);
+      holding();
+      await released;
+      created = await materializeRule(tx, ruleId, addMonths(today, 14));
+    });
+    await held;
+    const second = await admin.get(`/api/titles/${before[1]!.id}`);
+    const patch = admin.patch(`/api/titles/${second.id}`, formBody(second, { amountCents: 45_000 }));
+    // A mudança fica esperando a trava da série (a mesma chave do worker).
+    let waiting = 0;
+    try {
+      for (let i = 0; i < 60 && waiting === 0; i++) {
+        const locks = await h.db.execute<{ n: number }>(sql`
+          SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = ${MATERIALIZE_LOCK}`);
+        waiting = Number(locks.rows[0]?.n ?? 0);
+        if (waiting === 0) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      release();
+      await worker;
+      await patch;
+    }
+    expect(waiting).toBe(1);
+    expect(created).toBeGreaterThan(0);
+
+    const after = await seriesOf(admin, s.caixaA.id, ruleId);
+    expect(after).toHaveLength(before.length + created);
+    expect(after[0]!.amountCents).toBe(40_000);
+    // Inclusive as que o worker criou com o modelo de antes: a mudança as viu depois da trava.
+    expect(after.slice(1).every((t) => t.amountCents === 45_000)).toBe(true);
+    await admin.post(`/api/series/${ruleId}/end`, { endsOn: after.at(-1)!.dueDate });
+  });
 });
 
 describe('encerrar série (spec 005)', () => {
@@ -678,5 +739,34 @@ describe('saldo em aberto pelo status (tarefa 093)', () => {
     expect(overdueHere.map((t: { openCents: number }) => t.openCents).sort((a: number, b: number) => a - b)).toEqual([5_000, 10_000]);
     const unpaid = await admin.get(`/api/titles/totals?caixaId=${s.caixaA.id}&status=unpaid`);
     expect(unpaid).toMatchObject({ count: 4, openCents: 10_000 + 5_000 + 6_000 + 8_000 });
+  });
+});
+
+describe('busca de títulos (tarefa 147)', () => {
+  it('acha pelo trecho da descrição e pelo nome da entidade', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const byDescription = await admin.post('/api/titles', {
+      ...base(s),
+      description: `Manutenção do elevador ${s.tag}`,
+      mirrorCaixaId: null,
+    });
+    const other = await admin.post('/api/entities', { kind: 'company', name: `Zeladoria Ômega ${s.tag}` });
+    const byEntity = await admin.post('/api/titles', {
+      ...base(s),
+      entityId: other.id,
+      description: 'Serviço mensal',
+      mirrorCaixaId: null,
+    });
+    const ids = async (q: string) =>
+      (await admin.get(`/api/titles?caixaId=${s.caixaA.id}&q=${encodeURIComponent(q)}`)).map((r: { id: string }) => r.id);
+
+    expect(await ids(`elevador ${s.tag}`)).toEqual([byDescription.id]);
+    expect(await ids('ELEVADOR')).toEqual([byDescription.id]);
+    expect(await ids(`ômega ${s.tag}`)).toEqual([byEntity.id]);
+    // O mesmo texto na descrição de um e no nome da entidade de outro: os dois.
+    expect((await ids(s.tag)).sort()).toEqual([byDescription.id, byEntity.id].sort());
+    expect(await ids('nada-disso-aqui')).toEqual([]);
+    expect((await admin.get(`/api/titles/totals?caixaId=${s.caixaA.id}&q=${encodeURIComponent(`ômega ${s.tag}`)}`)).count).toBe(1);
   });
 });

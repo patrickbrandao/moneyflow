@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
@@ -90,3 +90,12 @@ Migration `database/migrations/0058_query_performance.sql` (com as tarefas 144 e
 2. Em `apps/server/src/services/titles.ts:106` (`listTitles` com `q`), trocar `t.description ILIKE $q OR e.name ILIKE $q` por `(t.description ILIKE $q OR t.entity_id IN (SELECT id FROM entities WHERE name ILIKE $q))`. Assim o planejador usa os dois índices trigram, `titles_description_trgm_idx` e `entities_name_trgm_idx`, num BitmapOr.
 3. A busca dos agentes (`agents/search.ts:121`) já usa `t.description % … OR t.description ILIKE …`: com o índice ela fica indexada, sem mudar o código.
 4. Teste em `apps/server/test/titles.test.ts`: a busca por `q` acha pelo trecho da descrição e pelo nome da entidade, depois da reescrita.
+
+### Aplicação (app)
+
+- `pnpm db:pull` já estava feito no branch de integração.
+- `apps/server/src/services/titles.ts` (`listTitles`/`titleTotals` com `q`, também a busca da paleta): `(t.description ILIKE $q OR t.entity_id IN (SELECT id FROM entities WHERE name ILIKE $q))`, para o planejador usar `titles_description_trgm_idx` e `entities_name_trgm_idx`. O resultado não muda.
+- `agents/search.ts` ficou como estava (o índice novo já o atende).
+- Teste: `apps/server/test/titles.test.ts`, "acha pelo trecho da descrição e pelo nome da entidade" (sem diferenciar maiúsculas, o mesmo texto na descrição de um e na entidade de outro, nenhum resultado e os totais do filtro).
+- Verificação: `pnpm verify:quick` (nível rápido).
+
