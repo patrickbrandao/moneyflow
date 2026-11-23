@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
@@ -103,3 +103,20 @@ Verificação:
 3. Na tela Requisições (`RequestsTable`/`RequestDrawer`), mostrar o `error_message` que começa por `interrupted:` como "Interrompida (o processo parou antes do fim)", em `t`.
 4. Teste em `apps/server/test/ai-requests.test.ts`: uma requisição inserida `running` com `started_at` de 2 horas atrás vira `error` depois da manutenção. Uma de agora fica `running`.
 5. `docs/023` (Ciclo): registrar o fechamento das interrompidas pela manutenção.
+
+### Aplicação (app)
+
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: nada chamava `ai_requests_close_stale`.
+
+1. `pnpm db:pull`: nada a gerar (só função e índice).
+2. `apps/server/src/agents/worker.ts`: `closeStaleAiRequests(db, after = '1 hour')` chama `ai_requests_close_stale(after, 1000)` em lotes, cada um na sua transação (autocommit), até um lote vir incompleto; no laço de manutenção, antes de `purgeAiRequests`, com o total no log como aviso.
+   - Decisão: o prazo fica fixo em 1 hora no código (`STALE_REQUEST_AFTER`), sem variável nova: está acima do maior prazo de uma chamada (`AI_DOCUMENT_CONVERT_TIMEOUT_MS`, até 30 min), e o streaming não tem prazo.
+3. Tela: `isInterruptedRequest` e `INTERRUPTED_REQUEST_PREFIX` em `packages/shared/src/agents/requests.ts`; a `RequestsTable` mostra "Interrompida" ao lado da situação Erro (com o texto completo no `title`) e a `RequestDrawer` troca a mensagem crua por "Interrompida (o processo parou antes do fim)" (`t.agentsUi.admin.requests.interrupted`/`interruptedShort`).
+4. Spec 023 (O que é registrado): o fechamento das interrompidas pela manutenção, o prazo e a tela.
+
+Testes:
+- `test/ai-requests.test.ts`: a requisição `running` de 2 horas vira `error` com `finished_at` e o motivo reconhecido por `isInterruptedRequest`, aparece na lista filtrada por erro, e a de agora fica `running`;
+- `test/maintenance.test.ts`: a primeira passada do laço de manutenção fecha uma requisição presa de 3 horas;
+- `packages/shared/test/ai-requests.test.ts`: `isInterruptedRequest` só pelo começo da mensagem.
+
+Verificação: rápida, `pnpm verify:quick --base HEAD`.

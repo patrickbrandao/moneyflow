@@ -50,6 +50,7 @@ O que é repetitivo e determinístico continua nas **regras de classificação**
 ## Histórico
 
 - Cada execução fica registrada com receita, lote, quem disparou, gatilho (`manual` ou `import`), escopo (número de linhas), status, a sessão e a execução. A tela da receita lista as execuções com link para a sessão (em leitura) e para o lote; a tela do lote mostra as execuções de receitas daquele lote.
+- O histórico guarda 1 ano: a execução terminada (`completed`, `skipped` ou `failed`) há mais de 1 ano é apagada pela manutenção do worker (`operational_purge`, tarefa 103); a sessão fica.
 
 ## Tela
 

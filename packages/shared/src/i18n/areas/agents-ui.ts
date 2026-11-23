@@ -729,6 +729,9 @@ export const agentsUiStrings = {
         list_models: 'Listar modelos',
       } as Record<string, string>,
       statuses: { running: 'Em andamento', ok: 'Ok', error: 'Erro', canceled: 'Cancelada' } as Record<string, string>,
+      /** A requisição que o processo não fechou, passada a erro pela manutenção (tarefa 162). */
+      interrupted: 'Interrompida (o processo parou antes do fim)',
+      interruptedShort: 'Interrompida',
       retention: 'Retenção (dias)',
       retentionHint: 'Requisições mais velhas que isso são apagadas pelo worker (o uso fica).',
       retentionFromDb: 'Valor salvo nesta tela (vence a variável de ambiente).',

@@ -64,6 +64,7 @@ Anotações funcionam como notas, post-its e lembretes presos a um objeto do sis
 - **Ícone**: um sino de alarme no canto superior direito, **entre o botão de tema claro/escuro e o ícone dos agentes**.
   - Com disparos não lidos, mostra o contador; enquanto toca, o ícone anima (respeitando `prefers-reduced-motion`).
   - Clicar abre o popover do log: os disparos (cor do tipo, título, entidade, horário previsto), o não lido em destaque, **"Marcar todos como lidos"** e o link para a tela das anotações.
+  - O log guarda os disparos lidos por 180 dias (pelo último disparo); depois, a manutenção do worker os apaga (`operational_purge`, tarefa 103). O não lido fica.
 - **Ao tocar**:
   - o som do lembrete toca em loop pelos segundos configurados e para sozinho;
   - o popover abre com o disparo e as ações **Dispensar** (para o som e marca como lido) e **Adiar 5 / 10 / 30 min** (para o som e reagenda);

@@ -84,7 +84,7 @@ function startHourlyLoop(db: Database, config: Config, log: FastifyBaseLogger): 
         ),
       );
       if (contracts && (contracts.renewed || contracts.ended || contracts.failed)) log.info(contracts, 'worker: contratos');
-      await step('sessions', () => purgeExpiredSessions(db));
+      await step('sessions', () => purgeExpiredSessions(db, config.sessionIdleHours));
     } finally {
       running = false;
     }

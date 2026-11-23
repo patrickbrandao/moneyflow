@@ -30,7 +30,7 @@ Em todos, **o kit do agente decide** o que roda direto (`allow`) e o que espera 
 - **Tela**:
   - a lista mostra nome, agente, agenda em texto ("toda segunda às 08:00"), próximo disparo, último resultado e ativo;
   - o formulário tem o agente, a instrução, a agenda e "Rodar agora";
-  - o histórico mostra os disparos, com status e link para a sessão.
+  - o histórico mostra os disparos, com status e link para a sessão; o disparo criado há mais de 1 ano sai do histórico pela manutenção do worker (`operational_purge`, tarefa 103), e a sessão fica.
 
 ## Conciliação completa ao importar
 - **Liga e desliga**:
@@ -61,7 +61,8 @@ Em todos, **o kit do agente decide** o que roda direto (`allow`) e o que espera 
   - enviar `/start <código>` ao bot liga aquele chat privado ao usuário;
   - só chats privados;
   - um chat não pareado recebe "Este chat não está pareado com o MoneyFlow";
-  - o usuário vê e desfaz os pareamentos, e o admin vê todos.
+  - o usuário vê e desfaz os pareamentos, e o admin vê todos;
+  - o código usado ou vencido há mais de 1 dia é apagado pela manutenção do worker (tarefa 103); o pareamento feito fica.
 - **Conversa**:
   - a mensagem do chat pareado entra na **sessão ativa** do usuário com o agente do destino ([026](026-sessoes-dos-agentes.md)), que é o mesmo fio do console;
   - a resposta final do agente volta ao chat (markdown convertido para o HTML do Telegram, em partes de 4096 caracteres);

@@ -7,6 +7,16 @@
 /** Valor que a aplicação e o banco põem no lugar das credenciais nos cabeçalhos. */
 export const OMITTED_HEADER = '[omitido]';
 
+/**
+ * Começo do `error_message` da requisição que o processo não fechou (tarefa 162): a manutenção do worker
+ * (`ai_requests_close_stale`) a passa a erro com esse motivo. A tela mostra "Interrompida".
+ */
+export const INTERRUPTED_REQUEST_PREFIX = 'interrupted:';
+
+/** A requisição foi fechada pela manutenção, sem ter terminado (tarefa 162). */
+export const isInterruptedRequest = (message: string | null | undefined): boolean =>
+  typeof message === 'string' && message.startsWith(INTERRUPTED_REQUEST_PREFIX);
+
 /** Cabeçalhos que o cURL não repete (o próprio curl calcula ou negocia). */
 const SKIP_CURL_HEADERS = new Set(['content-length', 'host', 'connection', 'accept-encoding', 'transfer-encoding']);
 

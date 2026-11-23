@@ -8,6 +8,7 @@
     "apps/server/src/http.ts": ["test/auth.test.ts", "test/chat-media.test.ts"],
     "apps/server/src/worker.ts": ["test/titles.test.ts", "test/cards.test.ts", "test/contracts.test.ts"],
     "apps/server/src/auth/**": ["test/auth.test.ts", "test/permissions.test.ts"],
+    "apps/server/src/auth/session.ts": ["test/maintenance.test.ts"],
     "apps/server/src/authz/**": ["test/permissions.test.ts", "test/statements.test.ts", "test/vision.test.ts"],
     "apps/server/src/integrations/telegram.ts": ["test/vision.test.ts", "test/autonomous.test.ts", "test/notes.test.ts"],
 
@@ -62,7 +63,13 @@
     "apps/server/src/services/conversations.ts": ["test/agents.test.ts"],
 
     "apps/server/src/agents/runner.ts": ["test/agents.test.ts", "test/autonomous.test.ts", "test/budgets.test.ts"],
-    "apps/server/src/agents/worker.ts": ["test/agents.test.ts", "test/autonomous.test.ts", "test/reconcile-recipes.test.ts"],
+    "apps/server/src/agents/worker.ts": [
+      "test/agents.test.ts",
+      "test/autonomous.test.ts",
+      "test/reconcile-recipes.test.ts",
+      "test/maintenance.test.ts",
+      "test/ai-requests.test.ts"
+    ],
     "apps/server/src/agents/store.ts": ["test/agents.test.ts"],
     "apps/server/src/agents/events-hub.ts": ["test/agents.test.ts"],
     "apps/server/src/agents/flows.ts": ["test/agents.test.ts", "test/autonomous.test.ts"],

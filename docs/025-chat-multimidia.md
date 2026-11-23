@@ -38,6 +38,7 @@ O chat dos agentes passa a mostrar e tocar o que é anexado, a gravar áudio e a
   - num agente sem áudio→texto, o áudio anexado fica como arquivo, com o aviso "sem transcrição: o agente não converte áudio".
   - com o orçamento de IA do mês estourado ([028](028-limites-e-uso.md)), o upload grava o áudio sem chamar o provedor: a transcrição nasce `failed` com o motivo do orçamento, e o "Tentar de novo" dá `429` `budget_exceeded` até haver orçamento (o admin fica isento).
 - Transcrever no upload gasta transcrição mesmo com áudio que nunca é enviado (aceito: o usuário vê o texto antes de mandar).
+- O arquivo enviado ao chat que não chega a uma mensagem (a janela fechada antes de mandar) fica sem vínculo e é apagado, com a transcrição, 7 dias depois do upload, pela manutenção do worker (`operational_purge`, tarefa 103). Vale também para o `upload_file` do `/mcp` nunca usado.
 - A transcrição usa o idioma `pt` como dica e grava uso e requisição com a finalidade `transcription`.
 
 ## Player de áudio
