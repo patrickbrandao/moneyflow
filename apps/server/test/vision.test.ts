@@ -849,6 +849,42 @@ describe('mensagens (spec 013)', () => {
 });
 
 describe('notificações (sino)', () => {
+  it('não lidas primeiro e todas alcançáveis pelo cursor, mesmo lendo entre as páginas (tarefa 169)', async () => {
+    const session = await userSession(h);
+    const me = client(h, session.cookie);
+    // 35 avisos, um por minuto; o mais novo é o 0.
+    await h.db.execute(sql`
+      INSERT INTO notifications (user_id, kind, title, created_at, dedup_key)
+      SELECT ${session.id}::uuid, 'system', 'Aviso ' || lpad(i::text, 2, '0'), now() - make_interval(mins => i), 'sino-169:' || i
+        FROM generate_series(0, 34) i`);
+    const ids = async () =>
+      (
+        await h.db.execute<{ id: string; title: string }>(
+          sql`SELECT id, title FROM notifications WHERE user_id = ${session.id} ORDER BY created_at DESC`,
+        )
+      ).rows;
+    const all = await ids();
+    // Lidas as 5 mais recentes.
+    for (const n of all.slice(0, 5)) await me.post(`/api/notifications/${n.id}/read`);
+
+    const page1 = await me.get('/api/notifications?limit=30');
+    expect(page1.unread).toBe(30);
+    expect(page1.items.map((n: any) => n.title)).toEqual(all.slice(5).map((n) => n.title));
+    expect(page1.items.every((n: any) => n.readAt === null)).toBe(true);
+    expect(page1.nextCursor).toEqual(expect.any(String));
+    const page2 = await me.get(`/api/notifications?limit=30&cursor=${page1.nextCursor}`);
+    expect(page2.items.map((n: any) => n.title)).toEqual(all.slice(0, 5).map((n) => n.title));
+    expect(page2.nextCursor).toBeNull();
+
+    // Ler a última da página entre as páginas não pula as não lidas que faltam.
+    const small = await me.get('/api/notifications?limit=20');
+    await me.post(`/api/notifications/${small.items.at(-1).id}/read`);
+    const rest = await me.get(`/api/notifications?limit=50&cursor=${small.nextCursor}`);
+    const restUnread = rest.items.filter((n: any) => n.readAt === null).map((n: any) => n.title);
+    expect(restUnread).toEqual(all.slice(25).map((n) => n.title));
+    await me.get('/api/notifications?cursor=xyz', 400);
+  });
+
   it('espelho pendente vira notificação do editor da outra caixa; marcar lida e todas', async () => {
     const admin = client(h, (await userSession(h, 'admin')).cookie);
     const s = await scenario(h, admin);

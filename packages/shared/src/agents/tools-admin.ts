@@ -226,7 +226,7 @@ export const ADMIN_TOOLS = [
     name: 'list_notifications',
     category: 'messages',
     title: 'Listar notificações',
-    description: 'Notificações do sino do próprio usuário (as mais recentes primeiro).',
+    description: 'Notificações do sino do próprio usuário (as não lidas primeiro, depois as mais recentes).',
     kind: 'read',
     input: z.object({ unread: z.boolean().default(false).describe('true = só as não lidas.'), limit: limit(100, 30) }),
   }),

@@ -1294,7 +1294,8 @@ export type NotificationDto = {
   createdAt: string;
 };
 
-export type NotificationList = { unread: number; items: NotificationDto[] };
+/** Não lidas primeiro, depois as mais recentes; `nextCursor` traz a página seguinte (tarefa 169). */
+export type NotificationList = { unread: number; items: NotificationDto[]; nextCursor: string | null };
 
 /* ---------------- contratos (specs 020 e 034) ---------------- */
 
