@@ -117,6 +117,15 @@ export async function loadMessages(db: Executor, conversationId: string): Promis
   return result.rows;
 }
 
+/** As últimas `limit` respostas do agente na conversa, da mais nova para a mais velha (o aviso de conclusão, tarefa 164). */
+export async function recentAssistantMessages(db: Executor, conversationId: string, limit: number): Promise<MessageRow[]> {
+  const result = await db.execute<MessageRow>(sql`
+    SELECT ${MESSAGE_COLUMNS} FROM ai_messages m
+     WHERE m.conversation_id = ${conversationId} AND m.role = 'assistant'
+     ORDER BY m.seq DESC LIMIT ${limit}`);
+  return result.rows;
+}
+
 export async function messageUsage(db: Executor, messageIds: string[]): Promise<Map<string, UsageTotals[]>> {
   const map = new Map<string, UsageTotals[]>();
   if (messageIds.length === 0) return map;

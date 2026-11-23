@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
@@ -102,3 +102,22 @@ Confirmado:
 5. Testes de integração (modo local):
    - `SHOW statement_timeout`, `lock_timeout` e `idle_in_transaction_session_timeout` numa conexão do pool devolvem os valores configurados;
    - `SELECT pg_sleep(…)` acima do `statement_timeout` do teste devolve o erro traduzido.
+
+### Aplicação (app)
+
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `createPool` sem nenhum prazo, nenhum tratamento de 57014/55P03 e o `SET lock_timeout = 0` do SQL do `pg_restore` anulando o `PGOPTIONS` da restauração.
+
+1. **Pool** (`packages/db/src/index.ts`): `createPool(url, max, { statementTimeoutMs, lockTimeoutMs, idleInTransactionTimeoutMs, connectionTimeoutMs, onError })`, com os padrões em `DEFAULT_POOL_TIMEOUTS` (60 s, 30 s, 5 min, 10 s) e `keepAlive`. A configuração (`config.dbTimeouts`) lê `DB_STATEMENT_TIMEOUT_MS`, `DB_LOCK_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` e `DB_CONNECTION_TIMEOUT_MS` (no `.env.example`), e o `main.ts` os passa ao pool.
+   - Prazo maior só na própria transação: `longRead(db, prazo, fn)` em `services/tx.ts` (só leitura, `set_config('statement_timeout', …, true)`), usado no export do backup JSON (30 min), na busca do admin em todas as conversas (`listConversations` com `userId: 'all'`, 5 min) e nas três consultas dos relatórios (5 min).
+2. **Tradução** (`errors.ts`): `57014` e `55P03` viram `503` (`pg_57014`, `pg_55P03`) com `retry-after: 5` e a mensagem em `DB_CODE_MESSAGES`; a espera por conexão do pool (o pg-pool não dá código: `isPoolTimeout` pela mensagem, `POOL_CONNECT_TIMEOUT_MESSAGES`) vira `503 db_busy` (`t.errors.databaseBusy`). O tratador da API manda os cabeçalhos do erro traduzido e loga o 503 como aviso.
+3. **Compose da raiz**: conferido, o `migrate` já tem `&options=-c%20lock_timeout%3D10s` (frente de infraestrutura). O deploy de produção (URL do dbmate e o `ALTER ROLE` uma vez) ficou registrado na `docs/018` (Ambientes).
+4. **Restauração** (`services/backup/dump.ts`): `restoreLockTimeout(ms)`, uma passagem entre o `pg_restore` e o `psql`, troca a linha `SET lock_timeout = 0;` do cabeçalho por `SET lock_timeout = '<ms>ms';` (procura nos primeiros 64 KB; o resto passa igual). O prazo é o mesmo do pool (`DB_LOCK_TIMEOUT_MS`), também no `PGOPTIONS`. Com a passagem no meio, o `pg_restore` não via o `psql` sair: quando o consumidor fecha antes, a ponta de leitura é fechada e ele recebe o EPIPE (sem isso, a restauração que falha ficava pendurada).
+   - Decisão: limitar a espera (e não retirar o `PGOPTIONS`): a restauração que espera um lock falha no prazo, com a transação desfeita.
+5. Docs: `docs/016` (Prazos no Postgres: valores, `longRead`, 503 e a troca na restauração) e `docs/018`.
+
+Testes:
+- `test/db-pool.test.ts` (novo): os prazos padrão e os da configuração numa conexão do pool (`current_setting`); `pg_sleep` acima do prazo → `57014` traduzido para 503, e a conexão volta usável; o `SET LOCAL` vencendo o prazo só na transação; a espera por advisory lock → `55P03` → 503; o pool esgotado responde em `connectionTimeoutMillis` com `db_busy`; a API responde 503 com `retry-after` quando a consulta passa do prazo.
+- `test/backup.test.ts`: a passagem troca só a linha do cabeçalho, mesmo com a entrada partida em pedaços de 1 e 7 bytes, e deixa intacto o SQL sem ela; a restauração com um lock segurado por outra transação falha em segundos com `DB_LOCK_TIMEOUT_MS=1000` (422 `restore_failed`, "lock timeout") e não muda nada. Rodado aqui com o cliente do PostgreSQL 19 (`PG_BIN_DIR=/opt/homebrew/opt/libpq/bin`): a ida e volta do dump também passou.
+- `test/config.test.ts`: os padrões e as faixas das variáveis novas.
+
+Verificação: rápida, `pnpm verify:quick --base f2f6e4d` (com `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_p2b`).

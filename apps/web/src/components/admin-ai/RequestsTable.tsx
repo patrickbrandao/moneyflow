@@ -1,4 +1,4 @@
-import { type AiRequestListItem, type AiRequestStatus, formatDateTime, t } from '@moneyflow/shared';
+import { type AiRequestListItem, type AiRequestStatus, formatDateTime, isInterruptedRequest, t } from '@moneyflow/shared';
 import { formatInt } from '../../agents/format';
 import { SkelRows } from '../domain';
 import { Badge, EmptyRow, type Tone } from '../ui';
@@ -69,6 +69,11 @@ export function RequestsTable({
                 <RequestStatusBadge status={item.status} />
                 {item.httpStatus !== null && item.status === 'error' && (
                   <span className="ml-1 mono text-xs text-faint">{item.httpStatus}</span>
+                )}
+                {item.status === 'error' && isInterruptedRequest(item.errorMessage) && (
+                  <span className="ml-1 text-xs text-faint" title={r.interrupted}>
+                    {r.interruptedShort}
+                  </span>
                 )}
               </td>
               <td className="num mono text-xs">{item.attempts}</td>

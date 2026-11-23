@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
@@ -170,3 +170,20 @@ Verificação:
 4. `listDestinations` (`services/messages.ts`): nada obrigatório, porque os índices novos já servem à consulta de hoje. Não troque `max(o.sent_at)` por outra forma sem conferir o plano.
 5. Testes: um `test/maintenance.test.ts`, ou o `describe` da manutenção em `agents.test.ts`, com um anexo de chat não enviado e `created_at` ajustado para 8 dias atrás, que some depois da manutenção, e um ligado a uma mensagem, que fica.
 6. Specs: registrar os prazos na 013 (outbox e sino), na 025 (o upload do chat não enviado some em 7 dias), na 029 (códigos de pareamento e disparos das tarefas), na 030 (histórico das receitas por 1 ano) e na 035 (log dos disparos lidos por 180 dias).
+
+### Aplicação (app)
+
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: nada chamava `operational_purge`, e `purgeExpiredSessions` só olhava o `expires_at`.
+
+1. `pnpm db:pull`: nada a gerar (só função e índices; o schema gerado da integração já estava em dia).
+2. `apps/server/src/agents/worker.ts`: `purgeOperational(db)` chama `operational_purge(1000)` numa transação própria sem `app.user_id` (a exclusão dos anexos sai como `system`), repete enquanto alguma tabela devolve o lote cheio (teto de 20 lotes por passada) e devolve as contagens diferentes de zero, que vão ao log (`manutenção: retenção operacional`). O laço de manutenção a chama na primeira passada e depois a cada hora (`OPERATIONAL_PURGE_EVERY_MS`), isolada: a falha vai ao log com `step: 'operational_purge'` e o resto da manutenção segue.
+3. `apps/server/src/auth/session.ts`: `purgeExpiredSessions(db, idleHours)` apaga também as sessões com `last_seen_at` além de `SESSION_IDLE_HOURS` (com `idleHours` > 0) e devolve quantas; o laço de hora em hora passa `config.sessionIdleHours`.
+4. `listDestinations`: sem mudança, como pedido (os índices novos servem à consulta de hoje).
+5. Specs: os prazos na 013 (outbox 180 dias, acima dos 120 da dedup; sino lido 180 dias), 025 (upload do chat não enviado e `upload_file` não usado: 7 dias), 029 (código de pareamento: 1 dia; disparos das tarefas: 1 ano), 030 (histórico das receitas: 1 ano) e 035 (log dos disparos lidos: 180 dias); a 002 diz que o worker apaga as sessões vencidas e as ociosas.
+
+Testes (`test/maintenance.test.ts`, novo, no mapa `related.json` do `agents/worker.ts` e do `auth/session.ts`):
+- o laço de manutenção (`startAgentWorker`, a primeira passada) apaga o anexo sem vínculo de 8 dias; o recente e o ligado a uma entidade, de 30 dias, ficam; a exclusão sai na auditoria como `system`, sem usuário;
+- `purgeOperational` devolve só as contagens diferentes de zero e `{}` quando não há o que apagar;
+- as sessões: com `0`, só a vencida sai; com 72 h, a ociosa de 100 h também, e a usada há 1 h fica.
+
+Verificação: rápida, `pnpm verify:quick --base HEAD` (com `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_p2b`).

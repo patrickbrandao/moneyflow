@@ -1,6 +1,14 @@
+import { DEFAULT_POOL_TIMEOUTS, type PoolTimeouts } from '@moneyflow/db';
+
 /** Configuração por variáveis de ambiente (veja .env.example na raiz). */
 export type Config = {
   databaseUrl: string;
+  /**
+   * Prazos das conexões do pool (tarefa 102), em ms: DB_STATEMENT_TIMEOUT_MS (60 s), DB_LOCK_TIMEOUT_MS
+   * (30 s; também o da restauração do dump), DB_IDLE_IN_TRANSACTION_TIMEOUT_MS (5 min) e
+   * DB_CONNECTION_TIMEOUT_MS (10 s, a espera por uma conexão do pool).
+   */
+  dbTimeouts: PoolTimeouts;
   host: string;
   port: number;
   cookieSecure: boolean;
@@ -117,6 +125,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error('CNPJ_ABERTO_ENABLED=true exige CNPJ_ABERTO_API_KEY (veja .env.example).');
   return {
     databaseUrl,
+    dbTimeouts: {
+      statementTimeoutMs: intEnv(env, 'DB_STATEMENT_TIMEOUT_MS', DEFAULT_POOL_TIMEOUTS.statementTimeoutMs, 1000, 24 * HOUR_MS),
+      lockTimeoutMs: intEnv(env, 'DB_LOCK_TIMEOUT_MS', DEFAULT_POOL_TIMEOUTS.lockTimeoutMs, 1000, HOUR_MS),
+      idleInTransactionTimeoutMs: intEnv(
+        env,
+        'DB_IDLE_IN_TRANSACTION_TIMEOUT_MS',
+        DEFAULT_POOL_TIMEOUTS.idleInTransactionTimeoutMs,
+        1000,
+        24 * HOUR_MS,
+      ),
+      connectionTimeoutMs: intEnv(env, 'DB_CONNECTION_TIMEOUT_MS', DEFAULT_POOL_TIMEOUTS.connectionTimeoutMs, 100, 600_000),
+    },
     host: env.HOST ?? '0.0.0.0',
     port: intEnv(env, 'PORT', 3001, 1, 65_535),
     cookieSecure: env.COOKIE_SECURE === 'true',

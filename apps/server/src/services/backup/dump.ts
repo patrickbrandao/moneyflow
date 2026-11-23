@@ -3,6 +3,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Transform } from 'node:stream';
 import { pg } from '@moneyflow/db';
 import { type BackupStatus, type DumpRestoreResult, t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
@@ -90,6 +91,7 @@ function pipeRun(
   producer: { command: string; args: string[] },
   consumer: { command: string; args: string[] },
   env: NodeJS.ProcessEnv,
+  through?: Transform,
 ): Promise<{ producer: Run; consumer: Run }> {
   return new Promise((resolve, reject) => {
     const from = spawn(producer.command, producer.args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -103,7 +105,6 @@ function pipeRun(
     to.stderr.on('data', collect('consumer'));
     // EPIPE quando o psql para antes: o erro que importa é o dele.
     to.stdin.on('error', () => {});
-    from.stdout.pipe(to.stdin);
     let failed = false;
     const fail = (error: Error) => {
       if (failed) return;
@@ -114,6 +115,12 @@ function pipeRun(
     };
     from.on('error', fail);
     to.on('error', fail);
+    if (through) {
+      through.on('error', fail);
+      from.stdout.pipe(through).pipe(to.stdin);
+    } else {
+      from.stdout.pipe(to.stdin);
+    }
     const done = () => {
       if (!failed && results.producer && results.consumer) resolve(results as { producer: Run; consumer: Run });
     };
@@ -123,8 +130,53 @@ function pipeRun(
     });
     to.on('close', (code) => {
       results.consumer = { code: code ?? 1, stdout: '', stderr: errs.consumer };
+      // Com a passagem no meio, o produtor não vê o pipe fechar: sem ler a saída dele, ficaria bloqueado na escrita.
+      // Fechar a ponta de leitura dá a ele o EPIPE, como no pipe direto.
+      if (through && !results.producer) {
+        from.stdout.unpipe();
+        from.stdout.destroy();
+      }
       done();
     });
+  });
+}
+
+const LOCK_TIMEOUT_OFF = Buffer.from('\nSET lock_timeout = 0;\n');
+/** Até onde procurar o SET no começo do SQL (o cabeçalho tem poucas centenas de bytes). */
+const HEADER_SCAN_BYTES = 64 * 1024;
+
+/**
+ * O prazo da espera por lock na restauração (tarefa 102). O SQL que o `pg_restore -f -` gera começa com
+ * `SET lock_timeout = 0;`, que vence o `PGOPTIONS`: esta passagem troca essa linha do cabeçalho por
+ * `SET lock_timeout = '<ms>ms';`. Uma restauração que espera um lock (uma transação longa da API ou do
+ * worker) falha no prazo, com a transação desfeita, em vez de enfileirar atrás dela as consultas da
+ * aplicação. O resto do SQL passa sem mudança; sem a linha no começo, passa inteiro (o `PGOPTIONS` vale).
+ */
+export function restoreLockTimeout(ms: number): Transform {
+  const replacement = Buffer.from(`\nSET lock_timeout = '${Math.max(1, Math.round(ms))}ms';\n`);
+  let head: Buffer | null = Buffer.alloc(0);
+  return new Transform({
+    transform(chunk: Buffer, _encoding, done) {
+      if (!head) return done(null, chunk);
+      head = Buffer.concat([head, chunk]);
+      const at = head.indexOf(LOCK_TIMEOUT_OFF);
+      if (at >= 0) {
+        const out = Buffer.concat([head.subarray(0, at), replacement, head.subarray(at + LOCK_TIMEOUT_OFF.length)]);
+        head = null;
+        return done(null, out);
+      }
+      if (head.length > HEADER_SCAN_BYTES) {
+        const out = head;
+        head = null;
+        return done(null, out);
+      }
+      done();
+    },
+    flush(done) {
+      const out = head;
+      head = null;
+      done(null, out && out.length > 0 ? out : undefined);
+    },
   });
 }
 
@@ -345,7 +397,10 @@ export async function restoreDump(ctx: ServiceContext, body: unknown, log: Backu
       }
       const listPath = join(dir, 'restore.list');
       await writeFile(listPath, await restoreList(ctx.config, dumpPath), { mode: 0o600 });
-      const env: NodeJS.ProcessEnv = { ...pgEnv(ownerUrl), PGOPTIONS: '-c lock_timeout=30s' };
+      // A espera por lock com o prazo do pool (DB_LOCK_TIMEOUT_MS): o PGOPTIONS vale para o começo da sessão do psql,
+      // e o SET do cabeçalho do SQL, que o zeraria, é trocado no caminho (restoreLockTimeout).
+      const lockMs = ctx.config.dbTimeouts.lockTimeoutMs;
+      const env: NodeJS.ProcessEnv = { ...pgEnv(ownerUrl), PGOPTIONS: `-c lock_timeout=${lockMs}ms` };
       // pg_restore só gera o SQL (sem conexão); o psql o roda numa transação, zerando antes os privilégios padrão.
       const out = await pipeRun(
         { command: pgBin(ctx.config, 'pg_restore'), args: ['--clean', '--if-exists', '--no-owner', '-L', listPath, '-f', '-', dumpPath] },
@@ -354,6 +409,7 @@ export async function restoreDump(ctx: ServiceContext, body: unknown, log: Backu
           args: ['-X', '-q', '--single-transaction', '-v', 'ON_ERROR_STOP=1', '-c', 'SELECT restore_reset_default_privileges()', '-f', '-'],
         },
         env,
+        restoreLockTimeout(lockMs),
       );
       if (out.producer.code !== 0 || out.consumer.code !== 0) {
         const stderr = [out.consumer.stderr, out.producer.stderr].filter(Boolean).join('\n');

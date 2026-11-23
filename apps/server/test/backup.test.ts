@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { loadAccess } from '../src/authz/access';
 import type { ServiceContext } from '../src/context';
 import { loadCatalog } from '../src/services/backup/catalog';
-import { extractDump } from '../src/services/backup/dump';
+import { extractDump, restoreLockTimeout } from '../src/services/backup/dump';
 import { ATTACHMENT_ENTRY_PREFIX, exportFullZip, tableBatches } from '../src/services/backup/export';
 import { backupText, parseBackupUpload } from '../src/services/backup/import';
 import { backupUnzipLimit, UnzipTooLarge } from '../src/services/backup/unzip';
@@ -1275,6 +1275,80 @@ describe('backup: dump e restauração pelo dono (tarefa 054)', () => {
     if (!inject('superDatabaseUrl')) return ctx.skip();
     if ((await roundTrip('super')) === 'skip') ctx.skip();
   });
+
+  it('o SQL da restauração troca o SET lock_timeout = 0 do cabeçalho pelo prazo (tarefa 102), mesmo partido em pedaços', async () => {
+    const header = [
+      '--',
+      '-- PostgreSQL database dump',
+      '--',
+      '',
+      'SET statement_timeout = 0;',
+      'SET lock_timeout = 0;',
+      'SET idle_in_transaction_session_timeout = 0;',
+      "SET client_encoding = 'UTF8';",
+      '',
+      "INSERT INTO t VALUES ('SET lock_timeout = 0;');",
+      'SET lock_timeout = 0;',
+      '',
+    ].join('\n');
+    const through = async (input: Buffer, size: number) => {
+      const transform = restoreLockTimeout(1500);
+      const out: Buffer[] = [];
+      transform.on('data', (chunk: Buffer) => out.push(chunk));
+      const ended = new Promise((resolve) => transform.on('end', resolve));
+      for (let at = 0; at < input.length; at += size) transform.write(input.subarray(at, at + size));
+      transform.end();
+      await ended;
+      return Buffer.concat(out).toString('utf8');
+    };
+    for (const size of [1, 7, 4096]) {
+      const out = await through(Buffer.from(header), size);
+      // Só a linha do cabeçalho muda: o resto (inclusive o mesmo texto adiante) passa igual.
+      expect(out).toBe(header.replace('\nSET lock_timeout = 0;\n', "\nSET lock_timeout = '1500ms';\n"));
+    }
+    // Sem a linha no começo (outro formato), tudo passa sem mudança, inclusive o que vem depois dos 64 KB.
+    const plain = Buffer.from(`${'-- x\n'.repeat(20_000)}SET lock_timeout = 0;\n`);
+    expect(await through(plain, 1000)).toBe(plain.toString('utf8'));
+  });
+
+  it('a restauração que espera um lock falha no prazo da DB_LOCK_TIMEOUT_MS, sem mudar nada (tarefa 102)', async (ctx) => {
+    const urls = await freshDatabaseUrls();
+    if (!urls) return ctx.skip();
+    const app = await startApp({ DATABASE_OWNER_URL: urls.owner, PG_BIN_DIR: pgBinDir, DB_LOCK_TIMEOUT_MS: '1000' }, urls.app);
+    const holder = new pg.Client({ connectionString: urls.app });
+    // O DROP DATABASE … WITH (FORCE) do fim derruba a conexão: sem ouvinte, a queda viraria exceção.
+    holder.on('error', () => {});
+    try {
+      const admin = await userSession(app, 'admin');
+      const api = client(app, admin.cookie);
+      if (!(await api.get('/api/backup/status')).dumpAvailable) return ctx.skip();
+      const dump = await app.app.inject({ method: 'GET', url: '/api/backup/dump', headers: { cookie: admin.cookie } });
+      expect(dump.statusCode, dump.body).toBe(200);
+      const after = await api.post('/api/categories', { kind: 'expense', name: `Depois ${uid()}`, colorSlot: 5 });
+      // Uma transação longa da aplicação segura a tabela: o DROP da restauração espera o lock.
+      await holder.connect();
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM categories LIMIT 1');
+      const started = Date.now();
+      const restored = await app.app.inject({
+        method: 'POST',
+        url: '/api/backup/restore-dump?confirm=RESTAURAR',
+        payload: dump.rawPayload,
+        headers: { cookie: admin.cookie, 'content-type': 'application/zip' },
+      });
+      expect(restored.statusCode, restored.body).toBe(422);
+      expect(restored.json().error.code).toBe('restore_failed');
+      expect(restored.body).toMatch(/lock timeout/i);
+      expect(Date.now() - started).toBeLessThan(20_000);
+      await holder.query('ROLLBACK');
+      // Desfeita inteira: o que foi criado depois do dump continua lá.
+      const ids = (await api.get('/api/categories')).map((c: { id: string }) => c.id);
+      expect(ids).toContain(after.id);
+    } finally {
+      await holder.end().catch(() => {});
+      await app.close();
+    }
+  }, 120_000);
 });
 
 describe('backup: JSON completo num sistema novo', () => {

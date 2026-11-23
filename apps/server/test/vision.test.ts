@@ -32,7 +32,15 @@ import { client, type Harness, scenario, startApp, uid, userSession } from './he
  */
 
 type TelegramCall = { path: string; body: { chat_id: string; text: string; parse_mode: string } };
-const telegram = { mode: 'ok' as 'ok' | '429' | '400', calls: [] as TelegramCall[], nextId: 100, delayMs: 0 };
+const telegram = {
+  mode: 'ok' as 'ok' | '429' | '400' | '500',
+  calls: [] as TelegramCall[],
+  nextId: 100,
+  delayMs: 0,
+  /** Cota por chat na janela (tarefa 109): passou dela, 429 com retry_after 2; 0 = sem cota. */
+  quota: 0,
+  window: new Map<string, number>(),
+};
 let mock: Server;
 let h: Harness;
 
@@ -47,9 +55,17 @@ beforeAll(async () => {
     });
     req.on('end', async () => {
       if (telegram.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, telegram.delayMs));
-      telegram.calls.push({ path: req.url ?? '', body: JSON.parse(raw || '{}') });
+      const body = JSON.parse(raw || '{}');
+      telegram.calls.push({ path: req.url ?? '', body });
       res.setHeader('content-type', 'application/json');
-      if (telegram.mode === '429') {
+      const chat = String(body.chat_id ?? '');
+      const used = telegram.window.get(chat) ?? 0;
+      if (telegram.quota > 0 && used >= telegram.quota) {
+        res.statusCode = 429;
+        res.end(
+          JSON.stringify({ ok: false, error_code: 429, description: 'Too Many Requests: retry after 2', parameters: { retry_after: 2 } }),
+        );
+      } else if (telegram.mode === '429') {
         res.statusCode = 429;
         res.end(
           JSON.stringify({ ok: false, error_code: 429, description: 'Too Many Requests: retry after 7', parameters: { retry_after: 7 } }),
@@ -57,7 +73,11 @@ beforeAll(async () => {
       } else if (telegram.mode === '400') {
         res.statusCode = 400;
         res.end(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: chat not found' }));
+      } else if (telegram.mode === '500') {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ ok: false, error_code: 500, description: 'Internal Server Error' }));
       } else {
+        telegram.window.set(chat, used + 1);
         telegram.nextId += 1;
         res.end(JSON.stringify({ ok: true, result: { message_id: telegram.nextId } }));
       }
@@ -75,6 +95,8 @@ beforeEach(() => {
   telegram.mode = 'ok';
   telegram.calls = [];
   telegram.delayMs = 0;
+  telegram.quota = 0;
+  telegram.window.clear();
 });
 
 /**
@@ -450,10 +472,11 @@ describe('mensagens (spec 013)', () => {
     const limited = await admin.post(`/api/message-destinations/${dest.id}/test`);
     expect(limited.status).toBe('pending');
     expect(limited.error).toContain('429');
-    const row = await h.db.execute<{ attempts: number; wait: number }>(
-      sql`SELECT attempts, extract(epoch FROM next_attempt_at - now())::int AS wait FROM message_outbox WHERE id = ${limited.messageId}`,
+    const row = await h.db.execute<{ attempts: number; deferrals: number; wait: number }>(
+      sql`SELECT attempts, deferrals, extract(epoch FROM next_attempt_at - now())::int AS wait FROM message_outbox WHERE id = ${limited.messageId}`,
     );
-    expect(row.rows[0]!.attempts).toBe(1);
+    // O 429 adia sem gastar tentativa (tarefa 109).
+    expect(row.rows[0]!).toMatchObject({ attempts: 0, deferrals: 1 });
     expect(Number(row.rows[0]!.wait)).toBeGreaterThanOrEqual(5);
     expect(Number(row.rows[0]!.wait)).toBeLessThanOrEqual(8);
 
@@ -485,6 +508,78 @@ describe('mensagens (spec 013)', () => {
     await admin.post(`/api/message-destinations/${dest.id}/test`, {}, 422);
     // Com histórico, excluir arquiva.
     expect(await admin.del(`/api/message-destinations/${dest.id}`)).toEqual({ deleted: false, archived: true });
+  });
+
+  it('rajada ao mesmo chat (tarefa 109): o 429 adia sem gastar tentativa, segura o destino na passada e nada vira failed', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const chat = `109${Date.now() % 100_000}`;
+    const dest = await admin.post('/api/message-destinations', { name: `Rajada ${uid()}`, botToken: TOKEN, chatId: chat });
+    // 120 avisos para o mesmo grupo, que aceita 20 por janela.
+    await h.db.execute(sql`
+      INSERT INTO message_outbox (destination_id, event_kind, dedup_key, payload)
+      SELECT ${dest.id}::uuid, 'agent_message', 'rajada:' || i, jsonb_build_object('text', 'aviso ' || i, 'parse_mode', 'HTML')
+        FROM generate_series(1, 120) i`);
+    telegram.quota = 20;
+    const statusCount = async () => {
+      const rows = await h.db.execute<{ status: string; n: number }>(
+        sql`SELECT status, count(*)::int AS n FROM message_outbox WHERE destination_id = ${dest.id} GROUP BY status`,
+      );
+      return Object.fromEntries(rows.rows.map((r) => [r.status, r.n])) as Record<string, number>;
+    };
+    let passes = 0;
+    while ((await statusCount()).pending && passes < 15) {
+      passes += 1;
+      // Uma janela nova e o retry_after vencido (o tempo andou).
+      telegram.window.clear();
+      await h.db.execute(sql`UPDATE message_outbox SET next_attempt_at = now() WHERE destination_id = ${dest.id} AND status = 'pending'`);
+      const before = telegram.calls.length;
+      await consumeOutbox(h.db, h.config);
+      const toChat = telegram.calls.slice(before).filter((c) => c.body.chat_id === chat);
+      // Depois do primeiro 429, nada mais vai ao chat na mesma passada: 20 aceitas e a recusada.
+      expect(toChat.length).toBeLessThanOrEqual(21);
+    }
+    expect(await statusCount()).toEqual({ sent: 120 });
+    const attempts = await h.db.execute<{ max: number; deferrals: number }>(
+      sql`SELECT max(attempts)::int AS max, max(deferrals)::int AS deferrals FROM message_outbox WHERE destination_id = ${dest.id}`,
+    );
+    // Cada uma saiu na primeira tentativa contada; os adiamentos ficam bem abaixo do teto (100).
+    expect(attempts.rows[0]!.max).toBe(1);
+    expect(attempts.rows[0]!.deferrals).toBeLessThanOrEqual(passes);
+    const bell = await admin.get('/api/notifications');
+    expect(bell.items.some((n: any) => n.kind === 'message_failed' && n.link.includes(dest.id))).toBe(false);
+  });
+
+  it('o 429 no teto de adiamentos conta a tentativa; um erro que não é 429 segue com as tentativas (tarefa 109)', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const dest = await admin.post('/api/message-destinations', { name: `Teto ${uid()}`, botToken: TOKEN, chatId: '1091' });
+    const insert = async (key: string, deferrals: number, attempts: number) => {
+      const row = await h.db.execute<{ id: string }>(sql`
+        INSERT INTO message_outbox (destination_id, event_kind, dedup_key, payload)
+        VALUES (${dest.id}, 'agent_message', ${key}, '{"text":"x","parse_mode":"HTML"}'::jsonb) RETURNING id`);
+      const id = row.rows[0]!.id;
+      await h.db.execute(sql`UPDATE message_outbox SET deferrals = ${deferrals}, attempts = ${attempts} WHERE id = ${id}`);
+      return id;
+    };
+    const capped = await insert(`teto:${uid()}`, 100, 4);
+    telegram.mode = '429';
+    await consumeOutbox(h.db, h.config);
+    const row = await h.db.execute<{ status: string; attempts: number }>(
+      sql`SELECT status, attempts FROM message_outbox WHERE id = ${capped}`,
+    );
+    expect(row.rows[0]).toEqual({ status: 'failed', attempts: 5 });
+
+    // Erro que não é 429 (500 do Telegram): conta a tentativa e volta com o backoff de 30 s.
+    const plain = await insert(`erro:${uid()}`, 0, 0);
+    telegram.mode = '500';
+    await consumeOutbox(h.db, h.config);
+    const retried = await h.db.execute<{ status: string; attempts: number; deferrals: number; wait: number }>(
+      sql`SELECT status, attempts, deferrals, extract(epoch FROM next_attempt_at - now())::int AS wait FROM message_outbox WHERE id = ${plain}`,
+    );
+    expect(retried.rows[0]).toMatchObject({ status: 'pending', attempts: 1, deferrals: 0 });
+    expect(Number(retried.rows[0]!.wait)).toBeGreaterThanOrEqual(25);
+    await h.db.execute(sql`UPDATE message_outbox SET status = 'canceled' WHERE id = ${plain}`);
   });
 
   it('token indisponível: erro transitório volta à fila; P0002/42501 do banco falham de vez (tarefa 062)', async () => {

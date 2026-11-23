@@ -24,8 +24,56 @@ export type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 /** Banco ou transação: os serviços aceitam os dois. */
 export type Executor = Database | Tx;
 
-export function createPool(url: string, max = 10) {
-  return new pg.Pool({ connectionString: url, max, application_name: 'moneyflow' });
+/**
+ * Prazos de cada conexão do pool (tarefa 102), em ms: nada da aplicação espera sem limite. O que
+ * precisa de mais tempo levanta o `statement_timeout` só na própria transação (SET LOCAL).
+ */
+export type PoolTimeouts = {
+  /** Consulta mais longa que isso é cancelada pelo servidor (57014). */
+  statementTimeoutMs: number;
+  /** Espera por um lock (linha, tabela, advisory) mais longa que isso falha (55P03). */
+  lockTimeoutMs: number;
+  /** Transação aberta e parada mais que isso é encerrada pelo servidor. */
+  idleInTransactionTimeoutMs: number;
+  /** Espera por uma conexão (pool esgotado ou banco que não responde) mais longa que isso falha. */
+  connectionTimeoutMs: number;
+};
+
+export const DEFAULT_POOL_TIMEOUTS: PoolTimeouts = {
+  statementTimeoutMs: 60_000,
+  lockTimeoutMs: 30_000,
+  idleInTransactionTimeoutMs: 300_000,
+  connectionTimeoutMs: 10_000,
+};
+
+/** Texto do pg-pool quando a espera por uma conexão passa do `connectionTimeoutMillis`. */
+export const POOL_CONNECT_TIMEOUT_MESSAGES = ['timeout exceeded when trying to connect', 'Connection terminated due to connection timeout'];
+
+/**
+ * Pool da aplicação, com os prazos (padrão DEFAULT_POOL_TIMEOUTS). `onError` recebe a queda de uma
+ * conexão (tarefa 108: o banco reiniciou, a rede caiu, a transação parada encerrada pelo servidor): o
+ * pool descarta o cliente e a próxima consulta abre outro; sem um ouvinte de `error`, o EventEmitter
+ * lançaria e o processo cairia.
+ */
+export function createPool(url: string, max = 10, options: Partial<PoolTimeouts> & { onError?: (error: Error) => void } = {}) {
+  const { onError, ...own } = options;
+  const timeouts = { ...DEFAULT_POOL_TIMEOUTS, ...own };
+  const pool = new pg.Pool({
+    connectionString: url,
+    max,
+    application_name: 'moneyflow',
+    statement_timeout: timeouts.statementTimeoutMs,
+    lock_timeout: timeouts.lockTimeoutMs,
+    idle_in_transaction_session_timeout: timeouts.idleInTransactionTimeoutMs,
+    connectionTimeoutMillis: timeouts.connectionTimeoutMs,
+    keepAlive: true,
+  });
+  // A queda chega ao ouvinte do próprio cliente, ocioso ou emprestado (a transação parada que o servidor encerra
+  // pelo idle_in_transaction_session_timeout: o pg-pool tira o ouvinte dele do cliente emprestado). O do pool só
+  // evita a exceção da ociosa, que chega aos dois.
+  pool.on('connect', (client) => client.on('error', (error) => onError?.(error)));
+  pool.on('error', () => {});
+  return pool;
 }
 
 export function createDb(pool: pg.Pool): Database {

@@ -14,6 +14,7 @@ import { type SQL, sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
 import { readableFilter } from './caixas';
 import { resolveEntityFilter } from './entity-tags';
+import { LONG_STATEMENT_TIMEOUT, longRead } from './tx';
 import { camel } from './util';
 
 /*
@@ -71,6 +72,10 @@ async function entityScope(ctx: ServiceContext, filter: Partial<EntityFilter> | 
 
 type Filtered = Partial<EntityFilter>;
 
+/** A consulta de um relatório, com prazo próprio (tarefa 102): um período longo passa do prazo do pool. */
+const report = (ctx: ServiceContext, query: SQL) =>
+  longRead(ctx.db, LONG_STATEMENT_TIMEOUT.report, (tx) => tx.execute<Record<string, unknown>>(query));
+
 export async function categoryReport(
   ctx: ServiceContext,
   q: { from: string; to: string; basis: ReportBasis; caixaIds: string[] } & Filtered,
@@ -80,12 +85,15 @@ export async function categoryReport(
   const scope = await entityScope(ctx, q);
   const empty = { basis: q.basis, from: q.from, to: q.to, months, caixas, lines: [], entityFilter: scope.info };
   if (caixas.length === 0 || scope.info?.entityCount === 0) return empty;
-  const result = await ctx.db.execute(sql`
+  const result = await report(
+    ctx,
+    sql`
     SELECT r.month, r.caixa_id, r.card_caixa_id, r.kind, r.group_category_id, g.name AS group_name, g.color_slot AS group_color_slot,
            r.category_id, c.name AS category_name, c.color_slot, r.source, r.is_internal, r.amount_cents, r.entries
       FROM report_category_totals(${uuidArray(ids(caixas))}, ${q.from}::date, ${q.to}::date, ${q.basis}, ${scope.param}) r
       LEFT JOIN categories g ON g.id = r.group_category_id
-      LEFT JOIN categories c ON c.id = r.category_id`);
+      LEFT JOIN categories c ON c.id = r.category_id`,
+  );
   const lines = result.rows
     .map((row) => {
       const line = camel<CategoryTotalLine>(row);
@@ -103,14 +111,17 @@ export async function entityReport(
   const scope = await entityScope(ctx, q);
   const empty = { basis: q.basis, from: q.from, to: q.to, caixas, lines: [], entityFilter: scope.info };
   if (caixas.length === 0 || scope.info?.entityCount === 0) return empty;
-  const result = await ctx.db.execute(sql`
+  const result = await report(
+    ctx,
+    sql`
     SELECT r.entity_id, coalesce(e.trade_name, e.name) AS entity_name, r.caixa_id, c.name AS caixa_name,
            r.card_caixa_id, k.name AS card_name, r.source, r.is_internal, r.outflow_cents, r.inflow_cents, r.entries
       FROM report_entity_totals(${uuidArray(ids(caixas))}, ${q.from}::date, ${q.to}::date, ${q.basis}, ${scope.param}) r
       JOIN entities e ON e.id = r.entity_id
       JOIN caixas c ON c.id = r.caixa_id
       LEFT JOIN caixas k ON k.id = r.card_caixa_id
-     ORDER BY entity_name, c.name`);
+     ORDER BY entity_name, c.name`,
+  );
   return { ...empty, lines: result.rows.map((row) => camel<EntityTotalLine>(row)).filter(purchaseFilter(caixas, q.caixaIds)) };
 }
 
@@ -123,11 +134,14 @@ export async function projectionReport(
   const horizons = [...new Set(q.horizons)].sort((a, b) => a - b);
   const scope = await entityScope(ctx, q);
   if (caixas.length === 0 || scope.info?.entityCount === 0) return { today, horizons, lines: [], entityFilter: scope.info };
-  const result = await ctx.db.execute(sql`
+  const result = await report(
+    ctx,
+    sql`
     SELECT p.*, c.name AS caixa_name, a.name AS account_name
       FROM report_cash_projection(${uuidArray(ids(caixas))}, ${today}::date, ${`{${horizons.join(',')}}`}::int[], ${scope.param}) p
       JOIN caixas c ON c.id = p.caixa_id
       LEFT JOIN financial_accounts a ON a.id = p.financial_account_id
-     ORDER BY c.name, p.caixa_id, p.financial_account_id NULLS FIRST, a.name, p.horizon_days`);
+     ORDER BY c.name, p.caixa_id, p.financial_account_id NULLS FIRST, a.name, p.horizon_days`,
+  );
   return { today, horizons, lines: result.rows.map((row) => camel<ProjectionLine>(row)), entityFilter: scope.info };
 }

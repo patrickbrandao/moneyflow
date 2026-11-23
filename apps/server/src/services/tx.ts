@@ -1,6 +1,7 @@
-import type { Tx } from '@moneyflow/db';
+import type { Database, Tx } from '@moneyflow/db';
 import type { DeleteResult } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
+import type { PgTransactionConfig } from 'drizzle-orm/pg-core';
 import type { ServiceContext } from '../context';
 import { findPgError } from '../errors';
 
@@ -29,6 +30,28 @@ export function withTx<T>(ctx: ServiceContext, fn: (tx: Tx) => Promise<T>): Prom
     await setActor(tx, ctx);
     return fn(tx);
   });
+}
+
+/** Prazos maiores que o `statement_timeout` do pool (tarefa 102), para o que de fato demora. */
+export const LONG_STATEMENT_TIMEOUT = { backup: '30min', search: '5min', report: '5min' } as const;
+
+/**
+ * Leitura com prazo próprio (tarefa 102): uma transação só de leitura com o `statement_timeout` local
+ * (set_config com is_local, o mesmo que SET LOCAL), que volta ao do pool no fim dela.
+ */
+export function longRead<T>(
+  db: Database,
+  timeout: string,
+  fn: (tx: Tx) => Promise<T>,
+  config: Omit<PgTransactionConfig, 'accessMode'> = {},
+): Promise<T> {
+  return db.transaction(
+    async (tx) => {
+      await tx.execute(sql`SELECT set_config('statement_timeout', ${timeout}, true)`);
+      return fn(tx);
+    },
+    { ...config, accessMode: 'read only' },
+  );
 }
 
 /**

@@ -1,4 +1,4 @@
-import { type AiRequestBodyPart, type AiRequestDetail, buildCurl, formatDateTime, t } from '@moneyflow/shared';
+import { type AiRequestBodyPart, type AiRequestDetail, buildCurl, formatDateTime, isInterruptedRequest, t } from '@moneyflow/shared';
 import { Download, MessageSquare, Radio, X } from 'lucide-react';
 import { useState } from 'react';
 import { useAgentActions } from '../../agents/AgentsProvider';
@@ -126,7 +126,7 @@ export function RequestDrawer({ requestId, onClose }: { requestId: string; onClo
                 {data.errorMessage && (
                   <>
                     <dt>{d.error}</dt>
-                    <dd className="text-danger">{data.errorMessage}</dd>
+                    <dd className="text-danger">{isInterruptedRequest(data.errorMessage) ? r.interrupted : data.errorMessage}</dd>
                   </>
                 )}
               </dl>

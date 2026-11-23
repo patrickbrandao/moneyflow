@@ -506,15 +506,17 @@ export type ClaimedMessage = { id: string; chatId: string; destinationName: stri
 /**
  * Entrega uma mensagem já reservada (status sending): lê o token pela função
  * do banco, chama a Bot API fora de transação e fecha com mark_sent ou
- * mark_failed (retry_after do 429; 400/401/403/404 = falha permanente; o
- * token indisponível só é permanente com P0002/42501 do banco).
+ * mark_failed (400/401/403/404 = falha permanente; o token indisponível só é
+ * permanente com P0002/42501 do banco). O 429 não gasta tentativa (tarefa
+ * 109): message_outbox_release devolve a mensagem à fila depois do
+ * retry_after, e `retryAfterSec` volta para o worker segurar o destino.
  * Falha definitiva gera a notificação message_failed para o dono do destino.
  */
 export async function deliver(
   db: Executor,
   config: Config,
   message: ClaimedMessage,
-): Promise<{ status: OutboxStatus; error: string | null }> {
+): Promise<{ status: OutboxStatus; error: string | null; retryAfterSec?: number }> {
   let token: string;
   try {
     const result = await db.execute<{ token: string }>(sql`SELECT message_destination_token(${message.id}::uuid) AS token`);
@@ -539,9 +541,27 @@ export async function deliver(
     await db.execute(sql`SELECT message_outbox_mark_sent(${message.id}::uuid, ${sent.messageId || null})`);
     return { status: 'sent', error: null };
   }
-  const status = await markFailed(db, message.id, sent.error, sent.retryAfterSec, sent.permanent);
+  if (sent.retryAfterSec !== null && !sent.permanent) {
+    // 429: adia sem gastar tentativa (no teto de adiamentos do banco, conta e pode virar failed).
+    const status = await releaseMessage(db, message.id, sent.retryAfterSec, sent.error);
+    if (status === 'failed') await notifyFailure(db, message.id, sent.error);
+    return { status, error: sent.error, retryAfterSec: sent.retryAfterSec };
+  }
+  const status = await markFailed(db, message.id, sent.error, null, sent.permanent);
   if (status === 'failed') await notifyFailure(db, message.id, sent.error);
   return { status, error: sent.error };
+}
+
+/**
+ * Devolve à fila uma mensagem reservada sem gastar tentativa (message_outbox_release, tarefa 109): o 429 dela ou de
+ * outra do mesmo destino na mesma passada. Volta depois de `retryAfterSec` (no mínimo 1 s).
+ */
+export async function releaseMessage(db: Executor, id: string, retryAfterSec: number, error: string): Promise<OutboxStatus> {
+  const retry = `${Math.max(1, Math.ceil(retryAfterSec))} seconds`;
+  const result = await db.execute<{ status: OutboxStatus }>(
+    sql`SELECT message_outbox_release(${id}::uuid, ${retry}::interval, ${error}) AS status`,
+  );
+  return result.rows[0]!.status;
 }
 
 async function markFailed(

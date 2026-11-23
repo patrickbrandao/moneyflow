@@ -1,3 +1,4 @@
+import { isInterruptedRequest } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
@@ -5,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { embed } from '../src/agents/llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
-import { purgeAiRequests } from '../src/agents/worker';
+import { closeStaleAiRequests, purgeAiRequests } from '../src/agents/worker';
 import { EXCLUDED_TABLES, fullTables, loadCatalog } from '../src/services/backup/catalog';
 import { client, type Harness, newSession, startApp, uid, userSession } from './helpers';
 
@@ -437,6 +438,30 @@ describe('retenção e configurações', () => {
     const audit = await h.db.execute(sql`
       SELECT 1 FROM audit_log WHERE table_name = 'app_settings' AND record_id = md5('ai.request_retention_days')::uuid`);
     expect(audit.rows.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('a requisição presa em running (o processo parou no meio) fecha como interrompida; a de agora fica (tarefa 162)', async () => {
+    const running = async (minutesAgo: number) => {
+      const r = await h.db.execute<{ id: string }>(sql`
+        INSERT INTO ai_requests (provider_id, operation, purpose, model, path, started_at)
+        VALUES (${provider.id}, 'chat', 'chat', 'claude-sonnet-5-5', '/v1/messages', now() - make_interval(mins => ${minutesAgo}::int))
+        RETURNING id`);
+      return r.rows[0]!.id;
+    };
+    const stale = await running(120);
+    const fresh = await running(0);
+    expect(await closeStaleAiRequests(h.db)).toBeGreaterThanOrEqual(1);
+    const rows = await h.db.execute<{ id: string; status: string; error_message: string | null; finished_at: string | null }>(sql`
+      SELECT id, status, error_message, finished_at FROM ai_requests WHERE id IN (${stale}, ${fresh})`);
+    const byId = new Map(rows.rows.map((r) => [r.id, r]));
+    expect(byId.get(stale)).toMatchObject({ status: 'error' });
+    expect(byId.get(stale)?.finished_at).toBeTruthy();
+    expect(isInterruptedRequest(byId.get(stale)?.error_message)).toBe(true);
+    expect(byId.get(fresh)).toMatchObject({ status: 'running', error_message: null });
+    // Na lista da tela, a interrompida aparece como erro, com a mensagem que a tela traduz.
+    const page = await admin.get(`/api/admin/ai/requests?providerId=${provider.id}&status=error&limit=200`);
+    expect(page.items.find((i: { id: string }) => i.id === stale)).toMatchObject({ status: 'error' });
+    await h.db.execute(sql`UPDATE ai_requests SET status = 'canceled', finished_at = now() WHERE id = ${fresh}`);
   });
 
   it('valores fora da faixa e chaves desconhecidas são recusados', async () => {

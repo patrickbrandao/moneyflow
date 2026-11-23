@@ -13,7 +13,9 @@ import { embed, type LlmCredentials, type RequestLogBase } from './llm';
  *
  * Indexação de um par: (1) grava/atualiza o texto-fonte dos objetos
  * (entidades, títulos, compras de cartão, linhas de extrato) — o banco marca
- * needs_reindex quando o texto muda; (2) calcula os vetores pendentes.
+ * needs_reindex quando o texto muda; (2) calcula os vetores pendentes; (3)
+ * marca o índice completo ou não (ai_embedding_index_mark, tarefa 161), que é
+ * o que a busca lê para avisar "índice em construção".
  */
 
 export type EmbeddingPair = { providerId: string; model: string };
@@ -154,15 +156,24 @@ export async function purgeEmbeddingIndexes(db: Executor, idle = '7 days'): Prom
   return Number(result.rows[0]?.n ?? 0);
 }
 
+const sourceKey = (pair: EmbeddingPair, type: string) => `${pair.providerId}|${pair.model}|${type}`;
+
 /**
  * Grava os textos-fonte alterados desde a última passada do par (até `batch` por tipo). Pagina pela chave composta
  * (updated_at, object_id), porque uma transação grava milhares de linhas com o mesmo carimbo (tarefa 094); alcançado
- * o fim, o cursor volta à janela de COMMIT tardio.
+ * o fim, o cursor volta à janela de COMMIT tardio. `reachedEnd`: todo tipo leu menos que o lote (contadas as linhas
+ * lidas, não só as gravadas, que ficam em 0 quando nada mudou), então a passada alcançou o fim das fontes (tarefa 161).
  */
-export async function syncEmbeddingSources(db: Database, pair: EmbeddingPair, state: IndexState, batch = 500) {
+export async function syncEmbeddingSources(
+  db: Database,
+  pair: EmbeddingPair,
+  state: IndexState,
+  batch = 500,
+): Promise<{ upserted: number; reachedEnd: boolean }> {
   let upserted = 0;
+  let reachedEnd = true;
   for (const [type, source] of Object.entries(SOURCES)) {
-    const key = `${pair.providerId}|${pair.model}|${type}`;
+    const key = sourceKey(pair, type);
     const since = state.since.get(key) ?? { at: '-infinity', id: ZERO_UUID };
     const result = await db.execute<{ last_at: string | null; last_id: string | null; read: number; n: number; rewind: string }>(sql`
       WITH src AS (SELECT * FROM (${source}) s
@@ -184,9 +195,21 @@ export async function syncEmbeddingSources(db: Database, pair: EmbeddingPair, st
     const row = result.rows[0];
     if (row && row.read >= batch && row.last_at && row.last_id) state.since.set(key, { at: row.last_at, id: row.last_id });
     else if (row) state.since.set(key, { at: row.rewind, id: ZERO_UUID });
+    if (!row || row.read >= batch) reachedEnd = false;
     upserted += row?.n ?? 0;
   }
-  return upserted;
+  return { upserted, reachedEnd };
+}
+
+/**
+ * Marca o índice do par (tarefa 161): `true` grava o fim de uma passada completa (o banco só aceita sem vetor na
+ * fila, `needs_reindex`), `false` limpa. A busca lê só a marca (`ai_embedding_index_ready`), sem contar as fontes.
+ */
+export async function markEmbeddingIndex(db: Executor, pair: EmbeddingPair, complete: boolean): Promise<boolean> {
+  const result = await db.execute<{ done: boolean }>(
+    sql`SELECT ai_embedding_index_mark(${pair.providerId}::uuid, ${pair.model}, ${complete}) AS done`,
+  );
+  return Boolean(result.rows[0]?.done);
 }
 
 /** Calcula os vetores pendentes (needs_reindex) do par. */
@@ -217,12 +240,18 @@ export async function embedPending(db: Database, creds: EmbeddingCredentials, ba
 /**
  * Um ciclo de indexação (worker): registra os pares em uso e indexa cada um.
  * Um par com problema (provedor fora, modelo com outra dimensão) não segura
- * os demais: o erro volta na lista.
+ * os demais: o erro volta na lista. Ao fim de cada par, a marca do índice
+ * (tarefa 161): completo quando a passada alcançou o fim das fontes e não
+ * sobrou vetor na fila; incompleto (ou com erro), desmarcado. Na primeira
+ * passada do processo para o par (sem cursor), desmarca antes: o worker não
+ * sabe o que mudou enquanto estava parado, e só marca quando a releitura
+ * alcançar o fim.
  */
 export async function indexEmbeddings(
   db: Database,
   config: Pick<Config, 'aiRequestMaxAttempts' | 'aiRequestBackoffMs'>,
   state: IndexState,
+  opts: { sourceBatch?: number } = {},
 ): Promise<{ pairs: number; sources: number; embedded: number; errors: { pair: EmbeddingPair; error: unknown }[] }> {
   const pairs = await touchEmbeddingIndexes(db);
   let sources = 0;
@@ -232,10 +261,16 @@ export async function indexEmbeddings(
     try {
       const creds = await embeddingCredentials(db, pair, config);
       if (!creds) continue;
-      sources += await syncEmbeddingSources(db, pair, state);
+      const fresh = !Object.keys(SOURCES).some((type) => state.since.has(sourceKey(pair, type)));
+      if (fresh) await markEmbeddingIndex(db, pair, false);
+      const synced = await syncEmbeddingSources(db, pair, state, opts.sourceBatch);
+      sources += synced.upserted;
       embedded += await embedPending(db, creds);
+      // Com a fila não vazia, o banco grava nulo mesmo com true.
+      await markEmbeddingIndex(db, pair, synced.reachedEnd);
     } catch (error) {
       errors.push({ pair, error });
+      await markEmbeddingIndex(db, pair, false).catch(() => {});
     }
   }
   return { pairs: pairs.length, sources, embedded, errors };

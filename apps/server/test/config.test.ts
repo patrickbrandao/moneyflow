@@ -20,8 +20,11 @@ describe('configuração por ambiente (tarefa 110)', () => {
       LOGIN_RATE_LIMIT: '',
       NOTIFY_AT: '',
       BACKUP_MAX_UPLOAD_MB: '',
+      DB_STATEMENT_TIMEOUT_MS: '',
     });
     expect(config).toMatchObject({
+      // Prazos do pool (tarefa 102).
+      dbTimeouts: { statementTimeoutMs: 60_000, lockTimeoutMs: 30_000, idleInTransactionTimeoutMs: 300_000, connectionTimeoutMs: 10_000 },
       port: 3001,
       sessionDays: 30,
       agentPollMs: 1000,
@@ -51,6 +54,8 @@ describe('configuração por ambiente (tarefa 110)', () => {
       ['AI_REQUEST_MAX_ATTEMPTS', 'três'],
       ['BACKUP_MAX_UPLOAD_MB', '-1'],
       ['SESSION_IDLE_HOURS', '-1'],
+      ['DB_STATEMENT_TIMEOUT_MS', '0'],
+      ['DB_LOCK_TIMEOUT_MS', '30s'],
     ];
     for (const [name, value] of bad) {
       expect(() => loadConfig({ ...base, [name]: value }), `${name}=${value}`).toThrow(new RegExp(name));

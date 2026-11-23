@@ -13,7 +13,12 @@ import { startWorker } from './worker';
  */
 const mode = resolveMode(process.argv[2], process.env);
 const config = loadConfig();
-const pool = createPool(config.databaseUrl);
+/*
+ * Conexão ociosa que cai (tarefa 108: o banco reiniciou, a rede caiu): o pool a descarta e a próxima consulta abre
+ * outra; aqui só o aviso, pelo logger do modo quando ele existe (antes disso, no stderr, sem os parâmetros).
+ */
+let poolWarn = (error: Error) => console.warn('banco: conexão ociosa caiu', loggableError(error));
+const pool = createPool(config.databaseUrl, 10, { ...config.dbTimeouts, onError: (error) => poolWarn(error) });
 const db = createDb(pool);
 
 /*
@@ -43,6 +48,7 @@ process.on('SIGINT', shutdown);
 async function main() {
   if (mode === 'worker') {
     const log = workerLogger(config);
+    poolWarn = (error) => log.warn({ err: error }, 'banco: conexão ociosa caiu');
     const stop = startWorker(db, config, log);
     stopServices = async () => {
       log.info('worker: parando');
@@ -53,6 +59,7 @@ async function main() {
   if (mode !== 'api') throw new Error(`Modo desconhecido: ${mode} (use api ou worker)`);
 
   const app = await buildApp({ db, config });
+  poolWarn = (error) => app.log.warn({ err: error }, 'banco: conexão ociosa caiu');
   // Fecha o servidor: os streams SSE abertos são encerrados antes (preClose em routes/agents.ts).
   stopServices = () => app.close();
   if (stopping) return;

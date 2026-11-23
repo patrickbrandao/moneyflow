@@ -12,6 +12,7 @@ import {
 import { type SQL, sql } from 'drizzle-orm';
 import { strToU8, Zip, ZipDeflate, ZipPassThrough } from 'fflate';
 import type { ServiceContext } from '../../context';
+import { LONG_STATEMENT_TIMEOUT, longRead } from '../tx';
 import {
   type Catalog,
   EXCLUDED_TABLES,
@@ -169,8 +170,9 @@ function header(ctx: ServiceContext, kind: BackupKind, version: string | null) {
   } as const;
 }
 
+// Prazo próprio (tarefa 102): o export lê as tabelas inteiras, anexos inclusive.
 const readOnly = <T>(ctx: ServiceContext, fn: (tx: Tx) => Promise<T>) =>
-  ctx.db.transaction(fn, { isolationLevel: 'repeatable read', accessMode: 'read only' });
+  longRead(ctx.db, LONG_STATEMENT_TIMEOUT.backup, fn, { isolationLevel: 'repeatable read' });
 
 /** Um recurso, com as referências externas (sem segredos) para casar registros na importação. */
 export async function exportResource(ctx: ServiceContext, resource: BackupResource): Promise<BackupFile> {

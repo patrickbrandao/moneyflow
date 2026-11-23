@@ -8,6 +8,7 @@
     "apps/server/src/http.ts": ["test/auth.test.ts", "test/chat-media.test.ts"],
     "apps/server/src/worker.ts": ["test/titles.test.ts", "test/cards.test.ts", "test/contracts.test.ts"],
     "apps/server/src/auth/**": ["test/auth.test.ts", "test/permissions.test.ts"],
+    "apps/server/src/auth/session.ts": ["test/maintenance.test.ts"],
     "apps/server/src/authz/**": ["test/permissions.test.ts", "test/statements.test.ts", "test/vision.test.ts"],
     "apps/server/src/integrations/telegram.ts": ["test/vision.test.ts", "test/autonomous.test.ts", "test/notes.test.ts"],
 
@@ -84,7 +85,13 @@
     "apps/server/src/services/conversations.ts": ["test/agents.test.ts"],
 
     "apps/server/src/agents/runner.ts": ["test/agents.test.ts", "test/autonomous.test.ts", "test/budgets.test.ts"],
-    "apps/server/src/agents/worker.ts": ["test/agents.test.ts", "test/autonomous.test.ts", "test/reconcile-recipes.test.ts"],
+    "apps/server/src/agents/worker.ts": [
+      "test/agents.test.ts",
+      "test/autonomous.test.ts",
+      "test/reconcile-recipes.test.ts",
+      "test/maintenance.test.ts",
+      "test/ai-requests.test.ts"
+    ],
     "apps/server/src/agents/store.ts": ["test/agents.test.ts"],
     "apps/server/src/agents/events-hub.ts": ["test/agents.test.ts"],
     "apps/server/src/agents/flows.ts": ["test/agents.test.ts", "test/autonomous.test.ts"],
@@ -116,7 +123,7 @@
     "e2e/fakes/fake-llm.ts": ["test/e2e-fakes.test.ts", "test/agents.test.ts", "test/capabilities.test.ts"],
     "e2e/fakes/fake-telegram.ts": ["test/e2e-fakes.test.ts", "test/autonomous.test.ts", "test/vision.test.ts"],
 
-    "packages/db/src/**": ["test/generated-schema.test.ts"],
+    "packages/db/src/**": ["test/generated-schema.test.ts", "test/db-pool.test.ts"],
     "database/migrations/**": ["test/generated-schema.test.ts"],
     "packages/shared/src/reconcile.ts": ["test/statements.test.ts", "test/contracts.test.ts"],
     "packages/shared/src/supersede.ts": ["test/statement-supersede.test.ts"],

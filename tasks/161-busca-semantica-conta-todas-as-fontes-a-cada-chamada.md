@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
@@ -114,3 +114,20 @@ Verificação:
    - antes da primeira passada completa, `building: true`;
    - depois dela, `mode: 'embeddings'` sem `building`;
    - com um título editado e sincronizado (`needs_reindex`), `building: true` de novo.
+
+### Aplicação (app)
+
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `indexComplete` lia `ai_embedding_index_stats` e somava `embeddingSourceTotal` a cada `semantic_search`. Construído sobre o cursor da tarefa 094.
+
+1. `pnpm db:pull`: o schema gerado da integração já tinha `complete_at` (tabela e visão).
+2. `apps/server/src/agents/embeddings.ts`:
+   - `syncEmbeddingSources` devolve `{ upserted, reachedEnd }`: `reachedEnd` quando todo tipo leu menos que o lote, contadas as linhas de `src` (o `read`), não só as gravadas;
+   - `markEmbeddingIndex(db, par, completo)` chama `ai_embedding_index_mark`;
+   - `indexEmbeddings`, por par: na primeira passada do processo (nenhum cursor do par em `IndexState`), desmarca antes de ler; ao fim, marca com `reachedEnd` (o banco grava nulo se sobrou vetor em `needs_reindex`, o que cobre o `embedPending` que não esvaziou a fila); com erro, desmarca. Aceita `sourceBatch` (só para o teste).
+   - Decisão: seguir a recomendação de desmarcar no recomeço. Efeito: depois de reiniciar o worker, a busca avisa "em construção" até a releitura alcançar o fim (no ritmo de hoje, 500 por tipo a cada `AGENT_MAINTENANCE_MS`), o que é o estado real do índice nesse intervalo.
+3. `apps/server/src/agents/search.ts`: `indexComplete` é só `SELECT ai_embedding_index_ready(provedor, modelo)`, sem a visão nem `embeddingSourceTotal`, que fica só no detalhe do provedor (`services/ai-requests.ts`).
+4. Spec 024 (Embeddings): a marca do worker, o que desmarca e a troca aceita.
+
+Testes (`test/capabilities.test.ts`, "embeddings por par", onde já estava o par registrado e não indexado com `building: true`): depois da passada completa, os dois pares com `complete_at`; o nome da entidade editado e sincronizado (sem calcular o vetor) volta a dar `building: true`, e a passada seguinte tira; o worker que reinicia (estado vazio, lote de 1) desmarca o par e a busca avisa até a indexação alcançar o fim, quando a marca volta. O `agents.test.ts` (embeddings) segue passando com a busca em `mode: 'embeddings'`.
+
+Verificação: rápida, `pnpm verify:quick --base HEAD`.
