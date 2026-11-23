@@ -356,6 +356,7 @@ export const contractsStrings = {
     compareWith: 'Comparar com',
     diffTitle: (a: number, b: number) => `Diferenças v${a} → v${b}`,
     noDiff: 'As versões são iguais.',
+    diffTruncated: 'As versões são muito diferentes: o diff foi resumido e as contagens são limites superiores.',
     restoreVersion: 'Restaurar esta versão',
     restoredVersion: (from: number, to: number) => `Versão ${from} restaurada como v${to}.`,
     restoredFrom: (n: number) => `restaurada da v${n}`,

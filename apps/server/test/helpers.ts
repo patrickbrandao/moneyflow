@@ -1,10 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createDb, createPool, type Database, pg } from '@moneyflow/db';
 import { cnpjCheckDigits } from '@moneyflow/shared';
+import { sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { inject } from 'vitest';
 import { buildApp } from '../src/app';
 import { type Config, loadConfig } from '../src/config';
+import { stopRun } from '../src/services/conversations';
 import { insertUser } from '../src/services/users';
 import { createOwnedDatabase, migrate, withDatabase } from './migrate';
 
@@ -214,4 +216,19 @@ export async function newSession(api: ReturnType<typeof client>, agentId: string
   const active = threads.find((thread) => thread.agentId === agentId)?.active;
   if (active) await api.post(`/api/conversations/${active.id}/finish`);
   return api.post('/api/conversations', { agentId });
+}
+
+/**
+ * Encerra as execuções de agente que os arquivos anteriores deixaram na fila ou
+ * esperando confirmação. Os arquivos rodam em sequência no mesmo banco, e o
+ * `ai_run_claim(1, …)` dos `drain()` pega a execução mais antiga de qualquer
+ * arquivo: uma sobra (o `classify_lines` de outro arquivo, por exemplo) gastaria
+ * o `llm.queue` do teste, conforme a ordem do vitest. Chame no `beforeAll`,
+ * depois do `startApp`.
+ */
+export async function stopLeftoverRuns(h: Harness) {
+  const left = await h.db.execute<{ id: string; conversation_id: string }>(
+    sql`SELECT id, conversation_id FROM ai_runs WHERE status IN ('queued', 'awaiting_confirmation') ORDER BY created_at`,
+  );
+  for (const run of left.rows) await h.db.transaction((tx) => stopRun(tx, run.id, run.conversation_id));
 }

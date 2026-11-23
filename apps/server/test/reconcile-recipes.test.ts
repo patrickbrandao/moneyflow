@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { recipesTick } from '../src/services/reconcile-recipes';
-import { client, type Harness, scenario, startApp, uid, userSession } from './helpers';
+import { client, type Harness, scenario, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * Receitas de conciliação (spec 030), com o provedor de IA falso: cadastro e
@@ -63,6 +63,8 @@ async function importAs(editor: Session, accountId: string) {
 beforeAll(async () => {
   llm = await startFakeLlm(0, '127.0.0.1');
   h = await startApp({ AI_REQUEST_BACKOFF_MS: '0' });
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   admin = client(h, (await userSession(h, 'admin')).cookie);
   provider = await admin.post('/api/admin/ai/providers', {
     name: `Falso F16 ${uid()}`,

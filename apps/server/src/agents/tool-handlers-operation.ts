@@ -1,7 +1,7 @@
 import {
-  diffLines,
   diffRows,
   diffStats,
+  diffText,
   formatBRL,
   formatDate,
   formatMonth,
@@ -484,7 +484,8 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         if (i.baseVersionId && doc.currentVersionId && i.baseVersionId !== doc.currentVersionId)
           throw new AppError(409, 'version_conflict', t.contracts.documents.versionConflict(doc.currentVersion ?? 0));
         if (doc.content === i.content) throw unprocessable(t.contracts.documents.noChanges, 'no_changes');
-        const stats = diffStats(diffLines(doc.content ?? '', i.content));
+        const diff = diffText(doc.content ?? '', i.content);
+        const stats = diffStats(diff.lines);
         return {
           title: 'Salvar nova versão do markdown',
           summary: doc.title,
@@ -494,7 +495,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
             { label: 'Linhas', after: `+${stats.added} / −${stats.removed}` },
             ...(i.note ? [{ label: 'Nota', after: i.note }] : []),
           ],
-          warnings: ['As versões anteriores ficam no histórico.'],
+          warnings: ['As versões anteriores ficam no histórico.', ...(diff.truncated ? [t.contracts.documents.diffTruncated] : [])],
         };
       }
       const contract = await writableContract(ctx, i.contractId!);

@@ -12,7 +12,7 @@ import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { startAgentWorker } from '../src/agents/worker';
 import { registerDocumentReader } from '../src/services/title-entry';
-import { client, type Harness, minimalPdf, newSession, scenario, startApp, uid, userSession } from './helpers';
+import { client, type Harness, minimalPdf, newSession, scenario, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * Tools de controle total, lote F13a (spec 027), com o provedor falso: para
@@ -170,6 +170,8 @@ async function auditActor(table: string, recordId: string) {
 beforeAll(async () => {
   llm = await startFakeLlm(0, '127.0.0.1');
   h = await startApp();
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   viewerSession = await userSession(h);
@@ -364,6 +366,15 @@ describe('contratos', () => {
       baseVersionId: version.value.document.currentVersionId,
     });
     expect(stale.error).toContain('mudou depois que a edição começou');
+    // Versões muito diferentes: a prévia sai com as contagens e o aviso do diff resumido (tarefa 112).
+    const antigo = Array.from({ length: 4_000 }, (_, i) => `antiga ${i}`).join('\n');
+    await admin.post(`/api/contract-documents/${documentId}/versions`, { content: antigo });
+    const novo = Array.from({ length: 4_000 }, (_, i) => `nova ${i}`).join('\n');
+    const big = await call(adminSession, 'save_contract_markdown', { documentId, content: novo }, { approve: false });
+    expect(rowsOf(big.preview)).toMatchObject({ Linhas: '+4000 / −4000' });
+    expect(big.preview.warnings).toContain(t.contracts.documents.diffTruncated);
+    await admin.post(`/api/runs/${big.runId}/confirmations`, { decision: 'rejected' });
+    await drain();
 
     const renewed = await approved(adminSession, 'renew_contract', { contractId, renewal: { endsOn: '2027-10-31' } });
     expect(rowsOf(renewed.preview)).toMatchObject({ Vigência: '01/11/2026 a 30/04/2027 → 01/05/2027 a 31/10/2027' });
