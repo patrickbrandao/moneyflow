@@ -193,7 +193,18 @@ export async function startFakeTelegram(port = 0, host = '127.0.0.1'): Promise<F
         return json(res, 200, { ok: true, result: true });
     }
   });
-  await new Promise<void>((resolve) => server.listen(port, host, resolve));
+  // Porta ocupada (por exemplo, o fake-telegram rodando à mão na mesma porta) vira um erro claro no beforeAll, em vez de uma
+  // exceção solta que derruba o worker do Playwright (tarefa 125).
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', (error: NodeJS.ErrnoException) =>
+      reject(
+        error.code === 'EADDRINUSE'
+          ? new Error(`Bot API falsa: a porta ${port} está ocupada (pare o fake-telegram manual ou o processo que a usa)`)
+          : error,
+      ),
+    );
+    server.listen(port, host, resolve);
+  });
   const address = server.address() as AddressInfo;
   return {
     url: `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${address.port}`,

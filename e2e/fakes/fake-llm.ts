@@ -501,7 +501,18 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
       res.end(JSON.stringify({ error: { message: String(error) } }));
     }
   });
-  await new Promise<void>((resolve) => server.listen(port, host, resolve));
+  // Porta ocupada (por exemplo, o fake-llm rodando à mão na mesma porta) vira um erro claro no beforeAll, em vez de uma
+  // exceção solta que derruba o worker do Playwright (tarefa 125).
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', (error: NodeJS.ErrnoException) =>
+      reject(
+        error.code === 'EADDRINUSE'
+          ? new Error(`provedor de IA falso: a porta ${port} está ocupada (pare o fake-llm manual ou o processo que a usa)`)
+          : error,
+      ),
+    );
+    server.listen(port, host, resolve);
+  });
   const actual = (server.address() as AddressInfo).port;
   fake.port = actual;
   fake.url = `http://127.0.0.1:${actual}`;

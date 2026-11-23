@@ -43,7 +43,7 @@ pnpm verify:full                # verificação completa (só quando pedido, ant
 pnpm build                      # SPA (apps/web/dist) + bundle da API/worker (apps/server/dist/main.mjs)
 pnpm db:pull                    # regenera packages/db/src/generated depois de uma migration nova (nunca edite à mão; test/generated-schema.test.ts confere)
 docker compose up --build -d    # pilha completa: Postgres (5433), migrations, api (http://localhost:3000, serve o SPA) e worker
-pnpm e2e                        # Playwright contra a pilha no ar (E2E_BASE_URL, padrão http://localhost:3000)
+pnpm e2e                        # Playwright contra a pilha no ar (E2E_BASE_URL, padrão http://localhost:3000), um arquivo por vez (workers: 1)
 # Os e2e de mensagens sobem uma Bot API falsa na porta 18081 (E2E_TELEGRAM_PORT): suba a pilha apontando para ela
 TELEGRAM_API_BASE=http://host.docker.internal:18081 docker compose up --build -d
 # Os e2e de agentes sobem um provedor de IA falso na porta 18082 (E2E_LLM_PORT) e o cadastram com

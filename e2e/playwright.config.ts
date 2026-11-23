@@ -12,6 +12,9 @@ export default defineConfig({
   timeout: 60_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,
+  // Um arquivo por vez (tarefa 125): a pilha é uma só, e o agente que um spec liga vira o agente dos fluxos de todos
+  // os imports dos outros. Sem isso o Playwright usa metade dos núcleos, e o resultado dependia da máquina.
+  workers: 1,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : 'list',
   use: {
