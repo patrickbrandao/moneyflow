@@ -16,8 +16,10 @@ import { BarChart3, Timer } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApi } from '../../lib/hooks';
+import { RowButton } from '../a11y';
 import { MonthColumns } from '../caixa/account-charts';
 import { LoadError, Money, TitleStatusBadge } from '../domain';
+
 import { ExportMenu } from '../ExportMenu';
 import { Badge, EmptyRow, Panel, Skel } from '../ui';
 import { DelayBars } from './payment-charts';
@@ -120,7 +122,11 @@ export function PaymentsSection({ contract }: { contract: ContractDetail }) {
                     onClick={() => open(row)}
                   >
                     <td>
-                      <span className="row-title">{row.description}</span>
+                      {row.titleId || row.cardPurchaseId ? (
+                        <RowButton onClick={() => open(row)}>{row.description}</RowButton>
+                      ) : (
+                        <span className="row-title">{row.description}</span>
+                      )}
                       {row.kind === 'card_charge' && <span className="row-sub">{C.obligation.kinds.card}</span>}
                     </td>
                     <td className="mono">{row.occurrence ? `#${row.occurrence}` : '—'}</td>
@@ -179,7 +185,7 @@ function Summary({ data }: { data: ContractPaymentsDto }) {
     ...(s.notCharged > 0 ? [{ label: P.notChargedCount, value: String(s.notCharged) }] : []),
   ];
   return (
-    <div className="stat-tiles" aria-label={P.tab} data-testid="contract-payments-summary">
+    <div className="stat-tiles" role="group" aria-label={P.tab} data-testid="contract-payments-summary">
       {tiles.map((tile) => (
         <div key={tile.label} className="stat-tile">
           <div className="v">{tile.value}</div>

@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type FakeLlm, silentWav, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { claimTranscriptions, drainTranscriptions, processTranscription } from '../src/agents/transcriptions';
-import { client, type Harness, minimalPdf, newSession, startApp, uid, userSession } from './helpers';
+import { client, type Harness, minimalPdf, newSession, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * Chat multimídia (spec 025), com o provedor FALSO (transcrição e fala): o
@@ -56,6 +56,8 @@ const chatCall = (marker: string) =>
 beforeAll(async () => {
   llm = await startFakeLlm(0, '127.0.0.1');
   h = await startApp({ AI_TRANSCRIPTION_TIMEOUT_MS: '2500', AI_REQUEST_BACKOFF_MS: '0' });
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   ownerSession = await userSession(h, 'user');

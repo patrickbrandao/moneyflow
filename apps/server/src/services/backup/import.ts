@@ -1,3 +1,4 @@
+import { constants as bufferConstants } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import type { Tx } from '@moneyflow/db';
 import {
@@ -34,9 +35,10 @@ import {
   tableLabel,
   uuidArray,
 } from './catalog';
-import { schemaVersion } from './export';
+import { ATTACHMENT_ENTRY_PREFIX, schemaVersion } from './export';
 import { legacyContracts } from './legacy-contracts';
-import { UnzipTooLarge, unzipLimited } from './unzip';
+import { BACKUP_LOCK_KEY, backupBusy } from './lock';
+import { UnzipTooLarge, unzipLimited, type ZipEntryReader, zipEntryReader } from './unzip';
 
 /*
  * Importação com merge (spec 019). Regras:
@@ -76,6 +78,8 @@ type Node = {
   reason?: string;
   /** Pais (FK não adiável) presentes no arquivo. */
   deps: Node[];
+  /** Pais por referência opcional (FK ON DELETE SET NULL): a coluna e o pai, para desfazer um ciclo. */
+  softDeps?: { column: string; parent: Node; hard: boolean }[];
   unit?: Unit;
   translated?: BackupRow;
 };
@@ -84,26 +88,51 @@ type Unit = { nodes: Node[]; deps: Set<Unit>; dependents: Set<Unit>; rank: numbe
 
 class DryRunRollback extends Error {}
 
+/** Teto do conteúdo de um anexo no .zip (o do banco, `attachments_size_check`). */
+const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Arquivo de backup lido do upload. No JSON completo em .zip (tarefa 077), o
+ * conteúdo dos anexos vem em entradas próprias (`attachments/<id>`), lidas uma a
+ * uma na hora do INSERT; `blobs` é o leitor delas.
+ */
+export type LoadedBackup = BackupFile & { blobs?: ZipEntryReader };
+
+/** Texto do JSON: acima do limite de string do V8, 413 com a mensagem (o backup grande vai pelo dump). */
+export function backupText(bytes: Uint8Array, maxLength = bufferConstants.MAX_STRING_LENGTH): string {
+  const tooLong = () => new AppError(413, 'backup_json_too_large', t.backup.errors.jsonTooLarge);
+  if (bytes.length > maxLength) throw tooLong();
+  try {
+    return Buffer.isBuffer(bytes) ? bytes.toString('utf8') : strFromU8(bytes);
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ERR_STRING_TOO_LONG') throw tooLong();
+    throw unprocessable(t.backup.errors.invalidFile, 'invalid_backup');
+  }
+}
+
 /**
  * Lê o arquivo enviado (.json ou .zip com um .json dentro) e valida o cabeçalho. O .zip descompacta
- * no máximo `maxUnzippedBytes` (`backupUnzipLimit`, tarefa 055): acima disso, 413.
+ * no máximo `maxUnzippedBytes` (`backupUnzipLimit`, tarefa 055): acima disso, 413. O conteúdo dos
+ * anexos do JSON completo fica no zip e sai sob demanda, um por vez (`blobs`).
  */
-export function parseBackupUpload(body: unknown, maxUnzippedBytes: number): BackupFile {
+export function parseBackupUpload(body: unknown, maxUnzippedBytes: number): LoadedBackup {
   if (!Buffer.isBuffer(body) || body.length === 0) throw unprocessable(t.backup.errors.invalidFile, 'invalid_backup');
   let text: string;
+  let blobs: ZipEntryReader | undefined;
   if (body[0] === 0x50 && body[1] === 0x4b) {
     let entries: Record<string, Uint8Array>;
     try {
       entries = unzipLimited(body, (name) => name.toLowerCase().endsWith('.json'), maxUnzippedBytes);
+      blobs = zipEntryReader(body, (name) => name.startsWith(ATTACHMENT_ENTRY_PREFIX), ATTACHMENT_MAX_BYTES);
     } catch (error) {
       if (error instanceof UnzipTooLarge) throw error;
       throw unprocessable(t.backup.errors.invalidFile, 'invalid_backup');
     }
     const name = Object.keys(entries).find((n) => n.endsWith('moneyflow.json')) ?? Object.keys(entries)[0];
     if (!name) throw unprocessable(t.backup.errors.invalidFile, 'invalid_backup');
-    text = strFromU8(entries[name]!);
+    text = backupText(entries[name]!);
   } else {
-    text = body.toString('utf8');
+    text = backupText(body);
   }
   let file: Partial<BackupFile>;
   try {
@@ -118,7 +147,7 @@ export function parseBackupUpload(body: unknown, maxUnzippedBytes: number): Back
   for (const rows of [...Object.values(file.tables), ...Object.values(file.references ?? {})]) {
     if (!Array.isArray(rows)) throw unprocessable(t.backup.errors.invalidFile, 'invalid_backup');
   }
-  return file as BackupFile;
+  return blobs && blobs.size > 0 ? { ...(file as BackupFile), blobs } : (file as BackupFile);
 }
 
 /** Profundidade de cada tabela no grafo de FKs (pais antes dos filhos; ciclos são cortados). */
@@ -226,6 +255,9 @@ const FLOW_PURPOSES = new Set(['document_reading', 'classify_lines', 'contract_r
  *   conversas dos fluxos em screen_context.purpose; a finalidade vem de lá.
  * - notes: a entidade (object_id) vai também em entity_id, a coluna da FK,
  *   para ser traduzida pela chave natural (spec 035).
+ * - statement_csv_mappings: um arquivo anterior ao sinal (0063, tarefa 091)
+ *   entra invertido no cartão (o padrão da migração sem evidência) e como vem
+ *   na conta.
  */
 function normalizeRow(table: string, data: BackupRow, state: { flowAgentTaken: boolean }): BackupRow {
   // A requisição ao provedor nunca vem no arquivo (spec 023): o uso entra sem o vínculo, como sem a execução.
@@ -237,6 +269,9 @@ function normalizeRow(table: string, data: BackupRow, state: { flowAgentTaken: b
   // tradução da FK (entidade casada pelo documento = o id deste banco); a gravação leva o object_id traduzido.
   if (table === 'notes' && data.object_type === 'entity' && typeof data.object_id === 'string') {
     return { ...data, entity_id: data.object_id };
+  }
+  if (table === 'statement_csv_mappings' && data.amount_sign === undefined) {
+    return { ...data, amount_sign: data.card_caixa_id ? 'invert' : 'as_is' };
   }
   if (table === 'ai_agents' && data.use_for_flows === true && state.flowAgentTaken) {
     return { ...data, use_for_flows: false };
@@ -536,13 +571,16 @@ async function legacyClassificationRules(ctx: ServiceContext, file: BackupFile):
 function describe(error: unknown): string {
   const translated = translateDbError(error);
   if (translated) return t.backup.reasons.db(translated.message);
+  // Recusa da própria importação (o conteúdo do anexo que falta no .zip): a mensagem como está.
+  if (error instanceof AppError) return error.message;
   const pg = findPgError(error);
   return t.backup.reasons.db(pg?.message ?? (error as Error).message ?? t.errors.generic);
 }
 
-export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, kind: BackupKind, dryRun: boolean): Promise<ImportReport> {
+export async function importBackup(ctx: ServiceContext, uploaded: LoadedBackup, kind: BackupKind, dryRun: boolean): Promise<ImportReport> {
   ctx.access.assertAdmin();
   const started = Date.now();
+  const blobs = uploaded.blobs;
   const file = legacyCapabilities(
     kind === 'full' ? legacyContracts(await legacyClassificationRules(ctx, await legacyAgentKits(ctx, uploaded))) : uploaded,
   );
@@ -602,8 +640,18 @@ export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, ki
       const value = node.data[fk.refColumn];
       if (fk.deferrable || typeof value !== 'string') continue;
       const parent = nodes.get(`${fk.parent}:${value.toLowerCase()}`);
-      if (parent && parent !== node) node.deps.push(parent);
+      if (!parent || parent === node) continue;
+      node.deps.push(parent);
+      if (isSoft(fk)) {
+        node.softDeps ??= [];
+        node.softDeps.push({ column: fk.refColumn, parent, hard: false });
+      }
     }
+    // Um pai também apontado por uma FK obrigatória não sai da ordem.
+    for (const soft of node.softDeps ?? [])
+      soft.hard = catalog
+        .get(node.table)!
+        .fks.some((fk) => !fk.deferrable && !isSoft(fk) && String(node.data[fk.refColumn] ?? '').toLowerCase() === soft.parent.id);
   }
 
   // Unidades: os registros do cluster adiável ligados entre si formam uma só.
@@ -650,7 +698,24 @@ export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, ki
   for (const unit of units) for (const node of unit.nodes) for (const dep of node.deps) if (dep.unit !== unit) unit.deps.add(dep.unit!);
 
   const lessUnit = (a: Unit, b: Unit) => (a.last !== b.last ? !a.last : a.rank !== b.rank ? a.rank < b.rank : a.first < b.first);
-  const sorted = topoSort(units, (u) => u.deps, lessUnit);
+  let sorted = topoSort(units, (u) => u.deps, lessUnit);
+  // Ciclo só por referências opcionais (a regra aprendida de uma linha do provisório, cuja substituta é classificada
+  // pela própria regra): nos registros do ciclo, essas referências saem da ordem, o registro entra com elas nulas
+  // (como a FK fraca que não se resolve) e elas voltam no fim, em `softLater`.
+  const softLater: { node: Node; column: string; parent: Node }[] = [];
+  if (sorted.rest.length > 0) {
+    for (const unit of sorted.rest) {
+      for (const node of unit.nodes) {
+        const dropped = new Set((node.softDeps ?? []).filter((soft) => !soft.hard).map((soft) => soft.parent));
+        if (dropped.size === 0) continue;
+        node.deps = node.deps.filter((dep) => !dropped.has(dep));
+        for (const soft of node.softDeps!) if (!soft.hard) softLater.push({ node, column: soft.column, parent: soft.parent });
+      }
+      unit.deps.clear();
+      for (const node of unit.nodes) for (const dep of node.deps) if (dep.unit !== unit) unit.deps.add(dep.unit!);
+    }
+    sorted = topoSort(units, (u) => u.deps, lessUnit);
+  }
   for (const unit of sorted.rest) {
     for (const node of unit.nodes) {
       node.status = node.ref ? 'missing' : 'failed';
@@ -662,8 +727,9 @@ export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, ki
   let currentVersion: string | null = null;
 
   const run = async (tx: Tx) => {
-    const locked = await tx.execute<{ ok: boolean }>(sql`SELECT pg_try_advisory_xact_lock(hashtext('moneyflow:backup')) AS ok`);
-    if (!locked.rows[0]?.ok) throw new AppError(409, 'backup_busy', t.backup.errors.busy);
+    // A mesma chave da trava de sessão do dump, da restauração e do JSON completo (tarefa 172).
+    const locked = await tx.execute<{ ok: boolean }>(sql`SELECT pg_try_advisory_xact_lock(${sql.raw(BACKUP_LOCK_KEY)}) AS ok`);
+    if (!locked.rows[0]?.ok) throw backupBusy();
     currentVersion = await schemaVersion(tx);
 
     // Ids do arquivo que já existem no banco, por tabela.
@@ -772,14 +838,25 @@ export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, ki
 
     const insertRow = async (table: string, data: BackupRow) => {
       const allowed = insertColumns(catalog.get(table)!);
-      const columns = Object.keys(data).filter((c) => allowed.has(c));
+      // Anexo do JSON completo em .zip (tarefa 077): o conteúdo vem da entrada própria, como bytea, e não do JSON.
+      const entry = table === 'attachments' && data.content == null ? data.content_entry : undefined;
+      let content: Buffer | null = null;
+      if (entry !== undefined) {
+        const bytes = typeof entry === 'string' && entry.startsWith(ATTACHMENT_ENTRY_PREFIX) ? blobs?.read(entry) : null;
+        if (!bytes) throw new AppError(422, 'attachment_entry_missing', t.backup.errors.attachmentEntryMissing);
+        content = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      }
+      const columns = Object.keys(data).filter((c) => allowed.has(c) && !(content && c === 'content'));
       const list = sql.join(
         columns.map((c) => sql.identifier(c)),
         sql`, `,
       );
-      await tx.execute(sql`
-        INSERT INTO ${sql.identifier(table)} (${list})
-        SELECT ${list} FROM json_populate_record(NULL::${sql.identifier(table)}, ${JSON.stringify(data)}::json)`);
+      const source = sql`json_populate_record(NULL::${sql.identifier(table)}, ${JSON.stringify(data)}::json)`;
+      if (content) {
+        await tx.execute(sql`INSERT INTO ${sql.identifier(table)} (${list}, content) SELECT ${list}, ${content}::bytea FROM ${source}`);
+        return;
+      }
+      await tx.execute(sql`INSERT INTO ${sql.identifier(table)} (${list}) SELECT ${list} FROM ${source}`);
     };
     const updateRow = async (table: string, id: string, data: BackupRow) => {
       const columns = Object.keys(data);
@@ -951,6 +1028,20 @@ export async function importBackup(ctx: ServiceContext, uploaded: BackupFile, ki
     };
 
     for (const unit of sorted.order) await processUnit(unit);
+
+    // As referências opcionais tiradas do ciclo: o pai que entrou (ou já estava) volta à coluna; sem ele, fica nula.
+    for (const { node, column, parent } of softLater) {
+      if (node.status !== 'imported' || node.translated?.[column] != null) continue;
+      if (parent.status !== 'imported' && parent.status !== 'existing') continue;
+      await tx.execute(sql`SAVEPOINT backup_soft`);
+      try {
+        await updateRow(node.table, node.id, { [column]: parent.target });
+        await tx.execute(sql`RELEASE SAVEPOINT backup_soft`);
+      } catch {
+        await tx.execute(sql`ROLLBACK TO SAVEPOINT backup_soft`);
+        await tx.execute(sql`RELEASE SAVEPOINT backup_soft`);
+      }
+    }
 
     // Passos tardios (tag arquivada): depois de todas as ligações.
     for (const { node, data } of late) {

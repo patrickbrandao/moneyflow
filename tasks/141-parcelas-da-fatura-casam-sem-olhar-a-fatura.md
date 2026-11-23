@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 9b41c2e
 ---
 
 # Linha da fatura casa com qualquer parcela da compra, sem olhar a fatura do lote
@@ -61,4 +61,14 @@ Nada foi executado. A data que cada banco escreve nas parcelas não foi verifica
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: os candidatos da linha do cartão eram as parcelas do cartão com o valor oposto e a data da compra a ±3 dias, sem olhar a fatura do lote (`statement_imports.card_invoice_id`) e sem `ORDER BY`. Reproduzido no teste novo: compra em 3x e a fatura do mês 2 importada antes da do mês 1, a linha "02/03" ficava sugerida com a parcela 1.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/statements.ts` (junto com a tarefa 139, na mesma leitura dos candidatos): o `autoMatch` lê a fatura do lote com as linhas; com ela, a linha procura só as parcelas dessa fatura (as de outras faturas só quando ela não tem nenhuma com aquele valor e data), e a parcela que sobra sozinha concilia direto pelo `pickMatch`. Sem a fatura no lote, as parcelas vêm por `installment_number`, e o desempate estável do `pickMatch` sugere a de menor número em aberto. O casar à mão (`lineCandidates`, janela de 30 dias) continua listando as parcelas de todas as faturas, agora na ordem das parcelas.
+- Decisão: a preferência é por linha e só pela fatura do lote; o banco continua sem conferir a fatura do item casado (fora do escopo; a parcela casada fica na fatura dela, sem efeito nos totais).
+- Spec: `docs/007-cartao-de-credito.md`, o item do import da fatura com o empate das parcelas.
+- Teste: `apps/server/test/statements.test.ts`, "a linha casa com a parcela da fatura do lote, mesmo fora de ordem…": compra em 3x e uma à vista; a fatura do mês 2 importada primeiro concilia a parcela 2 (e a compra à vista da fatura do mês 1 pelo recurso às outras faturas), a do mês 1 concilia a parcela 1, e um lote sem fatura sugere a parcela 1 de outra compra em 3x. A compra à vista do teste da fatura ("importa a fatura do cartão…") continua conciliada.
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

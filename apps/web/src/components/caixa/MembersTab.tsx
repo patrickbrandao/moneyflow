@@ -11,6 +11,8 @@ import { Avatar, Button, EmptyRow, Field, Modal, Status, useConfirm } from '../u
 type Role = (typeof CAIXA_ROLES)[number];
 
 /** Quem acessa a caixa e com que papel (editor/leitor). Só o admin altera. */
+const M = t.caixa.membersTab;
+
 export function MembersTab({ caixa }: { caixa: CaixaDetail }) {
   const me = useUser();
   const isAdmin = me.role === 'admin';
@@ -20,14 +22,14 @@ export function MembersTab({ caixa }: { caixa: CaixaDetail }) {
   const { run } = useAction();
 
   async function changeRole(member: MemberRow, role: Role) {
-    const rows = await run(() => api.patch<MemberRow[]>(`/api/caixas/${caixa.id}/members/${member.id}`, { role }), 'Papel atualizado.');
+    const rows = await run(() => api.patch<MemberRow[]>(`/api/caixas/${caixa.id}/members/${member.id}`, { role }), M.roleSaved);
     if (rows) setData(rows);
   }
 
   async function remove(member: MemberRow) {
-    const ok = await confirm({ title: `Remover @${member.username} da caixa?`, confirmLabel: t.common.remove, danger: true });
+    const ok = await confirm({ title: M.removeTitle(member.username), confirmLabel: t.common.remove, danger: true });
     if (!ok) return;
-    const rows = await run(() => api.del<MemberRow[]>(`/api/caixas/${caixa.id}/members/${member.id}`), 'Membro removido.');
+    const rows = await run(() => api.del<MemberRow[]>(`/api/caixas/${caixa.id}/members/${member.id}`), M.removed);
     if (rows) setData(rows);
   }
 
@@ -35,10 +37,10 @@ export function MembersTab({ caixa }: { caixa: CaixaDetail }) {
   return (
     <>
       <div className="mb-3 flex items-center justify-between gap-2">
-        <p className="text-[13px] text-muted">Administradores enxergam todas as caixas e não aparecem aqui.</p>
+        <p className="text-[13px] text-muted">{M.adminsHint}</p>
         {isAdmin && (
           <Button onClick={() => setAdding(true)}>
-            <Plus /> Adicionar membro
+            <Plus /> {M.add}
           </Button>
         )}
       </div>
@@ -47,14 +49,14 @@ export function MembersTab({ caixa }: { caixa: CaixaDetail }) {
           <thead>
             <tr>
               <th>{t.user.username}</th>
-              <th>Papel na caixa</th>
+              <th>{M.role}</th>
               <th>{t.common.status}</th>
               <th />
             </tr>
           </thead>
           <tbody>
             {!data && <SkelRows cols={4} rows={2} />}
-            {data && data.length === 0 && <EmptyRow colSpan={4}>Nenhum membro.</EmptyRow>}
+            {data && data.length === 0 && <EmptyRow colSpan={4}>{M.empty}</EmptyRow>}
             {data?.map((member) => (
               <tr key={member.id} className={member.isActive ? '' : 'is-off'}>
                 <td>
@@ -72,7 +74,7 @@ export function MembersTab({ caixa }: { caixa: CaixaDetail }) {
                       className="field field-sm field-auto"
                       value={member.role}
                       onChange={(e) => void changeRole(member, e.target.value as Role)}
-                      aria-label="Papel"
+                      aria-label={M.roleShort}
                     >
                       {CAIXA_ROLES.map((role) => (
                         <option key={role} value={role}>
@@ -131,16 +133,16 @@ function AddMemberModal({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const rows = await run(() => api.post<MemberRow[]>(`/api/caixas/${caixaId}/members`, { userId, role }), 'Membro adicionado.');
+    const rows = await run(() => api.post<MemberRow[]>(`/api/caixas/${caixaId}/members`, { userId, role }), M.added);
     if (rows) onSaved(rows);
   }
 
   return (
-    <Modal open title="Adicionar membro" onClose={onClose}>
+    <Modal open title={M.add} onClose={onClose}>
       <form onSubmit={submit} className="form-grid">
         <Field label={t.user.username}>
           <select className="field" value={userId} onChange={(e) => setUserId(e.target.value)} required autoFocus>
-            <option value="">{users.loading ? t.common.loading : 'Escolha…'}</option>
+            <option value="">{users.loading ? t.common.loading : t.common.choose}</option>
             {options.map((u) => (
               <option key={u.id} value={u.id}>
                 @{u.username} · {u.email}
@@ -148,7 +150,7 @@ function AddMemberModal({
             ))}
           </select>
         </Field>
-        <Field label="Papel na caixa" hint="Editor lança e altera; leitor só consulta.">
+        <Field label={M.role} hint={M.roleHint}>
           <select className="field" value={role} onChange={(e) => setRole(e.target.value as Role)}>
             {CAIXA_ROLES.map((r) => (
               <option key={r} value={r}>

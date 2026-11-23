@@ -3,11 +3,23 @@ import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
-import { type IndexState, indexEmbeddings, touchEmbeddingIndexes } from '../src/agents/embeddings';
+import { type IndexState, indexEmbeddings, syncEmbeddingSources, touchEmbeddingIndexes } from '../src/agents/embeddings';
 import { resolveInference } from '../src/agents/inferences';
 import { speak, transcribe } from '../src/agents/llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
-import { client, type Harness, minimalPdf, newSession, startApp, TINY_PNG, uid, userSession } from './helpers';
+import {
+  client,
+  dropFreshDatabases,
+  freshDatabase,
+  type Harness,
+  minimalPdf,
+  newSession,
+  startApp,
+  stopLeftoverRuns,
+  TINY_PNG,
+  uid,
+  userSession,
+} from './helpers';
 
 /*
  * Capacidades dos provedores e provedor por inferência (spec 024), com o
@@ -30,7 +42,7 @@ let claude: any;
 /** OpenAI compatível com todas as flags. */
 let openai: any;
 let kit: any;
-const created = { agents: [] as string[], providers: [] as string[] };
+let created = { agents: [] as string[], providers: [] as string[] };
 
 async function newProvider(body: Record<string, unknown>) {
   const p = await admin.post('/api/admin/ai/providers', { name: `Cap ${uid()}`, apiKey: `sk-cap-${uid()}`, ...body });
@@ -95,6 +107,8 @@ const messagesCall = (marker: string) =>
 beforeAll(async () => {
   llm = await startFakeLlm(0, '127.0.0.1');
   h = await startApp();
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   claude = await newProvider({ kind: 'anthropic', baseUrl: llm.url, defaultModels: { text: 'claude-sonnet-5-5' } });
@@ -465,6 +479,43 @@ describe('visão: direta, por descrição, camada de texto do PDF e recusa', () 
 });
 
 describe('embeddings por par (provedor, modelo)', () => {
+  /*
+   * Banco novo só para estes casos (tarefa 126): a passada completa do índice
+   * lê todas as fontes do banco (entidades, títulos, mensagens…), e no banco
+   * compartilhado da suíte isso cresce com o que os outros arquivos gravaram (na
+   * suíte inteira, milhares de vetores por par, bem acima dos 30 s). Sem a
+   * conexão do dono (banco externo), segue no banco compartilhado.
+   */
+  let shared: {
+    h: Harness;
+    admin: typeof admin;
+    adminSession: typeof adminSession;
+    claude: any;
+    kit: any;
+    created: typeof created;
+  } | null = null;
+  beforeAll(async () => {
+    const url = await freshDatabase();
+    if (!url) return;
+    shared = { h, admin, adminSession, claude, kit, created };
+    created = { agents: [], providers: [] };
+    h = await startApp({}, url);
+    adminSession = await userSession(h, 'admin');
+    admin = client(h, adminSession.cookie);
+    claude = await newProvider({ kind: 'anthropic', baseUrl: llm.url, defaultModels: { text: 'claude-sonnet-5-5' } });
+    const catalog: any[] = await admin.get('/api/admin/ai/tools');
+    kit = await admin.post('/api/admin/ai/tool-kits', {
+      name: `Kit cap ${uid()}`,
+      tools: catalog.filter((x) => x.kind === 'read').map((x) => ({ name: x.name, mode: 'allow' })),
+    });
+  });
+  afterAll(async () => {
+    if (!shared) return;
+    await h.close();
+    ({ h, admin, adminSession, claude, kit, created } = shared);
+    await dropFreshDatabases();
+  });
+
   it('dois agentes com modelos diferentes geram dois índices; a busca usa o do agente; índice incompleto avisa e completa com trigramas', async () => {
     const provider = await newProvider({
       kind: 'openai',
@@ -529,6 +580,27 @@ describe('embeddings por par (provedor, modelo)', () => {
     const done = await search(agentB.id);
     expect(done.payload.building).toBeUndefined();
     expect(done.payload.hits[0]).toMatchObject({ id: entity.id });
+    const mark = async (model: string) =>
+      (
+        await h.db.execute<{ complete: boolean }>(sql`
+          SELECT complete_at IS NOT NULL AS complete FROM ai_embedding_indexes WHERE provider_id = ${provider.id} AND model = ${model}`)
+      ).rows[0]?.complete;
+    expect([await mark('emb-a'), await mark('emb-b')]).toEqual([true, true]);
+
+    // Tarefa 161: o texto editado e já sincronizado (o vetor na fila, needs_reindex) volta a avisar, sem contar as
+    // fontes, até a passada seguinte recalcular; um processo novo (sem cursor) desmarca até alcançar o fim.
+    await admin.patch(`/api/entities/${entity.id}`, { name: `${name} Filial` });
+    await syncEmbeddingSources(h.db, { providerId: provider.id, model: 'emb-b' }, state);
+    expect((await search(agentB.id)).payload).toMatchObject({ building: true });
+    await index();
+    expect((await search(agentB.id)).payload.building).toBeUndefined();
+    // O worker que reinicia relê do começo: a primeira passada (lote de 1, sem alcançar o fim) desmarca o par.
+    const restarted: IndexState = { since: new Map() };
+    expect((await indexEmbeddings(h.db, h.config, restarted, { sourceBatch: 1 })).errors).toEqual([]);
+    expect(await mark('emb-b')).toBe(false);
+    expect((await search(agentB.id)).payload).toMatchObject({ building: true });
+    await index();
+    expect(await mark('emb-b')).toBe(true);
 
     // Progresso do índice no detalhe do provedor.
     const summary = await admin.get(`/api/admin/ai/providers/${provider.id}/summary`);
@@ -543,5 +615,53 @@ describe('embeddings por par (provedor, modelo)', () => {
     const trigram = await search(plain.id);
     expect(trigram.model).toBeUndefined();
     expect(trigram.payload.mode).toBe('trigram');
+  });
+
+  it('o cursor da indexação não perde registros com o mesmo updated_at nem o COMMIT tardio (tarefa 094)', async () => {
+    const provider = await newProvider({
+      kind: 'openai',
+      baseUrl: `${llm.url}/v1`,
+      capabilities: ['embeddings'],
+      defaultModels: { embeddings: 'emb-cursor' },
+    });
+    await newAgent({ providerId: claude.id, inferences: [{ capability: 'embeddings', providerId: provider.id }] });
+    await touchEmbeddingIndexes(h.db);
+    const pair = { providerId: provider.id, model: 'emb-cursor' };
+    const state: IndexState = { since: new Map() };
+    const indexed = async (ids: string[]) =>
+      Number(
+        (
+          await h.db.execute<{ n: number }>(sql`
+            SELECT count(*)::int AS n FROM ai_embeddings
+             WHERE object_type = 'entity' AND provider_id = ${provider.id} AND model = 'emb-cursor'
+               AND object_id = ANY (${`{${ids.join(',')}}`}::uuid[])`)
+        ).rows[0]!.n,
+      );
+    const sync = async (ids: string[]) => {
+      for (let i = 0; i < 400 && (await indexed(ids)) < ids.length; i += 1) await syncEmbeddingSources(h.db, pair, state, 10);
+      return indexed(ids);
+    };
+    // 25 entidades numa transação: o mesmo updated_at, mais que o lote de 10.
+    const tag = uid();
+    const batch = await h.db.transaction(async (tx) =>
+      (
+        await tx.execute<{ id: string }>(sql`
+          INSERT INTO entities (kind, name) SELECT 'company', 'Cursor ' || ${tag} || ' ' || g FROM generate_series(1, 25) g RETURNING id`)
+      ).rows.map((r) => r.id),
+    );
+    expect(await sync(batch)).toBe(25);
+
+    // COMMIT tardio: a transação começa antes de o cursor passar pelo carimbo dela e confirma depois.
+    const late = await h.db.transaction(async (tx) => {
+      const rows = await tx.execute<{ id: string }>(sql`
+        INSERT INTO entities (kind, name) SELECT 'company', 'Tardia ' || ${tag} || ' ' || g FROM generate_series(1, 3) g RETURNING id`);
+      // Outra conexão grava depois (carimbo maior) e a indexação lê até ela antes deste COMMIT.
+      const [after] = (
+        await h.db.execute<{ id: string }>(sql`INSERT INTO entities (kind, name) VALUES ('company', ${`Depois ${tag}`}) RETURNING id`)
+      ).rows;
+      expect(await sync([after!.id])).toBe(1);
+      return rows.rows.map((r) => r.id);
+    });
+    expect(await sync(late)).toBe(3);
   });
 });

@@ -83,7 +83,7 @@ export async function listEntities(
   const result = await ctx.db.execute(sql`
     SELECT ${summarySelect(ctx.access)} FROM entities e
      WHERE ${sql.join(conditions, sql` AND `)}
-     ORDER BY ${order} LIMIT ${query.limit}`);
+     ORDER BY ${order}, e.id LIMIT ${query.limit}`);
   return result.rows.map(toSummary);
 }
 
@@ -337,7 +337,10 @@ export async function updateContact(ctx: ServiceContext, entityId: string, conta
 
 export async function deleteContact(ctx: ServiceContext, entityId: string, contactId: string) {
   await guardChild(ctx, entityId);
-  await withTx(ctx, (tx) => tx.delete(entityContacts).where(and(eq(entityContacts.id, contactId), eq(entityContacts.entityId, entityId))));
+  const result = await withTx(ctx, (tx) =>
+    tx.delete(entityContacts).where(and(eq(entityContacts.id, contactId), eq(entityContacts.entityId, entityId))),
+  );
+  if (!result.rowCount) throw notFound();
   return getEntity(ctx, entityId);
 }
 
@@ -361,9 +364,10 @@ export async function updateAddress(ctx: ServiceContext, entityId: string, addre
 
 export async function deleteAddress(ctx: ServiceContext, entityId: string, addressId: string) {
   await guardChild(ctx, entityId);
-  await withTx(ctx, (tx) =>
+  const result = await withTx(ctx, (tx) =>
     tx.delete(entityAddresses).where(and(eq(entityAddresses.id, addressId), eq(entityAddresses.entityId, entityId))),
   );
+  if (!result.rowCount) throw notFound();
   return getEntity(ctx, entityId);
 }
 
@@ -392,9 +396,10 @@ export async function updateBankAccount(
 
 export async function deleteBankAccount(ctx: ServiceContext, entityId: string, accountId: string) {
   await guardChild(ctx, entityId);
-  await withTx(ctx, (tx) =>
+  const result = await withTx(ctx, (tx) =>
     tx.delete(entityBankAccounts).where(and(eq(entityBankAccounts.id, accountId), eq(entityBankAccounts.entityId, entityId))),
   );
+  if (!result.rowCount) throw notFound();
   return getEntity(ctx, entityId);
 }
 
@@ -425,7 +430,10 @@ export async function updatePixKey(ctx: ServiceContext, entityId: string, keyId:
 
 export async function deletePixKey(ctx: ServiceContext, entityId: string, keyId: string) {
   await guardChild(ctx, entityId);
-  await withTx(ctx, (tx) => tx.delete(entityPixKeys).where(and(eq(entityPixKeys.id, keyId), eq(entityPixKeys.entityId, entityId))));
+  const result = await withTx(ctx, (tx) =>
+    tx.delete(entityPixKeys).where(and(eq(entityPixKeys.id, keyId), eq(entityPixKeys.entityId, entityId))),
+  );
+  if (!result.rowCount) throw notFound();
   return getEntity(ctx, entityId);
 }
 
@@ -438,10 +446,11 @@ export async function addLink(ctx: ServiceContext, entityId: string, input: z.ou
 
 export async function deleteLink(ctx: ServiceContext, entityId: string, linkId: string) {
   await guardChild(ctx, entityId);
-  await withTx(ctx, (tx) =>
+  const result = await withTx(ctx, (tx) =>
     tx
       .delete(entityLinks)
       .where(and(eq(entityLinks.id, linkId), or(eq(entityLinks.entityId, entityId), eq(entityLinks.relatedEntityId, entityId)))),
   );
+  if (!result.rowCount) throw notFound();
   return getEntity(ctx, entityId);
 }

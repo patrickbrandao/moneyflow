@@ -165,8 +165,18 @@ body.agent-resizing .shell {
   flex-direction: column;
   gap: 10px;
 }
+/* A lista das mensagens (região viva, tarefa 114): a mesma coluna do rolador. */
+.agent-log {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.agent-log:empty {
+  display: none;
+}
 .agent-empty {
   margin: auto 8px;
+
   text-align: center;
   font-size: 13px;
   color: var(--text-muted);
@@ -1622,6 +1632,11 @@ body.agent-resizing .agent-side-grip {
   width: 48px;
   border: 1px solid var(--border-strong);
   background: var(--on-accent);
+}
+/* miniatura ainda não desenhada (tarefa 121): o lugar de uma página A4 */
+.agent-pdf-thumb.is-loading {
+  display: block;
+  aspect-ratio: 210 / 297;
 }
 .agent-doc-icon {
   flex: none;

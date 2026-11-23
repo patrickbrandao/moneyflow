@@ -9,7 +9,7 @@ LANGUAGE plpgsql AS $$ BEGIN SET CONSTRAINTS ALL IMMEDIATE; SET CONSTRAINTS ALL 
 -- Estrutura
 SELECT has_table(t) FROM unnest(ARRAY['statement_csv_mappings', 'statement_imports', 'statement_lines', 'classification_rules']) t;
 SELECT has_view('statement_import_balances');
-SELECT has_function('classification_rule_for', ARRAY['uuid', 'uuid', 'text', 'bigint']);
+SELECT has_function('classification_rule_for', ARRAY['uuid', 'uuid', 'text', 'bigint', 'text']);
 SELECT columns_are('statement_imports', ARRAY['id', 'financial_account_id', 'card_caixa_id', 'card_invoice_id', 'format',
                                               'attachment_id', 'csv_mapping_id', 'period_start', 'period_end', 'bank_balance_cents',
                                               'bank_balance_on', 'imported_by_user_id', 'notes', 'created_at', 'updated_at',
@@ -27,7 +27,7 @@ SELECT columns_are('classification_rules', ARRAY['id', 'caixa_id', 'match_kind',
                                                  'financial_account_id', 'copied_from_rule_id']);
 SELECT columns_are('statement_csv_mappings', ARRAY['id', 'financial_account_id', 'card_caixa_id', 'name', 'delimiter', 'encoding',
                                                    'has_header', 'skip_rows', 'date_format', 'decimal_separator', 'columns',
-                                                   'is_default', 'created_at', 'updated_at']);
+                                                   'is_default', 'created_at', 'updated_at', 'amount_sign']);
 SELECT fk_ok('statement_imports', 'financial_account_id', 'financial_accounts', 'id');
 SELECT fk_ok('statement_imports', 'card_caixa_id', 'caixas', 'id');
 SELECT fk_ok('statement_imports', 'card_invoice_id', 'card_invoices', 'id');
@@ -319,7 +319,7 @@ SELECT is((SELECT count(*)::int FROM statement_lines WHERE statement_import_id =
 SELECT table_privs_are(t, 'moneyflow_app', ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE'])
   FROM unnest(ARRAY['statement_csv_mappings', 'statement_imports', 'statement_lines', 'classification_rules']) t;
 SELECT ok(has_table_privilege('moneyflow_app', 'statement_import_balances', 'SELECT'), 'app lê statement_import_balances');
-SELECT function_privs_are('classification_rule_for', ARRAY['uuid', 'uuid', 'text', 'bigint'], 'moneyflow_app', ARRAY['EXECUTE']);
+SELECT function_privs_are('classification_rule_for', ARRAY['uuid', 'uuid', 'text', 'bigint', 'text'], 'moneyflow_app', ARRAY['EXECUTE']);
 
 SELECT * FROM finish();
 ROLLBACK;

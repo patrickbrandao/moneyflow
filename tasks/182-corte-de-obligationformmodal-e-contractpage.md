@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 520d60e
 ---
 
 # Cortar `ObligationFormModal.tsx` (898 linhas) e `ContractPage.tsx` (831) e unificar o diff de versões
@@ -74,4 +74,22 @@ Proposta de corte, sem medir tempo de build ou de revisão.
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: `ObligationFormModal.tsx` com 902 linhas e sete assuntos (o `SeriesEditModal` da gaveta do título e o `SeriesRuleEndModal` dentro do arquivo do contrato), `ContractPage.tsx` com 832 linhas e seis componentes, `kindOf` repetido em quatro arquivos (também no `TitleFormModal`), o diff de versões duplicado em `DocumentView` e `AgentPrompt` e o modal da chave criada e a validade em dias duplicados em `ApiTokensPanel` e `AdminMcpPage`.
+
 ## Resolução (executor)
+
+Corte mecânico (sem mudar os `data-testid`), junto com a tarefa 181:
+
+- `components/series/`: `SeriesEditModal.tsx`, `SeriesRuleEndModal.tsx`, `SeriesTermsFields.tsx` (o editor único da 181) e `series-text.ts` (`kindOf`, `calendarText`; o `kindOf` repetido saiu de `ContractActionModals`, `ContractFormModal` e `TitleFormModal`). O resumo dos ajustes fica no shared (`seriesTermsSummary`). `TitleDrawer` e `ContractPage` importam a série daqui.
+- `components/contracts/`: `obligation-options.tsx` (`useObligationOptions`, `AccountSelect`), `ObligationFields.tsx` (rascunho, validação, corpo da API, campos e `ObligationsEditor`), `ObligationFormModal.tsx` (só o modal), `LinkSeriesModal.tsx`; o aditivo saiu de `ContractActionModals.tsx` para `AmendmentModal.tsx` e o `usePreview` para `contract-preview.ts`.
+- `ContractPage.tsx` (242 linhas) → `ContractSummary.tsx` (`ContractTotals`, `ContractSummary`), `ContractObligations.tsx` (com os títulos avulsos), `ContractDocuments.tsx` (com o `NewMarkdownModal`) e `ContractHistory.tsx`.
+- `components/diff/LineDiff.tsx` (o diff com as contagens) e `VersionCompare.tsx` (lista com A/B, ver uma, voltar a comparar e restaurar por callback), usados por `DocumentView` e `AgentPrompt`. Unificado também o comportamento: sem escolha, A é a penúltima e B a última (como já era no documento); clicar na versão aberta volta à comparação; os rádios têm o rótulo "A: versão N"/"B: versão N" (chaves novas `t.contracts.documents.compareA`/`compareB` no lugar do literal `A v…` e do `compareWith`).
+- `components/account/TokenReveal.tsx`: `TokenRevealModal` (a chave mostrada uma vez, com o comando do Claude por `children` no Controle MCP), `ExpiresInDaysField` e `expiresInDaysOf` (1–3650), usados por `ApiTokensPanel` e `AdminMcpPage`.
+
+Pendente da tarefa 114, terminado aqui: as linhas dos títulos avulsos (`ContractObligations`) têm o nome como `RowLink` para o título e as dos documentos (`ContractDocuments`) o título como `RowButton`; o `role="radiogroup"` do `LinkSeriesModal` saiu do `<ul>` (vai num `<div>`, com as linhas em `<div className="item">`), e a regra `noNoninteractiveElementToInteractiveRole` foi religada como `error` no `biome.json` (o `pnpm lint` do projeto passa sem outro caso).
+
+Tamanhos: nenhum arquivo das telas de contrato passa de 400 linhas, fora o `ContractFormModal.tsx` (472, um componente só, que a tarefa não pedia para cortar). `AGENTS.md` (item F20 da estrutura) atualizado com os caminhos novos.
+
+Testes: sem teste novo de comportamento (o corte não muda nada para o usuário); cobrem os e2e existentes de contratos e do histórico do prompt (`agentes.spec.ts`), não rodados aqui. Verificação: `pnpm verify:quick`.

@@ -10,10 +10,12 @@ import {
 import { CalendarClock, Handshake, History, Plus, Repeat, Search, TrendingDown, TrendingUp } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { RowLink } from '../components/a11y';
 import { CaixaFilter } from '../components/CaixaFilter';
 import { ContractFormModal } from '../components/contracts/ContractFormModal';
 import { ContractStatusBadge, ContractsTable, termText } from '../components/contracts/ContractsTable';
 import { LoadError, Money, PageHead } from '../components/domain';
+
 import { ExportMenu } from '../components/ExportMenu';
 import { Button, EmptyRow, Panel, Tabs, useDebounced } from '../components/ui';
 import { api } from '../lib/api';
@@ -282,9 +284,10 @@ function MiniList({ rows, testId }: { rows: ContractRow[] | undefined; testId?: 
   return (
     <ul className="item-list" data-testid={testId}>
       {rows.map((row) => (
+        // biome-ignore lint/a11y/useKeyWithClickEvents: o nome é o link da linha (teclado); o clique no resto do item só ajuda o mouse.
         <li key={row.id} className="item cursor-pointer" onClick={() => navigate(`/contracts/${row.id}`)}>
           <span className="grow min-w-0">
-            <span className="row-title">{row.name}</span>
+            <RowLink to={`/contracts/${row.id}`}>{row.name}</RowLink>
             <span className="row-sub">
               {row.entityName} · {row.terminatedOn ? t.contracts.history.terminatedOn(formatDate(row.terminatedOn)) : termText(row)}
             </span>

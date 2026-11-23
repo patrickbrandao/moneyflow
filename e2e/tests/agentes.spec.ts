@@ -59,6 +59,18 @@ const FIXTURES = join(import.meta.dirname, '../../apps/server/test/fixtures');
 /** Resposta longa em vários pedaços, para derrubar o SSE no meio dela. */
 const LONG_REPLY = Array.from({ length: 16 }, (_, i) => `Trecho ${String(i + 1).padStart(2, '0')} da resposta longa.`).join(' ');
 
+/** Resposta em muitos pedaços (tarefa 120): os deltas chegam juntos, um aviso por quadro. */
+const MANY_CHUNKS_REPLY = `${Array.from({ length: 400 }, (_, i) => `p${i + 1}`).join(' ')} fim dos pedaços.`;
+
+/** HTML cru na resposta (tarefa 073): tudo tem de aparecer como texto, sem mudar o console. */
+const HTML_REPLY = [
+  'Oi **mundo**',
+  '',
+  '<style>body{display:none}</style><div style="position:fixed;inset:0;z-index:2147483647" popover>Tela falsa</div>',
+  '',
+  'Entre de novo: <form><input type="password"><button>Entrar</button></form> [externo](//exemplo.invalid) [interno](/caixas)',
+].join('\n');
+
 let llm: FakeLlm;
 let adminApi: APIRequestContext;
 let provider: { id: string };
@@ -120,6 +132,9 @@ test.beforeAll(async () => {
   llm = await startFakeLlm(llmPort);
   llm.brain = (view) => {
     if (view.lastRole === 'user' && /reconectar o stream/i.test(view.lastText)) return { text: LONG_REPLY, chunks: 16, delayMs: 60 };
+    if (view.lastRole === 'user' && /muitos pedaços/i.test(view.lastText)) return { text: MANY_CHUNKS_REPLY, chunks: 400, delayMs: 2 };
+    // Markdown seguro (tarefa 073): a resposta traz HTML cru, como numa injeção de prompt.
+    if (view.lastRole === 'user' && /responda com html cru/i.test(view.lastText)) return { text: HTML_REPLY };
     // Conciliação com IA (spec 029): lê o lote e propõe ignorar as duas primeiras linhas novas (escritas em ask).
     if (/conciliar um lote de extrato/.test(view.system)) {
       const importId = /statementImportId ([0-9a-f-]{36})/.exec(view.lastText)?.[1];
@@ -191,6 +206,8 @@ test('agente: conversa, aprova uma escrita, ancora no painel direito e minimiza'
   const card = win.getByTestId('agent-confirmation');
   await expect(card).toBeVisible({ timeout: 30_000 });
   await expect(card).toContainText(entityName);
+  // O leitor de tela é avisado do pedido de aprovação (tarefa 114).
+  await expect(card.getByRole('alert')).toHaveText('O agente pede aprovação para 1 ação.');
   await card.getByTestId('agent-approve').first().click();
   await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Pronto:' })).toBeVisible({ timeout: 30_000 });
   const entities: { name: string }[] = await (await page.request.get(`/api/entities?q=${encodeURIComponent(entityName)}`)).json();
@@ -218,6 +235,38 @@ test('agente: conversa, aprova uma escrita, ancora no painel direito e minimiza'
   // O provedor falso recebeu as tools e o prompt com cache.
   const call = llm.calls.find((c) => c.path === '/v1/messages' && Array.isArray(c.body.tools));
   expect(call?.body.system[0].cache_control).toEqual({ type: 'ephemeral' });
+});
+
+test('acessibilidade (tarefa 114): abrir o agente pelo menu foca o compositor; as mensagens são uma região viva', async ({ page }) => {
+  await enter(page);
+  const win = await freshSession(page);
+  await expect(win.getByTestId('agent-composer')).toBeFocused({ timeout: 10_000 });
+  await say(win, 'Olá, tudo bem?');
+  const log = win.getByRole('log', { name: 'Mensagens da sessão' });
+  await expect(log.getByTestId('agent-message-assistant').filter({ hasText: 'Olá! Sou o agente de teste.' })).toBeVisible({
+    timeout: 30_000,
+  });
+});
+
+test('markdown seguro: HTML cru na resposta aparece como texto e não muda o console (tarefa 073)', async ({ page }) => {
+  await enter(page);
+  const win = await freshSession(page);
+  await say(win, 'responda com html cru');
+  const reply = win.getByTestId('agent-message-assistant').filter({ hasText: 'Tela falsa' });
+  await expect(reply).toBeVisible({ timeout: 30_000 });
+  const md = reply.locator('.agent-md');
+  // O markdown continua: negrito e o link interno, que navega sem abrir outra aba.
+  await expect(md.locator('strong')).toHaveText('mundo');
+  await expect(md.getByRole('link', { name: 'interno' })).toHaveAttribute('href', '/caixas');
+  await expect(md.getByRole('link', { name: 'interno' })).not.toHaveAttribute('target', '_blank');
+  // O HTML cru aparece escapado: nada de style, div, popover, form ou input de senha.
+  await expect(md).toContainText('<style>body{display:none}</style>');
+  await expect(md).toContainText('<input type="password">');
+  await expect(md.locator('style, div, form, button, [style], [popover], input[type="password"]')).toHaveCount(0);
+  // //host não vira link para fora.
+  await expect(md.locator('a', { hasText: 'externo' })).not.toHaveAttribute('href', /.+/);
+  await expect(page.locator('body')).toBeVisible();
+  await expect(win.getByTestId('agent-composer')).toBeVisible();
 });
 
 test('sessões: conversar, finalizar, a próxima mensagem numa sessão nova, abrir a anterior em leitura e bifurcar', async ({ page }) => {
@@ -390,6 +439,128 @@ test('agente: o SSE cai no meio da resposta e reconecta com Last-Event-ID, sem d
   expect(assistant).toHaveLength(1);
   await expect(win.locator('[data-testid="agent-message-assistant"]:not([data-live])')).toHaveCount(assistant.length);
   await expect(win.locator('[data-testid="agent-message-assistant"][data-live]')).toHaveCount(0);
+});
+
+test('agente: o stream do provedor cai no meio; a nova tentativa recomeça sem o texto parcial e sem aviso de erro (tarefa 151)', async ({
+  page,
+}) => {
+  await enter(page);
+  const win = await freshSession(page);
+  // A 1ª chamada cai depois de 2 pedaços (a execução volta à fila); a 2ª responde inteira.
+  llm.queue.push(
+    { text: 'Pedaço perdido um. Pedaço perdido dois. Pedaço perdido três.', chunks: 6, dropAfter: 2, delayMs: 200 },
+    { text: 'Resposta depois da queda.', chunks: 3, delayMs: 100 },
+  );
+  await say(win, `queda do provedor ${tag}`);
+  const final = win.locator('[data-testid="agent-message-assistant"]:not([data-live])').filter({ hasText: 'Resposta depois da queda.' });
+  await expect(final).toHaveCount(1, { timeout: 45_000 });
+  await expect(win.getByTestId('agent-composer')).toBeEnabled({ timeout: 30_000 });
+  await expect(final).not.toContainText('Pedaço perdido');
+  await expect(win.getByText('Pedaço perdido')).toHaveCount(0);
+  // Concluída a nova tentativa, o aviso do provedor não fica na janela.
+  await expect(win.locator('.notice.danger')).toHaveCount(0);
+});
+
+test('janelas (tarefa 120): clicar na janela da frente não grava o estado; a resposta em 400 pedaços chega inteira', async ({ page }) => {
+  await enter(page);
+  const win = await freshSession(page);
+  // Conta as gravações do estado das janelas a partir daqui.
+  await page.evaluate(() => {
+    const w = globalThis as unknown as { __agentsWrites: number };
+    w.__agentsWrites = 0;
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key: string, value: string) {
+      if (key.includes('agents-ui')) w.__agentsWrites += 1;
+      return original.call(this, key, value);
+    };
+  });
+  await win.getByTestId('agent-session-title').click();
+  await win.getByTestId('agent-composer').click();
+  expect(await page.evaluate(() => (globalThis as unknown as { __agentsWrites: number }).__agentsWrites)).toBe(0);
+
+  await say(win, 'muitos pedaços, por favor');
+  const final = win.locator('[data-testid="agent-message-assistant"]:not([data-live])').filter({ hasText: 'fim dos pedaços.' });
+  await expect(final).toHaveCount(1, { timeout: 45_000 });
+  expect((await final.innerText()).replace(/\s+/g, ' ').trim()).toBe(MANY_CHUNKS_REPLY);
+  await expect(win.locator('[data-testid="agent-message-assistant"][data-live]')).toHaveCount(0);
+});
+
+test('SSE (tarefa 122): nada aberto enquanto espera aprovação nem com a aba escondida; aprovar e voltar retomam', async ({ page }) => {
+  await enter(page);
+  const open = new Set<Request>();
+  const opened: Request[] = [];
+  page.on('request', (req) => {
+    if (!/\/api\/runs\/[^/]+\/events/.test(req.url())) return;
+    open.add(req);
+    opened.push(req);
+  });
+  page.on('requestfinished', (req) => open.delete(req));
+  page.on('requestfailed', (req) => open.delete(req));
+  const win = await freshSession(page);
+
+  // Esperando aprovação: o cartão na tela e nenhuma conexão de eventos aberta.
+  const entityName = `E2E Entidade SSE ${tag}`;
+  await say(win, `criar entidade ${entityName}`);
+  const card = win.getByTestId('agent-confirmation');
+  await expect(card).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => open.size, { timeout: 10_000 }).toBe(0);
+  // Aprovar reabre o SSE (do último evento visto) e a resposta chega sem recarregar.
+  const before = opened.length;
+  await card.getByTestId('agent-approve').first().click();
+  await expect(win.getByTestId('agent-message-assistant').filter({ hasText: 'Pronto:' })).toBeVisible({ timeout: 30_000 });
+  expect(opened.length).toBeGreaterThan(before);
+  const resumed = await opened[before]!.allHeaders();
+  expect(Number(resumed['last-event-id'])).toBeGreaterThan(0);
+
+  // Aba escondida no meio de uma resposta lenta: a conexão fecha; ao voltar, retoma e a resposta termina.
+  const setHidden = (hidden: boolean) =>
+    page.evaluate((value) => {
+      // roda no navegador; o tsconfig do e2e não carrega a lib DOM
+      const doc = (globalThis as unknown as { document: EventTarget }).document;
+      Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => (value ? 'hidden' : 'visible') });
+      doc.dispatchEvent(new Event('visibilitychange'));
+    }, hidden);
+  await say(win, 'devagar');
+  await expect(win.locator('[data-testid="agent-message-assistant"][data-live]')).toBeVisible({ timeout: 30_000 });
+  await setHidden(true);
+  await expect.poll(() => open.size, { timeout: 10_000 }).toBe(0);
+  const hiddenAt = opened.length;
+  await setHidden(false);
+  await expect.poll(() => opened.length, { timeout: 10_000 }).toBeGreaterThan(hiddenAt);
+  await expect(win.getByTestId('agent-composer')).toBeEnabled({ timeout: 45_000 });
+  await expect(
+    win.locator('[data-testid="agent-message-assistant"]:not([data-live])').filter({ hasText: 'Pensando com calma' }),
+  ).toHaveCount(1);
+});
+
+test('janelas entre abas (tarefa 183): fechar numa aba vale na outra, e clicar na outra não traz a janela de volta', async ({
+  page,
+  context,
+}) => {
+  await enter(page);
+  const win = await freshSession(page);
+  const agentId = (await win.getAttribute('data-agent-id'))!;
+  const other = await context.newPage();
+  await other.goto('/');
+  const otherWin = other.locator(`[data-testid="agent-window"][data-agent-id="${agentId}"]`);
+  await expect(otherWin).toBeVisible();
+
+  // Fechar na primeira aba some com a janela na segunda, sem recarregar.
+  await win.getByTestId('agent-close').click();
+  await expect(otherWin).toHaveCount(0);
+  // Abrir de novo na segunda aparece na primeira; minimizar lá vale aqui.
+  await other.getByTestId('agents-button').click();
+  await other.locator(`[data-testid="agents-thread"][data-agent-id="${agentId}"]`).getByTestId('agents-thread-open').click();
+  await expect(page.locator(`[data-testid="agent-window"][data-agent-id="${agentId}"]`)).toBeVisible();
+  await other.locator(`[data-testid="agent-window"][data-agent-id="${agentId}"]`).getByTestId('agent-close').click();
+  await expect(page.locator(`[data-testid="agent-window"][data-agent-id="${agentId}"]`)).toHaveCount(0);
+
+  // Um clique na segunda aba não regrava o estado antigo: recarregada, a primeira continua sem a janela.
+  await other.locator('main').click({ position: { x: 5, y: 5 } });
+  await page.reload();
+  await expect(page.getByRole('heading', { name: /^Olá,/ })).toBeVisible();
+  await expect(page.locator('[data-testid="agent-window"]')).toHaveCount(0);
+  await other.close();
 });
 
 test('agente: o admin abre a sessão de outro usuário em modo somente leitura', async ({ page }) => {
@@ -962,6 +1133,29 @@ test('prompt: editar o prompt, ver o histórico e o diff, restaurar; variáveis 
   expect(versions.map((v: { version: number }) => v.version)).toEqual([3, 2, 1]);
 });
 
+test('prompt: versões muito diferentes mostram o aviso de diff resumido (tarefa 112)', async ({ page }) => {
+  // 2.000 linhas trocadas por outras 2.000: passa do teto do diff exato (DIFF_MAX_EDITS).
+  const lines = (prefix: string) => Array.from({ length: 2000 }, (_, i) => `${prefix} ${i}`).join('\n');
+  const bigAgent = await postJson(adminApi, '/api/admin/ai/agents', {
+    name: `E2E Prompt grande ${tag}`,
+    systemPrompt: lines('Linha antiga'),
+  });
+  extraAgents.push(bigAgent.id);
+  const res = await adminApi.patch(`/api/admin/ai/agents/${bigAgent.id}`, { data: { systemPrompt: lines('Linha nova') } });
+  expect(res.ok()).toBeTruthy();
+  await enter(page);
+  await page.goto('/admin/ai/agents');
+  await page.getByRole('row').filter({ hasText: bigAgent.name }).getByRole('button', { name: 'Editar' }).click();
+  const form = page.getByRole('dialog', { name: 'Editar agente' });
+  await form.getByRole('button', { name: 'Histórico' }).click();
+  const history = page.getByRole('dialog', { name: `Histórico do prompt — ${bigAgent.name}` });
+  await history.getByLabel('A: versão 1').check();
+  await history.getByLabel('B: versão 2').check();
+  await expect(history.getByTestId('prompt-diff-truncated')).toContainText('o diff foi resumido');
+  await expect(history).toContainText('+2000');
+  await expect(history).toContainText('−2000');
+});
+
 test('Minha conta → IA: as instruções do usuário ficam salvas', async ({ page }) => {
   await enter(page);
   await page.goto('/account');
@@ -1374,6 +1568,39 @@ test.describe('chat multimídia (spec 025)', () => {
     await expect(doc).toHaveCount(0);
   });
 
+  test('PDFs (tarefa 121): três miniaturas com um worker só do pdf.js; restaurar a janela não baixa os PDFs de novo', async ({ page }) => {
+    await enter(page);
+    const win = await freshSession(page, mediaAgent.name);
+    await win.locator('input[type="file"]').setInputFiles(
+      ['um', 'dois', 'tres'].map((name) => ({
+        name: `pdf-${name}.pdf`,
+        mimeType: 'application/pdf',
+        buffer: minimalPdf([`Documento ${name}`]),
+      })),
+    );
+    await expect(win.getByTestId('composer-attachment')).toHaveCount(3);
+    await say(win, 'veja os PDFs');
+    await expect(win.getByTestId('agent-message-assistant').last()).toBeVisible({ timeout: 30_000 });
+    await expect(win.getByTestId('pdf-card')).toHaveCount(3);
+    await expect(win.locator('[data-testid="pdf-card"] img.agent-pdf-thumb')).toHaveCount(3, { timeout: 15_000 });
+    // Um worker do pdf.js para a aba inteira, não um por documento.
+    expect(page.workers().length).toBeLessThanOrEqual(1);
+
+    // Minimizar e restaurar: as miniaturas voltam do cache, sem baixar os PDFs.
+    const downloads: string[] = [];
+    page.on('request', (req) => {
+      if (/\/api\/attachments\/[^/]+\/download\?inline=1/.test(req.url())) downloads.push(req.url());
+    });
+    const conversationId = await win.getAttribute('data-conversation-id');
+    expect(conversationId).toBeTruthy();
+    await win.getByTestId('agent-minimize').click();
+    await page.locator(`[data-testid="agent-dock-item"][data-conversation-id="${conversationId}"]`).click();
+    const restored = page.locator(`[data-testid="agent-window"][data-conversation-id="${conversationId}"]`);
+    await expect(restored.locator('[data-testid="pdf-card"] img.agent-pdf-thumb')).toHaveCount(3);
+    expect(downloads).toHaveLength(0);
+    expect(page.workers().length).toBeLessThanOrEqual(1);
+  });
+
   test('gravação pelo microfone (fake media stream): ouvir, descartar, regravar e anexar com transcrição', async ({ page }) => {
     await enter(page);
     const win = await freshSession(page, mediaAgent.name);
@@ -1401,5 +1628,34 @@ test.describe('chat multimídia (spec 025)', () => {
     const audio = win.getByTestId('audio-attachment');
     await expect(audio.getByTestId('transcription')).toContainText('Mensagem gravada pelo microfone.', { timeout: 30_000 });
     await expect(audio.getByTestId('audio-time')).toContainText(/ 0:0[1-2]/);
+  });
+
+  test('gravação: minimizar com o pedido de permissão pendente solta o microfone (tarefa 123)', async ({ page }) => {
+    // O pedido de permissão demora 1 s; as trilhas entregues ficam em __tracks.
+    await page.addInitScript(() => {
+      // roda no navegador; o tsconfig do e2e não carrega a lib DOM
+      type Track = { readyState: string };
+      type Stream = { getTracks: () => Track[] };
+      type Devices = { getUserMedia: (constraints: unknown) => Promise<Stream> };
+      const w = globalThis as unknown as { __tracks: Track[]; navigator: { mediaDevices: Devices } };
+      const devices = w.navigator.mediaDevices;
+      const original = devices.getUserMedia.bind(devices);
+      w.__tracks = [];
+      devices.getUserMedia = async (constraints) => {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const stream = await original(constraints);
+        w.__tracks.push(...stream.getTracks());
+        return stream;
+      };
+    });
+    await enter(page);
+    const win = await freshSession(page, mediaAgent.name);
+    await win.getByTestId('agent-record').click();
+    await win.getByTestId('agent-minimize').click();
+    await expect(win).toHaveCount(0);
+    // A permissão "chega" depois de a janela sumir: a trilha é parada na hora, sem gravação escondida.
+    const states = () =>
+      page.evaluate(() => (globalThis as unknown as { __tracks: { readyState: string }[] }).__tracks.map((track) => track.readyState));
+    await expect.poll(states, { timeout: 5_000 }).toEqual(['ended']);
   });
 });

@@ -1,9 +1,9 @@
-import { formatBRL, formatDate, type PreviewRow, type SUPERSEDE_TOOLS, type SupersedeResult, t } from '@moneyflow/shared';
+import { formatDate, type PreviewRow, type SUPERSEDE_TOOLS, type SupersedeResult, t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { unprocessable } from '../errors';
 import * as supersede from '../services/statement-supersede';
 import { assertNotSuperseded, getImport } from '../services/statements';
-import type { Handlers } from './tool-helpers';
+import { type Handlers, lineLabel, moreLines, PREVIEW_LINES } from './tool-helpers';
 
 /*
  * Tools do lote provisório e da troca pelo consolidado (spec 031, categoria
@@ -24,9 +24,6 @@ export function supersedeRows(result: SupersedeResult): PreviewRow[] {
     { label: S.consolidatedLeftover, after: String(result.consolidatedLeftover.length) },
   ];
 }
-
-const lineLabel = (l: { postedOn: string; amountCents: number; description: string }) =>
-  `${formatDate(l.postedOn)} · ${formatBRL(l.amountCents)} · ${l.description}`;
 
 export const SUPERSEDE_HANDLERS: Handlers<SupersedeToolName> = {
   set_statement_import_provisional: {
@@ -81,7 +78,8 @@ export const SUPERSEDE_HANDLERS: Handlers<SupersedeToolName> = {
       const lines = await supersede.listSupersededLines(ctx, i.importId, 'pending');
       const byId = new Map(lines.map((l) => [l.id, l]));
       const S = t.statements.supersede;
-      const rows: PreviewRow[] = i.items.map((item) => {
+      // Até PREVIEW_LINES linhas no cartão, o resto avisado (tarefa 155).
+      const rows: PreviewRow[] = i.items.slice(0, PREVIEW_LINES).map((item) => {
         const line = byId.get(item.lineId);
         const label = line ? lineLabel(line) : item.lineId;
         const entry = line?.target ? `${line.target.description}${line.target.entityName ? ` (${line.target.entityName})` : ''}` : null;
@@ -93,7 +91,7 @@ export const SUPERSEDE_HANDLERS: Handlers<SupersedeToolName> = {
         summary: lot.fileName,
         action: deletes ? 'delete' : 'update',
         rows,
-        warnings: deletes ? [S.deleteWarning(deletes)] : [],
+        warnings: [...(deletes ? [S.deleteWarning(deletes)] : []), ...moreLines(i.items.length)],
       };
     },
     run: (ctx, i) => supersede.resolveSupersededLines(ctx, i.importId, i.items),

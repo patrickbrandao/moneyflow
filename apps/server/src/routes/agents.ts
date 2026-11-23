@@ -70,6 +70,12 @@ const settingKey = (r: Req) => {
 /* Agentes de IA (spec 011): conversas, execuções (SSE), administração, tokens e a IA nos fluxos. */
 export async function agentRoutes(app: FastifyInstance) {
   const id = (r: Req) => param(r, 'id');
+  // Streams SSE abertos: fechados antes do server.close() (tarefa 107), que senão esperaria por eles
+  // (uma execução esperando aprovação mantém o stream aberto). O EventSource reconecta com Last-Event-ID.
+  const streams = new Set<() => void>();
+  app.addHook('preClose', async () => {
+    for (const close of [...streams]) close();
+  });
 
   /* ---------------- sessões por agente (spec 026) ---------------- */
   app.get('/api/agents', (r: Req) => conversations.listAgentOptions(r.ctx));
@@ -139,17 +145,22 @@ export async function agentRoutes(app: FastifyInstance) {
     let closed = false;
     let running = false;
     let again = false;
+    // A volta do timer pede a conferência do estado da execução (tarefa 164).
+    let checkRun = false;
     let unsubscribe: () => void = () => {};
     let ping: NodeJS.Timeout | null = null;
     const close = () => {
       if (closed) return;
       closed = true;
+      streams.delete(close);
       unsubscribe();
       if (ping) clearInterval(ping);
       res.end();
     };
-    const pump = async () => {
+    streams.add(close);
+    const pump = async (timer = false) => {
       if (closed) return;
+      if (timer) checkRun = true;
       if (running) {
         again = true;
         return;
@@ -172,7 +183,11 @@ export async function agentRoutes(app: FastifyInstance) {
             again = true;
             continue;
           }
-          // Execução já terminada sem o "done" (eventos expurgados): encerra com o estado final.
+          // Execução já terminada sem o "done" (eventos expurgados): encerra com o estado final. O estado só é
+          // conferido com a leitura vazia ou na volta do timer, nunca logo depois de enviar eventos (tarefa 164):
+          // durante a resposta, cada aviso custa uma consulta (a dos eventos).
+          if (events.length > 0 && !checkRun) continue;
+          checkRun = false;
           const current = await conversations.getRun(r.ctx, runId);
           if (FINAL.has(current.status) && !again) {
             const tail = await conversations.runEvents(app.db, runId, last);
@@ -199,7 +214,7 @@ export async function agentRoutes(app: FastifyInstance) {
       if (closed) return;
       ticks += 1;
       if (ticks % 3 === 0) res.write(': ping\n\n');
-      void pump();
+      void pump(true);
     }, 5_000);
     r.raw.on('close', close);
     void run;

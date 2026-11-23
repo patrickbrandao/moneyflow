@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 734b618
 ---
 
 # Gaveta do título mostra a NF-e emitida à noite com a data do dia seguinte
@@ -63,5 +63,14 @@ Exibir o instante no fuso de São Paulo: `formatDateTime(nfe.issuedAt)`, ou a da
 Nada foi executado. Supus que o pg devolve `issued_at` como `Date`, que vira UTC no `toISOString`, como mostra o código.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `getNfe` devolve `issuedAt` em UTC (`toISOString`) e `NfeInfo` cortava a data com `slice(0, 10)`.
 
 ## Resolução (executor)
+Auxiliar novo `localDateOf(instante)` em `packages/shared/src/dates.ts`: a data `YYYY-MM-DD` do instante em São Paulo ('' se inválido). `TitleEntryInfo.tsx` mostra `formatDate(localDateOf(nfe.issuedAt))`: a NF-e de 31/10 às 22h30 (−03:00) aparece como 31/10/2026. O servidor não mudou.
+
+Testes: `packages/shared/test/money-dates.test.ts` → "a data de um instante é a de São Paulo, não a do ISO em UTC (tarefa 178)". Verificação: `pnpm verify:quick`.
+
+### Complemento (revisão de 2026-11-22, frente P2a)
+
+- `apps/server/src/agents/tool-handlers-operation.ts` (`import_nfe`): a prévia e o título sugerido (competência e o vencimento sem duplicata) usam `localDateOf(issuedAt)` no lugar do `slice(0, 10)`, que errava a NF-e com o horário noutro fuso (em UTC, a das 22h30 em São Paulo caía no dia seguinte).
+- Teste: `apps/server/test/agent-tools.test.ts`, "NF-e da sessão…", com o `dhEmi` em UTC (01h30 do dia 6 = 22h30 do dia 5): a prévia e a competência saem 05/10/2026; com o `slice`, o teste falha (conferido). Verificação: `pnpm verify:quick`.

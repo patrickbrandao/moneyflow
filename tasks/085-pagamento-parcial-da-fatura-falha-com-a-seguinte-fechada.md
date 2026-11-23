@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: b492cc7
 ---
 
 # Pagamento parcial da fatura (e o crédito do fechamento) falha quando a fatura seguinte já fechou
@@ -80,4 +80,12 @@ Nada foi executado. Supõe-se que rolar para uma fatura mais distante seja aceit
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `nextOpenInvoice` (pagamento parcial) e o ramo do crédito de `closeInvoiceTx` só aceitavam a fatura do mês seguinte e davam `no_open_invoice` se ela estivesse fechada. O banco aceita o saldo rolado em qualquer fatura posterior aberta (`card_invoice_items_carryover_check`).
+
 ## Resolução (executor)
+
+- `apps/server/src/services/card-core.ts`: `firstOpenInvoiceAfter(tx, card, mês)` devolve a primeira fatura aberta com competência depois do mês e cria as que faltarem (até 60 meses). Serve ao crédito de `closeInvoiceTx`.
+- `apps/server/src/services/cards.ts`: `payInvoice` rola o resto para ela, e `nextOpenInvoice` saiu. Os encargos continuam em `insertPurchase` (a primeira aberta que fecha na data do pagamento).
+- Decisão: rolar para uma fatura mais distante quando a seguinte já fechou. `docs/007-cartao-de-credito.md` (fechamento e pagamento parcial).
+- Teste: `apps/server/test/cards.test.ts`, "pagamento parcial e crédito do fechamento com a fatura seguinte já fechada rolam para a primeira aberta (tarefa 085)". Com 10 e 11/2026 fechadas, o pagamento parcial da 10 rola 60,00 para a 12. Com 11/2026 fechada antes, o crédito de −2.000,00 da 10 vai para a 12. O teste falha sem a correção.
+- Verificação: `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s1 pnpm verify:quick` (nível rápido).

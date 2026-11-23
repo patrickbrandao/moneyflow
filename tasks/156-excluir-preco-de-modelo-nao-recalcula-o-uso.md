@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # "Excluir preço" promete que o uso passa ao preço anterior, mas o custo é congelado na gravação e o preço usado não sai
@@ -61,4 +61,13 @@ O recálculo do passado é decisão de produto; a correção mínima é o texto 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: a descrição e a prévia de `delete_ai_price` prometiam o recálculo; o custo é congelado no INSERT de `ai_usage` e o preço usado não sai (FK `ai_usage_price_id_fkey`), com a mensagem genérica de vínculo.
+
 ## Resolução (executor)
+
+- Decisão: a correção mínima (texto e mensagem); recalcular o passado ficaria para uma decisão de produto com o dba.
+- `services/ai-admin.ts`: `priceUsageCount` e `deletePrice` recusa o preço usado com `t.agents.errors.priceInUse(n)` (código `ai_usage_price_id_fkey`), na mesma transação; a FK ganhou a tradução em `DB_CONSTRAINT_MESSAGES` (a corrida).
+- `delete_ai_price`: descrição e aviso dizem que o uso gravado não muda e que o preço usado não sai; a prévia recusa já com a contagem. `create_ai_price`: descrição e aviso dizem que o custo é calculado na gravação (o `validFrom` no passado não recalcula).
+- Spec 027 atualizada (preços).
+- Teste: `agent-tools-admin.test.ts` (preço usado por um `ai_usage`: a tool recusa sem cartão, a rota devolve 422 com a mesma mensagem e o `cost_micros` não muda); o teste longo da configuração de IA ganhou prazo de 120 s.
+- Verificação: `pnpm verify:quick` (Biome, typecheck, os testes do shared relacionados e, passados depois de `--`, os de integração `agents`, `agent-tools`, `agent-tools-admin`, `titles`, `cards`, `contracts`, `statements`, `vision`, `reconcile-recipes`, `statement-supersede`, `autonomous` e `budgets` no Postgres local). Não rodei `verify:full` nem o e2e.

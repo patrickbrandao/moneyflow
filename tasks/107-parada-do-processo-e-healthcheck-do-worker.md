@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 701195e
 ---
 
 # Parada do processo sem prazo nem ordem, e healthcheck do worker que não diz nada
@@ -97,4 +97,18 @@ Nada foi executado. O tempo de 2 minutos vem do `staleAfter` padrão, e o SIGKIL
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado na leitura: o healthcheck do `Dockerfile` saía 0 para `MODE=worker` e chamava a porta 3000 com `docker run … worker` (sem `MODE`); `stop()` dos agentes esperava todas as execuções sem prazo nem sinal; o `stop` do worker não esperava as passadas em andamento antes do `pool.end()`; o `shutdown` podia rodar duas vezes; a API registrava os sinais depois do `buildApp`; e o SSE (`reply.hijack()`) não era fechado antes do `server.close()`. A transição `running → queued` já existe no banco (o gatilho limpa a reserva e zera `attempts`), então a devolução à fila não precisa do dba.
+
 ## Resolução (executor)
+
+- Healthcheck: `apps/server/src/health.ts` (batimento em arquivo — `WORKER_HEARTBEAT_FILE`, padrão na pasta temporária —, saudável até 3 × `MESSAGE_INTERVAL_MS` com mínimo de 90 s; o modo pelo mesmo critério do `main.ts`, lendo o argumento do processo principal em `/proc/1/cmdline`, senão `MODE`, senão api) e `apps/server/src/healthcheck.ts`, empacotado em `dist/healthcheck.mjs` (`build.mjs` com duas entradas). O `Dockerfile` usa `node /app/healthcheck.mjs` (start-period 30 s). O laço de mensagens grava o batimento a cada passada que chega ao banco (`SELECT 1` depois do `messageTick`, porque as etapas isoladas da tarefa 104 não lançam com o banco fora).
+- Parada com prazo (`SHUTDOWN_GRACE_MS`, padrão 8 s, 1–600 s, em `config.ts`): `apps/server/src/shutdown.ts` (`settleWithin`, `tracked`). `agents/worker.ts`: o `stop(graceMs)` aborta um sinal de desligamento, para de reservar e espera execuções, transcrições e os laços (reserva, manutenção, tarefas, receitas) até o prazo. `agents/runner.ts`: `WorkerDeps.shutdown`; a chamada ao modelo, a espera das transcrições e a da volta à fila param no sinal (as tools não: terminam antes); no próximo ponto seguro (antes de cada volta e de cada tool) ou no corte da chamada, `requeue` devolve a execução à fila com a cerca do `lock_token` e o evento `error` `worker_shutdown` (não conta como erro do provedor; o console o trata como o `provider_retry`, descartando o texto parcial). `worker.ts`: `startHourlyLoop` e `startMessageLoop` (exportado) não começam passada nova na parada e esperam a em andamento — o envio do Telegram termina marcado `sent` — junto com os agentes, no mesmo prazo.
+- `main.ts`: sinais registrados no início (também durante o boot da API), parada uma vez só, `pool.end()` uma vez, e saída forçada em `SHUTDOWN_GRACE_MS` + 1,5 s; o modo por `resolveMode`.
+- API: `routes/agents.ts` guarda os streams SSE abertos e os fecha num `preClose` (antes do `server.close()`); o `EventSource` reconecta com `Last-Event-ID`.
+- `docker-compose.yml`: `stop_grace_period: 30s` e `SHUTDOWN_GRACE_MS` no worker; `.env.example` com as duas variáveis.
+- Decisões: batimento em arquivo (sem tabela nova no banco); a API não ganhou `forceCloseConnections` (só os SSE são fechados; as demais requisições terminam, com a saída forçada como teto).
+- Spec: `docs/018` (parada e saúde; nota para o compose do projeto externo) e a linha dela no `docs/INDEX.md`; `AGENTS.md` (uma frase no `src/worker.ts`).
+- Testes: `apps/server/test/health.test.ts` (novo, sem banco: o modo por `/proc/1/cmdline`/`MODE`, inclusive com o init na frente; a idade do batimento; `settleWithin` no prazo); `apps/server/test/agents.test.ts` ("parada do worker: a execução no meio da chamada volta à fila na hora…": em menos de 2 s, `queued`, sem `lock_token`, `attempts` 0 e o evento `worker_shutdown`, e o `drain` seguinte conclui com uma resposta só; "…termina dentro do prazo mesmo com uma execução longa": `stop(3000)` do `startAgentWorker` em menos de 3 s; "a API fecha os streams SSE abertos ao parar": o `close()` com um SSE aberto em menos de 2 s e o stream encerrado); `apps/server/test/vision.test.ts` ("parada do laço de mensagens…": com a Bot API demorando 1 s, a parada no meio do envio volta com a mensagem `sent`, e o batimento gravado). O healthcheck empacotado foi conferido à mão (`node dist/healthcheck.mjs`: worker sem batimento 1, com batimento 0, API sem servidor 1); o `docker build` e o `docker stop` da pilha ficam para a verificação completa.
+- Verificação: `pnpm verify:quick`.

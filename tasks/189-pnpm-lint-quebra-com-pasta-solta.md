@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: a0f89b2
 ---
 
 # `pnpm lint` falha quando há uma pasta solta com `biome.json` (hoje, `tmp/`)
@@ -62,4 +62,10 @@ Não verifiquei o que a `tmp/` guarda além do template da skill do console; se 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `pnpm lint` parava no `biome.json` aninhado de `tmp/`.
+
 ## Resolução (executor)
+
+- `tmp/` no `.gitignore`: o Biome (`vcs.useIgnoreFile`) passa a ignorá-la. `pnpm lint` passa com a `tmp/` presente (480 arquivos, sem erro).
+- A lista positiva no `includes` do `biome.json` ficou de fora: o `.gitignore` já cobre as pastas soltas conhecidas, e `.claude/worktrees` está no `.git/info/exclude`.
+- De passagem: `MONEYFLOW_TEST_LOCAL_DB` em `apps/server/test/local-db.ts` (nome do banco local dos testes, com o modelo `<nome>_tpl`) para rodar a integração local em worktrees ao mesmo tempo; descrito no `AGENTS.md`.

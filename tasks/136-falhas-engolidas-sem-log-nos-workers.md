@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: b492cc7
 ---
 
 # Falhas engolidas sem log no worker de faturas, de contratos, das séries e na baixa automática
@@ -94,4 +94,15 @@ Nada foi executado. O `ServiceContext` não tem logger, por isso a proposta da b
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `cardMaintenance` e `contractMaintenance` tinham `catch { failed += 1; }`. O worker registrava só os contadores. `autoSettleLine` terminava em `catch { return false; }`. A materialização das séries já tinha o `onError` (tarefa 082, lote S1a).
+
 ## Resolução (executor)
+
+- `apps/server/src/errors.ts`: `failureReason(erro)` devolve o código do `AppError` ou o traduzido do banco, o código do Postgres, a constraint e a mensagem.
+- `apps/server/src/services/cards.ts`: `cardMaintenance(db, { autoClose, onError })` entrega cada cartão ou fatura que falhou (`CardMaintenanceFailure`, com o id e o motivo). A fatura que outro worker já fechou (`invoice_closed`) não conta como falha.
+- `apps/server/src/services/contract-worker.ts`: `contractMaintenance(db, hoje, destinatários, onError)` entrega cada contrato que falhou (`ContractMaintenanceFailure`).
+- `apps/server/src/worker.ts`: registra os dois em `warn` ("worker: fatura de cartão não atualizada" e "worker: contrato não renovado nem encerrado").
+- Baixa automática: `ServiceContext.log` (opcional; `apps/server/src/context.ts`) recebe o `request.log` nas rotas (`apps/server/src/app.ts`). Em `apps/server/src/services/statements.ts`, `autoSettleLine` não tenta quando o usuário não escreve na caixa da conta ou do cartão (devolve `false`, o caso previsto pela spec). Na falha, registra `warn` com o lote, a linha, o código, o código do Postgres e a constraint, sem valores, e devolve `'failed'`. `autoMatch` conta `autoSettleFailed`. A resposta do import não mudou.
+- Docs: `docs/007-cartao-de-credito.md` (fechamento automático), `docs/020-contratos.md` (worker) e `docs/033-pagamentos-de-contrato-no-extrato.md` (baixa sem confirmação).
+- Testes: em `apps/server/test/cards.test.ts`, "fechamento automático que falha vai para o log com a fatura e o motivo (tarefa 136)" usa outubro fechado na pagadora e `period_closings_locked_check`. Em `apps/server/test/contracts.test.ts`, "contrato que o worker não consegue renovar vai para o log com o id e o motivo" usa agosto fechado e confere que o contrato fica vigente. No mesmo arquivo, "baixa sem confirmação que falha vira sugestão e deixa o motivo no log, sem valores" usa novembro fechado e um logger dublê no `ServiceContext`. O caso `invoice_closed` entre dois workers não tem teste, porque a corrida não é reproduzível sem dois processos.
+- Verificação: `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s1 pnpm verify:quick` (nível rápido).

@@ -64,7 +64,7 @@ export function CapabilityIcons({ capabilities, testId }: { capabilities: readon
         const Icon = CAPABILITY_ICONS[capability];
         const label = t.agents.capabilities[capability] ?? capability;
         return (
-          <span key={capability} className="capability-icon" title={label} aria-label={label} data-capability={capability}>
+          <span key={capability} className="capability-icon" title={label} role="img" aria-label={label} data-capability={capability}>
             <Icon size={13} />
           </span>
         );

@@ -1,5 +1,7 @@
 # 026 — Sessões dos agentes (F12)
 
+> **Conteúdo:** F12: fio contínuo por usuário e agente dividido em sessões (UUIDv7), uma sessão ativa (índice único no banco), finalizar = arquivar com o motivo (`archived_reason`, parando a execução), só a sessão ativa vai ao modelo, bifurcar para continuar de uma finalizada, `pinned_at` removida, rotas e janelas por agente, conversão do `localStorage` e o ajuste do backup.
+
 A conversa com cada agente passa a ser um **fio contínuo por usuário e agente**, dividido em **sessões**. Substitui o modelo de várias conversas soltas da [011](011-agentes-de-ia.md). Decisões da entrevista de 2026-10-13. Como as sessões anteriores serão aproveitadas (memória, resumo, busca pelo agente) fica para implementações futuras.
 
 ## Regras
@@ -12,6 +14,7 @@ A conversa com cada agente passa a ser um **fio contínuo por usuário e agente*
   - se houver execução em andamento, o "parar" é pedido na mesma operação (`cancel_requested_at`) e a sessão é arquivada na hora; a execução termina sozinha em até alguns segundos, e a próxima mensagem já pode abrir a sessão nova;
   - a próxima mensagem entra numa sessão nova.
 - **O modelo recebe só a sessão ativa**: o histórico das finalizadas não vai ao modelo.
+- **Tamanho da sessão** (tarefa 098): o histórico **enviado** corta os resultados de tool longos (mais de 2 mil caracteres) das voltas antigas, que viram o começo do texto e um marcador com o tamanho ("chame a tool de novo se precisar"); o gravado em `ai_messages` fica inteiro. As voltas mantidas por inteiro andam em degraus de 10 (de 10 a 19 mais recentes), para o corte só mudar a cada 10 voltas e não quebrar o cache do histórico ([022](022-prompts-e-instrucoes.md)). Anexos não são cortados. Se mesmo assim a sessão passar do limite do provedor (ou do teto `AI_REQUEST_MAX_BYTES`), a execução termina com `context_overflow` e a mensagem manda finalizar a sessão e começar outra; depois de finalizar, dá para bifurcar de um ponto anterior.
 - **Sessões finalizadas**:
   - ficam em somente leitura, com o histórico, os anexos, o uso e o id visíveis;
   - não voltam a ser ativas;

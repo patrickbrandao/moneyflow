@@ -57,7 +57,7 @@ SELECT fk_ok('ai_attachment_derivatives', 'attachment_id', 'attachments', 'id');
 SELECT fk_ok('ai_attachment_derivatives', 'message_id', 'ai_messages', 'id');
 SELECT fk_ok('ai_attachment_derivatives', 'provider_id', 'ai_providers', 'id');
 SELECT fk_ok('ai_attachment_derivatives', 'result_attachment_id', 'attachments', 'id');
-SELECT columns_are('ai_embedding_indexes', ARRAY['provider_id', 'model', 'last_in_use_at', 'created_at', 'updated_at']);
+SELECT columns_are('ai_embedding_indexes', ARRAY['provider_id', 'model', 'last_in_use_at', 'created_at', 'updated_at', 'complete_at']);
 SELECT col_is_pk('ai_embedding_indexes', ARRAY['provider_id', 'model']);
 SELECT fk_ok('ai_embedding_indexes', 'provider_id', 'ai_providers', 'id');
 SELECT col_not_null('ai_embeddings', 'provider_id');

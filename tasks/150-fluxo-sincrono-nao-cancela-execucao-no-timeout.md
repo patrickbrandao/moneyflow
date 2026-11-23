@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: d0514fa
 ---
 
 # Leitura e conversão de documento desistem em 120 s, mas a execução continua e é paga
@@ -58,4 +58,12 @@ Nada foi executado. A estimativa de duração da conversão depende do modelo e 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `waitRun` desistia em `AI_DOCUMENT_TIMEOUT_MS` e as rotas respondiam 422 "ilegível" sem cancelar a execução, que seguia rodando e era cobrada.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/ai-flows.ts`: `awaitFlowRun` espera a execução; esgotado o prazo, pede o parar (`stopRun` numa `withTx`) e responde 422 `document_timeout` com `t.agents.errors.flowTimeout` ("demorou demais"), salvo se ela terminou entre a última leitura e o pedido. Usado na leitura de documento e no `runFlow` de `contract-documents.ts`.
+- Decisão: a conversão continua síncrona, com prazo próprio `AI_DOCUMENT_CONVERT_TIMEOUT_MS` (config nova, padrão 5 min, no `.env.example` e no `docker-compose.yml`; a leitura segue com `AI_DOCUMENT_TIMEOUT_MS`).
+- Specs: `docs/011` e `docs/020`.
+- Teste: `agents.test.ts` "leitura de documento que passa do prazo cancela a execução" (prazo de 1,5 s, resposta lenta do provedor falso: 422 `document_timeout`, a execução `canceled` e nenhum uso gravado).
+- Verificação: `pnpm verify:quick` (rápida), com `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s2`.

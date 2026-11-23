@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 877862f
 ---
 
 # Diff de texto guarda o vetor inteiro a cada passo: documento grande trava o worker e o navegador
@@ -102,4 +102,16 @@ Medições feitas num script descartável no Node 26 desta máquina (o navegador
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: `diffLines` guardava a cada passo `d` uma cópia inteira do vetor (`2·(N+M)+3`), memória e tempo O(D·(N+M)), sem teto. Usado na prévia de `save_contract_markdown` (worker) e nas telas de versões do documento e do prompt.
+
 ## Resolução (executor)
+
+- `packages/shared/src/text-diff.ts`, só o algoritmo, com a assinatura de `diffLines(antes, depois): DiffLine[]` e de `diffStats` mantidas (a tarefa 182 unificou os usos no web): o prefixo e o sufixo comuns ficam fora do Myers; as linhas viram números (`Map` de texto para id); o caminho guarda só a faixa usada a cada passo (`v.slice(offset − d, offset + d + 1)`), memória O(D²); acima de `DIFF_MAX_EDITS = 3000` linhas diferentes (ou com |N − M| acima disso), o miolo sai resumido (todas as antigas removidas e todas as novas incluídas), um diff ainda válido. `diffText(antes, depois, maxEdits?)` devolve `{ lines, truncated }`.
+- `apps/server/src/agents/tool-handlers-operation.ts`: a prévia de `save_contract_markdown` usa `diffText` e, resumida, acrescenta o aviso `t.contracts.documents.diffTruncated` (as contagens viram limites superiores).
+- Medido (máquina carregada): 8.000 × 8.000 linhas diferentes em ~0,3 s e ~36 MB de ArrayBuffers (antes, 33,6 s e 1,5 GB).
+- Pendente fora desta frente: o aviso "diff resumido" nas telas de comparação (documento e prompt) depende do componente unificado da tarefa 182; o `diffText` e o texto `t.contracts.documents.diffTruncated` já estão no shared.
+- Testes: `packages/shared/test/contracts.test.ts` (500 pares aleatórios reconstruindo os dois lados e com o tamanho mínimo pela LCS; 10.000 linhas com uma trocada dão 1 inclusão e 1 remoção; 8.000 × 8.000 diferentes abaixo de 1 s, resumido e válido, com prefixo e sufixo preservados; exato até o teto) e `apps/server/test/agent-tools.test.ts` (prévia de `save_contract_markdown` com 4.000 × 4.000 linhas diferentes: `+4000 / −4000` e o aviso).
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).
+- Complemento (sobras): o aviso de diff resumido aparece nas telas de comparação. O `LineDiff` (`apps/web/src/components/diff/LineDiff.tsx`, o componente da tarefa 182) usa `diffText` e, com `truncated`, mostra o `truncatedNote` acima do diff (`data-testid` `<testId>-truncated`): nas versões do documento de contrato, `t.contracts.documents.diffTruncated` (`DocumentView.tsx`, com o `testId` `document-diff`); no histórico do prompt do agente, o novo `t.agentsUi.admin.prompt.diffTruncated` (`AgentPrompt.tsx`). Teste: e2e `agentes.spec.ts`, "prompt: versões muito diferentes mostram o aviso de diff resumido" (2.000 × 2.000 linhas diferentes; não rodado nesta frente); typecheck do web e do shared.

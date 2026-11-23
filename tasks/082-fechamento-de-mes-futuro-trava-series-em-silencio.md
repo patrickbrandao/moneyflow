@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: bf102a8
 ---
 
 # A API aceita fechar mês futuro, e o worker para de materializar as séries daquele mês sem dizer qual nem por quê
@@ -77,4 +77,12 @@ Nada foi executado. A decisão de permitir ou não fechar o mês corrente (a tel
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `periodClosingInput` e `closeMonth` aceitavam qualquer mês, e `materializeAll` engolia o erro (`catch { failed += 1; }`).
+
 ## Resolução (executor)
+
+- `apps/server/src/services/audit.ts`: `assertClosableMonth` — mês depois do atual em São Paulo → 422 `closing_future_month` (`t.errors.closingFutureMonth`), chamado no `closeMonth` e na prévia da tool `close_month` (`agents/tool-handlers-admin.ts`). O mês corrente continua podendo ser fechado, como na tela.
+- `apps/server/src/services/recurrence.ts`: `materializeAll(db, horizonte, onError)` entrega cada série que falhou (`MaterializeFailure`: id, código e mensagem traduzidos por `translateDbError`) e conta à parte as presas num mês fechado (`closedMonth`); `apps/server/src/worker.ts` registra cada uma em `warn` ("worker: série não materializada").
+- `packages/shared/src/i18n/pt-BR.ts`: `errors.closingFutureMonth`. `docs/008-categorias-auditoria-e-exclusao.md`: a regra.
+- Testes: `apps/server/test/operation.test.ts`, "não fecha mês futuro; a série presa num mês fechado aparece no log do worker (tarefa 082)" (422 no mês seguinte; com um mês futuro fechado direto no banco, o `onError` recebe a série com `period_closings_locked_check`, e reaberto o mês ela volta a andar); `apps/server/test/agent-tools-admin.test.ts`, o caso de fechamento pela tool fecha um mês passado e confere a recusa do futuro.
+- Verificação: `pnpm verify:quick` (nível rápido).

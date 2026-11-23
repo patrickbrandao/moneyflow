@@ -1,6 +1,7 @@
 import { type Database, type Executor, recurrenceRules, titles } from '@moneyflow/db';
 import {
   addMonths,
+  dayOfMonth,
   type Frequency,
   MATERIALIZE_MONTHS,
   occurrenceCompetenceDate,
@@ -10,7 +11,8 @@ import {
   stripInstallmentSuffix,
   todayIso,
 } from '@moneyflow/shared';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
+import { translateDbError } from '../errors';
 import { insertTitlePair, type MirrorPlan } from './title-pair';
 
 /*
@@ -48,6 +50,14 @@ export async function materializeRule(tx: Executor, ruleId: string, horizon = ma
     .limit(1);
   if (!template || template.occurrence === null) return 0;
   const rule = toRule(ruleRow);
+  // Dia da competência da série: o da 1ª ocorrência que ainda existe (tarefa 170).
+  const [first] = await tx
+    .select({ competenceDate: titles.competenceDate })
+    .from(titles)
+    .where(and(eq(titles.recurrenceRuleId, ruleId), isNull(titles.mirrorStatus)))
+    .orderBy(asc(titles.occurrence))
+    .limit(1);
+  const competenceAnchorDay = dayOfMonth(first?.competenceDate ?? template.competenceDate);
   const mirrorTemplate = template.mirrorTitleId
     ? (await tx.select().from(titles).where(eq(titles.id, template.mirrorTitleId)))[0]
     : undefined;
@@ -71,7 +81,12 @@ export async function materializeRule(tx: Executor, ruleId: string, horizon = ma
         entityId: template.entityId,
         categoryId: template.categoryId,
         description: describe(template),
-        competenceDate: occurrenceCompetenceDate(rule, { occurrence: template.occurrence, competenceDate: template.competenceDate }, n),
+        competenceDate: occurrenceCompetenceDate(
+          rule,
+          { occurrence: template.occurrence, competenceDate: template.competenceDate },
+          n,
+          competenceAnchorDay,
+        ),
         dueDate: occurrenceDueDate(rule, n),
         amountCents: template.amountCents,
         notes: template.notes,
@@ -91,15 +106,21 @@ export async function materializeRule(tx: Executor, ruleId: string, horizon = ma
 const describe = (template: { description: string; contractCycleId: string | null }) =>
   template.contractCycleId ? stripInstallmentSuffix(template.description) : template.description;
 
+/** Série que não materializou numa passada: o worker registra qual e por quê (tarefa 082). */
+export type MaterializeFailure = { ruleId: string; code: string | null; message: string };
+
 /**
  * Passada do worker por todas as séries. Cada série roda na própria transação
  * com advisory lock por série (pg_try_advisory_xact_lock): dois workers (ou a
- * API e o worker) nunca materializam a mesma série ao mesmo tempo.
+ * API e o worker) nunca materializam a mesma série ao mesmo tempo. A série que
+ * falha vai para `onError` com o motivo traduzido; `closedMonth` conta à parte
+ * as presas num mês fechado.
  */
 export async function materializeAll(
   db: Database,
   horizon = materializeHorizon(),
-): Promise<{ rules: number; created: number; skipped: number; failed: number }> {
+  onError?: (failure: MaterializeFailure) => void,
+): Promise<{ rules: number; created: number; skipped: number; failed: number; closedMonth: number }> {
   const rules = await db.execute<{ id: string }>(sql`
     SELECT r.id FROM recurrence_rules r
      WHERE EXISTS (SELECT 1 FROM titles t WHERE t.recurrence_rule_id = r.id)
@@ -107,6 +128,7 @@ export async function materializeAll(
   let created = 0;
   let skipped = 0;
   let failed = 0;
+  let closedMonth = 0;
   for (const { id } of rules.rows) {
     // Uma série com erro (ex.: competência num mês fechado) não impede as outras.
     try {
@@ -118,11 +140,18 @@ export async function materializeAll(
         }
         created += await materializeRule(tx, id, horizon);
       });
-    } catch {
+    } catch (error) {
       failed += 1;
+      const known = translateDbError(error);
+      if (known?.code === 'period_closings_locked_check') closedMonth += 1;
+      onError?.({
+        ruleId: id,
+        code: known?.code ?? null,
+        message: known?.message ?? (error instanceof Error ? error.message : String(error)),
+      });
     }
   }
-  return { rules: rules.rows.length, created, skipped, failed };
+  return { rules: rules.rows.length, created, skipped, failed, closedMonth };
 }
 
 /** Primeira chave do advisory lock das séries (constante arbitrária do MoneyFlow). */

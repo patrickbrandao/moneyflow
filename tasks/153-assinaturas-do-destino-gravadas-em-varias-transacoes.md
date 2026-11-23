@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # set_message_subscriptions grava cada assinatura numa transação: falha no meio deixa metade aplicada
@@ -57,4 +57,11 @@ Não procurei uma regra do banco específica que falhe na segunda assinatura; o 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: o `run` chamava `upsertSubscription`/`deleteSubscription` item a item, cada um na sua `withTx`, e o mesmo evento podia vir nas duas listas.
+
 ## Resolução (executor)
+
+- `services/messages.ts`: `setSubscriptions(ctx, destino, { upsert, remove })` valida tudo antes (destino gerenciável, não arquivado, caixas legíveis) e grava numa única `withTx`, com o destino travado (`FOR UPDATE`) e o arquivado conferido de novo dentro dela; `upsertSubscription` (a rota) passou a usá-lo; o corpo da gravação de cada item ficou em `writeSubscription`.
+- O schema da tool (`tools-admin.ts`) recusa o mesmo evento repetido em `subscriptions` ou presente também em `remove`.
+- Testes: `agent-tools-admin.test.ts` (`describe('mensagens')`: o 2º item falha no banco e o 1º não fica gravado; o evento nas duas listas é recusado sem cartão).
+- Verificação: `pnpm verify:quick` (Biome, typecheck, os testes do shared relacionados e, passados depois de `--`, os de integração `agents`, `agent-tools`, `agent-tools-admin`, `titles`, `cards`, `contracts`, `statements`, `vision`, `reconcile-recipes`, `statement-supersede`, `autonomous` e `budgets` no Postgres local). Não rodei `verify:full` nem o e2e.

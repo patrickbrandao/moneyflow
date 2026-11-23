@@ -151,9 +151,11 @@ export function StatementImportPanel({
   };
 
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: só recebe o arquivo arrastado; pelo teclado, o botão Importar faz o mesmo.
     <div
       onDragOver={(e) => {
         if (!canWrite) return;
+
         e.preventDefault();
         setOver(true);
       }}
@@ -300,6 +302,7 @@ export function StatementImportPanel({
                   className={cx('cursor-pointer', scope.has(row.id) && 'is-selected', row.supersededBy && 'is-off')}
                   onClick={() => setImportId(row.id)}
                 >
+                  {/* biome-ignore lint/a11y/useKeyWithClickEvents: só segura o clique da linha; a caixa de seleção é um controle próprio. */}
                   <td onClick={(e) => e.stopPropagation()}>
                     <input
                       type="checkbox"
@@ -328,6 +331,7 @@ export function StatementImportPanel({
                       </span>
                     )}
                     {row.financialAccountId && openingAfterStart(row) && (
+                      // biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: só segura o clique da linha; o ajuste é um botão próprio.
                       <span className="row-sub inline-flex flex-wrap items-center gap-1" onClick={(e) => e.stopPropagation()}>
                         <Badge tone="warn" title={s.openingAfterStart(formatDate(row.accountOpeningDate!))}>
                           <Landmark /> {s.openingAfterStartShort}
@@ -364,6 +368,7 @@ export function StatementImportPanel({
                     />
                   </td>
                   <td className="text-right">
+                    {/* biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: só segura o clique da linha; as ações são botões e links próprios. */}
                     <span className="row-actions" onClick={(e) => e.stopPropagation()}>
                       <a className="row-action" href={attachmentUrl(row.attachmentId)} title={s.download} aria-label={s.download}>
                         <Download />

@@ -71,8 +71,8 @@ SELECT is((SELECT array_agg(attname::text ORDER BY attnum) FROM pg_attribute
             WHERE attrelid = 'statement_import_balances'::regclass AND attnum > 0),
           ARRAY['statement_import_id', 'financial_account_id', 'card_caixa_id', 'period_start', 'period_end',
                 'bank_balance_on', 'bank_balance_cents', 'app_balance_cents', 'difference_cents', 'lines', 'matched_lines',
-                'suggested_lines', 'new_lines', 'ignored_lines', 'provisional', 'superseded'],
-          'statement_import_balances: provisional e superseded no fim');
+                'suggested_lines', 'new_lines', 'ignored_lines', 'provisional', 'superseded', 'interval_difference_cents'],
+          'statement_import_balances: provisional e superseded no fim (e a divergência do intervalo da 0057)');
 SELECT ok(pg_get_constraintdef(oid) ~ 'supersede_pairs', conname || ' aceita supersede_pairs')
   FROM pg_constraint
  WHERE conname IN ('ai_conversations_purpose_check', 'ai_usage_purpose_check', 'ai_requests_purpose_check');

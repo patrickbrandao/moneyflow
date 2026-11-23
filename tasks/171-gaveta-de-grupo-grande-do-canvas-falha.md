@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: ecb16b1
 ---
 
 # Gaveta de um grupo grande do canvas falha: os ids das entidades vão na query string
@@ -62,4 +62,15 @@ Não executado. O limite de 16 KiB é o padrão do Node (`--max-http-header-size
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: a gaveta do cluster mandava todos os ids na URL de `GET /api/flow/lines` (`entityIds`, teto de 500 no schema, e antes disso o limite de cabeçalho do Node ou do proxy).
+
 ## Resolução (executor)
+
+- Decisão: a opção 2 da tarefa (os ids no corpo de um POST). O agrupamento pelo grupo de categoria exigiria repetir no servidor a regra do lado (entrada × saída) calculada no front.
+- `packages/shared/src/schemas/vision.ts`: `flowLinesBody` (as mesmas seleções do GET, `caixaIds` e `entityIds` como listas, até `FLOW_LINES_MAX_ENTITIES = 5000` entidades) e o tipo `FlowLinesBody`. `apps/server/src/routes/vision.ts`: `POST /api/flow/lines`, só leitura, sobre o mesmo `flowLines`; o `GET` fica como estava.
+- `apps/web/src/components/canvas/FlowDrawer.tsx`: a gaveta monta o corpo (`linesBody`) e pede pelo POST (`useFlowLines`, com o mesmo cuidado do `useApi` de não pintar a resposta de uma seleção antiga); grupo acima do teto mostra o aviso `t.flow.groupTooLarge` em vez de pedir.
+- Spec 014 (agrupamento e gaveta).
+- Teste em `apps/server/test/vision.test.ts` (canvas de fluxo): `POST /api/flow/lines` com 600 ids (dois reais e 598 sem lançamentos) traz as linhas das duas entidades, também numa aresta com origem; 5.001 ids e período invertido dão `400`. O e2e do canvas não mudou de forma (a gaveta continua mostrando as mesmas linhas).
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

@@ -12,6 +12,7 @@ import {
   type caixaCreateInput,
   type caixaUpdateInput,
   type DeleteResult,
+  formatBRL,
   type hiddenCategoriesInput,
   type MemberRow,
   type memberInput,
@@ -23,7 +24,7 @@ import { and, asc, eq, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { Access } from '../authz/access';
 import type { ServiceContext } from '../context';
-import { notFound, unprocessable } from '../errors';
+import { forbidden, notFound, unprocessable } from '../errors';
 import { type Card, ensureHorizon, invoiceDates } from './card-core';
 import { assertNotReconciled, clearStatementSuggestions } from './reconciliation-guards';
 import { deleteOrArchive, withTx } from './tx';
@@ -42,13 +43,21 @@ export function readableFilter(access: Access, column = sql`c.id`) {
   )})`;
 }
 
+/**
+ * Em aberto pelo status (tarefa 093): `open_cents > 0` ⇔ aberto ou parcial pelas invariantes do banco, e o status
+ * deixa o planejador usar titles_caixa_id_status_due_date_idx em vez de ler todo o histórico da caixa.
+ */
+const openStatus = sql`tb.status IN ('open', 'partial')`;
+
 const summarySql = (today: string) => sql`
   c.id, c.name, c.kind, c.holder_entity_id, e.name AS holder_name, c.is_primary, c.description, c.archived_at, c.card_last4,
-  coalesce((SELECT sum(b.balance_cents) FROM financial_account_balances b WHERE b.caixa_id = c.id AND b.archived_at IS NULL), 0)::bigint AS balance_cents,
-  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.direction = 'payable' AND tb.archived_at IS NULL), 0)::bigint AS payable_open_cents,
-  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.direction = 'receivable' AND tb.archived_at IS NULL), 0)::bigint AS receivable_open_cents,
-  (SELECT count(*)::int FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.open_cents > 0 AND tb.archived_at IS NULL AND tb.due_date < ${today}::date) AS overdue_count,
-  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.open_cents > 0 AND tb.archived_at IS NULL AND tb.due_date < ${today}::date), 0)::bigint AS overdue_cents`;
+  -- Saldo atual = o do fim de hoje em São Paulo; o lançado com data futura vai à parte (tarefa 130).
+  coalesce((SELECT sum(b.balance_today_cents) FROM financial_account_balances b WHERE b.caixa_id = c.id AND b.archived_at IS NULL), 0)::bigint AS balance_cents,
+  coalesce((SELECT sum(b.balance_cents - b.balance_today_cents) FROM financial_account_balances b WHERE b.caixa_id = c.id AND b.archived_at IS NULL), 0)::bigint AS future_cents,
+  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND ${openStatus} AND tb.direction = 'payable' AND tb.archived_at IS NULL), 0)::bigint AS payable_open_cents,
+  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND ${openStatus} AND tb.direction = 'receivable' AND tb.archived_at IS NULL), 0)::bigint AS receivable_open_cents,
+  (SELECT count(*)::int FROM title_balances tb WHERE tb.caixa_id = c.id AND ${openStatus} AND tb.open_cents > 0 AND tb.archived_at IS NULL AND tb.due_date < ${today}::date) AS overdue_count,
+  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND ${openStatus} AND tb.open_cents > 0 AND tb.archived_at IS NULL AND tb.due_date < ${today}::date), 0)::bigint AS overdue_cents`;
 
 function toSummary(access: Access, row: Record<string, unknown>): CaixaSummary {
   const r = camel<CaixaSummary & { archivedAt: Date | null }>(row);
@@ -94,6 +103,20 @@ async function assertHolder(db: Executor, entityId: string) {
   if (holder.archivedAt) throw unprocessable(t.errors.holderArchived);
 }
 
+/**
+ * Marcar a principal tira a atual do titular, e é nela que os espelhos dos
+ * títulos lançados contra ele caem (spec 006). Sem ser admin, só quem edita a
+ * principal atual a troca (tarefa 072).
+ */
+async function assertCanTakePrimary(ctx: ServiceContext, db: Executor, holderEntityId: string, exceptId?: string) {
+  if (ctx.access.isAdmin) return;
+  const current = await db
+    .select({ id: caixas.id })
+    .from(caixas)
+    .where(and(eq(caixas.holderEntityId, holderEntityId), eq(caixas.isPrimary, true), ...(exceptId ? [ne(caixas.id, exceptId)] : [])));
+  if (current.some((c) => !ctx.access.canWrite(c.id))) throw forbidden(t.errors.primaryOfOtherCaixa);
+}
+
 export async function createCaixa(ctx: ServiceContext, input: z.output<typeof caixaCreateInput>): Promise<CaixaDetail> {
   ctx.access.assertRegistryWrite();
   const isCard = input.kind === 'credit_card';
@@ -102,6 +125,7 @@ export async function createCaixa(ctx: ServiceContext, input: z.output<typeof ca
     await assertHolder(tx, input.holderEntityId);
     if (isCard) await assertGeneralPayer(tx, input.defaultPayerCaixaId!);
     if (input.isPrimary && !isCard) {
+      await assertCanTakePrimary(ctx, tx, input.holderEntityId);
       await tx.update(caixas).set({ isPrimary: false }).where(eq(caixas.holderEntityId, input.holderEntityId));
     }
     const [row] = await tx
@@ -151,7 +175,8 @@ export async function updateCaixa(ctx: ServiceContext, id: string, input: z.outp
       const linked = await tx.execute(sql`SELECT 1 FROM titles WHERE caixa_id = ${id} OR counterparty_caixa_id = ${id} LIMIT 1`);
       if (linked.rows.length > 0) throw unprocessable(t.errors.mirrorCaixaNotHeld);
     }
-    if (input.isPrimary) {
+    if (input.isPrimary && current.kind !== 'credit_card') {
+      await assertCanTakePrimary(ctx, tx, holder, id);
       await tx
         .update(caixas)
         .set({ isPrimary: false })
@@ -262,17 +287,20 @@ export async function removeMember(ctx: ServiceContext, caixaId: string, memberI
 
 export async function listAccounts(
   ctx: ServiceContext,
-  opts: { caixaId?: string; archived?: boolean; writable?: boolean } = {},
+  opts: { caixaId?: string; accountId?: string; archived?: boolean; writable?: boolean } = {},
 ): Promise<AccountRow[]> {
   if (opts.caixaId) ctx.access.assertRead(opts.caixaId);
   const result = await ctx.db.execute(sql`
     SELECT a.id, a.caixa_id, c.name AS caixa_name, a.kind, a.name, a.bank_code, a.ispb, a.branch, a.account_number,
-           a.opening_balance_cents, a.opening_date, a.archived_at, b.balance_cents, a.ai_auto_reconcile
+           a.opening_balance_cents, a.opening_date, a.archived_at, a.ai_auto_reconcile,
+           -- Saldo atual = o do fim de hoje; o lançado com data futura à parte (tarefa 130).
+           b.balance_today_cents AS balance_cents, (b.balance_cents - b.balance_today_cents)::bigint AS future_cents
       FROM financial_accounts a
       JOIN caixas c ON c.id = a.caixa_id
       JOIN financial_account_balances b ON b.financial_account_id = a.id
      WHERE ${readableFilter(ctx.access, sql`a.caixa_id`)}
        ${opts.caixaId ? sql`AND a.caixa_id = ${opts.caixaId}` : sql``}
+       ${opts.accountId ? sql`AND a.id = ${opts.accountId}` : sql``}
        ${opts.archived ? sql`` : sql`AND a.archived_at IS NULL AND c.archived_at IS NULL`}
      ORDER BY c.name, a.archived_at NULLS FIRST, a.name`);
   return result.rows
@@ -286,6 +314,11 @@ export async function listAccounts(
       };
     })
     .filter((a) => !opts.writable || a.canWrite);
+}
+
+/** Conta arquivada não recebe movimento novo (baixa, avulso, transferência); o estorno continua (tarefa 080). */
+export function assertAccountActive(account: { archivedAt: Date | string | null }) {
+  if (account.archivedAt) throw unprocessable(t.errors.accountArchived, 'account_archived');
 }
 
 export async function getAccount(ctx: ServiceContext, id: string, db: Executor = ctx.db) {
@@ -331,7 +364,15 @@ export async function deleteAccount(ctx: ServiceContext, id: string): Promise<De
     deleteOrArchive(
       tx,
       async (sp) => (await sp.delete(financialAccounts).where(eq(financialAccounts.id, id))).rowCount ?? 0,
-      (t) => t.update(financialAccounts).set({ archivedAt: sql`now()` }).where(eq(financialAccounts.id, id)),
+      async (tx) => {
+        // Arquivada, ela sai do saldo da caixa: só com saldo zero, para o total não mudar sem lançamento (tarefa 080).
+        const balance = await tx.execute<{ balance_cents: string }>(
+          sql`SELECT balance_cents FROM financial_account_balances WHERE financial_account_id = ${id}`,
+        );
+        const cents = Number(balance.rows[0]?.balance_cents ?? 0);
+        if (cents !== 0) throw unprocessable(t.errors.accountArchiveBalance(formatBRL(cents)), 'account_archive_balance');
+        await tx.update(financialAccounts).set({ archivedAt: sql`now()` }).where(eq(financialAccounts.id, id));
+      },
     ),
   );
 }
@@ -346,6 +387,7 @@ export async function restoreAccount(ctx: ServiceContext, id: string) {
 export async function addAdjustment(ctx: ServiceContext, accountId: string, input: z.output<typeof adjustmentInput>) {
   const account = await getAccount(ctx, accountId);
   ctx.access.assertWrite(account.caixaId);
+  assertAccountActive(account);
   const [row] = await withTx(ctx, (tx) =>
     tx
       .insert(movements)

@@ -3,8 +3,8 @@
 --
 
 
--- Dumped from database version 18.6 (Debian 18.6-1.pgdg12+2)
--- Dumped by pg_dump version 18.6 (Debian 18.6-1.pgdg12+2)
+-- Dumped from database version 18.7 (Debian 18.7-1.pgdg12+2)
+-- Dumped by pg_dump version 18.7 (Debian 18.7-1.pgdg12+2)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -68,16 +68,19 @@ COMMENT ON EXTENSION vector IS 'vector data type and ivfflat and hnsw access met
 
 
 --
--- Name: account_daily_balances(uuid, date, date); Type: FUNCTION; Schema: public; Owner: -
+-- Name: account_daily_balances(uuid, date, date, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.account_daily_balances(p_account_id uuid, p_from date, p_to date) RETURNS TABLE(day date, balance_cents bigint)
+CREATE FUNCTION public.account_daily_balances(p_account_id uuid, p_from date, p_to date, p_today date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date) RETURNS TABLE(day date, balance_cents bigint, scheduled_cents bigint, projected_cents bigint)
     LANGUAGE plpgsql STABLE
     AS $$
 BEGIN
   IF p_from IS NULL OR p_to IS NULL OR p_to < p_from OR p_to - p_from > 1100 THEN
     RAISE EXCEPTION 'account_daily_balances: invalid period % .. % (max 1100 days)', p_from, p_to
       USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_today IS NULL THEN
+    RAISE EXCEPTION 'account_daily_balances: today must be set' USING ERRCODE = 'invalid_parameter_value';
   END IF;
 
   RETURN QUERY
@@ -92,24 +95,50 @@ BEGIN
       FROM movements m
      WHERE m.financial_account_id = p_account_id AND m.occurred_on BETWEEN p_from AND p_to
      GROUP BY m.occurred_on
+  ),
+  -- Previsto: saldo aberto dos títulos com esta conta prevista (vencidos contam a partir de hoje), como na caixa.
+  pending_daily AS (
+    SELECT greatest(b.due_date, p_today) AS d,
+           sum(CASE b.direction WHEN 'receivable' THEN b.open_cents ELSE -b.open_cents END) AS delta
+      FROM titles t
+      JOIN title_balances b ON b.title_id = t.id
+      LEFT JOIN card_invoices v ON v.id = t.card_invoice_id
+     WHERE t.planned_account_id = p_account_id AND t.status IN ('open', 'partial') AND t.due_date <= p_to
+       AND t.archived_at IS NULL AND b.open_cents > 0
+       AND greatest(t.due_date, p_today) <= p_to
+       AND (v.id IS NULL OR v.closed_at IS NOT NULL)
+     GROUP BY 1
+  ),
+  pending_before AS (
+    SELECT coalesce(sum(p.delta), 0) AS cents FROM pending_daily p WHERE p.d < p_from
+  ),
+  series AS (
+    SELECT g.d::date AS day,
+           CASE WHEN g.d < acc.opening_date THEN NULL
+                ELSE acc.opening_balance_cents + acc.before_cents + sum(coalesce(daily.delta, 0)) OVER w END AS realized,
+           pending_before.cents + sum(coalesce(pd.delta, 0)) OVER w AS scheduled
+      FROM acc
+      CROSS JOIN generate_series(p_from, p_to, interval '1 day') g (d)
+      CROSS JOIN pending_before
+      LEFT JOIN daily ON daily.d = g.d::date
+      LEFT JOIN pending_daily pd ON pd.d = g.d::date
+    WINDOW w AS (ORDER BY g.d)
   )
-  SELECT g.d::date,
-         CASE WHEN g.d < acc.opening_date THEN NULL
-              ELSE (acc.opening_balance_cents + acc.before_cents
-                    + sum(coalesce(daily.delta, 0)) OVER (ORDER BY g.d))::bigint END
-    FROM acc
-    CROSS JOIN generate_series(p_from, p_to, interval '1 day') g (d)
-    LEFT JOIN daily ON daily.d = g.d::date
-   ORDER BY 1;
+  SELECT s.day,
+         s.realized::bigint,
+         (CASE WHEN s.day < p_today THEN 0 ELSE s.scheduled END)::bigint,
+         (s.realized + CASE WHEN s.day < p_today THEN 0 ELSE s.scheduled END)::bigint
+    FROM series s
+   ORDER BY s.day;
 END
 $$;
 
 
 --
--- Name: FUNCTION account_daily_balances(p_account_id uuid, p_from date, p_to date); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION account_daily_balances(p_account_id uuid, p_from date, p_to date, p_today date); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.account_daily_balances(p_account_id uuid, p_from date, p_to date) IS 'Saldo da conta no fim de cada dia do período (saldo inicial + movimentos até o dia, inclusive os datados no futuro); NULL antes da abertura; nenhuma linha se a conta não existe. Até 1100 dias (erro 22023).';
+COMMENT ON FUNCTION public.account_daily_balances(p_account_id uuid, p_from date, p_to date, p_today date) IS 'Por dia: balance_cents = saldo realizado da conta no fim do dia (saldo inicial + movimentos até o dia, inclusive os datados no futuro); scheduled_cents = a partir de p_today (padrão = hoje em America/Sao_Paulo), saldo aberto acumulado dos títulos não arquivados com esta conta prevista (planned_account_id; + receber, − pagar; vencidos entram em p_today), 0 antes de p_today; projected_cents = balance + scheduled (tarefa 131). balance e projected NULL antes da abertura; nenhuma linha se a conta não existe. Títulos sem conta prevista só entram no previsto da caixa (caixa_daily_balances). Até 1100 dias (erro 22023).';
 
 
 --
@@ -953,6 +982,16 @@ BEGIN
     FROM ai_messages m
    WHERE m.conversation_id = src.id AND m.seq <= upto
    ORDER BY m.seq;
+
+  -- Os vínculos que não vêm de blocos attachment (os arquivos gerados pelas tools, spec 027); os dos blocos o trigger
+  -- já criou.
+  INSERT INTO ai_message_attachments (message_id, attachment_id)
+  SELECT n.id, ma.attachment_id
+    FROM ai_messages o
+    JOIN ai_message_attachments ma ON ma.message_id = o.id
+    JOIN ai_messages n ON n.conversation_id = new_id AND n.seq = o.seq
+   WHERE o.conversation_id = src.id AND o.seq <= upto
+  ON CONFLICT (message_id, attachment_id) DO NOTHING;
   RETURN new_id;
 END
 $$;
@@ -962,7 +1001,7 @@ $$;
 -- Name: FUNCTION ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text) IS 'Bifurca: finaliza a sessão chat ativa de p_user_id com o agente da origem (archived_reason = forked; pode ser a própria origem) e cria a sessão nova, que vira a ativa, copiando as mensagens da origem até p_message_id (inclusive, mesmos seq, sem run_id; anexos religados); devolve o id. Título = p_title ou o da origem. A cópia é sempre purpose chat (sem a chave purpose no screen_context), mesmo vinda de uma conversa de fluxo. Corte a bifurcação numa mensagem que não deixe tool_use sem tool_result (a aplicação escolhe). P0002 se a mensagem não existe; 23514 ai_conversations_archive_active_run_check se a sessão ativa tem execução ativa sem cancelamento pedido; 23505 se outra transação criou a ativa do par ao mesmo tempo.';
+COMMENT ON FUNCTION public.ai_conversation_fork(p_message_id uuid, p_user_id uuid, p_title text) IS 'Bifurca: finaliza a sessão chat ativa de p_user_id com o agente da origem (archived_reason = forked; pode ser a própria origem) e cria a sessão nova, que vira a ativa, copiando as mensagens da origem até p_message_id (inclusive, mesmos seq, sem run_id) com todos os anexos delas em ai_message_attachments (os dos blocos attachment e os arquivos gerados pelas tools, tarefa 160; o áudio gerado por mensagem não é copiado, é refeito sob demanda); devolve o id. Título = p_title ou o da origem. A cópia é sempre purpose chat (sem a chave purpose no screen_context), mesmo vinda de uma conversa de fluxo. Corte a bifurcação numa mensagem que não deixe tool_use sem tool_result (a aplicação escolhe). P0002 se a mensagem não existe; 23514 ai_conversations_archive_active_run_check se a sessão ativa tem execução ativa sem cancelamento pedido; 23505 se outra transação criou a ativa do par ao mesmo tempo.';
 
 
 --
@@ -1097,6 +1136,65 @@ COMMENT ON FUNCTION public.ai_embedding_credentials(p_provider_id uuid) IS 'Work
 
 
 --
+-- Name: ai_embedding_index_mark(uuid, text, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_embedding_index_mark(p_provider_id uuid, p_model text, p_complete boolean) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  done boolean;
+BEGIN
+  IF p_complete IS NULL THEN
+    RAISE EXCEPTION 'ai_embedding_index_mark: complete must be true or false' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  UPDATE ai_embedding_indexes x
+     SET complete_at = CASE
+                         WHEN p_complete AND NOT EXISTS (SELECT 1 FROM ai_embeddings e
+                                                          WHERE e.provider_id = x.provider_id AND e.model = x.model
+                                                            AND e.needs_reindex)
+                         THEN now()
+                       END
+   WHERE x.provider_id = p_provider_id AND x.model = p_model
+  RETURNING x.complete_at IS NOT NULL INTO done;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ai_embedding_index_mark: pair %/% is not registered', p_provider_id, p_model
+      USING ERRCODE = 'no_data_found';
+  END IF;
+  RETURN done;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_embedding_index_mark(p_provider_id uuid, p_model text, p_complete boolean); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_embedding_index_mark(p_provider_id uuid, p_model text, p_complete boolean) IS 'Worker (tarefa 161): com p_complete = true, ao fim de uma passada sem fontes novas nem vetores pendentes, grava complete_at = agora, desde que o par não tenha vetor em needs_reindex (senão grava nulo); com false, limpa. Devolve se o par ficou completo. P0002 se o par não está em ai_embedding_indexes; 22023 com p_complete nulo.';
+
+
+--
+-- Name: ai_embedding_index_ready(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_embedding_index_ready(p_provider_id uuid, p_model text) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT EXISTS (SELECT 1 FROM ai_embedding_indexes x
+                  WHERE x.provider_id = p_provider_id AND x.model = p_model AND x.complete_at IS NOT NULL)
+     AND NOT EXISTS (SELECT 1 FROM ai_embeddings e
+                      WHERE e.provider_id = p_provider_id AND e.model = p_model AND e.needs_reindex)
+$$;
+
+
+--
+-- Name: FUNCTION ai_embedding_index_ready(p_provider_id uuid, p_model text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_embedding_index_ready(p_provider_id uuid, p_model text) IS 'Busca semântica (tarefa 161): true se o par foi marcado completo (complete_at) e não tem vetor na fila (needs_reindex, pelo índice parcial ai_embeddings_reindex_idx). Não conta as fontes: um registro criado depois da marcação fica fora até a próxima passada do worker. Par não registrado = false.';
+
+
+--
 -- Name: ai_embedding_indexes_purge(interval); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1148,6 +1246,7 @@ CREATE TABLE public.ai_embedding_indexes (
     last_in_use_at timestamp with time zone DEFAULT now() NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    complete_at timestamp with time zone,
     CONSTRAINT ai_embedding_indexes_model_check CHECK ((model ~ '^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$'::text))
 );
 
@@ -1164,6 +1263,13 @@ COMMENT ON TABLE public.ai_embedding_indexes IS 'Um índice de embeddings por pa
 --
 
 COMMENT ON COLUMN public.ai_embedding_indexes.last_in_use_at IS 'Última vez em que algum agente ativo usava o par.';
+
+
+--
+-- Name: COLUMN ai_embedding_indexes.complete_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.ai_embedding_indexes.complete_at IS 'Fim da última passada completa do worker no par (nenhuma fonte nova a sincronizar e nenhum vetor na fila), gravado por ai_embedding_index_mark; nulo = ainda não completo, ou marcado incompleto. O índice está pronto para a busca com complete_at preenchido e nenhum vetor em needs_reindex (ai_embedding_index_ready; tarefa 161).';
 
 
 --
@@ -2300,6 +2406,48 @@ COMMENT ON FUNCTION public.ai_requests_before_write() IS 'INSERT: tentativas = 0
 
 
 --
+-- Name: ai_requests_close_stale(interval, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_requests_close_stale(p_after interval DEFAULT '01:00:00'::interval, p_limit integer DEFAULT 1000) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  n integer;
+BEGIN
+  IF p_after IS NULL OR p_after < interval '10 minutes' THEN
+    RAISE EXCEPTION 'ai_requests_close_stale: after must be at least 10 minutes' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100000 THEN
+    RAISE EXCEPTION 'ai_requests_close_stale: limit must be between 1 and 100000' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  WITH stale AS (
+    SELECT r.id FROM ai_requests r
+     WHERE r.status = 'running' AND r.started_at < clock_timestamp() - p_after
+     ORDER BY r.started_at, r.id
+     LIMIT p_limit
+     FOR UPDATE SKIP LOCKED
+  )
+  UPDATE ai_requests r
+     SET status = 'error',
+         finished_at = clock_timestamp(),
+         error_message = 'interrupted: the process stopped before the request finished'
+    FROM stale s
+   WHERE r.id = s.id AND r.status = 'running';
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END
+$$;
+
+
+--
+-- Name: FUNCTION ai_requests_close_stale(p_after interval, p_limit integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_requests_close_stale(p_after interval, p_limit integer) IS 'Manutenção (spec 023, tarefa 162): fecha como error, com error_message = ''interrupted: the process stopped before the request finished'' e finished_at = agora, até p_limit (padrão 1000, máx. 100000) requisições running iniciadas há mais de p_after (padrão 1 hora, mínimo 10 minutos), as mais velhas primeiro, pulando as travadas; devolve quantas. São as chamadas que o processo não fechou (queda ou SIGKILL no meio do streaming): passam a contar como erro em ai_provider_health. O worker chama em lotes até devolver menos que o limite. Erro 22023 com prazo ou limite fora da faixa. SECURITY INVOKER (a aplicação já tem UPDATE em ai_requests).';
+
+
+--
 -- Name: ai_requests_purge(integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2534,7 +2682,7 @@ BEGIN
     RAISE EXCEPTION 'ai_run_event_append: run % not found', p_run_id USING ERRCODE = 'no_data_found';
   END IF;
   INSERT INTO ai_run_events (run_id, seq, event_type, payload) VALUES (p_run_id, s, p_event_type, coalesce(p_payload, '{}'));
-  PERFORM pg_notify('ai_run_events', json_build_object('run_id', p_run_id, 'seq', s)::text);
+  PERFORM pg_notify('ai_run_events', ai_run_event_notice(p_run_id, s, p_event_type, p_payload));
   RETURN s;
 END
 $$;
@@ -2544,7 +2692,27 @@ $$;
 -- Name: FUNCTION ai_run_event_append(p_run_id uuid, p_event_type text, p_payload jsonb); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.ai_run_event_append(p_run_id uuid, p_event_type text, p_payload jsonb) IS 'Grava o próximo evento da execução (seq = last_event_seq + 1, trava a linha da execução) e avisa por NOTIFY no canal ai_run_events com {"run_id", "seq"} (entregue no COMMIT). A API escuta (LISTEN) e lê WHERE run_id = … AND seq > último enviado. Devolve o seq. P0002 se a execução não existe.';
+COMMENT ON FUNCTION public.ai_run_event_append(p_run_id uuid, p_event_type text, p_payload jsonb) IS 'Grava o próximo evento da execução (seq = last_event_seq + 1, trava a linha da execução) e avisa por NOTIFY no canal ai_run_events com ai_run_event_notice: {"run_id", "seq", "type"} e, em status/done, "status" (entregue no COMMIT; tarefa 164). A API escuta (LISTEN), lê WHERE run_id = … AND seq > último enviado e, sem stream aberto, só consulta o banco pelos eventos que importam (done, status). Devolve o seq. P0002 se a execução não existe.';
+
+
+--
+-- Name: ai_run_event_notice(uuid, integer, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ai_run_event_notice(p_run_id uuid, p_seq integer, p_event_type text, p_payload jsonb) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT json_strip_nulls(json_build_object(
+           'run_id', p_run_id, 'seq', p_seq, 'type', p_event_type,
+           'status', CASE WHEN p_event_type IN ('status', 'done') THEN left(p_payload ->> 'status', 40) END))::text
+$$;
+
+
+--
+-- Name: FUNCTION ai_run_event_notice(p_run_id uuid, p_seq integer, p_event_type text, p_payload jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.ai_run_event_notice(p_run_id uuid, p_seq integer, p_event_type text, p_payload jsonb) IS 'Payload do NOTIFY de ai_run_events: {"run_id", "seq", "type"} e, nos eventos status e done com status no payload, "status" (até 40 caracteres). Sem o resto do payload: os dados do evento continuam só na tabela (tarefa 164).';
 
 
 --
@@ -4316,8 +4484,7 @@ CREATE FUNCTION public.audit_row() RETURNS trigger
     AS $$
 DECLARE
   quiet   text[] := coalesce(string_to_array(nullif(TG_ARGV[0], ''), ','), '{}');
-  secrets constant text[] := ARRAY['password', 'bot_token', 'api_key', 'secret_headers', 'token_hash',
-                                   'webhook_secret_hash', 'code_hash'];
+  bulky   text[] := coalesce(string_to_array(nullif(TG_ARGV[1], ''), ','), '{}');
   o       jsonb;
   n       jsonb;
   changed text[];
@@ -4334,7 +4501,8 @@ BEGIN
     END IF;
   END IF;
 
-  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o - secrets, n - secrets, changed);
+  -- Os segredos saem em audit_write (audit_secret_columns); as colunas volumosas, aqui.
+  PERFORM audit_write(TG_TABLE_NAME, lower(TG_OP), o - bulky, n - bulky, changed);
   RETURN NULL;
 END
 $$;
@@ -4344,7 +4512,7 @@ $$;
 -- Name: FUNCTION audit_row(); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de auditoria. Remove os segredos (password, bot_token, api_key, secret_headers, token_hash, webhook_secret_hash, code_hash): a troca aparece só em changed_columns, sem o valor. TG_ARGV[0] = colunas que sozinhas não geram linha.';
+COMMENT ON FUNCTION public.audit_row() IS 'Trigger AFTER INSERT/UPDATE/DELETE de auditoria. Os segredos (audit_secret_columns) saem em audit_write: a troca aparece só em changed_columns, sem o valor. TG_ARGV[0] = colunas que sozinhas não geram linha; TG_ARGV[1] = colunas volumosas (caches) que ficam fora de old_data e new_data e só aparecem em changed_columns (tarefa 159).';
 
 
 --
@@ -4385,6 +4553,24 @@ COMMENT ON FUNCTION public.audit_row_keyed() IS 'Trigger de auditoria de tabelas
 
 
 --
+-- Name: audit_secret_columns(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.audit_secret_columns() RETURNS text[]
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT ARRAY['password', 'bot_token', 'api_key', 'secret_headers', 'token_hash', 'webhook_secret_hash', 'code_hash']
+$$;
+
+
+--
+-- Name: FUNCTION audit_secret_columns(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.audit_secret_columns() IS 'Colunas de segredo que nunca vão ao audit_log (old_data e new_data), qualquer que seja a tabela: audit_write as tira de tudo o que grava. Segredo novo (coluna sem SELECT para moneyflow_app) entra aqui; o pgTAP da 0065 confere que toda coluna auditada sem SELECT para a aplicação está na lista (tarefa 159).';
+
+
+--
 -- Name: audit_write(text, text, jsonb, jsonb, text[], uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4396,6 +4582,7 @@ DECLARE
   uid_text text := nullif(current_setting('app.user_id', true), '');
   kind     text := nullif(current_setting('app.actor_kind', true), '');
   run_text text := nullif(current_setting('app.agent_run_id', true), '');
+  secrets  constant text[] := public.audit_secret_columns();
   uid      uuid;
 BEGIN
   IF uid_text IS NOT NULL THEN
@@ -4425,8 +4612,8 @@ BEGIN
 
   INSERT INTO public.audit_log (table_name, record_id, action, old_data, new_data, changed_columns,
                                 user_id, actor_kind, agent_run_id, transaction_id)
-  VALUES (p_table, coalesce(p_record_id, (p_new ->> 'id')::uuid, (p_old ->> 'id')::uuid), p_action, p_old, p_new,
-          p_changed, uid, kind, run_text, pg_current_xact_id()::text::bigint);
+  VALUES (p_table, coalesce(p_record_id, (p_new ->> 'id')::uuid, (p_old ->> 'id')::uuid), p_action,
+          p_old - secrets, p_new - secrets, p_changed, uid, kind, run_text, pg_current_xact_id()::text::bigint);
 END
 $_$;
 
@@ -4435,7 +4622,7 @@ $_$;
 -- Name: FUNCTION audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[], p_record_id uuid); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[], p_record_id uuid) IS 'Interna: grava em audit_log com o ator de app.user_id / app.actor_kind / app.agent_run_id. record_id = p_record_id (tabelas sem coluna id, como entity_tag_links) ou o id da linha. Erro 23514 (audit_log_actor_check) se app.user_id não é uuid, se actor_kind é inválido, se human/agent vem sem usuário, ou se app.agent_run_id vem sem actor_kind = agent ou não é uma execução (ai_runs) do mesmo usuário.';
+COMMENT ON FUNCTION public.audit_write(p_table text, p_action text, p_old jsonb, p_new jsonb, p_changed text[], p_record_id uuid) IS 'Interna: grava em audit_log com o ator de app.user_id / app.actor_kind / app.agent_run_id. record_id = p_record_id (tabelas sem coluna id, como entity_tag_links) ou o id da linha. Tira de old_data e new_data as colunas de audit_secret_columns() (tarefa 159), para todo trigger de auditoria; a troca de um segredo fica só em p_changed. Erro 23514 (audit_log_actor_check) se app.user_id não é uuid, se actor_kind é inválido, se human/agent vem sem usuário, ou se app.agent_run_id vem sem actor_kind = agent ou não é uma execução (ai_runs) do mesmo usuário.';
 
 
 --
@@ -4502,7 +4689,8 @@ BEGIN
       FROM title_balances b
       JOIN titles t ON t.id = b.title_id
       LEFT JOIN card_invoices v ON v.id = t.card_invoice_id
-     WHERE b.caixa_id = p_caixa_id AND b.open_cents > 0 AND b.archived_at IS NULL
+     WHERE b.caixa_id = p_caixa_id AND b.status IN ('open', 'partial') AND b.due_date <= p_to
+       AND b.open_cents > 0 AND b.archived_at IS NULL
        AND greatest(b.due_date, p_today) <= p_to
        AND (v.id IS NULL OR v.closed_at IS NOT NULL)
      GROUP BY 1
@@ -4561,6 +4749,18 @@ BEGIN
   IF TG_OP = 'UPDATE' AND NEW.kind IS DISTINCT FROM OLD.kind THEN
     RAISE EXCEPTION 'caixas: kind cannot change (caixa %)', OLD.id
       USING ERRCODE = 'check_violation', CONSTRAINT = 'caixas_kind_immutable_check';
+  END IF;
+
+  -- O titular define os espelhos, os contratos e o recebedor dos encargos do cartão (tarefa 148): com algum deles
+  -- ligado à caixa, não muda.
+  IF TG_OP = 'UPDATE' AND NEW.holder_entity_id IS DISTINCT FROM OLD.holder_entity_id
+     AND (EXISTS (SELECT 1 FROM titles t WHERE t.caixa_id = OLD.id)
+          OR EXISTS (SELECT 1 FROM titles t WHERE t.counterparty_caixa_id = OLD.id)
+          OR EXISTS (SELECT 1 FROM contracts k WHERE k.caixa_id = OLD.id)
+          OR EXISTS (SELECT 1 FROM contracts k WHERE k.counterparty_caixa_id = OLD.id)
+          OR EXISTS (SELECT 1 FROM card_purchases p WHERE p.card_caixa_id = OLD.id AND p.kind = 'charge')) THEN
+    RAISE EXCEPTION 'caixas: holder of caixa % cannot change while titles, contracts or issuer charges depend on it', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'caixas_holder_locked_check';
   END IF;
 
   IF NEW.default_payer_caixa_id IS NOT NULL
@@ -4794,6 +4994,32 @@ BEGIN
   RETURN NEW;
 END
 $$;
+
+
+--
+-- Name: card_invoice_items_validate_statement(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.card_invoice_items_validate_statement() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM statement_lines l
+              WHERE l.card_invoice_item_id = OLD.id AND l.status = 'matched'
+                AND (l.amount_cents <> -NEW.amount_cents OR NEW.card_invoice_id <> OLD.card_invoice_id)) THEN
+    RAISE EXCEPTION 'card_invoice_items: item % is reconciled with a statement line', OLD.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'statement_lines_card_item_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION card_invoice_items_validate_statement(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.card_invoice_items_validate_statement() IS 'Trigger de card_invoice_items: o item conciliado com uma linha de extrato (matched) não muda de valor nem de fatura (23514 statement_lines_card_item_check), como movements_validate_statement (tarefa 148).';
 
 
 --
@@ -5155,10 +5381,10 @@ $$;
 
 
 --
--- Name: classification_rule_for(uuid, uuid, text, bigint); Type: FUNCTION; Schema: public; Owner: -
+-- Name: classification_rule_for(uuid, uuid, text, bigint, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint) RETURNS uuid
+CREATE FUNCTION public.classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint, p_description_normalized text DEFAULT NULL::text) RETURNS uuid
     LANGUAGE plpgsql STABLE
     AS $$
 DECLARE
@@ -5176,12 +5402,15 @@ BEGIN
               THEN r.financial_account_id = p_financial_account_id
               ELSE r.caixa_id = p_card_caixa_id AND r.financial_account_id IS NULL END
      AND (r.direction IS NULL OR r.direction = CASE WHEN p_amount_cents > 0 THEN 'in' ELSE 'out' END)
-     AND CASE r.match_kind
+     AND coalesce(CASE r.match_kind
            WHEN 'exact'       THEN lower(btrim(p_description)) = lower(btrim(r.pattern))
+                                   OR lower(btrim(p_description_normalized)) = lower(btrim(r.pattern))
            WHEN 'starts_with' THEN starts_with(lower(btrim(p_description)), lower(btrim(r.pattern)))
+                                   OR starts_with(lower(btrim(p_description_normalized)), lower(btrim(r.pattern)))
            WHEN 'contains'    THEN strpos(lower(p_description), lower(btrim(r.pattern))) > 0
+                                   OR strpos(lower(p_description_normalized), lower(btrim(r.pattern))) > 0
            WHEN 'regex'       THEN p_description ~* r.pattern
-         END
+         END, false)
    ORDER BY r.priority,
             array_position(ARRAY['exact', 'starts_with', 'contains', 'regex'], r.match_kind),
             length(r.pattern) DESC,
@@ -5193,10 +5422,10 @@ $$;
 
 
 --
--- Name: FUNCTION classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint); Type: COMMENT; Schema: public; Owner: -
+-- Name: FUNCTION classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint, p_description_normalized text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint) IS 'Regra ativa do alvo da linha (a conta, ou o cartão; exatamente um) que classifica a descrição (sinal de p_amount_cents = direção): menor prioridade, exact > starts_with > contains > regex, padrão mais longo. NULL se nenhuma casa. Para o cartão, passe a caixa do cartão e o valor da linha (compra −).';
+COMMENT ON FUNCTION public.classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint, p_description_normalized text) IS 'Regra ativa do alvo da linha (a conta, ou o cartão; exatamente um) que classifica a descrição (sinal de p_amount_cents = direção): menor prioridade, exact > starts_with > contains > regex, padrão mais longo. NULL se nenhuma casa. Para o cartão, passe a caixa do cartão e o valor da linha (compra −). p_description_normalized (opcional, tarefa 076): a descrição pelo normalizeDescription do shared; exact, starts_with e contains casam com a crua ou com a normalizada (a regra aprendida guarda o padrão normalizado), regex só com a crua.';
 
 
 --
@@ -5759,15 +5988,22 @@ CREATE FUNCTION public.contract_payments(p_contract_id uuid, p_from date DEFAULT
       FROM settlements s
       JOIN obligations o ON o.id = s.title_id
       LEFT JOIN transfers tr ON tr.settlement_id = s.id
+      -- A linha conciliada com a baixa: pelo movimento da baixa (ou da perna do espelho) ou pela perna da transferência
+      -- que a financia. Dois ramos indexáveis (movements.settlement_id e transfers.settlement_id) em vez de um OR
+      -- (tarefa 144); uma linha só cai num deles (o movimento é de baixa ou de transferência).
       LEFT JOIN LATERAL (
-        SELECT l.id, l.auto_settled, l.created_entry
-          FROM statement_lines l
-          JOIN movements m ON m.id = l.movement_id
-         WHERE l.status = 'matched'
-           AND (m.settlement_id IN (s.id, s.mirror_settlement_id)
-                OR m.transfer_id IN (SELECT x.id FROM transfers x
-                                      WHERE x.settlement_id IN (s.id, s.mirror_settlement_id)))
-         ORDER BY l.auto_settled DESC, (l.created_entry IS NOT NULL) DESC, l.matched_at, l.id
+        SELECT c.id, c.auto_settled, c.created_entry
+          FROM (SELECT l.id, l.auto_settled, l.created_entry, l.matched_at
+                  FROM movements m
+                  JOIN statement_lines l ON l.movement_id = m.id AND l.status = 'matched'
+                 WHERE m.settlement_id IN (s.id, s.mirror_settlement_id)
+                UNION ALL
+                SELECT l.id, l.auto_settled, l.created_entry, l.matched_at
+                  FROM movements m
+                  JOIN statement_lines l ON l.movement_id = m.id AND l.status = 'matched'
+                 WHERE m.transfer_id = ANY (ARRAY(SELECT x.id FROM transfers x
+                                                   WHERE x.settlement_id IN (s.id, s.mirror_settlement_id)))) c
+         ORDER BY c.auto_settled DESC, (c.created_entry IS NOT NULL) DESC, c.matched_at, c.id
          LIMIT 1
       ) ln ON true
      WHERE s.reversed_at IS NULL
@@ -6200,6 +6436,7 @@ CREATE FUNCTION public.financial_accounts_period_lock() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
+  PERFORM period_lock_shared(OLD.caixa_id);
   IF EXISTS (SELECT 1 FROM period_closings pc
               WHERE pc.caixa_id = OLD.caixa_id
                 AND pc.month >= date_trunc('month', least(OLD.opening_date, NEW.opening_date))::date) THEN
@@ -6335,7 +6572,9 @@ BEGIN
      WHERE t.caixa_id = ANY (p_caixa_ids)
        AND NOT (t.direction = 'receivable' AND coalesce(cp.id = ANY (p_caixa_ids), false))
   ),
-  title_ends AS (
+  -- NOT MATERIALIZED (tarefa 146): cada ramo abaixo inlina os títulos e aplica o próprio período (baixas no período;
+  -- em aberto que vencem no período), em vez de separar antes todos os títulos das caixas.
+  title_ends AS NOT MATERIALIZED (
     SELECT tt.*,
            CASE WHEN tt.direction = 'payable' THEN 'caixa'
                 ELSE 'entity' END AS s_kind,
@@ -6369,7 +6608,8 @@ BEGIN
     FROM title_ends e
     JOIN title_balances b ON b.title_id = e.id
     LEFT JOIN card_invoices v ON v.id = e.card_invoice_id
-   WHERE b.open_cents > 0 AND e.archived_at IS NULL AND e.due_date BETWEEN p_from AND p_to
+   WHERE e.status IN ('open', 'partial') AND b.open_cents > 0 AND e.archived_at IS NULL
+     AND e.due_date BETWEEN p_from AND p_to
      AND (v.id IS NULL OR v.closed_at IS NOT NULL)
   UNION ALL
   -- Faturas abertas: previsão por pagadora (itens − antecipações).
@@ -6881,8 +7121,10 @@ CREATE TABLE public.message_outbox (
     provider_message_id text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    deferrals smallint DEFAULT 0 NOT NULL,
     CONSTRAINT message_outbox_attempts_check CHECK ((((max_attempts >= 1) AND (max_attempts <= 20)) AND ((attempts >= 0) AND (attempts <= max_attempts)))),
     CONSTRAINT message_outbox_dedup_key_check CHECK (((btrim(dedup_key) <> ''::text) AND (length(dedup_key) <= 300))),
+    CONSTRAINT message_outbox_deferrals_check CHECK (((deferrals >= 0) AND (deferrals <= 100))),
     CONSTRAINT message_outbox_event_kind_check CHECK ((event_kind = ANY (ARRAY['due_reminder'::text, 'overdue'::text, 'daily_summary'::text, 'weekly_summary'::text, 'invoice_closed'::text, 'card_limit'::text, 'reconciliation_divergence'::text, 'agent_completed'::text, 'agent_message'::text, 'contract_notice_deadline'::text, 'contract_ending'::text, 'contract_renewal_pending'::text, 'contract_readjustment'::text, 'ai_budget_alert'::text, 'ai_awaiting_approval'::text, 'test'::text, 'note_reminder'::text]))),
     CONSTRAINT message_outbox_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
     CONSTRAINT message_outbox_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'sending'::text, 'sent'::text, 'failed'::text, 'canceled'::text]))),
@@ -6944,6 +7186,13 @@ COMMENT ON COLUMN public.message_outbox.locked_at IS 'Quando o worker reservou (
 --
 
 COMMENT ON COLUMN public.message_outbox.provider_message_id IS 'Id da mensagem no provedor (Telegram message_id), após o envio.';
+
+
+--
+-- Name: COLUMN message_outbox.deferrals; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.message_outbox.deferrals IS 'Quantas vezes a mensagem reservada voltou à fila sem gastar tentativa (message_outbox_release: 429 do Telegram ou liberada sem envio pelo limite do chat). Teto 100: dali em diante a liberação conta a tentativa (tarefa 109).';
 
 
 --
@@ -7052,7 +7301,7 @@ $$;
 -- Name: FUNCTION message_outbox_mark_failed(p_message_id uuid, p_error text, p_retry_after interval, p_permanent boolean); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.message_outbox_mark_failed(p_message_id uuid, p_error text, p_retry_after interval, p_permanent boolean) IS 'Registra a falha de uma tentativa de uma mensagem em sending. Volta a pending com next_attempt_at = agora + p_retry_after (ex.: retry_after do Telegram 429) ou backoff 30 s × 2^(tentativa−1), máximo 1 h; vira failed se p_permanent (ex.: chat não existe, token inválido) ou se esgotou max_attempts. Devolve o novo status. Erro 23514 (message_outbox_transition_check) se ela não está em sending.';
+COMMENT ON FUNCTION public.message_outbox_mark_failed(p_message_id uuid, p_error text, p_retry_after interval, p_permanent boolean) IS 'Registra a falha de uma tentativa de uma mensagem em sending. Volta a pending com next_attempt_at = agora + p_retry_after ou backoff 30 s × 2^(tentativa−1), máximo 1 h; vira failed se p_permanent (ex.: chat não existe, token inválido) ou se esgotou max_attempts. A tentativa conta: para o 429 do Telegram, que só adia, use message_outbox_release (tarefa 109). Devolve o novo status. Erro 23514 (message_outbox_transition_check) se ela não está em sending.';
 
 
 --
@@ -7079,6 +7328,61 @@ $$;
 --
 
 COMMENT ON FUNCTION public.message_outbox_mark_sent(p_message_id uuid, p_provider_message_id text) IS 'Fecha uma mensagem reservada como enviada (sent_at, id no provedor). Erro 23514 (message_outbox_transition_check) se ela não está em sending.';
+
+
+--
+-- Name: message_outbox_release(uuid, interval, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.message_outbox_release(p_message_id uuid, p_retry_after interval DEFAULT NULL::interval, p_error text DEFAULT NULL::text) RETURNS text
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  m          message_outbox;
+  max_deferrals constant smallint := 100;
+  wait       interval;
+  new_status text;
+BEGIN
+  IF p_retry_after < interval '0' THEN
+    RAISE EXCEPTION 'message_outbox_release: retry_after must not be negative' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  SELECT * INTO m FROM message_outbox WHERE id = p_message_id FOR UPDATE;
+  IF NOT FOUND OR m.status <> 'sending' THEN
+    RAISE EXCEPTION 'message_outbox: message % is not being sent', p_message_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'message_outbox_transition_check';
+  END IF;
+  wait := least(greatest(coalesce(p_retry_after, interval '30 seconds'), interval '1 second'), interval '1 day');
+
+  IF m.deferrals < max_deferrals THEN
+    UPDATE message_outbox o
+       SET status = 'pending',
+           locked_at = NULL,
+           attempts = greatest(o.attempts - 1, 0),
+           deferrals = o.deferrals + 1,
+           last_error = coalesce(left(nullif(btrim(p_error), ''), 2000), o.last_error),
+           next_attempt_at = clock_timestamp() + wait
+     WHERE o.id = p_message_id;
+    RETURN 'pending';
+  END IF;
+
+  -- No teto: conta a tentativa (já somada na reserva), como message_outbox_mark_failed.
+  new_status := CASE WHEN m.attempts >= m.max_attempts THEN 'failed' ELSE 'pending' END;
+  UPDATE message_outbox o
+     SET status = new_status,
+         locked_at = NULL,
+         last_error = left(coalesce(nullif(btrim(p_error), ''), 'rate limited: deferred ' || max_deferrals || ' times'), 2000),
+         next_attempt_at = CASE WHEN new_status = 'pending' THEN clock_timestamp() + wait ELSE o.next_attempt_at END
+   WHERE o.id = p_message_id;
+  RETURN new_status;
+END
+$$;
+
+
+--
+-- Name: FUNCTION message_outbox_release(p_message_id uuid, p_retry_after interval, p_error text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.message_outbox_release(p_message_id uuid, p_retry_after interval, p_error text) IS 'Devolve à fila uma mensagem em sending sem gastar tentativa (tarefa 109): 429 do Telegram, ou reservada do mesmo destino que o worker libera sem enviar depois de um 429. status = pending, attempts − 1 (desfaz a reserva), deferrals + 1, next_attempt_at = agora + p_retry_after (padrão 30 s, entre 1 s e 1 dia), last_error = p_error (vazio mantém o anterior). Com deferrals no teto (100), conta a tentativa como message_outbox_mark_failed: failed se esgotou max_attempts. Devolve o novo status. 23514 (message_outbox_transition_check) se ela não está em sending; 22023 com p_retry_after negativo.';
 
 
 --
@@ -8058,14 +8362,109 @@ COMMENT ON FUNCTION public.notes_sync_reminder() IS 'Trigger de notes: ao arquiv
 
 
 --
+-- Name: operational_purge(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.operational_purge(p_limit integer DEFAULT 1000) RETURNS TABLE(target text, deleted integer)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+DECLARE
+  n   integer;
+  ids uuid[];
+BEGIN
+  IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100000 THEN
+    RAISE EXCEPTION 'operational_purge: limit must be between 1 and 100000' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Anexos órfãos: trava os candidatos e, num segundo comando (snapshot novo), apaga só os que continuam sem vínculo; um
+  -- vínculo criado depois espera a trava e falha na FK, nunca é apagado em CASCADE.
+  SELECT array_agg(x.id) INTO ids FROM (
+    SELECT a.id FROM public.attachments a
+     WHERE a.created_at < clock_timestamp() - interval '7 days'
+       AND NOT EXISTS (SELECT 1 FROM public.attachment_links l WHERE l.attachment_id = a.id)
+     ORDER BY a.created_at, a.id
+     LIMIT p_limit
+     FOR UPDATE OF a SKIP LOCKED) x;
+  DELETE FROM public.attachments a
+   WHERE a.id = ANY (coalesce(ids, '{}'))
+     AND NOT EXISTS (SELECT 1 FROM public.attachment_links l WHERE l.attachment_id = a.id);
+  GET DIAGNOSTICS n = ROW_COUNT;
+  target := 'attachments'; deleted := n; RETURN NEXT;
+
+  WITH doomed AS (
+    SELECT o.id FROM public.message_outbox o
+     WHERE o.status IN ('sent', 'canceled', 'failed') AND o.created_at < clock_timestamp() - interval '180 days'
+     ORDER BY o.created_at, o.id LIMIT p_limit FOR UPDATE SKIP LOCKED)
+  DELETE FROM public.message_outbox o USING doomed d WHERE o.id = d.id;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  target := 'message_outbox'; deleted := n; RETURN NEXT;
+
+  WITH doomed AS (
+    SELECT x.id FROM public.notifications x
+     WHERE x.read_at IS NOT NULL AND x.created_at < clock_timestamp() - interval '180 days'
+     ORDER BY x.created_at, x.id LIMIT p_limit FOR UPDATE SKIP LOCKED)
+  DELETE FROM public.notifications x USING doomed d WHERE x.id = d.id;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  target := 'notifications'; deleted := n; RETURN NEXT;
+
+  WITH doomed AS (
+    SELECT f.id FROM public.note_reminder_firings f
+     WHERE f.read_at IS NOT NULL AND f.last_fired_at < clock_timestamp() - interval '180 days'
+     ORDER BY f.last_fired_at, f.id LIMIT p_limit FOR UPDATE SKIP LOCKED)
+  DELETE FROM public.note_reminder_firings f USING doomed d WHERE f.id = d.id;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  target := 'note_reminder_firings'; deleted := n; RETURN NEXT;
+
+  WITH doomed AS (
+    SELECT c.id FROM public.telegram_pairing_codes c
+     WHERE c.used_at < clock_timestamp() - interval '1 day' OR c.expires_at < clock_timestamp() - interval '1 day'
+     ORDER BY c.created_at, c.id LIMIT p_limit FOR UPDATE SKIP LOCKED)
+  DELETE FROM public.telegram_pairing_codes c USING doomed d WHERE c.id = d.id;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  target := 'telegram_pairing_codes'; deleted := n; RETURN NEXT;
+
+  WITH doomed AS (
+    SELECT r.id FROM public.ai_scheduled_task_runs r
+     WHERE r.created_at < clock_timestamp() - interval '1 year'
+     ORDER BY r.created_at, r.id LIMIT p_limit FOR UPDATE SKIP LOCKED)
+  DELETE FROM public.ai_scheduled_task_runs r USING doomed d WHERE r.id = d.id;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  target := 'ai_scheduled_task_runs'; deleted := n; RETURN NEXT;
+
+  WITH doomed AS (
+    SELECT r.id FROM public.ai_reconcile_recipe_runs r
+     WHERE r.status IN ('completed', 'skipped', 'failed')
+       AND coalesce(r.finished_at, r.created_at) < clock_timestamp() - interval '1 year'
+     ORDER BY r.created_at, r.id LIMIT p_limit FOR UPDATE SKIP LOCKED)
+  DELETE FROM public.ai_reconcile_recipe_runs r USING doomed d WHERE r.id = d.id;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  target := 'ai_reconcile_recipe_runs'; deleted := n; RETURN NEXT;
+END
+$$;
+
+
+--
+-- Name: FUNCTION operational_purge(p_limit integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.operational_purge(p_limit integer) IS 'Manutenção (tarefa 103): apaga até p_limit linhas (padrão 1000, máx. 100000; fora da faixa, 22023) de cada tabela operacional que passou do prazo, as mais velhas primeiro, pulando as travadas, e devolve (target, deleted) por tabela. Prazos: attachments sem vínculo em attachment_links criados há mais de 7 dias; message_outbox sent/canceled/failed criadas há mais de 180 dias; notifications lidas criadas há mais de 180 dias; note_reminder_firings lidas com o último disparo há mais de 180 dias; telegram_pairing_codes usados ou vencidos há mais de 1 dia; ai_scheduled_task_runs criados há mais de 1 ano; ai_reconcile_recipe_runs completed/skipped/failed terminados há mais de 1 ano. O worker chama numa transação sem app.user_id (a exclusão dos anexos e dos códigos é auditada como system) e repete enquanto alguma tabela devolver o limite. SECURITY DEFINER.';
+
+
+--
 -- Name: period_assert_open(uuid, date, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
 CREATE FUNCTION public.period_assert_open(p_caixa_id uuid, p_on date, p_what text) RETURNS void
-    LANGUAGE plpgsql STABLE
+    LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF p_caixa_id IS NOT NULL AND p_on IS NOT NULL AND period_is_closed(p_caixa_id, p_on) THEN
+  IF p_caixa_id IS NULL OR p_on IS NULL THEN
+    RETURN;
+  END IF;
+  PERFORM period_lock_shared(p_caixa_id);
+  IF EXISTS (SELECT 1 FROM period_closings pc
+              WHERE pc.caixa_id = p_caixa_id AND pc.month = date_trunc('month', p_on)::date) THEN
     RAISE EXCEPTION '%: month % is closed in caixa %', p_what, to_char(p_on, 'YYYY-MM'), p_caixa_id
       USING ERRCODE = 'check_violation', CONSTRAINT = 'period_closings_locked_check';
   END IF;
@@ -8077,7 +8476,28 @@ $$;
 -- Name: FUNCTION period_assert_open(p_caixa_id uuid, p_on date, p_what text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.period_assert_open(p_caixa_id uuid, p_on date, p_what text) IS 'Erro 23514 (period_closings_locked_check) se o mês da data está fechado na caixa.';
+COMMENT ON FUNCTION public.period_assert_open(p_caixa_id uuid, p_on date, p_what text) IS 'Erro 23514 (period_closings_locked_check) se o mês da data está fechado na caixa. Antes de ler, toma a trava compartilhada do fechamento da caixa (period_lock_shared): um fechamento em andamento termina antes, e é visto.';
+
+
+--
+-- Name: period_closings_lock(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.period_closings_lock() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(period_lock_key(NEW.caixa_id));
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION period_closings_lock(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.period_closings_lock() IS 'Trigger de period_closings (INSERT): trava exclusiva do fechamento da caixa até o fim da transação. Espera as escritas em andamento na caixa (que têm a trava compartilhada) e faz as seguintes esperarem o fechamento (tarefa 145).';
 
 
 --
@@ -8154,6 +8574,46 @@ $$;
 --
 
 COMMENT ON FUNCTION public.period_is_closed(p_caixa_id uuid, p_on date) IS 'true se o mês da data está fechado na caixa.';
+
+
+--
+-- Name: period_lock_key(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.period_lock_key(p_caixa_id uuid) RETURNS bigint
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  SELECT hashtextextended('period_closing:' || p_caixa_id::text, 0)
+$$;
+
+
+--
+-- Name: FUNCTION period_lock_key(p_caixa_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.period_lock_key(p_caixa_id uuid) IS 'Chave do advisory lock do fechamento de mês da caixa (tarefa 145): compartilhado por quem escreve no período, exclusivo para quem fecha.';
+
+
+--
+-- Name: period_lock_shared(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.period_lock_shared(p_caixa_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF p_caixa_id IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock_shared(period_lock_key(p_caixa_id));
+  END IF;
+END
+$$;
+
+
+--
+-- Name: FUNCTION period_lock_shared(p_caixa_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.period_lock_shared(p_caixa_id uuid) IS 'Trava compartilhada (até o fim da transação) do fechamento de mês da caixa: quem escreve num período espera um fechamento em andamento na caixa e, depois, o enxerga na próxima instrução (tarefa 145). Escritores não se esperam.';
 
 
 --
@@ -8303,29 +8763,33 @@ $$;
 CREATE FUNCTION public.report_cash_projection(p_caixa_ids uuid[], p_today date DEFAULT ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date, p_horizons integer[] DEFAULT '{30,60,90}'::integer[], p_entity_ids uuid[] DEFAULT NULL::uuid[]) RETURNS TABLE(caixa_id uuid, financial_account_id uuid, horizon_days integer, until date, balance_today_cents bigint, scheduled_movements_cents bigint, overdue_receivable_cents bigint, overdue_payable_cents bigint, receivable_cents bigint, payable_cents bigint, projected_cents bigint)
     LANGUAGE plpgsql STABLE
     AS $$
+DECLARE
+  v_last date;
 BEGIN
   IF p_today IS NULL OR p_horizons IS NULL OR cardinality(p_horizons) = 0
      OR EXISTS (SELECT 1 FROM unnest(p_horizons) h WHERE h IS NULL OR h < 1 OR h > 1100) THEN
     RAISE EXCEPTION 'report_cash_projection: horizons must be 1..1100 days and today must be set'
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
+  v_last := p_today + (SELECT max(h) FROM unnest(p_horizons) h);
 
   RETURN QUERY
   WITH hz AS (
     SELECT DISTINCT h AS days, p_today + h AS until FROM unnest(p_horizons) h
   ),
-  accs AS (
-    SELECT a.id, a.caixa_id, a.opening_date, a.opening_balance_cents
+  -- Por conta, uma vez: saldo no fim de hoje.
+  accs AS MATERIALIZED (
+    SELECT a.id, a.caixa_id, a.opening_date, a.opening_balance_cents,
+           (CASE WHEN a.opening_date <= p_today THEN a.opening_balance_cents ELSE 0 END
+            + coalesce((SELECT sum(m.amount_cents) FROM movements m
+                         WHERE m.financial_account_id = a.id AND m.occurred_on <= p_today), 0))::bigint AS today_cents
       FROM financial_accounts a
       JOIN caixas c ON c.id = a.caixa_id AND c.kind = 'general'
      WHERE a.caixa_id = ANY (p_caixa_ids)
   ),
-  -- Por conta: saldo no fim de hoje e o que já está lançado com data futura (até o horizonte).
+  -- Por conta e horizonte: o que já está lançado com data futura (até o horizonte).
   acc_rows AS (
-    SELECT accs.caixa_id, accs.id AS account_id, hz.days, hz.until,
-           (CASE WHEN accs.opening_date <= p_today THEN accs.opening_balance_cents ELSE 0 END
-            + coalesce((SELECT sum(m.amount_cents) FROM movements m
-                         WHERE m.financial_account_id = accs.id AND m.occurred_on <= p_today), 0))::bigint AS today_cents,
+    SELECT accs.caixa_id, accs.id AS account_id, hz.days, hz.until, accs.today_cents,
            (CASE WHEN p_entity_ids IS NULL AND accs.opening_date > p_today AND accs.opening_date <= hz.until
                  THEN accs.opening_balance_cents ELSE 0 END
             + coalesce((SELECT sum(m.amount_cents) FROM movements m
@@ -8342,7 +8806,8 @@ BEGIN
       FROM title_balances b
       JOIN titles t ON t.id = b.title_id
       LEFT JOIN card_invoices v ON v.id = t.card_invoice_id
-     WHERE b.caixa_id = ANY (p_caixa_ids) AND b.open_cents > 0 AND b.archived_at IS NULL
+     WHERE b.caixa_id = ANY (p_caixa_ids) AND b.status IN ('open', 'partial') AND b.due_date <= v_last
+       AND b.open_cents > 0 AND b.archived_at IS NULL
        AND (v.id IS NULL OR v.closed_at IS NOT NULL)
        AND (p_entity_ids IS NULL OR (t.origin <> 'card_invoice' AND t.entity_id = ANY (p_entity_ids)))
     UNION ALL
@@ -8743,6 +9208,100 @@ COMMENT ON FUNCTION public.settlement_assert_movements(p_settlement_id uuid) IS 
 
 
 --
+-- Name: settlement_reversal_movements(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.settlement_reversal_movements(p_settlement_id uuid) RETURNS TABLE(settlement_id uuid, title_id uuid, caixa_id uuid, settled_on date, reversed_at timestamp with time zone, movement_id uuid, financial_account_id uuid, occurred_on date, amount_cents bigint, opening_date date, statement_line_id uuid)
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT s.id, s.title_id, t.caixa_id, s.settled_on, s.reversed_at,
+         m.id, m.financial_account_id, m.occurred_on, m.amount_cents, a.opening_date, l.id
+    FROM settlements s0
+    JOIN settlements s ON s.id IN (s0.id, s0.mirror_settlement_id)
+    JOIN titles t ON t.id = s.title_id
+    LEFT JOIN LATERAL (
+      -- O movimento de estorno é o de sinal oposto ao da baixa (payable sai, receivable entra).
+      SELECT x.* FROM movements x
+       WHERE x.settlement_id = s.id
+         AND x.amount_cents = -(s.amount_cents + s.interest_cents + s.fine_cents - s.discount_cents)
+                              * CASE t.direction WHEN 'payable' THEN -1 ELSE 1 END
+       ORDER BY x.occurred_on DESC, x.id
+       LIMIT 1
+    ) m ON s.reversed_at IS NOT NULL
+    LEFT JOIN financial_accounts a ON a.id = m.financial_account_id
+    LEFT JOIN statement_lines l ON l.movement_id = m.id AND l.status = 'matched'
+   WHERE s0.id = p_settlement_id
+   ORDER BY s.id = p_settlement_id DESC, s.id
+$$;
+
+
+--
+-- Name: FUNCTION settlement_reversal_movements(p_settlement_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.settlement_reversal_movements(p_settlement_id uuid) IS 'Pernas da baixa (ela e a perna do espelho, se houver), cada uma com a caixa do título, a data da baixa, reversed_at e o movimento de estorno (o de sinal oposto ao da baixa; nulo se a perna não tem conta ou não foi estornada), com a conta, a data, o valor, a abertura da conta e a linha de extrato conciliada com ele. A baixa pedida vem primeiro. Sem linhas se a baixa não existe. Para a prévia da troca da data do estorno e o Access nas caixas das pernas (tarefa 045).';
+
+
+--
+-- Name: settlement_reversal_set_date(uuid, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.settlement_reversal_set_date(p_settlement_id uuid, p_reversed_on date) RETURNS TABLE(movement_id uuid, settlement_id uuid, financial_account_id uuid, old_date date, new_date date)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  s settlements;
+  r record;
+BEGIN
+  IF p_reversed_on IS NULL THEN
+    RAISE EXCEPTION 'settlement_reversal_set_date: the reversal date is required' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Trava as pernas (a baixa e a do espelho), para duas trocas da mesma baixa ficarem em série.
+  SELECT * INTO s FROM settlements x WHERE x.id = p_settlement_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'settlement_reversal_set_date: settlement % not found', p_settlement_id USING ERRCODE = 'no_data_found';
+  END IF;
+  PERFORM 1 FROM settlements x WHERE x.id = s.mirror_settlement_id FOR UPDATE;
+
+  IF s.reversed_at IS NULL THEN
+    RAISE EXCEPTION 'settlements: settlement % is not reversed', s.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_reversal_date_check';
+  END IF;
+  IF p_reversed_on < s.settled_on THEN
+    RAISE EXCEPTION 'settlements: reversal date % is before the settlement date % (settlement %)', p_reversed_on, s.settled_on, s.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_reversal_date_check';
+  END IF;
+
+  FOR r IN SELECT * FROM settlement_reversal_movements(p_settlement_id) v WHERE v.movement_id IS NOT NULL LOOP
+    IF r.statement_line_id IS NOT NULL THEN
+      RAISE EXCEPTION 'settlements: reversal movement % of settlement % is reconciled with statement line %',
+        r.movement_id, r.settlement_id, r.statement_line_id
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_reversal_reconciled_check';
+    END IF;
+    IF r.occurred_on <> p_reversed_on THEN
+      -- A abertura da conta e o mês fechado (data antiga e nova) são conferidos pelos triggers de movements.
+      UPDATE movements m SET occurred_on = p_reversed_on WHERE m.id = r.movement_id;
+      movement_id := r.movement_id;
+      settlement_id := r.settlement_id;
+      financial_account_id := r.financial_account_id;
+      old_date := r.occurred_on;
+      new_date := p_reversed_on;
+      RETURN NEXT;
+    END IF;
+  END LOOP;
+END
+$$;
+
+
+--
+-- Name: FUNCTION settlement_reversal_set_date(p_settlement_id uuid, p_reversed_on date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.settlement_reversal_set_date(p_settlement_id uuid, p_reversed_on date) IS 'Muda para p_reversed_on a data do movimento de estorno das pernas da baixa estornada (ela e a do espelho; pernas sem conta não têm movimento) e devolve os movimentos alterados com a data antiga e a nova (tarefa 045). SECURITY INVOKER: a auditoria registra o ator da transação. Erros: 22023 data nula; P0002 baixa inexistente; 23514 settlements_reversal_date_check (baixa não estornada ou data antes da baixa), settlements_reversal_reconciled_check (movimento de estorno conciliado com linha de extrato), movements_opening_date_check (antes da abertura da conta) e period_closings_locked_check (mês fechado na data antiga ou na nova).';
+
+
+--
 -- Name: settlements_mirror_check(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8792,6 +9351,34 @@ BEGIN
   RETURN NULL;
 END
 $$;
+
+
+--
+-- Name: settlements_mirror_required_check(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.settlements_mirror_required_check() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  s settlements;
+BEGIN
+  SELECT * INTO s FROM settlements WHERE id = NEW.id;
+  IF FOUND AND s.reversed_at IS NULL AND s.mirror_settlement_id IS NULL
+     AND EXISTS (SELECT 1 FROM titles t WHERE t.id = s.title_id AND t.mirror_title_id IS NOT NULL) THEN
+    RAISE EXCEPTION 'settlements: settlement % of a mirrored title needs the mirror leg', s.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_mirror_required_check';
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: FUNCTION settlements_mirror_required_check(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.settlements_mirror_required_check() IS 'Constraint trigger de settlements (no COMMIT): baixa ativa em título espelhado tem mirror_settlement_id, a perna no outro lado do par (spec 006; tarefa 148). O lado do título (ligar o par depois) é conferido em titles_mirror_check.';
 
 
 --
@@ -8935,6 +9522,27 @@ BEGIN
   RETURN NEW;
 END
 $$;
+
+
+--
+-- Name: statement_imports_period_lock(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.statement_imports_period_lock() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  PERFORM period_lock_shared(a.caixa_id) FROM financial_accounts a WHERE a.id = NEW.financial_account_id;
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION statement_imports_period_lock(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.statement_imports_period_lock() IS 'Trigger de statement_imports (UPDATE que marca o lote como provisório): trava compartilhada do fechamento da caixa da conta antes da checagem das linhas em mês fechado (tarefa 145).';
 
 
 --
@@ -9129,6 +9737,32 @@ $$;
 --
 
 COMMENT ON FUNCTION public.statement_line_inferred_created_entry(p_line_id uuid) IS 'Uso interno (backfill da 0048): created_entry inferido para uma linha matched pelo instante de criação do lançamento igual ao matched_at (mesma transação). Nulo se o lançamento é mais antigo que a conciliação. Não é usado pela aplicação, que grava created_entry ao conciliar.';
+
+
+--
+-- Name: statement_lines_period_lock(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.statement_lines_period_lock() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  caixa uuid;
+BEGIN
+  SELECT a.caixa_id INTO caixa
+    FROM statement_imports i JOIN financial_accounts a ON a.id = i.financial_account_id
+   WHERE i.id = NEW.statement_import_id AND i.provisional AND i.superseded_by_import_id IS NULL;
+  PERFORM period_lock_shared(caixa);
+  RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: FUNCTION statement_lines_period_lock(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.statement_lines_period_lock() IS 'Trigger de statement_lines (INSERT): a linha de lote provisório ativo toma a trava compartilhada do fechamento da caixa da conta antes da checagem do mês fechado (tarefa 145).';
 
 
 --
@@ -9702,6 +10336,13 @@ BEGIN
     RETURN NULL;
   END IF;
 
+  -- As pernas das baixas acompanham o par (tarefa 148): a perna ligada a uma baixa deste título fica no espelho dele.
+  IF EXISTS (SELECT 1 FROM settlements s JOIN settlements o ON o.id = s.mirror_settlement_id
+              WHERE s.title_id = t.id AND o.title_id IS DISTINCT FROM t.mirror_title_id) THEN
+    RAISE EXCEPTION 'titles: settlement legs of title % are not on a mirrored title pair', t.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_mirror_title_check';
+  END IF;
+
   IF t.mirror_title_id IS NULL THEN
     IF EXISTS (SELECT 1 FROM titles x WHERE x.mirror_title_id = t.id) THEN
       RAISE EXCEPTION 'titles: mirror link to % is not reciprocal', t.id
@@ -9709,7 +10350,6 @@ BEGIN
     END IF;
     RETURN NULL;
   END IF;
-
   SELECT * INTO m FROM titles WHERE id = t.mirror_title_id;
   IF NOT FOUND THEN
     RETURN NULL;  -- a FK (também deferida) reporta o erro.
@@ -9728,6 +10368,18 @@ BEGIN
   SELECT c.holder_entity_id INTO holder FROM caixas c WHERE c.id = m.caixa_id;
   IF holder IS DISTINCT FROM t.entity_id THEN
     RAISE EXCEPTION 'titles: counterparty caixa % is not held by entity %', m.caixa_id, t.entity_id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_caixa_check';
+  END IF;
+
+  -- O sentido inverso (tarefa 148): trocar a caixa de um lado só dispara o trigger deste lado.
+  IF t.caixa_id IS DISTINCT FROM m.counterparty_caixa_id THEN
+    RAISE EXCEPTION 'titles: title % is not in counterparty caixa % of its mirror %', t.id, m.counterparty_caixa_id, m.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_caixa_check';
+  END IF;
+
+  SELECT c.holder_entity_id INTO holder FROM caixas c WHERE c.id = t.caixa_id;
+  IF holder IS DISTINCT FROM m.entity_id THEN
+    RAISE EXCEPTION 'titles: caixa % is not held by entity % of mirror %', t.caixa_id, m.entity_id, m.id
       USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_caixa_check';
   END IF;
 
@@ -9751,6 +10403,14 @@ BEGIN
   IF (t.mirror_status IS NULL) = (m.mirror_status IS NULL) THEN
     RAISE EXCEPTION 'titles: exactly one title of pair % / % must carry mirror_status', t.id, m.id
       USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_mirror_side_check';
+  END IF;
+
+  -- Baixa ativa num par espelhado tem a perna do espelho (tarefa 148): ligar depois dois títulos com baixas soltas não
+  -- passa. As pernas ligadas já têm a mesma data e os mesmos valores (settlements_mirror_check).
+  IF EXISTS (SELECT 1 FROM settlements x
+              WHERE x.title_id IN (t.id, m.id) AND x.reversed_at IS NULL AND x.mirror_settlement_id IS NULL) THEN
+    RAISE EXCEPTION 'titles: mirrored pair % / % has an active settlement without the mirror leg', t.id, m.id
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'settlements_mirror_required_check';
   END IF;
 
   RETURN NULL;
@@ -9818,7 +10478,15 @@ BEGIN
   END IF;
 
   IF NEW.recurrence_rule_id IS NOT NULL THEN
-    SELECT r.installments_total INTO total FROM recurrence_rules r WHERE r.id = NEW.recurrence_rule_id;
+    -- Ocorrência nova (ou que mudou de série/número): lê o total com FOR SHARE (tarefa 149). Uma redução de N em
+    -- andamento (FOR UPDATE ou UPDATE da série) termina antes e o total lido é o novo; uma redução que chega depois
+    -- espera esta transação e recurrence_rules_validate enxerga a ocorrência já confirmada.
+    IF TG_OP = 'INSERT' OR NEW.recurrence_rule_id IS DISTINCT FROM OLD.recurrence_rule_id
+       OR NEW.occurrence IS DISTINCT FROM OLD.occurrence THEN
+      SELECT r.installments_total INTO total FROM recurrence_rules r WHERE r.id = NEW.recurrence_rule_id FOR SHARE;
+    ELSE
+      SELECT r.installments_total INTO total FROM recurrence_rules r WHERE r.id = NEW.recurrence_rule_id;
+    END IF;
     IF NEW.occurrence > total THEN
       RAISE EXCEPTION 'titles: occurrence % exceeds installments total %', NEW.occurrence, total
         USING ERRCODE = 'check_violation', CONSTRAINT = 'titles_occurrence_total_check';
@@ -10823,17 +11491,18 @@ CREATE VIEW public.ai_embedding_index_stats WITH (security_invoker='true') AS
           WHERE ((u.provider_id = x.provider_id) AND (u.model = x.model)))) AS in_use,
     (count(e.id))::integer AS vectors,
     (count(e.id) FILTER (WHERE (NOT e.needs_reindex)))::integer AS indexed,
-    (count(e.id) FILTER (WHERE e.needs_reindex))::integer AS pending
+    (count(e.id) FILTER (WHERE e.needs_reindex))::integer AS pending,
+    x.complete_at
    FROM (public.ai_embedding_indexes x
      LEFT JOIN public.ai_embeddings e ON (((e.provider_id = x.provider_id) AND (e.model = x.model))))
-  GROUP BY x.provider_id, x.model, x.last_in_use_at;
+  GROUP BY x.provider_id, x.model, x.last_in_use_at, x.complete_at;
 
 
 --
 -- Name: VIEW ai_embedding_index_stats; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.ai_embedding_index_stats IS 'Progresso de cada índice (detalhe do provedor): linhas (vectors), já indexadas com o texto atual (indexed) e na fila (pending), mais se o par está em uso.';
+COMMENT ON VIEW public.ai_embedding_index_stats IS 'Progresso de cada índice (detalhe do provedor): linhas (vectors), já indexadas com o texto atual (indexed) e na fila (pending), se o par está em uso e o fim da última passada completa do worker (complete_at).';
 
 
 --
@@ -13281,34 +13950,41 @@ COMMENT ON COLUMN public.titles.planned_account_custom IS 'A ocorrência escolhe
 --
 
 CREATE VIEW public.title_balances WITH (security_invoker='true') AS
- SELECT t.id AS title_id,
-    t.caixa_id,
-    t.direction,
-    t.status,
-    t.entity_id,
-    t.category_id,
-    t.description,
-    t.competence_date,
-    t.due_date,
-    t.amount_cents,
-    (COALESCE(s.settled_cents, (0)::numeric))::bigint AS settled_cents,
+ SELECT id AS title_id,
+    caixa_id,
+    direction,
+    status,
+    entity_id,
+    category_id,
+    description,
+    competence_date,
+    due_date,
+    amount_cents,
     (
-        CASE
-            WHEN (t.status = 'canceled'::text) THEN (0)::numeric
-            ELSE ((t.amount_cents)::numeric - COALESCE(s.settled_cents, (0)::numeric))
+        CASE status
+            WHEN 'paid'::text THEN (amount_cents)::numeric
+            WHEN 'partial'::text THEN ( SELECT COALESCE(sum(x.amount_cents), (0)::numeric) AS "coalesce"
+               FROM public.settlements x
+              WHERE ((x.title_id = t.id) AND (x.reversed_at IS NULL)))
+            ELSE (0)::numeric
+        END)::bigint AS settled_cents,
+    (
+        CASE status
+            WHEN 'open'::text THEN (amount_cents)::numeric
+            WHEN 'partial'::text THEN ((amount_cents)::numeric - ( SELECT COALESCE(sum(x.amount_cents), (0)::numeric) AS "coalesce"
+               FROM public.settlements x
+              WHERE ((x.title_id = t.id) AND (x.reversed_at IS NULL))))
+            ELSE (0)::numeric
         END)::bigint AS open_cents,
-    t.archived_at
-   FROM (public.titles t
-     LEFT JOIN LATERAL ( SELECT sum(x.amount_cents) AS settled_cents
-           FROM public.settlements x
-          WHERE ((x.title_id = t.id) AND (x.reversed_at IS NULL))) s ON (true));
+    archived_at
+   FROM public.titles t;
 
 
 --
 -- Name: VIEW title_balances; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.title_balances IS 'Títulos com principal baixado (baixas ativas) e saldo aberto (amount − baixado; 0 se cancelado). Títulos em aberto: open_cents > 0.';
+COMMENT ON VIEW public.title_balances IS 'Títulos com principal baixado (baixas ativas) e saldo aberto (amount − baixado; 0 se cancelado). Títulos em aberto: open_cents > 0, o mesmo que status IN (''open'', ''partial''): filtre também pelo status, que é indexável (titles_caixa_id_status_due_date_idx). Só o parcial soma as baixas; aberto, pago e cancelado saem do status (invariantes de titles_validate_status e settlements_refresh_title_status; tarefa 093).';
 
 
 --
@@ -14786,9 +15462,15 @@ CREATE VIEW public.financial_account_balances WITH (security_invoker='true') AS
     a.opening_balance_cents,
     (COALESCE(m.movements_cents, (0)::numeric))::bigint AS movements_cents,
     (((a.opening_balance_cents)::numeric + COALESCE(m.movements_cents, (0)::numeric)))::bigint AS balance_cents,
-    a.archived_at
+    a.archived_at,
+    (((
+        CASE
+            WHEN (a.opening_date <= ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date) THEN a.opening_balance_cents
+            ELSE (0)::bigint
+        END)::numeric + COALESCE(m.today_cents, (0)::numeric)))::bigint AS balance_today_cents
    FROM (public.financial_accounts a
-     LEFT JOIN LATERAL ( SELECT sum(x.amount_cents) AS movements_cents
+     LEFT JOIN LATERAL ( SELECT sum(x.amount_cents) AS movements_cents,
+            sum(x.amount_cents) FILTER (WHERE (x.occurred_on <= ((now() AT TIME ZONE 'America/Sao_Paulo'::text))::date)) AS today_cents
            FROM public.movements x
           WHERE (x.financial_account_id = a.id)) m ON (true));
 
@@ -14797,7 +15479,7 @@ CREATE VIEW public.financial_account_balances WITH (security_invoker='true') AS
 -- Name: VIEW financial_account_balances; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.financial_account_balances IS 'Saldo de cada conta: opening_balance_cents + soma de todos os movimentos (inclusive datados no futuro). Saldo numa data: financial_account_balance_at(conta, data).';
+COMMENT ON VIEW public.financial_account_balances IS 'Saldo de cada conta: balance_cents = opening_balance_cents + soma de todos os movimentos (inclusive datados no futuro); balance_today_cents = o saldo no fim de hoje em America/Sao_Paulo (o saldo inicial só se a conta já abriu, mais os movimentos até hoje; tarefa 130), o "saldo atual" das telas. balance_cents − balance_today_cents = o que já está lançado com data futura. Saldo numa data: financial_account_balance_at(conta, data).';
 
 
 --
@@ -15504,6 +16186,8 @@ CREATE TABLE public.statement_csv_mappings (
     is_default boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    amount_sign text DEFAULT 'as_is'::text NOT NULL,
+    CONSTRAINT statement_csv_mappings_amount_sign_check CHECK ((amount_sign = ANY (ARRAY['as_is'::text, 'invert'::text]))),
     CONSTRAINT statement_csv_mappings_columns_check CHECK (((jsonb_typeof(columns) = 'object'::text) AND (columns ? 'date'::text) AND (columns ? 'description'::text) AND ((columns ? 'amount'::text) OR ((columns ? 'debit'::text) AND (columns ? 'credit'::text))))),
     CONSTRAINT statement_csv_mappings_date_format_check CHECK ((btrim(date_format) <> ''::text)),
     CONSTRAINT statement_csv_mappings_decimal_separator_check CHECK ((decimal_separator = ANY (ARRAY[','::text, '.'::text]))),
@@ -15534,6 +16218,13 @@ COMMENT ON COLUMN public.statement_csv_mappings.date_format IS 'Formato da data 
 --
 
 COMMENT ON COLUMN public.statement_csv_mappings.columns IS 'Objeto JSON: chave = campo (date, description, amount OU debit+credit; opcionais fitid, balance, document), valor = índice (0-based) ou nome da coluna no cabeçalho. Interpretado pela aplicação.';
+
+
+--
+-- Name: COLUMN statement_csv_mappings.amount_sign; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.statement_csv_mappings.amount_sign IS 'Sinal dos valores do arquivo (tarefa 091): as_is = como vêm; invert = inverte todos (fatura do cartão com as compras positivas; conta com o débito positivo). A aplicação aplica pelo mapeamento, nunca pela maioria das linhas.';
 
 
 --
@@ -15765,22 +16456,36 @@ CREATE VIEW public.statement_import_balances WITH (security_invoker='true') AS
     i.period_end,
     i.bank_balance_on,
     i.bank_balance_cents,
-        CASE
-            WHEN ((i.financial_account_id IS NOT NULL) AND (i.bank_balance_on IS NOT NULL)) THEN public.financial_account_balance_at(i.financial_account_id, i.bank_balance_on)
-            ELSE NULL::bigint
-        END AS app_balance_cents,
-        CASE
-            WHEN ((i.financial_account_id IS NOT NULL) AND (i.bank_balance_on IS NOT NULL)) THEN (i.bank_balance_cents - public.financial_account_balance_at(i.financial_account_id, i.bank_balance_on))
-            ELSE NULL::bigint
-        END AS difference_cents,
+    x.app AS app_balance_cents,
+    (i.bank_balance_cents - x.app) AS difference_cents,
     (COALESCE(c.lines, (0)::bigint))::integer AS lines,
     (COALESCE(c.matched, (0)::bigint))::integer AS matched_lines,
     (COALESCE(c.suggested, (0)::bigint))::integer AS suggested_lines,
     (COALESCE(c.new, (0)::bigint))::integer AS new_lines,
     (COALESCE(c.ignored, (0)::bigint))::integer AS ignored_lines,
     i.provisional,
-    (i.superseded_by_import_id IS NOT NULL) AS superseded
-   FROM (public.statement_imports i
+    (i.superseded_by_import_id IS NOT NULL) AS superseded,
+        CASE
+            WHEN (x.app IS NOT NULL) THEN ( SELECT (
+                    CASE
+                        WHEN (pv.bank_balance_on >= a.opening_date) THEN (((i.bank_balance_cents - pv.bank_balance_cents))::numeric - COALESCE(( SELECT sum(m.amount_cents) AS sum
+                           FROM public.movements m
+                          WHERE ((m.financial_account_id = i.financial_account_id) AND (m.occurred_on > pv.bank_balance_on) AND (m.occurred_on <= i.bank_balance_on))), (0)::numeric))
+                        ELSE NULL::numeric
+                    END)::bigint AS int8
+               FROM (( SELECT p.bank_balance_on,
+                        p.bank_balance_cents
+                       FROM public.statement_imports p
+                      WHERE ((p.financial_account_id = i.financial_account_id) AND (p.bank_balance_on IS NOT NULL) AND (p.superseded_by_import_id IS NULL) AND (ROW(p.bank_balance_on, p.created_at) < ROW(i.bank_balance_on, i.created_at)))
+                      ORDER BY p.bank_balance_on DESC, p.created_at DESC
+                     LIMIT 1) pv
+                 JOIN public.financial_accounts a ON ((a.id = i.financial_account_id))))
+            ELSE NULL::bigint
+        END AS interval_difference_cents
+   FROM ((public.statement_imports i
+     LEFT JOIN LATERAL ( SELECT public.financial_account_balance_at(i.financial_account_id, i.bank_balance_on) AS app
+          WHERE ((i.financial_account_id IS NOT NULL) AND (i.bank_balance_on IS NOT NULL))
+         OFFSET 0) x ON (true))
      LEFT JOIN LATERAL ( SELECT count(*) AS lines,
             count(*) FILTER (WHERE (l.status = 'matched'::text)) AS matched,
             count(*) FILTER (WHERE (l.status = 'suggested'::text)) AS suggested,
@@ -15794,7 +16499,7 @@ CREATE VIEW public.statement_import_balances WITH (security_invoker='true') AS
 -- Name: VIEW statement_import_balances; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.statement_import_balances IS 'Por lote: saldo informado pelo banco × saldo do app na mesma data (difference_cents = banco − app; 0 = sem divergência) e contagem de linhas por status (lines inclui as superseded). Saldo só para contas (não para cartão). provisional e superseded (spec 031): a aplicação tira os substituídos da divergência e do "lote anterior".';
+COMMENT ON VIEW public.statement_import_balances IS 'Por lote: saldo informado pelo banco × saldo do app na mesma data (difference_cents = banco − app; 0 = sem divergência), calculado uma vez por lote, e contagem de linhas por status (lines inclui as superseded). Saldo só para contas (não para cartão). interval_difference_cents (tarefa 092) = difference_cents menos a do lote anterior com saldo da mesma conta, não substituído, na ordem (bank_balance_on, created_at); nula sem lote anterior ou com ele antes da abertura. provisional e superseded (spec 031): a aplicação tira os substituídos da divergência (o "lote anterior" já os exclui).';
 
 
 --
@@ -17655,6 +18360,13 @@ CREATE INDEX ai_requests_run_id_idx ON public.ai_requests USING btree (run_id);
 
 
 --
+-- Name: ai_requests_running_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ai_requests_running_idx ON public.ai_requests USING btree (started_at) WHERE (status = 'running'::text);
+
+
+--
 -- Name: ai_requests_started_at_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -18012,10 +18724,10 @@ CREATE INDEX card_purchases_entity_id_idx ON public.card_purchases USING btree (
 
 
 --
--- Name: card_purchases_payer_caixa_id_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: card_purchases_payer_caixa_id_purchased_on_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX card_purchases_payer_caixa_id_idx ON public.card_purchases USING btree (payer_caixa_id);
+CREATE INDEX card_purchases_payer_caixa_id_purchased_on_idx ON public.card_purchases USING btree (payer_caixa_id, purchased_on);
 
 
 --
@@ -18460,10 +19172,38 @@ CREATE UNIQUE INDEX message_outbox_dedup_key ON public.message_outbox USING btre
 
 
 --
+-- Name: message_outbox_destination_failed_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_outbox_destination_failed_idx ON public.message_outbox USING btree (destination_id) WHERE (status = 'failed'::text);
+
+
+--
+-- Name: INDEX message_outbox_destination_failed_idx; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON INDEX public.message_outbox_destination_failed_idx IS 'Falhas por destino (contagem da lista de destinos; tarefa 103).';
+
+
+--
 -- Name: message_outbox_destination_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX message_outbox_destination_id_idx ON public.message_outbox USING btree (destination_id, created_at);
+
+
+--
+-- Name: message_outbox_destination_sent_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX message_outbox_destination_sent_idx ON public.message_outbox USING btree (destination_id, sent_at) WHERE (sent_at IS NOT NULL);
+
+
+--
+-- Name: INDEX message_outbox_destination_sent_idx; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON INDEX public.message_outbox_destination_sent_idx IS 'Último envio por destino (max(sent_at) da lista de destinos, sem ler o histórico inteiro; tarefa 103).';
 
 
 --
@@ -18533,7 +19273,7 @@ CREATE INDEX movements_entity_id_idx ON public.movements USING btree (entity_id)
 -- Name: movements_financial_account_id_occurred_on_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX movements_financial_account_id_occurred_on_idx ON public.movements USING btree (financial_account_id, occurred_on);
+CREATE INDEX movements_financial_account_id_occurred_on_idx ON public.movements USING btree (financial_account_id, occurred_on) INCLUDE (amount_cents);
 
 
 --
@@ -19055,6 +19795,13 @@ CREATE INDEX titles_counterparty_caixa_id_idx ON public.titles USING btree (coun
 
 
 --
+-- Name: titles_description_trgm_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_description_trgm_idx ON public.titles USING gin (description public.gin_trgm_ops);
+
+
+--
 -- Name: titles_due_date_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -19066,6 +19813,13 @@ CREATE INDEX titles_due_date_idx ON public.titles USING btree (due_date) WHERE (
 --
 
 CREATE INDEX titles_entity_id_idx ON public.titles USING btree (entity_id);
+
+
+--
+-- Name: titles_mirror_pending_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX titles_mirror_pending_idx ON public.titles USING btree (caixa_id) WHERE (mirror_status = 'pending'::text);
 
 
 --
@@ -19741,6 +20495,13 @@ CREATE TRIGGER card_invoice_items_validate BEFORE INSERT OR DELETE OR UPDATE ON 
 
 
 --
+-- Name: card_invoice_items card_invoice_items_validate_statement; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER card_invoice_items_validate_statement BEFORE UPDATE OF amount_cents, card_invoice_id ON public.card_invoice_items FOR EACH ROW EXECUTE FUNCTION public.card_invoice_items_validate_statement();
+
+
+--
 -- Name: card_invoices card_invoices_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -20276,7 +21037,7 @@ CREATE TRIGGER financial_accounts_validate_rules BEFORE UPDATE OF caixa_id, kind
 -- Name: mcp_servers mcp_servers_audit; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER mcp_servers_audit AFTER INSERT OR DELETE OR UPDATE ON public.mcp_servers FOR EACH ROW EXECUTE FUNCTION public.audit_row('tools_cache,tools_cached_at,tools_error,instructions_cache');
+CREATE TRIGGER mcp_servers_audit AFTER INSERT OR DELETE OR UPDATE ON public.mcp_servers FOR EACH ROW EXECUTE FUNCTION public.audit_row('tools_cache,tools_cached_at,tools_error,instructions_cache', 'tools_cache,instructions_cache');
 
 
 --
@@ -20525,6 +21286,13 @@ CREATE TRIGGER period_closings_audit AFTER INSERT OR DELETE OR UPDATE ON public.
 
 
 --
+-- Name: period_closings period_closings_lock; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER period_closings_lock BEFORE INSERT ON public.period_closings FOR EACH ROW EXECUTE FUNCTION public.period_closings_lock();
+
+
+--
 -- Name: period_closings period_closings_provisional_check; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -20602,6 +21370,13 @@ CREATE CONSTRAINT TRIGGER settlements_mirror_check AFTER INSERT OR UPDATE OF mir
 
 
 --
+-- Name: settlements settlements_mirror_required_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER settlements_mirror_required_check AFTER INSERT OR UPDATE OF mirror_settlement_id ON public.settlements DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.settlements_mirror_required_check();
+
+
+--
 -- Name: settlements settlements_movements_check; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -20665,6 +21440,13 @@ CREATE TRIGGER statement_imports_audit AFTER INSERT OR DELETE OR UPDATE ON publi
 
 
 --
+-- Name: statement_imports statement_imports_period_lock; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER statement_imports_period_lock BEFORE UPDATE OF provisional ON public.statement_imports FOR EACH ROW WHEN ((new.provisional AND (NOT old.provisional))) EXECUTE FUNCTION public.statement_imports_period_lock();
+
+
+--
 -- Name: statement_imports statement_imports_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -20704,6 +21486,13 @@ CREATE TRIGGER statement_imports_validate BEFORE INSERT OR UPDATE ON public.stat
 --
 
 CREATE TRIGGER statement_lines_audit AFTER INSERT OR DELETE OR UPDATE ON public.statement_lines FOR EACH ROW EXECUTE FUNCTION public.audit_row('provisional');
+
+
+--
+-- Name: statement_lines statement_lines_period_lock; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER statement_lines_period_lock BEFORE INSERT ON public.statement_lines FOR EACH ROW EXECUTE FUNCTION public.statement_lines_period_lock();
 
 
 --

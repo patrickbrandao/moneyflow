@@ -6,10 +6,11 @@ import {
   type McpVisibility,
   t,
 } from '@moneyflow/shared';
-import { ChevronRight, Pencil, Plug, Plus, RefreshCw, Trash2, Undo2, X } from 'lucide-react';
+import { Pencil, Plug, Plus, RefreshCw, Trash2, Undo2, X } from 'lucide-react';
 import { type FormEvent, Fragment, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
+import { ExpandToggle } from '../a11y';
 import { LoadError, SkelRows } from '../domain';
 import { FormError, ModalActions } from '../forms';
 import { Badge, Button, cx, EmptyRow, EmptyState, Field, Modal } from '../ui';
@@ -77,7 +78,11 @@ export function McpTab() {
                   >
                     <td>
                       <span className="flex items-center gap-1.5">
-                        <ChevronRight className={cx('size-3.5 text-faint transition-transform', expanded === server.id && 'rotate-90')} />
+                        <ExpandToggle
+                          open={expanded === server.id}
+                          label={server.name}
+                          onToggle={() => setExpanded(expanded === server.id ? null : server.id)}
+                        />
                         <span className="row-title">{server.name}</span>
                       </span>
                       <span className="row-sub mono">{server.url}</span>
@@ -98,6 +103,7 @@ export function McpTab() {
                     <td>
                       <ActiveBadge active={server.isActive} archived={Boolean(server.archivedAt)} />
                     </td>
+                    {/* biome-ignore lint/a11y/useKeyWithClickEvents: só segura o clique da linha; as ações são botões próprios. */}
                     <td className="text-right" onClick={(e) => e.stopPropagation()}>
                       <span className="row-actions">
                         <Button size="sm" variant="ghost" disabled={refreshing === server.id} onClick={() => void refresh(server)}>

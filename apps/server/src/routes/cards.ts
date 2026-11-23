@@ -24,6 +24,7 @@ export async function cardRoutes(app: FastifyInstance) {
 
   app.get('/api/cards/:id', (r: Req) => cards.cardOverview(r.ctx, id(r)));
   app.get('/api/cards/:id/purchases', (r: Req) => cards.listPurchases(r.ctx, id(r), parse(cardPurchaseListQuery, r.query)));
+  app.get('/api/cards/:id/purchases/totals', (r: Req) => cards.purchaseTotals(r.ctx, id(r), parse(cardPurchaseListQuery, r.query)));
   app.post('/api/cards/:id/purchases', (r: Req) => cards.createPurchase(r.ctx, id(r), parse(cardPurchaseInput, r.body)));
   app.post('/api/cards/:id/charges', (r: Req) => cards.createCharge(r.ctx, id(r), parse(cardChargeInput, r.body)));
   // Cobranças esperadas das obrigações no cartão (spec 034): "É cobrança de um contrato?".

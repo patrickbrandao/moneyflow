@@ -175,6 +175,8 @@ export type SummaryData = {
   heading: string;
   dueLabel: string;
   due: SummaryItem[];
+  /** Quantos vencimentos há de fato (a lista `due` pode vir cortada; tarefa 105). Ausente = `due.length`. */
+  dueCount?: number;
   overdue: { count: number; cents: number };
   balances: { caixaName: string; cents: number }[];
   flowLabel: string;
@@ -183,7 +185,7 @@ export type SummaryData = {
 };
 
 /** Até quantos vencimentos o resumo lista (o resto vira "… e mais N"). */
-const SUMMARY_MAX_ITEMS = 25;
+export const SUMMARY_MAX_ITEMS = 25;
 
 export function summaryMessage(data: SummaryData): MessagePayload {
   const shown = data.due.slice(0, SUMMARY_MAX_ITEMS);
@@ -191,7 +193,8 @@ export function summaryMessage(data: SummaryData): MessagePayload {
     (item) =>
       `• ${data.showDueDate ? `${escapeHtml(formatDate(item.dueDate).slice(0, 5))} ` : ''}${escapeHtml(item.direction === 'payable' ? '−' : '+')}${money(item.openCents)} ${escapeHtml(item.description)} <i>(${escapeHtml(item.caixaName)})</i>`,
   );
-  if (data.due.length > shown.length) dueLines.push(escapeHtml(T.more(data.due.length - shown.length)));
+  const total = Math.max(data.dueCount ?? 0, data.due.length);
+  if (total > shown.length) dueLines.push(escapeHtml(T.more(total - shown.length)));
   return payload([
     b(data.heading),
     '',

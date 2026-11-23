@@ -6,7 +6,7 @@ import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { startAgentWorker } from '../src/agents/worker';
 import { type FakeMcp, startFakeMcp } from './fakes/fake-mcp';
-import { client, type Harness, newSession, scenario, startApp, uid, userSession } from './helpers';
+import { client, type Harness, newSession, scenario, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * F8 (spec 022): montagem do prompt na ordem com os dois pontos de cache, instruções do usuário (Minha conta → IA),
@@ -66,6 +66,8 @@ beforeAll(async () => {
   mcp = await startFakeMcp(MCP_SECRET, { instructions: MCP_TEXT });
   bigMcp = await startFakeMcp(MCP_SECRET, { instructions: 'x'.repeat(60_000) });
   h = await startApp();
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   provider = await admin.post('/api/admin/ai/providers', {
@@ -188,6 +190,32 @@ describe('montagem do prompt', () => {
     body = await chatRequest(admin, conversation.id);
     expect(body.system[1]!.text.indexOf('Contexto do usuário')).toBe(0);
     await admin.patch(`/api/admin/ai/agents/${agent.id}`, { mcpServers: [] });
+  });
+
+  it('ponto de cache 3 no fim do histórico: cada volta do laço marca o último bloco, no máximo 4 marcas (tarefa 096)', async () => {
+    const looping = await newAgent();
+    const conversation = await newSession(admin, looping.id);
+    llm.calls.length = 0;
+    await admin.post(`/api/conversations/${conversation.id}/messages`, { text: 'listar caixas' });
+    await drain();
+    const isTitle = (c: (typeof llm.calls)[number]) => /Gere um título/.test(JSON.stringify(c.body.system));
+    const calls = llm.calls.filter((c) => c.path === '/v1/messages' && !isTitle(c));
+    expect(calls).toHaveLength(2);
+    const marks = (body: any) => (JSON.stringify(body).match(/"cache_control"/g) ?? []).length;
+    for (const { body } of calls) {
+      const blocks = body.messages.flatMap((m: any) => m.content);
+      // Só o último bloco da última mensagem do histórico leva a marca.
+      expect(body.messages.at(-1).content.at(-1).cache_control).toEqual({ type: 'ephemeral' });
+      expect(blocks.filter((b: any) => b.cache_control)).toHaveLength(1);
+      const system = body.system.filter((b: any) => b.cache_control).length;
+      expect(marks(body)).toBe(1 + system + 1);
+      expect(marks(body)).toBeLessThanOrEqual(4);
+    }
+    // Na segunda volta o último bloco é o resultado da tool: a chamada lê do cache o que a primeira gravou.
+    expect(calls[1]!.body.messages.at(-1).content.at(-1).type).toBe('tool_result');
+    // O título é uma chamada avulsa: não marca o histórico.
+    const title = llm.calls.find((c) => c.path === '/v1/messages' && isTitle(c))!;
+    expect(title.body.messages.flatMap((m: any) => m.content).some((b: any) => b.cache_control)).toBe(false);
   });
 
   it('cache das instructions do MCP cortado em 50 mil; trocar o modo é auditado, atualizar o cache não', async () => {

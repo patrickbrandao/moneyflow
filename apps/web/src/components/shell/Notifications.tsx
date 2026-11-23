@@ -20,6 +20,10 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { cx, EmptyState, useClickOutside, usePolling } from '../ui';
 
+/** Tamanho da página do sino e o teto que a atualização relê de uma vez. */
+const PAGE = 30;
+const MAX_PAGE = 200;
+
 const ICONS: Record<NotificationKind, ReactNode> = {
   agent_completed: <Bot className="ic info" />,
   agent_message: <Bot className="ic info" />,
@@ -49,6 +53,8 @@ const ICONS: Record<NotificationKind, ReactNode> = {
  * fechada, vencimentos, atrasados, limite do cartão, divergência de
  * conciliação, mensagem não enviada e, na F4, os agentes). Clicar marca como
  * lida e leva à tela; "marcar todas" zera o contador. Atualiza a cada minuto.
+ * As não lidas vêm primeiro e "Ver mais" busca a página seguinte pelo cursor
+ * (tarefa 169); a atualização relê tudo o que já está carregado.
  */
 export function Notifications() {
   const [open, setOpen] = useState(false);
@@ -58,10 +64,27 @@ export function Notifications() {
   const close = useCallback(() => setOpen(false), []);
   useClickOutside(ref, close, open);
 
+  const loaded = useRef(PAGE);
+  const [loadingMore, setLoadingMore] = useState(false);
   const load = useCallback(async () => {
-    const list = await api.get<NotificationList>('/api/notifications', { limit: 30 }).catch(() => null);
+    const list = await api.get<NotificationList>('/api/notifications', { limit: Math.min(MAX_PAGE, loaded.current) }).catch(() => null);
     if (list) setData(list);
   }, []);
+
+  async function loadMore() {
+    if (!data?.nextCursor) return;
+    setLoadingMore(true);
+    const next = await api.get<NotificationList>('/api/notifications', { limit: PAGE, cursor: data.nextCursor }).catch(() => null);
+    setLoadingMore(false);
+    if (!next) return;
+    setData((current) => {
+      if (!current) return next;
+      const seen = new Set(current.items.map((n) => n.id));
+      const items = [...current.items, ...next.items.filter((n) => !seen.has(n.id))];
+      loaded.current = items.length;
+      return { unread: next.unread, items, nextCursor: next.nextCursor };
+    });
+  }
   usePolling(load, 60_000);
 
   function toggle() {
@@ -77,6 +100,7 @@ export function Notifications() {
       setData((current) =>
         current
           ? {
+              ...current,
               unread: Math.max(0, current.unread - 1),
               items: current.items.map((n) => (n.id === item.id ? { ...n, readAt: new Date().toISOString() } : n)),
             }
@@ -132,9 +156,14 @@ export function Notifications() {
                     {t.notifications.kinds[item.kind]} · {formatDateTime(item.createdAt)}
                   </span>
                 </span>
-                {!item.readAt && <span className="notif-dot" aria-label={t.notifications.markRead} />}
+                {!item.readAt && <span className="notif-dot" role="img" aria-label={t.notifications.markRead} />}
               </button>
             ))}
+            {data?.nextCursor && (
+              <button type="button" className="notif-more" onClick={() => void loadMore()} disabled={loadingMore}>
+                {t.notifications.loadMore}
+              </button>
+            )}
           </div>
         </div>
       )}

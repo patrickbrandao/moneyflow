@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { type Database, sessions, userColumns, users } from '@moneyflow/db';
 import type { GlobalRole } from '@moneyflow/shared';
-import { and, eq, gt, lt, sql } from 'drizzle-orm';
+import { and, eq, gt, lt, or, sql } from 'drizzle-orm';
 import type { Actor } from '../authz/access';
 
 /*
@@ -54,6 +54,16 @@ export async function deleteSession(db: Database, token: string) {
   await db.delete(sessions).where(eq(sessions.id, hashToken(token)));
 }
 
-export async function purgeExpiredSessions(db: Database) {
-  await db.delete(sessions).where(lt(sessions.expiresAt, sql`now()`));
+/**
+ * Apaga as sessões vencidas e, com `idleHours` > 0, as ociosas além de SESSION_IDLE_HOURS (tarefa 103), que já não
+ * valem (`resolveSession`) e ficariam até o `expires_at`. Devolve quantas.
+ */
+export async function purgeExpiredSessions(db: Database, idleHours = 0): Promise<number> {
+  const expired = lt(sessions.expiresAt, sql`now()`);
+  const idle = idleHours > 0 ? lt(sessions.lastSeenAt, sql`now() - make_interval(hours => ${idleHours}::int)`) : undefined;
+  const removed = await db
+    .delete(sessions)
+    .where(idle ? or(expired, idle) : expired)
+    .returning({ id: sessions.id });
+  return removed.length;
 }

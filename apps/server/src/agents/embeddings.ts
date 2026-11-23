@@ -13,7 +13,9 @@ import { embed, type LlmCredentials, type RequestLogBase } from './llm';
  *
  * Indexação de um par: (1) grava/atualiza o texto-fonte dos objetos
  * (entidades, títulos, compras de cartão, linhas de extrato) — o banco marca
- * needs_reindex quando o texto muda; (2) calcula os vetores pendentes.
+ * needs_reindex quando o texto muda; (2) calcula os vetores pendentes; (3)
+ * marca o índice completo ou não (ai_embedding_index_mark, tarefa 161), que é
+ * o que a busca lê para avisar "índice em construção".
  */
 
 export type EmbeddingPair = { providerId: string; model: string };
@@ -128,8 +130,19 @@ export async function embeddingSourceTotal(db: Executor): Promise<number> {
   return Number(result.rows[0]?.n ?? 0);
 }
 
-/** Até onde cada par já leu os textos-fonte de cada tipo (em memória: um worker que reinicia relê tudo, sem custo). */
-export type IndexState = { since: Map<string, string> };
+/**
+ * Até onde cada par já leu os textos-fonte de cada tipo: o cursor (updated_at, object_id) do último registro lido
+ * (em memória: um worker que reinicia relê tudo, sem custo).
+ */
+export type IndexState = { since: Map<string, { at: string; id: string }> };
+
+const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
+/**
+ * Janela relida a cada passada que alcança o fim (tarefa 094): updated_at é o início da transação, não o COMMIT, e
+ * uma importação longa confirmada depois de o cursor passar pelo carimbo dela ficaria para trás. Reler é barato: o
+ * upsert só grava o texto que mudou.
+ */
+const LATE_COMMIT_WINDOW = '10 minutes';
 
 /** Pares em uso (registrados com last_in_use_at = agora); rode antes de gravar vetores de um par novo. */
 export async function touchEmbeddingIndexes(db: Executor): Promise<EmbeddingPair[]> {
@@ -143,15 +156,30 @@ export async function purgeEmbeddingIndexes(db: Executor, idle = '7 days'): Prom
   return Number(result.rows[0]?.n ?? 0);
 }
 
-/** Grava os textos-fonte alterados desde a última passada do par (até `batch` por tipo). */
-export async function syncEmbeddingSources(db: Database, pair: EmbeddingPair, state: IndexState, batch = 500) {
+const sourceKey = (pair: EmbeddingPair, type: string) => `${pair.providerId}|${pair.model}|${type}`;
+
+/**
+ * Grava os textos-fonte alterados desde a última passada do par (até `batch` por tipo). Pagina pela chave composta
+ * (updated_at, object_id), porque uma transação grava milhares de linhas com o mesmo carimbo (tarefa 094); alcançado
+ * o fim, o cursor volta à janela de COMMIT tardio. `reachedEnd`: todo tipo leu menos que o lote (contadas as linhas
+ * lidas, não só as gravadas, que ficam em 0 quando nada mudou), então a passada alcançou o fim das fontes (tarefa 161).
+ */
+export async function syncEmbeddingSources(
+  db: Database,
+  pair: EmbeddingPair,
+  state: IndexState,
+  batch = 500,
+): Promise<{ upserted: number; reachedEnd: boolean }> {
   let upserted = 0;
+  let reachedEnd = true;
   for (const [type, source] of Object.entries(SOURCES)) {
-    const key = `${pair.providerId}|${pair.model}|${type}`;
-    const since = state.since.get(key) ?? '-infinity';
-    const result = await db.execute<{ max: string | null; n: number }>(sql`
-      WITH src AS (SELECT * FROM (${source}) s WHERE s.updated_at > ${since}::timestamptz AND btrim(s.source_text) <> ''
-                    ORDER BY s.updated_at LIMIT ${batch}),
+    const key = sourceKey(pair, type);
+    const since = state.since.get(key) ?? { at: '-infinity', id: ZERO_UUID };
+    const result = await db.execute<{ last_at: string | null; last_id: string | null; read: number; n: number; rewind: string }>(sql`
+      WITH src AS (SELECT * FROM (${source}) s
+                    WHERE (s.updated_at, s.object_id) > (${since.at}::timestamptz, ${since.id}::uuid) AND btrim(s.source_text) <> ''
+                    ORDER BY s.updated_at, s.object_id LIMIT ${batch}),
+           last AS (SELECT updated_at, object_id FROM src ORDER BY updated_at DESC, object_id DESC LIMIT 1),
            up AS (
              INSERT INTO ai_embeddings (object_type, object_id, caixa_id, provider_id, model, source_text)
              SELECT object_type, object_id, caixa_id, ${pair.providerId}::uuid, ${pair.model}, left(source_text, 32000) FROM src
@@ -160,12 +188,28 @@ export async function syncEmbeddingSources(db: Database, pair: EmbeddingPair, st
                WHERE ai_embeddings.source_text IS DISTINCT FROM EXCLUDED.source_text
                   OR ai_embeddings.caixa_id IS DISTINCT FROM EXCLUDED.caixa_id
              RETURNING 1)
-      SELECT (SELECT max(updated_at)::text FROM src) AS max, (SELECT count(*)::int FROM up) AS n`);
+      SELECT (SELECT updated_at::text FROM last) AS last_at, (SELECT object_id::text FROM last) AS last_id,
+             (SELECT count(*)::int FROM src) AS read, (SELECT count(*)::int FROM up) AS n,
+             least(coalesce((SELECT updated_at FROM last), ${since.at}::timestamptz),
+                   now() - ${LATE_COMMIT_WINDOW}::interval)::text AS rewind`);
     const row = result.rows[0];
-    if (row?.max) state.since.set(key, row.max);
+    if (row && row.read >= batch && row.last_at && row.last_id) state.since.set(key, { at: row.last_at, id: row.last_id });
+    else if (row) state.since.set(key, { at: row.rewind, id: ZERO_UUID });
+    if (!row || row.read >= batch) reachedEnd = false;
     upserted += row?.n ?? 0;
   }
-  return upserted;
+  return { upserted, reachedEnd };
+}
+
+/**
+ * Marca o índice do par (tarefa 161): `true` grava o fim de uma passada completa (o banco só aceita sem vetor na
+ * fila, `needs_reindex`), `false` limpa. A busca lê só a marca (`ai_embedding_index_ready`), sem contar as fontes.
+ */
+export async function markEmbeddingIndex(db: Executor, pair: EmbeddingPair, complete: boolean): Promise<boolean> {
+  const result = await db.execute<{ done: boolean }>(
+    sql`SELECT ai_embedding_index_mark(${pair.providerId}::uuid, ${pair.model}, ${complete}) AS done`,
+  );
+  return Boolean(result.rows[0]?.done);
 }
 
 /** Calcula os vetores pendentes (needs_reindex) do par. */
@@ -196,12 +240,18 @@ export async function embedPending(db: Database, creds: EmbeddingCredentials, ba
 /**
  * Um ciclo de indexação (worker): registra os pares em uso e indexa cada um.
  * Um par com problema (provedor fora, modelo com outra dimensão) não segura
- * os demais: o erro volta na lista.
+ * os demais: o erro volta na lista. Ao fim de cada par, a marca do índice
+ * (tarefa 161): completo quando a passada alcançou o fim das fontes e não
+ * sobrou vetor na fila; incompleto (ou com erro), desmarcado. Na primeira
+ * passada do processo para o par (sem cursor), desmarca antes: o worker não
+ * sabe o que mudou enquanto estava parado, e só marca quando a releitura
+ * alcançar o fim.
  */
 export async function indexEmbeddings(
   db: Database,
   config: Pick<Config, 'aiRequestMaxAttempts' | 'aiRequestBackoffMs'>,
   state: IndexState,
+  opts: { sourceBatch?: number } = {},
 ): Promise<{ pairs: number; sources: number; embedded: number; errors: { pair: EmbeddingPair; error: unknown }[] }> {
   const pairs = await touchEmbeddingIndexes(db);
   let sources = 0;
@@ -211,10 +261,16 @@ export async function indexEmbeddings(
     try {
       const creds = await embeddingCredentials(db, pair, config);
       if (!creds) continue;
-      sources += await syncEmbeddingSources(db, pair, state);
+      const fresh = !Object.keys(SOURCES).some((type) => state.since.has(sourceKey(pair, type)));
+      if (fresh) await markEmbeddingIndex(db, pair, false);
+      const synced = await syncEmbeddingSources(db, pair, state, opts.sourceBatch);
+      sources += synced.upserted;
       embedded += await embedPending(db, creds);
+      // Com a fila não vazia, o banco grava nulo mesmo com true.
+      await markEmbeddingIndex(db, pair, synced.reachedEnd);
     } catch (error) {
       errors.push({ pair, error });
+      await markEmbeddingIndex(db, pair, false).catch(() => {});
     }
   }
   return { pairs: pairs.length, sources, embedded, errors };

@@ -10,10 +10,10 @@ import {
 import { BookOpenCheck, Loader2, Play } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { useAgents } from '../../agents/AgentsProvider';
+import { useAgentActions } from '../../agents/AgentsProvider';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
-import { Badge, Button, type Tone } from '../ui';
+import { Badge, Button, type Tone, usePolling } from '../ui';
 
 const k = t.agentsUi.recipes;
 
@@ -63,7 +63,7 @@ export function RecipesPanel({
 }) {
   const { data, reload } = useApi<ImportRecipesDto>(`/api/statement-imports/${importId}/recipes`);
   const { run, busy } = useAction();
-  const agents = useAgents();
+  const agents = useAgentActions();
   const started = useRef(onStarted);
   started.current = onStarted;
   const lastStarted = useRef<string | null>(null);
@@ -74,12 +74,11 @@ export function RecipesPanel({
   }, [version, reload]);
 
   // Enquanto a fila do import anda (uma receita por vez), relê; a cada execução nova, o painel da IA é remontado.
-  const queued = data?.runs.some((r) => r.status === 'queued' || r.status === 'started') ?? false;
-  useEffect(() => {
-    if (!queued) return;
-    const timer = setInterval(() => void reload(), 4000);
-    return () => clearInterval(timer);
-  }, [queued, reload]);
+  // A que espera aprovação não anda sozinha (tarefa 122): sem sondagem até a decisão (o painel da IA
+  // avisa ao terminar, pelo `version`); e nada com a aba escondida (`usePolling`).
+  const moving =
+    data?.runs.some((r) => r.status === 'queued' || (r.status === 'started' && r.runStatus !== 'awaiting_confirmation')) ?? false;
+  usePolling(() => reload(), 4000, moving);
   const current = data?.runs.find((r) => r.status === 'started')?.id ?? null;
   useEffect(() => {
     if (current && lastStarted.current && current !== lastStarted.current) started.current();

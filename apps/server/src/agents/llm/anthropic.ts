@@ -2,13 +2,14 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { AiRequestOperation, AiUsagePurpose, AssistantBlock, NeutralMessage } from '@moneyflow/shared';
 import { attachmentLabel } from './attachment-label';
 import { failureOutcome, type RequestLogBase, RequestRecorder } from './request-log';
-import { type LlmClient, type LlmCredentials, LlmError, type LlmRequest, type LlmStopReason } from './types';
+import { type LlmClient, type LlmCredentials, LlmError, type LlmRequest, type LlmStopReason, providerError } from './types';
 
 /*
  * Adaptador da Claude API (Messages API, @anthropic-ai/sdk) com streaming,
  * tool use, prompt caching (spec 022: pontos de cache na última tool, no fim da
- * parte estável do sistema e no fim da parte por usuário — 3 dos 4 que a API
- * aceita; a parte volátil vai depois) e entrada de imagem/PDF.
+ * parte estável do sistema, no fim da parte por usuário e no último bloco da
+ * última mensagem — os 4 que a API aceita; o do histórico faz cada volta do
+ * laço de tools ler do cache o que a anterior gravou) e entrada de imagem/PDF.
  *
  * Num servidor compatível (base_url), os interruptores do provedor (spec 024)
  * desligam o cache de prompt (nenhum cache_control) e o raciocínio (nem
@@ -118,6 +119,26 @@ async function toParams(request: LlmRequest): Promise<Anthropic.MessageParam[]> 
   return out;
 }
 
+/** Blocos que aceitam cache_control (o raciocínio não aceita). */
+const CACHEABLE = new Set(['text', 'tool_result', 'document', 'image', 'tool_use']);
+
+/**
+ * Ponto de cache 3 (spec 022, tarefa 096): o último bloco elegível da última
+ * mensagem. Na chamada seguinte da mesma execução o histórico só cresce, e a
+ * busca retroativa da API acha o prefixo gravado por esta.
+ */
+export function markHistoryCache(messages: Anthropic.MessageParam[]): void {
+  const last = messages.at(-1);
+  if (!last || !Array.isArray(last.content)) return;
+  for (let i = last.content.length - 1; i >= 0; i -= 1) {
+    const block = last.content[i] as { type: string; cache_control?: unknown };
+    if (CACHEABLE.has(block.type)) {
+      block.cache_control = { type: 'ephemeral' };
+      return;
+    }
+  }
+}
+
 export function anthropicClient(credentials: LlmCredentials, log: RequestLogBase = {}): LlmClient {
   // Um cliente por chamada: o fetch dele é o invólucro do registro (spec 023). As tentativas são do invólucro (maxRetries: 0).
   const open = (recorder: RequestRecorder) =>
@@ -128,18 +149,14 @@ export function anthropicClient(credentials: LlmCredentials, log: RequestLogBase
       timeout: 10 * 60 * 1000,
       fetch: recorder.fetch,
     });
-  const recorderFor = (operation: AiRequestOperation, purpose: AiUsagePurpose | null, model: string | null) =>
-    new RequestRecorder({ ...log, baseUrl: credentials.baseUrl }, { operation, purpose: purpose ?? null, model });
+  const recorderFor = (operation: AiRequestOperation, purpose: AiUsagePurpose | null, model: string | null, streaming?: boolean) =>
+    new RequestRecorder({ ...log, baseUrl: credentials.baseUrl }, { operation, purpose: purpose ?? null, model, streaming });
 
   const wrap = (error: unknown, signal?: AbortSignal): never => {
     if (error instanceof Anthropic.APIError && !(error instanceof Anthropic.APIUserAbortError)) {
       const status = typeof error.status === 'number' ? error.status : null;
       const message = (error.error as { error?: { message?: string } } | undefined)?.error?.message ?? error.message;
-      throw new LlmError(
-        String(message).slice(0, 500),
-        status,
-        status === null || status === 408 || status === 409 || status === 429 || status >= 500,
-      );
+      throw providerError(String(message), status);
     }
     if (signal?.aborted || (error as { name?: string })?.name === 'AbortError') throw error;
     // Queda no meio do stream (depois do primeiro byte, sem nova tentativa): a execução volta à fila (spec 023).
@@ -165,11 +182,16 @@ export function anthropicClient(credentials: LlmCredentials, log: RequestLogBase
       if (request.systemVolatile) system.push({ type: 'text', text: request.systemVolatile });
       const thinkingOn = thinkingAllowed && (params.thinking_budget_tokens ?? 0) > 0;
       const maxTokens = params.max_tokens ?? DEFAULT_MAX_TOKENS;
+      const messages = await toParams(request);
+      // Só onde há outra chamada que leia o prefixo: o laço de tools e o chat. Chamadas avulsas (título, descrição
+      // do anexo, fluxo JSON) pagariam a escrita do cache sem nunca lê-la.
+      const followUp = (request.operation ?? 'chat') === 'chat' && (request.tools.length > 0 || (request.purpose ?? 'chat') === 'chat');
+      if (cacheOn && followUp) markHistoryCache(messages);
       const body: Anthropic.MessageStreamParams = {
         model: request.model,
         max_tokens: legacy && thinkingOn ? Math.max(maxTokens, (params.thinking_budget_tokens ?? 0) + 1024) : maxTokens,
         system,
-        messages: await toParams(request),
+        messages,
         ...(tools.length ? { tools } : {}),
       };
       if (thinkingOn) {
@@ -187,7 +209,7 @@ export function anthropicClient(credentials: LlmCredentials, log: RequestLogBase
       }
 
       let final: Anthropic.Message;
-      const recorder = recorderFor(request.operation ?? 'chat', request.purpose ?? 'chat', request.model);
+      const recorder = recorderFor(request.operation ?? 'chat', request.purpose ?? 'chat', request.model, true);
       const client = open(recorder);
       try {
         const stream = client.messages.stream(body, { signal: request.signal });

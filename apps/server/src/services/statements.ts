@@ -2,17 +2,25 @@ import { createHash } from 'node:crypto';
 import { attachments, type Executor, statementCsvMappings, statementImports, statementLines, type Tx } from '@moneyflow/db';
 import {
   addDays,
+  applyCsvAmountSign,
   applyCsvMapping,
+  type CardChargeOccurrence,
   type CardChargeSuggestion,
+  type CsvAmountSign,
   type CsvMapping,
   cardChargeMatch,
+  csvBankBalance,
+  decodeCsvFile,
   decodeStatementFile,
+  detectCsvEncoding,
   detectDelimiter,
+  detectStatementEncoding,
   type importBankBalanceInput,
   importLink,
   type importRenameInput,
   type LineStatus,
   type MatchCandidate,
+  normalizeDescription,
   normalizeDescriptionForDedup,
   type ObligationMatch,
   type OfxInspectStatement,
@@ -25,9 +33,12 @@ import {
   pickOfxStatement,
   pickSeriesOccurrences,
   type SeriesCandidateInfo,
+  type SeriesOccurrenceRow,
+  type StatementFitidCollisions,
   type StatementImportDetail,
   type StatementImportSummary,
   type StatementInspect,
+  type StatementInvalidRows,
   type StatementLineRow,
   type SupersedeResult,
   scoreCandidate,
@@ -39,7 +50,7 @@ import {
 import { eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
-import { AppError, notFound, unprocessable } from '../errors';
+import { AppError, failureReason, notFound, unprocessable } from '../errors';
 import { cleanFileName, storeAttachment } from './attachments';
 import { getAccount } from './caixas';
 import { expectedCardOccurrences, insertChargePurchase, toSuggestion } from './card-charges';
@@ -47,7 +58,7 @@ import { loadCard } from './card-core';
 import { settleFromLine } from './line-settle';
 import { createNotifications } from './notifications';
 import { TERMS_SQL, termsOf } from './series-core';
-import { activeProvisionals, lockImports, previewSupersedeForFile, supersedeInTx } from './statement-supersede';
+import { activeProvisionals, assertActiveProvisionals, lockImports, previewSupersedeForFile, supersedeInTx } from './statement-supersede';
 import { withTx } from './tx';
 import { camel, iso } from './util';
 
@@ -76,6 +87,8 @@ export async function resolveTarget(
     if (write && account.kind !== 'checking' && account.kind !== 'savings') {
       throw unprocessable(t.errors.statementTarget, 'statement_imports_account_kind_check');
     }
+    // Conta arquivada não importa extrato novo (spec 032); os lotes antigos continuam legíveis (tarefa 080).
+    if (write && account.archivedAt) throw unprocessable(t.errors.statementAccountArchived, 'statement_account_archived');
     return {
       kind: 'account',
       accountId: account.id,
@@ -117,6 +130,8 @@ type ParsedFile = {
   csvMappingId: string | null;
   /** OFX com várias contas: as que ficaram de fora (rótulos). */
   ofxLeftOut: string[];
+  /** CSV: as linhas com data ou valor inválidos, que não entram (tarefa 140). */
+  invalidRows: { row: number; message: string }[];
 };
 
 const ofxLabel = (st: OfxStatement) => t.statements.ofxAccountLabel(st);
@@ -156,11 +171,6 @@ function chooseOfxStatement(statements: OfxStatement[], target: StatementTarget,
   throw unprocessable(t.errors.statementOfxChooseAccount(list), 'statement_ofx_choose_account');
 }
 
-function decodeWith(bytes: Buffer, encoding: string): string {
-  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return bytes.subarray(3).toString('utf8');
-  return new TextDecoder(encoding === 'latin1' ? 'latin1' : encoding).decode(bytes);
-}
-
 function mappingOf(row: InlineCsvMapping): CsvMapping {
   return {
     hasHeader: row.hasHeader,
@@ -185,11 +195,17 @@ async function findMapping(db: Executor, target: StatementTarget, mappingId?: st
   return row ?? null;
 }
 
-/** Mapeamento CSV ainda não salvo (prévia da tool import_statement, spec 027). */
+/** Mapeamento CSV ainda não salvo (prévia da tool import_statement, spec 027); sem o sinal, o padrão do alvo. */
 export type InlineCsvMapping = Pick<
   typeof statementCsvMappings.$inferSelect,
   'delimiter' | 'encoding' | 'hasHeader' | 'skipRows' | 'dateFormat' | 'decimalSeparator' | 'columns'
->;
+> & { amountSign?: string };
+
+/**
+ * Sinal do mapeamento criado sem ele (tarefa 091), o mesmo da migração sem evidência: a fatura do cartão em CSV
+ * costuma trazer as compras positivas (spec 009), e a conta vem como está.
+ */
+export const defaultCsvAmountSign = (target: { kind: 'account' | 'card' }): CsvAmountSign => (target.kind === 'card' ? 'invert' : 'as_is');
 
 /**
  * Lê o arquivo (OFX ou CSV com o mapeamento) e devolve as linhas no ponto de
@@ -216,12 +232,13 @@ export async function parseStatementFile(
       bankBalance: ofx.ledgerBalance,
       csvMappingId: null,
       ofxLeftOut: statements.filter((_, i) => i !== index).map(ofxLabel),
+      invalidRows: [],
     };
   }
 
   const mapping = inline ? { ...inline, id: null } : await findMapping(db, target, mappingId);
   if (!mapping) throw unprocessable(t.errors.csvMappingRequired, 'csv_mapping_required');
-  const csvText = decodeWith(bytes, mapping.encoding);
+  const csvText = decodeCsvFile(bytes, mapping.encoding);
   let applied: ReturnType<typeof applyCsvMapping>;
   try {
     applied = applyCsvMapping(parseCsv(csvText, mapping.delimiter), mappingOf(mapping));
@@ -236,45 +253,123 @@ export async function parseStatementFile(
     fitid: line.fitid,
     raw: line.raw as Record<string, unknown>,
   }));
-  // Fatura de cartão em CSV costuma trazer compras positivas: no app, compra sai (−).
-  if (target.kind === 'card' && lines.filter((l) => l.amountCents > 0).length > lines.length / 2) {
-    lines = lines.map((l) => ({ ...l, amountCents: -l.amountCents }));
-  }
-  const withBalance = applied.lines.filter((l) => l.balanceCents !== null);
-  const last = withBalance.reduce<(typeof withBalance)[number] | null>((acc, l) => (!acc || l.postedOn >= acc.postedOn ? l : acc), null);
+  // O sinal é o do mapeamento (tarefa 091), nunca a maioria das linhas do arquivo: no app, compra e débito saem (−).
+  lines = applyCsvAmountSign(lines, (mapping.amountSign as CsvAmountSign | undefined) ?? defaultCsvAmountSign(target));
   return {
     format: 'csv',
     lines,
     periodStart: null,
     periodEnd: null,
-    bankBalance: last ? { amountCents: last.balanceCents!, date: last.postedOn } : null,
+    bankBalance: csvBankBalance(applied.lines),
     csvMappingId: mapping.id,
     ofxLeftOut: [],
+    invalidRows: applied.errors,
   };
 }
+
+type DedupLine = Pick<ParsedLine, 'postedOn' | 'amountCents' | 'description' | 'fitid'>;
+
+/** A linha da conta que tem a chave `fitid:<FITID>` (data e valor), para reconhecer a colisão de FITID. */
+export type FitidHolder = { postedOn: string; amountCents: number };
+
+const fitidKey = (fitid: string) => `fitid:${fitid}`.slice(0, 200);
+const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
 /**
  * Chave de deduplicação (docs/016): `fitid:<FITID>` ou SHA-256 de data|valor|descrição normalizada|ordem.
  * A normalização do dedup é congelada (normalizeDescriptionForDedup): o hash das linhas já importadas não muda.
+ *
+ * FITID que não é único (tarefa 089): se a conta já tem `fitid:<FITID>` com outra data ou outro valor
+ * (`holders`), ou se o FITID se repete no arquivo, a linha é outra transação e recebe a chave de reserva
+ * `fitid:<FITID>#<SHA-256 de FITID|data|valor|descrição normalizada|ordem entre as iguais>`. A linha com a
+ * mesma data e o mesmo valor da que tem a chave é a mesma transação (duplicada), uma vez só. O reimport do
+ * mesmo arquivo dá as mesmas chaves, em qualquer ordem.
  */
-export function dedupHashes(lines: Pick<ParsedLine, 'postedOn' | 'amountCents' | 'description' | 'fitid'>[]): string[] {
+export function dedupHashes(lines: DedupLine[], holders: ReadonlyMap<string, FitidHolder> = new Map()): string[] {
   const seen = new Map<string, number>();
+  const taken = new Set<string>();
+  const reserved = new Map<string, number>();
   return lines.map((line) => {
-    if (line.fitid) return `fitid:${line.fitid}`.slice(0, 200);
+    if (line.fitid) {
+      const key = fitidKey(line.fitid);
+      if (!taken.has(key)) {
+        const holder = holders.get(key);
+        if (!holder || (holder.postedOn === line.postedOn && holder.amountCents === line.amountCents)) {
+          taken.add(key);
+          return key;
+        }
+      }
+      // 6 + 129 + 1 + 64 = 200, o limite de statement_lines_dedup_hash_check.
+      const base = `${line.fitid}|${line.postedOn}|${line.amountCents}|${normalizeDescriptionForDedup(line.description)}`;
+      const ordinal = reserved.get(base) ?? 0;
+      reserved.set(base, ordinal + 1);
+      return `fitid:${line.fitid.slice(0, 129)}#${sha256(`${base}|${ordinal}`)}`;
+    }
     const base = `${line.postedOn}|${line.amountCents}|${normalizeDescriptionForDedup(line.description)}`;
     const ordinal = seen.get(base) ?? 0;
     seen.set(base, ordinal + 1);
-    return createHash('sha256').update(`${base}|${ordinal}`).digest('hex');
+    return sha256(`${base}|${ordinal}`);
   });
 }
 
-/** A deduplicação não conta as linhas dos lotes provisórios (spec 031): o consolidado traz o mês inteiro. */
-const notProvisional = sql`NOT EXISTS (SELECT 1 FROM statement_imports si
-                                    WHERE si.id = statement_lines.statement_import_id AND si.provisional)`;
+/**
+ * A deduplicação não conta as linhas dos lotes provisórios (spec 031): o consolidado traz o mês inteiro. Pela
+ * cópia na linha, que o banco mantém para o índice parcial statement_lines_account_dedup_key (tarefa 139).
+ */
+const notProvisional = sql`NOT statement_lines.provisional`;
+
+/**
+ * As linhas do arquivo contra as da conta (ou do cartão): a chave de cada uma,
+ * as que já existem (`known`) e as novas que entram pela chave de reserva do
+ * FITID repetido (tarefa 089). Duas consultas, qualquer que seja o tamanho do arquivo.
+ */
+async function dedupAgainstTarget(db: Executor, target: StatementTarget, lines: ParsedLine[]) {
+  const ownerColumn = target.kind === 'account' ? sql`financial_account_id` : sql`card_caixa_id`;
+  const ownerId = target.kind === 'account' ? target.accountId : target.cardId;
+  const inList = (keys: string[]) =>
+    sql.join(
+      keys.map((h) => sql`${h}`),
+      sql`, `,
+    );
+  const fitidKeys = [...new Set(lines.flatMap((l) => (l.fitid ? [fitidKey(l.fitid)] : [])))];
+  const holders = new Map<string, FitidHolder>();
+  if (fitidKeys.length > 0) {
+    const rows = await db.execute<{ dedup_hash: string; posted_on: string; amount_cents: number }>(sql`
+      SELECT dedup_hash, posted_on, amount_cents FROM statement_lines WHERE ${ownerColumn} = ${ownerId}::uuid
+         AND ${notProvisional} AND dedup_hash IN (${inList(fitidKeys)})`);
+    for (const r of rows.rows) holders.set(r.dedup_hash, { postedOn: r.posted_on, amountCents: Number(r.amount_cents) });
+  }
+  const hashes = dedupHashes(lines, holders);
+  const existing = await db.execute<{ dedup_hash: string }>(sql`
+    SELECT dedup_hash FROM statement_lines WHERE ${ownerColumn} = ${ownerId}::uuid
+       AND ${notProvisional} AND dedup_hash IN (${inList(hashes)})`);
+  const known = new Set(existing.rows.map((r) => r.dedup_hash));
+  const fresh = lines.map((line, i) => ({ line, hash: hashes[i]! })).filter((x) => !known.has(x.hash));
+  const collided = fresh.filter((x) => x.line.fitid && x.hash !== fitidKey(x.line.fitid));
+  const fitidCollisions: StatementFitidCollisions | undefined = collided.length
+    ? {
+        total: collided.length,
+        lines: collided.slice(0, SHOWN_ROWS).map(({ line }) => ({
+          fitid: line.fitid!,
+          postedOn: line.postedOn,
+          amountCents: line.amountCents,
+          description: line.description,
+        })),
+      }
+    : undefined;
+  return { fresh, fitidCollisions };
+}
+
+/** Quantas linhas inválidas ou colisões a resposta lista (o total vem junto). */
+const SHOWN_ROWS = 50;
+
+const invalidRowsOf = (parsed: ParsedFile): StatementInvalidRows | undefined =>
+  parsed.invalidRows.length ? { total: parsed.invalidRows.length, rows: parsed.invalidRows.slice(0, SHOWN_ROWS) } : undefined;
 
 /**
  * Prévia de um import (sem gravar): formato, período e quantas linhas são
- * novas ou já importadas (spec 027, cartão de aprovação do import_statement).
+ * novas ou já importadas (spec 027, cartão de aprovação do import_statement),
+ * com as linhas do CSV que não foram lidas e as colisões de FITID.
  */
 export async function previewStatementImport(
   ctx: ServiceContext,
@@ -283,23 +378,15 @@ export async function previewStatementImport(
   opts: { mappingId?: string; inline?: InlineCsvMapping; ofxStatement?: number; provisional?: boolean; supersede?: string[] },
 ) {
   const target = await resolveTarget(ctx, ref, true);
-  if (opts.provisional && target.kind !== 'account')
+  if ((opts.provisional || opts.supersede?.length) && target.kind !== 'account')
     throw unprocessable(t.errors.statementProvisionalAccountOnly, 'statement_provisional_account_only');
+  // A troca pedida vale só para provisórios ativos da conta, como na execução (tarefa 142).
+  if (target.kind === 'account') await assertActiveProvisionals(ctx.db, target.accountId, opts.supersede ?? []);
   const parsed = await parseStatementFile(ctx.db, target, bytes, opts);
   if (parsed.lines.length === 0) throw unprocessable(t.errors.statementEmpty, 'statement_empty');
-  const hashes = dedupHashes(parsed.lines);
-  const ownerColumn = target.kind === 'account' ? sql`financial_account_id` : sql`card_caixa_id`;
-  const ownerId = target.kind === 'account' ? target.accountId : target.cardId;
-  const existing = await ctx.db.execute<{ dedup_hash: string }>(sql`
-    SELECT dedup_hash FROM statement_lines WHERE ${ownerColumn} = ${ownerId}::uuid
-       AND ${notProvisional}
-       AND dedup_hash IN (${sql.join(
-         hashes.map((h) => sql`${h}`),
-         sql`, `,
-       )})`);
-  const known = new Set(existing.rows.map((r) => r.dedup_hash));
+  const dedup = await dedupAgainstTarget(ctx.db, target, parsed.lines);
+  const fresh = dedup.fresh.map((x) => x.line);
   const dates = parsed.lines.map((l) => l.postedOn).sort();
-  const fresh = parsed.lines.filter((_, i) => !known.has(hashes[i]!));
   const periodStart = [parsed.periodStart, dates[0]].filter(Boolean).sort()[0] ?? null;
   const periodEnd = [parsed.periodEnd, dates.at(-1)].filter(Boolean).sort().at(-1) ?? null;
   // Spec 031: os provisórios ativos sobrepostos e, com a troca, o resultado dela sem gravar.
@@ -323,6 +410,8 @@ export async function previewStatementImport(
     inCents: fresh.filter((l) => l.amountCents > 0).reduce((sum, l) => sum + l.amountCents, 0),
     outCents: fresh.filter((l) => l.amountCents < 0).reduce((sum, l) => sum + l.amountCents, 0),
     ofxLeftOut: parsed.ofxLeftOut,
+    invalidRows: invalidRowsOf(parsed),
+    fitidCollisions: dedup.fitidCollisions,
   };
 }
 
@@ -354,6 +443,7 @@ export async function inspectStatement(
   ref: { accountId?: string; cardCaixaId?: string } = {},
 ): Promise<StatementInspect> {
   const text = decodeStatementFile(bytes);
+  // A codificação detectada (tarefa 088): no CSV, a tela a pré-seleciona no mapeamento.
   if (looksLikeOfx(text)) {
     const statements = readOfxStatements(text);
     const target = ref.accountId || ref.cardCaixaId ? (await resolveTarget(ctx, ref, false)).ofx : null;
@@ -362,7 +452,7 @@ export async function inspectStatement(
     const shown = all[pick.index ?? pick.suggested ?? 0]!;
     return {
       format: 'ofx',
-      encoding: 'auto',
+      encoding: detectStatementEncoding(bytes),
       ofx: {
         ...shown,
         statements: all,
@@ -375,7 +465,7 @@ export async function inspectStatement(
   const delimiter = detectDelimiter(text);
   const rows = parseCsv(text, delimiter);
   if (rows.length === 0) throw unprocessable(t.errors.statementFormat, 'statement_format');
-  return { format: 'csv', encoding: 'auto', ofx: null, csv: { delimiter, rows: rows.slice(0, 20) } };
+  return { format: 'csv', encoding: detectCsvEncoding(bytes), ofx: null, csv: { delimiter, rows: rows.slice(0, 20) } };
 }
 
 /* ---------------- import ---------------- */
@@ -390,20 +480,9 @@ export async function importStatement(
     throw unprocessable(t.errors.statementProvisionalAccountOnly, 'statement_provisional_account_only');
   const parsed = await parseStatementFile(ctx.db, target, file.content, query);
   if (parsed.lines.length === 0) throw unprocessable(t.errors.statementEmpty, 'statement_empty');
-  const hashes = dedupHashes(parsed.lines);
 
   const result = await withTx(ctx, async (tx) => {
-    const ownerColumn = target.kind === 'account' ? sql`financial_account_id` : sql`card_caixa_id`;
-    const ownerId = target.kind === 'account' ? target.accountId : target.cardId;
-    const existing = await tx.execute<{ dedup_hash: string }>(sql`
-      SELECT dedup_hash FROM statement_lines WHERE ${ownerColumn} = ${ownerId}::uuid
-         AND ${notProvisional}
-         AND dedup_hash IN (${sql.join(
-           hashes.map((h) => sql`${h}`),
-           sql`, `,
-         )})`);
-    const known = new Set(existing.rows.map((r) => r.dedup_hash));
-    const fresh = parsed.lines.map((line, i) => ({ line, hash: hashes[i]! })).filter((x) => !known.has(x.hash));
+    const { fresh, fitidCollisions } = await dedupAgainstTarget(tx, target, parsed.lines);
     if (fresh.length === 0) throw new AppError(409, 'statement_duplicated', t.errors.statementAllDuplicated);
 
     const dates = parsed.lines.map((l) => l.postedOn).sort();
@@ -435,12 +514,17 @@ export async function importStatement(
       })
       .returning({ id: statementImports.id });
 
+    // As regras de todas as linhas numa consulta só (tarefa 139).
+    const rules = await rulesFor(
+      tx,
+      ruleTargetOf(target),
+      fresh.map(({ line }) => line),
+    );
     const usage = new Map<string, number>();
-    const values = [];
-    for (const { line, hash } of fresh) {
-      const rule = await ruleFor(tx, ruleTargetOf(target), line.description, line.amountCents);
+    const values = fresh.map(({ line, hash }, i) => {
+      const rule = rules[i];
       if (rule) usage.set(rule.id, (usage.get(rule.id) ?? 0) + 1);
-      values.push({
+      return {
         statementImportId: imp!.id,
         financialAccountId: target.kind === 'account' ? target.accountId : null,
         cardCaixaId: target.kind === 'card' ? target.cardId : null,
@@ -453,16 +537,12 @@ export async function importStatement(
         entityId: rule?.entityId ?? null,
         categoryId: rule?.categoryId ?? null,
         classificationRuleId: rule?.id ?? null,
-        classificationSource: rule ? 'rule' : null,
+        classificationSource: rule ? ('rule' as const) : null,
         raw: line.raw,
-      });
-    }
+      };
+    });
     for (let i = 0; i < values.length; i += 500) await tx.insert(statementLines).values(values.slice(i, i + 500));
-    for (const [ruleId, count] of usage) {
-      await tx.execute(
-        sql`UPDATE classification_rules SET usage_count = usage_count + ${count}, last_used_at = now() WHERE id = ${ruleId}`,
-      );
-    }
+    await bumpRuleUsage(tx, usage);
     // Spec 031: a troca dos provisórios antes do casamento automático (as conciliações passam, nada é lançado de novo).
     // Um provisório novo substitui sempre os provisórios ativos que ele cobre; o consolidado, os escolhidos.
     let superseded: SupersedeResult | undefined;
@@ -478,13 +558,16 @@ export async function importStatement(
       if (!query.provisional && left.length > 0) provisionalOverlap = left;
     }
     await autoMatch(ctx, tx, imp!.id);
-    return { id: imp!.id, skipped: parsed.lines.length - fresh.length, superseded, provisionalOverlap };
+    return { id: imp!.id, skipped: parsed.lines.length - fresh.length, superseded, provisionalOverlap, fitidCollisions };
   });
   const detail = await getImport(ctx, result.id);
+  const invalidRows = invalidRowsOf(parsed);
   return {
     ...detail,
     skippedDuplicates: result.skipped,
     ...(parsed.ofxLeftOut.length ? { ofxLeftOut: parsed.ofxLeftOut } : {}),
+    ...(invalidRows ? { invalidRows } : {}),
+    ...(result.fitidCollisions ? { fitidCollisions: result.fitidCollisions } : {}),
     ...(result.superseded ? { superseded: result.superseded } : {}),
     ...(result.provisionalOverlap ? { provisionalOverlap: result.provisionalOverlap } : {}),
   };
@@ -500,11 +583,41 @@ export const ruleTargetOf = (target: StatementTarget): RuleTarget =>
 
 /** Regra aplicável (classification_rule_for, só as do alvo da linha) com a entidade/categoria dela. */
 export async function ruleFor(tx: Executor, target: RuleTarget, description: string, amountCents: number): Promise<Rule | null> {
-  const result = await tx.execute<{ id: string; entity_id: string | null; category_id: string | null }>(sql`
-    SELECT r.id, r.entity_id, r.category_id FROM classification_rules r
-     WHERE r.id = classification_rule_for(${target.accountId}::uuid, ${target.cardCaixaId}::uuid, ${description}, ${amountCents}::bigint)`);
-  const row = result.rows[0];
-  return row ? { id: row.id, entityId: row.entity_id, categoryId: row.category_id } : null;
+  return (await rulesFor(tx, target, [{ description, amountCents }]))[0] ?? null;
+}
+
+/**
+ * O ruleFor de várias linhas do mesmo alvo, na ordem delas: uma consulta só
+ * para o lote inteiro, com uma chamada de classification_rule_for por linha
+ * (tarefa 139; a importação e o "Aplicar regras" usam esta).
+ */
+export async function rulesFor(
+  tx: Executor,
+  target: RuleTarget,
+  lines: { description: string; amountCents: number }[],
+): Promise<(Rule | null)[]> {
+  if (lines.length === 0) return [];
+  // A descrição normalizada vai junto (tarefa 076): a regra aprendida guarda o padrão normalizado
+  // (rulePatternOf), sem acentos, pontuação, números de documento nem datas, e casa por ela.
+  const items = lines.map((l, i) => ({ i, d: l.description, v: l.amountCents, n: normalizeDescription(l.description) }));
+  const result = await tx.execute<{ i: number; id: string; entity_id: string | null; category_id: string | null }>(sql`
+    WITH x AS MATERIALIZED (
+      SELECT x.i, classification_rule_for(${target.accountId}::uuid, ${target.cardCaixaId}::uuid, x.d, x.v, x.n) AS rule_id
+        FROM json_to_recordset(${JSON.stringify(items)}::json) AS x(i int, d text, v bigint, n text))
+    SELECT x.i, r.id, r.entity_id, r.category_id FROM x JOIN classification_rules r ON r.id = x.rule_id`);
+  const out: (Rule | null)[] = lines.map(() => null);
+  for (const row of result.rows) out[Number(row.i)] = { id: row.id, entityId: row.entity_id, categoryId: row.category_id };
+  return out;
+}
+
+/** Soma o uso das regras (importação e "Aplicar regras", spec 009) numa consulta só. */
+export async function bumpRuleUsage(tx: Executor, usage: Map<string, number>) {
+  if (usage.size === 0) return;
+  const rows = [...usage].map(([id, n]) => ({ id, n }));
+  await tx.execute(sql`
+    UPDATE classification_rules r SET usage_count = r.usage_count + x.n, last_used_at = now()
+      FROM json_to_recordset(${JSON.stringify(rows)}::json) AS x(id uuid, n int)
+     WHERE r.id = x.id`);
 }
 
 /* ---------------- casamento assistido ---------------- */
@@ -516,123 +629,194 @@ type LineRow = {
   description: string;
   financial_account_id: string | null;
   card_caixa_id: string | null;
+  /** Na fatura do cartão, a fatura do lote (tarefa 141): as parcelas dela vêm no lugar das de outras faturas. */
+  card_invoice_id?: string | null;
 };
 
+/** Pré-filtro largo das ocorrências de série e das cobranças esperadas: a janela vai a 45 dias e o mesmo mês soma até 31. */
+const SERIES_PREFILTER_DAYS = 76;
+
+const bigintArray = (values: number[]) => sql`${`{${values.join(',')}}`}::bigint[]`;
+
+type SeriesRow = { direction: 'payable' | 'receivable'; occ: SeriesOccurrenceRow };
+type PoolItem = MatchCandidate & { invoiceId: string };
+
 /**
- * Candidatos de uma linha: movimentos da conta, títulos em aberto da caixa
- * (valor exato, ±3 dias), as ocorrências de séries pela regra de
- * reconhecimento da série (specs 033 e 034) e, na fatura do cartão, os itens
- * e as cobranças esperadas das obrigações no cartão.
+ * O que as linhas de um lote (da mesma conta ou do mesmo cartão) podem casar,
+ * lido de uma vez para o intervalo das datas e os valores delas (tarefa 139):
+ * movimentos livres da conta, títulos em aberto da caixa, ocorrências de
+ * série e, na fatura, os itens e as cobranças esperadas. Cada linha filtra o
+ * seu pedaço em memória (candidatesFromPool), com o mesmo resultado da
+ * consulta por linha.
  */
-export async function candidatesFor(tx: Executor, line: LineRow, windowDays = 3): Promise<MatchCandidate[]> {
-  const from = addDays(line.posted_on, -windowDays);
-  const to = addDays(line.posted_on, windowDays);
-  const matchLine = { postedOn: line.posted_on, amountCents: Number(line.amount_cents), description: line.description };
-  if (line.card_caixa_id) {
-    const items = await tx.execute<{ id: string; date: string; amount_cents: number; description: string; entity_name: string | null }>(sql`
-      SELECT i.id, p.purchased_on AS date, -i.amount_cents AS amount_cents, p.description, e.name AS entity_name
+type CandidatePool = {
+  windowDays: number;
+  moves: MatchCandidate[];
+  titles: MatchCandidate[];
+  series: SeriesRow[];
+  items: PoolItem[];
+  charges: CardChargeOccurrence[];
+};
+
+async function loadCandidatePool(tx: Executor, lines: LineRow[], windowDays: number): Promise<CandidatePool> {
+  const pool: CandidatePool = { windowDays, moves: [], titles: [], series: [], items: [], charges: [] };
+  const first = lines[0];
+  if (!first) return pool;
+  const dates = lines.map((l) => l.posted_on).sort();
+  const from = addDays(dates[0]!, -windowDays);
+  const to = addDays(dates.at(-1)!, windowDays);
+  const amounts = [...new Set(lines.map((l) => Number(l.amount_cents)))];
+  if (first.card_caixa_id) {
+    const items = await tx.execute<{
+      id: string;
+      invoice_id: string;
+      date: string;
+      amount_cents: number;
+      description: string;
+      entity_name: string | null;
+    }>(sql`
+      SELECT i.id, i.card_invoice_id AS invoice_id, p.purchased_on AS date, -i.amount_cents AS amount_cents, p.description,
+             e.name AS entity_name
         FROM card_invoice_items i
         JOIN card_invoices v ON v.id = i.card_invoice_id
         JOIN card_purchases p ON p.id = i.card_purchase_id
         JOIN entities e ON e.id = p.entity_id
-       WHERE v.card_caixa_id = ${line.card_caixa_id} AND i.kind = 'installment'
-         AND -i.amount_cents = ${line.amount_cents}
+       WHERE v.card_caixa_id = ${first.card_caixa_id} AND i.kind = 'installment'
+         AND -i.amount_cents = ANY (${bigintArray(amounts)})
          AND p.purchased_on BETWEEN ${from}::date AND ${to}::date
-         AND NOT EXISTS (SELECT 1 FROM statement_lines sl WHERE sl.card_invoice_item_id = i.id AND sl.status = 'matched')`);
-    // Cobranças esperadas (spec 034): pré-filtro largo, a janela vai a 45 dias e o mesmo mês soma até 31.
-    const charges = await expectedCardOccurrences(tx, line.card_caixa_id, addDays(line.posted_on, -76), addDays(line.posted_on, 76));
-    return [
-      ...items.rows.map((r) => ({
-        kind: 'card_item' as const,
-        id: r.id,
-        date: r.date,
-        amountCents: Number(r.amount_cents),
-        description: r.description,
-        entityName: r.entity_name,
-      })),
-      ...charges.map((c) => cardChargeMatch(matchLine, c)).filter((c): c is MatchCandidate => c !== null),
-    ];
-  }
-  const [moves, open] = await Promise.all([
-    tx.execute<{ id: string; date: string; amount_cents: number; description: string | null; entity_name: string | null }>(sql`
-      SELECT m.id, m.occurred_on AS date, m.amount_cents, coalesce(m.description, t.description) AS description, e.name AS entity_name
-        FROM movements m
-        LEFT JOIN settlements s ON s.id = m.settlement_id
-        LEFT JOIN titles t ON t.id = s.title_id
-        LEFT JOIN entities e ON e.id = coalesce(m.entity_id, t.entity_id)
-       WHERE m.financial_account_id = ${line.financial_account_id} AND m.amount_cents = ${line.amount_cents}
-         AND m.occurred_on BETWEEN ${from}::date AND ${to}::date
-         AND NOT EXISTS (SELECT 1 FROM statement_lines sl WHERE sl.movement_id = m.id AND sl.status = 'matched')`),
-    tx.execute<{ id: string; date: string; amount_cents: number; description: string; entity_name: string }>(sql`
-      SELECT t.id, t.due_date AS date,
-             CASE t.direction WHEN 'payable' THEN -b.open_cents ELSE b.open_cents END AS amount_cents,
-             t.description, e.name AS entity_name
-        FROM titles t
-        JOIN title_balances b ON b.title_id = t.id
-        JOIN entities e ON e.id = t.entity_id
-        JOIN financial_accounts a ON a.id = ${line.financial_account_id}::uuid
-       WHERE t.caixa_id = a.caixa_id AND t.status IN ('open', 'partial') AND t.archived_at IS NULL
-         AND b.open_cents = abs(${line.amount_cents}::bigint)
-         AND t.direction = ${line.amount_cents < 0 ? 'payable' : 'receivable'}
-         AND t.due_date BETWEEN ${from}::date AND ${to}::date`),
-  ]);
-  const occurrences = await seriesCandidates(tx, line);
-  return [
-    ...occurrences,
-    ...moves.rows.map((r) => ({
-      kind: 'movement' as const,
+         AND NOT EXISTS (SELECT 1 FROM statement_lines sl WHERE sl.card_invoice_item_id = i.id AND sl.status = 'matched')
+       -- Parcelas iguais da mesma compra (tarefa 141): a de menor número em aberto primeiro.
+       ORDER BY i.installment_number, p.purchased_on, i.id`);
+    pool.items = items.rows.map((r) => ({
+      kind: 'card_item' as const,
       id: r.id,
-      date: r.date,
-      amountCents: Number(r.amount_cents),
-      description: r.description ?? '',
-      entityName: r.entity_name,
-    })),
-    ...open.rows.map((r) => ({
-      kind: 'title' as const,
-      id: r.id,
+      invoiceId: r.invoice_id,
       date: r.date,
       amountCents: Number(r.amount_cents),
       description: r.description,
       entityName: r.entity_name,
-    })),
-  ];
+    }));
+    pool.charges = await expectedCardOccurrences(
+      tx,
+      first.card_caixa_id,
+      addDays(dates[0]!, -SERIES_PREFILTER_DAYS),
+      addDays(dates.at(-1)!, SERIES_PREFILTER_DAYS),
+    );
+    return pool;
+  }
+  const accountId = first.financial_account_id;
+  if (!accountId) return pool;
+  const moves = await tx.execute<{
+    id: string;
+    date: string;
+    amount_cents: number;
+    description: string | null;
+    entity_name: string | null;
+  }>(sql`
+    SELECT m.id, m.occurred_on AS date, m.amount_cents, coalesce(m.description, t.description) AS description, e.name AS entity_name
+      FROM movements m
+      LEFT JOIN settlements s ON s.id = m.settlement_id
+      LEFT JOIN titles t ON t.id = s.title_id
+      LEFT JOIN entities e ON e.id = coalesce(m.entity_id, t.entity_id)
+     WHERE m.financial_account_id = ${accountId} AND m.amount_cents = ANY (${bigintArray(amounts)})
+       AND m.occurred_on BETWEEN ${from}::date AND ${to}::date
+       AND NOT EXISTS (SELECT 1 FROM statement_lines sl WHERE sl.movement_id = m.id AND sl.status = 'matched')
+     ORDER BY m.occurred_on, m.id`);
+  pool.moves = moves.rows.map((r) => ({
+    kind: 'movement' as const,
+    id: r.id,
+    date: r.date,
+    amountCents: Number(r.amount_cents),
+    description: r.description ?? '',
+    entityName: r.entity_name,
+  }));
+  const titles = await tx.execute<{ id: string; date: string; amount_cents: number; description: string; entity_name: string }>(sql`
+    SELECT t.id, t.due_date AS date,
+           CASE t.direction WHEN 'payable' THEN -b.open_cents ELSE b.open_cents END AS amount_cents,
+           t.description, e.name AS entity_name
+      FROM titles t
+      JOIN title_balances b ON b.title_id = t.id
+      JOIN entities e ON e.id = t.entity_id
+      JOIN financial_accounts a ON a.id = ${accountId}::uuid
+     WHERE t.caixa_id = a.caixa_id AND t.status IN ('open', 'partial') AND t.archived_at IS NULL
+       AND b.open_cents = ANY (${bigintArray([...new Set(amounts.map(Math.abs))])})
+       AND t.due_date BETWEEN ${from}::date AND ${to}::date
+     ORDER BY t.due_date, t.id`);
+  pool.titles = titles.rows.map((r) => ({
+    kind: 'title' as const,
+    id: r.id,
+    date: r.date,
+    amountCents: Number(r.amount_cents),
+    description: r.description,
+    entityName: r.entity_name,
+  }));
+  pool.series = await seriesRows(tx, accountId, addDays(dates[0]!, -SERIES_PREFILTER_DAYS), addDays(dates.at(-1)!, SERIES_PREFILTER_DAYS));
+  return pool;
 }
 
 /**
- * Ocorrências em aberto (ou parciais) de séries na direção da linha, da caixa
- * da conta e com a conta prevista igual à da linha (ou sem conta), que batem
- * pela regra da série (seriesMatch: o mesmo mês ou a janela; exato, encargos,
- * desconto, tolerância ou parcial).
+ * Candidatos de uma linha a partir do que o lote leu: movimentos da conta,
+ * títulos em aberto da caixa (valor exato, ±3 dias), as ocorrências de séries
+ * pela regra de reconhecimento da série (specs 033 e 034) e, na fatura do
+ * cartão, os itens e as cobranças esperadas das obrigações no cartão. Com a
+ * fatura no lote, só as parcelas dela (as de outras faturas só se ela não tiver
+ * nenhuma; tarefa 141).
  */
-async function seriesCandidates(tx: Executor, line: LineRow, entityId?: string): Promise<MatchCandidate[]> {
-  if (!line.financial_account_id) return [];
-  // Pré-filtro largo: a janela vai a 45 dias e o mesmo mês soma até 31.
-  const from = addDays(line.posted_on, -76);
-  const to = addDays(line.posted_on, 76);
+function candidatesFromPool(pool: CandidatePool, line: LineRow): MatchCandidate[] {
+  const from = addDays(line.posted_on, -pool.windowDays);
+  const to = addDays(line.posted_on, pool.windowDays);
+  const amount = Number(line.amount_cents);
+  const near = (c: MatchCandidate) => c.amountCents === amount && c.date >= from && c.date <= to;
+  if (line.card_caixa_id) {
+    let items = pool.items.filter(near);
+    if (line.card_invoice_id) {
+      const ofLot = items.filter((i) => i.invoiceId === line.card_invoice_id);
+      if (ofLot.length > 0) items = ofLot;
+    }
+    const wideFrom = addDays(line.posted_on, -SERIES_PREFILTER_DAYS);
+    const wideTo = addDays(line.posted_on, SERIES_PREFILTER_DAYS);
+    const matchLine = { postedOn: line.posted_on, amountCents: amount, description: line.description };
+    return [
+      ...items.map(({ invoiceId: _invoice, ...candidate }) => candidate),
+      ...pool.charges
+        .filter((c) => c.dueDate >= wideFrom && c.dueDate <= wideTo)
+        .map((c) => cardChargeMatch(matchLine, c))
+        .filter((c): c is MatchCandidate => c !== null),
+    ];
+  }
+  return [...seriesFromRows(pool.series, line), ...pool.moves.filter(near), ...pool.titles.filter(near)];
+}
+
+/** Candidatos de uma linha (o casar à mão usa uma janela maior que a do casamento automático). */
+export async function candidatesFor(tx: Executor, line: LineRow, windowDays = 3): Promise<MatchCandidate[]> {
+  return candidatesFromPool(await loadCandidatePool(tx, [line], windowDays), line);
+}
+
+/**
+ * Ocorrências em aberto (ou parciais) de séries da caixa da conta, com a conta
+ * prevista igual à da conta (ou sem conta), com vencimento no intervalo.
+ */
+async function seriesRows(tx: Executor, accountId: string, from: string, to: string, entityId?: string): Promise<SeriesRow[]> {
   const result = await tx.execute(sql`
-    SELECT t.id, t.due_date, t.amount_cents, b.open_cents, t.description, e.name AS entity_name, t.recurrence_rule_id AS rule_id,
-           t.occurrence, r.installments_total, t.contract_id, c.name AS contract_name, t.planned_account_id, ${TERMS_SQL}
+    SELECT t.id, t.direction, t.due_date, t.amount_cents, b.open_cents, t.description, e.name AS entity_name,
+           t.recurrence_rule_id AS rule_id, t.occurrence, r.installments_total, t.contract_id, c.name AS contract_name,
+           t.planned_account_id, ${TERMS_SQL}
       FROM titles t
       JOIN recurrence_rules r ON r.id = t.recurrence_rule_id
       JOIN title_balances b ON b.title_id = t.id
       JOIN entities e ON e.id = t.entity_id
       LEFT JOIN contracts c ON c.id = t.contract_id
-      JOIN financial_accounts a ON a.id = ${line.financial_account_id}::uuid
+      JOIN financial_accounts a ON a.id = ${accountId}::uuid
      WHERE t.caixa_id = a.caixa_id AND (t.planned_account_id IS NULL OR t.planned_account_id = a.id)
        AND t.status IN ('open', 'partial') AND t.archived_at IS NULL AND b.open_cents > 0
-       AND t.direction = ${line.amount_cents < 0 ? 'payable' : 'receivable'}
        AND t.due_date BETWEEN ${from}::date AND ${to}::date
-       ${entityId ? sql`AND t.entity_id = ${entityId}` : sql``}`);
-  const matchLine = {
-    postedOn: line.posted_on,
-    amountCents: Number(line.amount_cents),
-    description: line.description,
-    accountId: line.financial_account_id,
-  };
-  return result.rows
-    .map((raw) => {
-      const r = camel<Record<string, unknown>>(raw);
-      return seriesMatch(matchLine, {
+       ${entityId ? sql`AND t.entity_id = ${entityId}` : sql``}
+     ORDER BY t.due_date, t.id`);
+  return result.rows.map((raw) => {
+    const r = camel<Record<string, unknown>>(raw);
+    return {
+      direction: r.direction as SeriesRow['direction'],
+      occ: {
         titleId: String(r.id),
         ruleId: String(r.ruleId),
         contractId: (r.contractId as string | null) ?? null,
@@ -646,9 +830,38 @@ async function seriesCandidates(tx: Executor, line: LineRow, entityId?: string):
         openCents: Number(r.openCents),
         plannedAccountId: (r.plannedAccountId as string | null) ?? null,
         terms: termsOf(raw as Parameters<typeof termsOf>[0]),
-      });
-    })
+      },
+    };
+  });
+}
+
+/**
+ * As ocorrências de série na direção da linha que batem pela regra da série
+ * (seriesMatch: o mesmo mês ou a janela; exato, encargos, desconto, tolerância
+ * ou parcial).
+ */
+function seriesFromRows(rows: SeriesRow[], line: LineRow): MatchCandidate[] {
+  if (!line.financial_account_id) return [];
+  const from = addDays(line.posted_on, -SERIES_PREFILTER_DAYS);
+  const to = addDays(line.posted_on, SERIES_PREFILTER_DAYS);
+  const direction = Number(line.amount_cents) < 0 ? 'payable' : 'receivable';
+  const matchLine = {
+    postedOn: line.posted_on,
+    amountCents: Number(line.amount_cents),
+    description: line.description,
+    accountId: line.financial_account_id,
+  };
+  return rows
+    .filter((r) => r.direction === direction && r.occ.dueDate >= from && r.occ.dueDate <= to)
+    .map((r) => seriesMatch(matchLine, r.occ))
     .filter((c): c is MatchCandidate => c !== null);
+}
+
+async function seriesCandidates(tx: Executor, line: LineRow, entityId?: string): Promise<MatchCandidate[]> {
+  if (!line.financial_account_id) return [];
+  const from = addDays(line.posted_on, -SERIES_PREFILTER_DAYS);
+  const to = addDays(line.posted_on, SERIES_PREFILTER_DAYS);
+  return seriesFromRows(await seriesRows(tx, line.financial_account_id, from, to, entityId), line);
 }
 
 /**
@@ -694,64 +907,95 @@ export async function obligationMatches(
  * sugerida (confirmação em lote). Ocorrência de série com "baixar sem
  * confirmação" vira conciliada com a baixa já feita (auto_settled); na
  * fatura, a cobrança esperada com valor exato vira a compra ligada. O sino
- * avisa uma vez por lote quantas foram baixadas.
+ * avisa uma vez por lote quantas foram baixadas. Os candidatos vêm de uma
+ * leitura só e os vínculos são gravados num UPDATE só (tarefa 139): fora a
+ * baixa automática, o número de consultas não cresce com as linhas. O
+ * `used` garante, como antes, que um movimento, título ou item vai para uma
+ * linha só.
  */
 export async function autoMatch(ctx: ServiceContext, tx: Tx, importId: string) {
   const lines = await tx.execute<LineRow>(sql`
-    SELECT id, posted_on, amount_cents, description, financial_account_id, card_caixa_id
-      FROM statement_lines WHERE statement_import_id = ${importId} AND status = 'new'
-     ORDER BY posted_on, line_number`);
+    SELECT l.id, l.posted_on, l.amount_cents, l.description, l.financial_account_id, l.card_caixa_id, i.card_invoice_id
+      FROM statement_lines l JOIN statement_imports i ON i.id = l.statement_import_id
+     WHERE l.statement_import_id = ${importId} AND l.status = 'new'
+     ORDER BY l.posted_on, l.line_number`);
+  const first = lines.rows[0];
+  if (!first) return { matched: 0, suggested: 0, autoSettled: 0, autoSettleFailed: 0 };
+  // As sugestões em aberto da mesma conta (ou do mesmo cartão), pela coluna do alvo, que tem índice.
+  const owner = first.card_caixa_id
+    ? sql`card_caixa_id = ${first.card_caixa_id}::uuid`
+    : sql`financial_account_id = ${first.financial_account_id}::uuid`;
   const pending = await tx.execute<{ ref: string }>(sql`
     SELECT coalesce(movement_id, title_id, card_invoice_item_id)::text AS ref FROM statement_lines
-     WHERE status = 'suggested' AND coalesce(financial_account_id, card_caixa_id) =
-           (SELECT coalesce(financial_account_id, card_caixa_id) FROM statement_imports WHERE id = ${importId})`);
+     WHERE ${owner} AND status = 'suggested'`);
   const used = new Set(pending.rows.map((r) => r.ref));
+  const pool = await loadCandidatePool(tx, lines.rows, 3);
+  const links: LineLink[] = [];
   let matched = 0;
   let suggested = 0;
   let autoSettled = 0;
+  let autoSettleFailed = 0;
   for (const line of lines.rows) {
-    const candidates = await candidatesFor(tx, line, 3);
     const pick = pickMatch(
       { postedOn: line.posted_on, amountCents: Number(line.amount_cents), description: line.description },
-      candidates,
+      candidatesFromPool(pool, line),
       used,
     );
     if (!pick) continue;
     used.add(pick.candidate.id);
-    if (pick.autoSettle && (await autoSettleLine(ctx, tx, line, pick.candidate))) {
-      autoSettled += 1;
-      matched += 1;
-      continue;
+    if (pick.autoSettle) {
+      const settled = await autoSettleLine(ctx, tx, importId, line, pick.candidate);
+      if (settled === true) {
+        autoSettled += 1;
+        matched += 1;
+        continue;
+      }
+      if (settled === 'failed') autoSettleFailed += 1;
     }
     // A cobrança esperada não tem lançamento para sugerir: a tela mostra "Lançar como cobrança de…".
     if (pick.candidate.kind === 'card_charge') continue;
-    const link =
-      pick.candidate.kind === 'movement'
-        ? sql`movement_id = ${pick.candidate.id}::uuid`
-        : pick.candidate.kind === 'title'
-          ? sql`title_id = ${pick.candidate.id}::uuid`
-          : sql`card_invoice_item_id = ${pick.candidate.id}::uuid`;
-    if (pick.status === 'matched') {
-      await tx.execute(sql`UPDATE statement_lines SET status = 'matched', matched_at = now(), ${link} WHERE id = ${line.id}`);
-      matched += 1;
-    } else {
-      await tx.execute(sql`UPDATE statement_lines SET status = 'suggested', ${link} WHERE id = ${line.id}`);
-      suggested += 1;
-    }
+    links.push({ id: line.id, status: pick.status, kind: pick.candidate.kind, ref: pick.candidate.id });
+    if (pick.status === 'matched') matched += 1;
+    else suggested += 1;
   }
+  await linkLines(tx, links);
   if (autoSettled > 0) await notifyAutoSettled(ctx, tx, importId, autoSettled);
-  return { matched, suggested, autoSettled };
+  return { matched, suggested, autoSettled, autoSettleFailed };
+}
+
+type LineLink = { id: string; status: 'matched' | 'suggested'; kind: 'movement' | 'title' | 'card_item'; ref: string };
+
+/** Grava os vínculos do casamento automático (linhas novas) num UPDATE só. */
+async function linkLines(tx: Tx, links: LineLink[]) {
+  if (links.length === 0) return;
+  await tx.execute(sql`
+    UPDATE statement_lines l
+       SET status = x.status,
+           matched_at = CASE WHEN x.status = 'matched' THEN now() ELSE l.matched_at END,
+           movement_id = CASE WHEN x.kind = 'movement' THEN x.ref ELSE l.movement_id END,
+           title_id = CASE WHEN x.kind = 'title' THEN x.ref ELSE l.title_id END,
+           card_invoice_item_id = CASE WHEN x.kind = 'card_item' THEN x.ref ELSE l.card_invoice_item_id END
+      FROM json_to_recordset(${JSON.stringify(links)}::json) AS x(id uuid, status text, kind text, ref uuid)
+     WHERE l.id = x.id`);
 }
 
 /**
  * A baixa sem confirmação de uma linha, num savepoint: na conta, a baixa
  * repartida da ocorrência; na fatura, a compra ligada à cobrança esperada. Se
- * o usuário não escreve na caixa (ou o lançamento falha), a linha fica como
- * sugestão.
+ * o usuário não escreve na caixa, a linha fica como sugestão sem tentar; se o
+ * lançamento falha, também, e o log da requisição registra o motivo (o código
+ * do erro, sem valores; tarefa 136): devolve 'failed'.
  */
-async function autoSettleLine(ctx: ServiceContext, tx: Tx, line: LineRow, candidate: MatchCandidate): Promise<boolean> {
+async function autoSettleLine(
+  ctx: ServiceContext,
+  tx: Tx,
+  importId: string,
+  line: LineRow,
+  candidate: MatchCandidate,
+): Promise<boolean | 'failed'> {
   try {
     if (candidate.kind === 'card_charge' && line.card_caixa_id && candidate.series) {
+      if (!ctx.access.canWrite(line.card_caixa_id)) return false;
       await tx.transaction(async (sp) => {
         const created = await insertChargePurchase(ctx, sp, {
           cardCaixaId: line.card_caixa_id!,
@@ -773,7 +1017,7 @@ async function autoSettleLine(ctx: ServiceContext, tx: Tx, line: LineRow, candid
       sql`SELECT caixa_id FROM financial_accounts WHERE id = ${line.financial_account_id}::uuid`,
     );
     const caixaId = caixa.rows[0]?.caixa_id;
-    if (!caixaId) return false;
+    if (!caixaId || !ctx.access.canWrite(caixaId)) return false;
     await tx.transaction(async (sp) => {
       const settled = await settleFromLine(
         ctx,
@@ -795,8 +1039,10 @@ async function autoSettleLine(ctx: ServiceContext, tx: Tx, line: LineRow, candid
       await sp.execute(sql`SET CONSTRAINTS ALL DEFERRED`);
     });
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    const { code, pgCode, constraint } = failureReason(error);
+    ctx.log?.warn({ importId, lineId: line.id, code, pgCode, constraint }, 'baixa automática virou sugestão');
+    return 'failed';
   }
 }
 
@@ -870,7 +1116,9 @@ const importSql = sql`
          -- Lote substituído (spec 031): fora da divergência.
          CASE WHEN i.superseded_by_import_id IS NULL THEN b.app_balance_cents END AS app_balance_cents,
          CASE WHEN i.superseded_by_import_id IS NULL THEN b.difference_cents END AS difference_cents,
-         CASE WHEN i.superseded_by_import_id IS NULL THEN b.difference_cents - prev.difference_cents END AS interval_difference_cents,
+         -- Divergência do intervalo (spec 009): a do lote menos a do anterior com saldo, calculada pela visão sem
+         -- somar desde a abertura (tarefa 092).
+         CASE WHEN i.superseded_by_import_id IS NULL THEN b.interval_difference_cents END AS interval_difference_cents,
          a.opening_date AS account_opening_date,
          b.lines AS line_count, b.matched_lines, b.suggested_lines, b.new_lines, b.ignored_lines, u.username AS imported_by, i.created_at,
          i.provisional,
@@ -887,18 +1135,7 @@ const importSql = sql`
     LEFT JOIN financial_accounts a ON a.id = b.financial_account_id
     LEFT JOIN users u ON u.id = i.imported_by_user_id
     LEFT JOIN statement_imports si ON si.id = i.superseded_by_import_id
-    LEFT JOIN attachments sf ON sf.id = si.attachment_id
-    -- Divergência do intervalo (spec 009): a acumulada menos a do lote anterior com saldo, na ordem da data do saldo.
-    LEFT JOIN LATERAL (
-      SELECT pb.difference_cents
-        FROM statement_import_balances pb
-        JOIN statement_imports pi ON pi.id = pb.statement_import_id
-       WHERE pb.financial_account_id = b.financial_account_id AND pb.bank_balance_on IS NOT NULL
-         AND pi.superseded_by_import_id IS NULL
-         AND (pb.bank_balance_on, pi.created_at) < (b.bank_balance_on, i.created_at)
-       ORDER BY pb.bank_balance_on DESC, pi.created_at DESC
-       LIMIT 1
-    ) prev ON b.bank_balance_on IS NOT NULL`;
+    LEFT JOIN attachments sf ON sf.id = si.attachment_id`;
 
 const toImport = (row: Record<string, unknown>): StatementImportSummary => {
   const r = camel<StatementImportSummary>(row);

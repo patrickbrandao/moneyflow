@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 289f9f7
 ---
 
 # Regras do espelho e da conciliação que a docs/016 atribui ao banco, mas só a aplicação garante
@@ -70,4 +70,70 @@ Nada foi executado. A regra 3 depende de que a restauração do backup traga as 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Os quatro casos se confirmaram no schema:
+1. `titles_mirror_check` só conferia o sentido do título que mudou para o espelho.
+2. `caixas_validate` só travava `kind`.
+3. `settlements_mirror_check` só olhava baixas com `mirror_settlement_id`, e nenhum trigger ligava a baixa ao `mirror_title_id` do título.
+4. `card_invoice_items` não tinha o equivalente de `movements_validate_statement`.
+
+A aplicação já respeita as quatro regras. `settleInTx` grava sempre as duas pernas, nenhum serviço liga títulos existentes como par, e o backup importa as baixas e os títulos ligados na mesma unidade.
+
 ## Resolução (executor)
+
+Migration `database/migrations/0060_mirror_and_reconciliation_invariants.sql`; teste `database/tests/0060_mirror_and_reconciliation_invariants.sql`.
+
+1. `titles_mirror_check` confere também que `t.caixa_id = m.counterparty_caixa_id` e que o titular de `t.caixa_id` é `m.entity_id`, com a mesma constraint `titles_mirror_caixa_check`.
+2. `caixas_validate` recusa trocar `holder_entity_id` enquanto houver dependências (`23514 caixas_holder_locked_check`):
+   - títulos com `caixa_id` ou `counterparty_caixa_id` = a caixa;
+   - contratos com `caixa_id` ou `counterparty_caixa_id` = a caixa;
+   - encargos do emissor no cartão (`card_purchases.kind = 'charge'`, cujo recebedor é o titular). Este caso vai além do que a tarefa pedia, pela mesma razão.
+3. Perna do espelho, com a constraint `settlements_mirror_required_check`:
+   - Constraint trigger novo `settlements_mirror_required_check` (deferido, AFTER INSERT OR UPDATE OF mirror_settlement_id): baixa ativa em título com `mirror_title_id` exige `mirror_settlement_id`.
+   - Ao ligar o par, `titles_mirror_check` recusa baixa ativa sem perna em qualquer dos dois lados.
+   - Decisão: exigir a perna de cada baixa ativa, em vez de só "a soma igual". Com a reciprocidade de `settlements_mirror_check`, isso implica a soma igual e é mais forte. Baixa estornada sem perna não impede ligar o par.
+4. Trigger novo `card_invoice_items_validate_statement` (BEFORE UPDATE OF amount_cents, card_invoice_id): o item com linha `matched` não muda de valor nem de fatura (`23514 statement_lines_card_item_check`). O item só sugerido continua livre.
+
+Dados que já existiam:
+- As regras valem daqui em diante.
+- A migration emite um `WARNING` com a contagem do que já as viola (lado de espelho incoerente, baixa sem perna, item conciliado com valor diferente).
+- No banco de desenvolvimento não apareceu nenhum.
+
+Testes:
+- os três roteiros de "Como reproduzir" falham com a constraint nomeada;
+- trocar os dois lados juntos, de forma coerente, passa;
+- titular de caixa sem dependências e outros campos continuam livres;
+- baixa com as duas pernas passa, e soltar as pernas é recusado;
+- ligar o par com baixa solta é recusado, e com ela estornada passa;
+- o item sugerido é redistribuído e a pagadora do conciliado muda.
+
+Verificação:
+- `make test` completo (56 arquivos, 4078 testes) passou sem mudar nenhum teste antigo.
+- `docs/016` atualizada (Caixas, Espelho, Baixas e Extratos). `make dump` rodado.
+
+Para a aplicação, nada obrigatório. Opcional: traduzir em `apps/server/src/errors.ts` as constraints novas `caixas_holder_locked_check` (hoje só a checagem de títulos de `caixas.ts:148-153` tem mensagem própria), `settlements_mirror_required_check` e `statement_lines_card_item_check`. Também convém confirmar que `test/backup.test.ts` passa, porque a ida e volta leva as duas pernas na mesma unidade.
+
+### Complemento (lote 2 do dba, 2026-11-22): desligar o par com baixas ligadas
+
+Achado no lote 1: `settlements_mirror_title_check` (as pernas da baixa ficam nos dois títulos do par) só rodava quando a baixa mudava. Desligar o par espelhado, ou trocar o espelho de um dos lados, deixava as pernas apontando uma para a outra fora de um par.
+
+Migration `database/migrations/0072_mirror_unlink_settlement_legs.sql`; teste `database/tests/0072_mirror_unlink_settlement_legs.sql`.
+
+- `titles_mirror_check` confere também as pernas das baixas do título: a perna ligada a uma baixa dele tem de estar no `mirror_title_id` dele. Senão, dá `23514 settlements_mirror_title_check` no COMMIT, com a mesma constraint e o mesmo texto ("are not on a mirrored title pair") da checagem do lado da baixa.
+- Vale para baixas ativas e estornadas.
+- Para desligar o par, solte as pernas (`mirror_settlement_id` nulo nas duas) na mesma transação.
+
+Testes:
+- desligar só o par com a baixa ligada é recusado;
+- desligar o par e soltar as pernas juntos passa;
+- o par sem baixa desliga como antes;
+- trocar o espelho com a perna no espelho antigo é recusado;
+- com as pernas estornadas, desligar só o par continua recusado;
+- as regras de reciprocidade e de valor de `titles_mirror_check` continuam valendo.
+
+Verificação:
+- `make test` com `0072`, `0060`, `0008`, `0009`, `0013` e `0022` passou, com o down da 0072.
+- `docs/016` (Baixas) atualizada.
+
+Para a aplicação, nada obrigatório. Não achei código que desligue um par com baixas. Se um dia houver, ele solta as pernas na mesma transação. Opcional: traduzir `settlements_mirror_title_check` em `apps/server/src/errors.ts`.

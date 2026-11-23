@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 4c1fd05
 ---
 
 # Uma falha ao gerar as notificações do sino para o Telegram e os alarmes dos lembretes
@@ -83,4 +83,14 @@ Nada foi executado. Não identifiquei um dado real que faça `produceNotificatio
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: `messageTick` encadeava as quatro etapas sem `try` entre elas, `produceNotifications` não isolava nenhum bloco e o laço de hora em hora (`worker.ts`) tinha um `try` só para as quatro etapas.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/message-worker.ts`: `messageTick` roda cada etapa (`messages`, `notifications`, `reminders`, `outbox`) num `try` próprio e devolve `stageErrors` (`{ stage, error }`, o texto por `errorText`, tarefa 070); `produceNotifications` isola cada bloco (`mirror_pending`, `mirror_disputed`, `invoice_closed`, `card_limit`, `reconciliation_divergence`, `contracts`, `daily`, `ai_budget_alert`) e o INSERT de cada lote de 200 (recusado, refeito linha a linha para as boas entrarem), devolvendo `notificationErrors` (`notifications.<bloco>`), que o `messageTick` junta aos `stageErrors`. `logMessageTick` avisa cada etapa que falhou.
+- `apps/server/src/worker.ts`: no laço de hora em hora, séries, cartões, contratos e sessões rodam cada um isolado (`step`), com o nome no log.
+- Spec: `docs/013`, "Fila e envio".
+- Testes: `apps/server/test/vision.test.ts` ("uma etapa que falha não para as outras…"): com o banco recusando a leitura das assinaturas (a etapa inteira do Telegram) e o bloco dos espelhos pendentes, a mesma passada envia a mensagem pendente, grava o disparo do lembrete vencido, devolve as duas etapas em `stageErrors` e o log as avisa com o nome. Os testes de `budgets`, `contracts`, `errors` e `notes` seguem passando.
+- Verificação: `pnpm verify:quick`.

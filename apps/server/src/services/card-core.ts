@@ -93,6 +93,22 @@ export async function openInvoiceFor(tx: Executor, card: Card, date: string): Pr
   throw unprocessable(t.errors.noOpenInvoice, 'no_open_invoice');
 }
 
+/**
+ * Primeira fatura ABERTA com competência depois de `month` (cria as que
+ * faltarem): o destino do saldo rolado e do crédito do fechamento. A seguinte
+ * pode já ter fechado (pagamento lançado com atraso, CARD_AUTO_CLOSE); o banco
+ * aceita o saldo em qualquer fatura posterior aberta do cartão (tarefa 085).
+ */
+export async function firstOpenInvoiceAfter(tx: Executor, card: Card, month: string): Promise<Invoice> {
+  let next = addMonths(month, 1);
+  for (let i = 0; i < 60; i += 1, next = addMonths(next, 1)) {
+    await ensureInvoices(tx, card, next, next);
+    const invoice = await invoiceByMonth(tx, card.id, next);
+    if (invoice && !invoice.closedAt) return invoice;
+  }
+  throw unprocessable(t.errors.noOpenInvoice, 'no_open_invoice');
+}
+
 /** Divide o total em `count` parcelas inteiras; o resto (centavos) vai na primeira. */
 export function splitInstallments(totalCents: number, count: number): number[] {
   const base = Math.floor(totalCents / count);
@@ -229,7 +245,7 @@ type PayerTotal = { payer_caixa_id: string; items_cents: number; billed_cents: n
 /**
  * Fecha a fatura: closed_at = now() e, por pagadora, o par de títulos pelo
  * valor dos itens − o já faturado (antecipações). Saldo negativo (crédito)
- * rola como item carryover negativo para a fatura seguinte.
+ * rola como item carryover negativo para a primeira fatura aberta seguinte.
  */
 export async function closeInvoiceTx(
   tx: Tx,
@@ -248,7 +264,6 @@ export async function closeInvoiceTx(
     SELECT payer_caixa_id, items_cents, billed_cents FROM card_invoice_payer_totals WHERE card_invoice_id = ${invoiceId}`);
 
   await tx.update(cardInvoices).set({ closedAt: sql`now()` }).where(eq(cardInvoices.id, invoiceId));
-  const nextMonth = addMonths(invoice.referenceMonth, 1);
   let next: Invoice | null = null;
 
   for (const row of totals.rows) {
@@ -260,12 +275,8 @@ export async function closeInvoiceTx(
         cardCategoryId: opts.cardCategoryId,
       });
     } else if (amount < 0) {
-      // Crédito (estornos/antecipações acima do total): rola para a próxima fatura.
-      if (!next) {
-        await ensureInvoices(tx, card, nextMonth, nextMonth);
-        next = await invoiceByMonth(tx, card.id, nextMonth);
-      }
-      if (!next || next.closedAt) throw unprocessable(t.errors.noOpenInvoice, 'no_open_invoice');
+      // Crédito (estornos/antecipações acima do total): rola para a primeira fatura aberta seguinte.
+      next ??= await firstOpenInvoiceAfter(tx, card, invoice.referenceMonth);
       await tx.insert(cardInvoiceItems).values({
         cardInvoiceId: next.id,
         kind: 'carryover',

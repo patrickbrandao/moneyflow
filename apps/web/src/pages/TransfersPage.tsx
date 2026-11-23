@@ -2,23 +2,31 @@ import { type AccountRow, type CaixaSummary, formatAccounting, formatDate, type 
 import { ArrowRight, Plus, Trash2 } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { LoadError, Money, PageHead, SkelRows } from '../components/domain';
+import { ListCutNotice, LoadError, Money, PageHead, SkelRows } from '../components/domain';
 import { FormError, ModalActions, MoneyInput } from '../components/forms';
 import { Badge, Button, EmptyRow, Field, Modal, useConfirm } from '../components/ui';
 import { canWriteCaixa } from '../lib/access';
 import { api } from '../lib/api';
 import { useUser } from '../lib/auth';
 import { useRegisterCommands } from '../lib/commands';
-import { useAction, useApi } from '../lib/hooks';
+import { useAction, useApi, useListLimit } from '../lib/hooks';
 import { useParamState } from '../lib/params';
 
 /** Transferências entre contas (spec 005): par de movimentos que soma zero; não é receita nem despesa. */
+const TP = t.transfer.page;
+
 export function TransfersPage() {
   const user = useUser();
   const [isNew, setNew] = useParamState('new');
   const [caixaId, setCaixaId] = useParamState('caixa');
   const caixas = useApi<CaixaSummary[]>('/api/caixas');
-  const { data, error, reload } = useApi<TransferRow[]>(`/api/transfers${caixaId ? `?caixaId=${caixaId}` : ''}`);
+  // A lista corta no servidor (tarefa 116): pede uma linha a mais para saber se há mais e avisa.
+  const list = useListLimit(caixaId ?? '');
+  const listQs = new URLSearchParams({ limit: String(list.limit + 1) });
+  if (caixaId) listQs.set('caixaId', caixaId);
+  const { data: probe, error, reload, loading } = useApi<TransferRow[]>(`/api/transfers?${listQs}`, { keepPrevious: list.growing });
+  const cut = Boolean(probe && probe.length > list.limit);
+  const data = probe && cut ? probe.slice(0, list.limit) : probe;
   const confirm = useConfirm();
   const { run } = useAction();
 
@@ -26,28 +34,28 @@ export function TransfersPage() {
 
   async function remove(row: TransferRow) {
     const ok = await confirm({
-      title: 'Excluir a transferência?',
-      description: `${formatAccounting(row.amountCents)} de ${row.fromAccountName} para ${row.toAccountName}. Os dois movimentos saem dos extratos.`,
+      title: TP.deleteTitle,
+      description: TP.deleteBody(formatAccounting(row.amountCents), row.fromAccountName, row.toAccountName),
       confirmLabel: t.common.delete,
       danger: true,
     });
-    if (ok && (await run(() => api.del(`/api/transfers/${row.id}`), 'Transferência excluída.'))) void reload();
+    if (ok && (await run(() => api.del(`/api/transfers/${row.id}`), TP.deleted))) void reload();
   }
 
   return (
     <div className="page wide">
       <PageHead
         title={t.nav.transfers}
-        sub="Dinheiro que muda de conta, dentro da mesma caixa ou entre caixas."
+        sub={TP.sub}
         actions={
           <>
             <select
               className="field field-auto"
               value={caixaId ?? ''}
               onChange={(e) => setCaixaId(e.target.value || null)}
-              aria-label="Caixa"
+              aria-label={TP.caixa}
             >
-              <option value="">Todas as caixas</option>
+              <option value="">{TP.allCaixas}</option>
               {(caixas.data ?? []).map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
@@ -78,7 +86,7 @@ export function TransfersPage() {
             </thead>
             <tbody>
               {!data && <SkelRows cols={7} />}
-              {data && data.length === 0 && <EmptyRow colSpan={7}>Nenhuma transferência.</EmptyRow>}
+              {data && data.length === 0 && <EmptyRow colSpan={7}>{TP.empty}</EmptyRow>}
               {data?.map((row) => (
                 <tr key={row.id}>
                   <td className="mono text-xs">{formatDate(row.transferredOn)}</td>
@@ -122,6 +130,7 @@ export function TransfersPage() {
           </table>
         </div>
       )}
+      {data && cut && <ListCutNotice shown={data.length} total={null} canMore={list.canMore} loading={loading} onMore={list.more} />}
       {isNew && (
         <TransferModal
           onClose={() => setNew(null)}
@@ -149,11 +158,11 @@ export function TransferModal({ onClose, onSaved }: { onClose: () => void; onSav
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!amount || amount <= 0) return setError(t.errors.invalidAmount);
-    if (fromId === toId) return setError('Escolha contas diferentes.');
+    if (fromId === toId) return setError(TP.sameAccount);
     setError(null);
     const ok = await run(
       () => api.post('/api/transfers', { fromAccountId: fromId, toAccountId: toId, amountCents: amount, transferredOn: date, description }),
-      'Transferência registrada.',
+      TP.created,
     );
     if (ok) onSaved();
   }
@@ -179,13 +188,13 @@ export function TransferModal({ onClose, onSaved }: { onClose: () => void; onSav
             autoFocus
             aria-label={t.transfer.from}
           >
-            <option value="">{accounts.loading ? t.common.loading : 'Escolha…'}</option>
+            <option value="">{accounts.loading ? t.common.loading : t.common.choose}</option>
             {options(toId)}
           </select>
         </Field>
         <Field label={t.transfer.to} className="span-all">
           <select className="field" value={toId} onChange={(e) => setToId(e.target.value)} required aria-label={t.transfer.to}>
-            <option value="">{accounts.loading ? t.common.loading : 'Escolha…'}</option>
+            <option value="">{accounts.loading ? t.common.loading : t.common.choose}</option>
             {options(fromId)}
           </select>
         </Field>

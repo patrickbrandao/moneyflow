@@ -11,6 +11,7 @@ import {
   lineUnmatchInput,
   pixKeyInput,
   settlementCreateInput,
+  settlementReversalDateInput,
   settlementReverseInput,
   TITLE_FILTERS,
   titleCreateInput,
@@ -18,7 +19,7 @@ import {
   transferCreateInput,
 } from '../schemas';
 import { RECIPE_TOOLS } from './recipes';
-import { type AgentToolDef, type AgentToolMode, date, define, limit, optionalDate } from './tool-def';
+import { type AgentToolDef, type AgentToolMode, date, define, limit, offset, optionalDate } from './tool-def';
 import { ADMIN_TOOLS } from './tools-admin';
 import { NOTE_TOOLS } from './tools-notes';
 import { OPERATION_TOOLS } from './tools-operation';
@@ -91,6 +92,7 @@ export const AGENT_TOOLS = [
     description:
       'Busca por significado (embeddings do agente) em entidades, títulos, compras de cartão e linhas de extrato; sem embeddings, busca por semelhança de texto. Com o índice em construção, completa com a semelhança de texto e avisa (notice).',
     kind: 'read',
+    external: true,
     input: z.object({
       query: z.string().trim().min(1).max(500),
       types: z
@@ -128,9 +130,10 @@ export const AGENT_TOOLS = [
     name: 'get_account_statement',
     category: 'caixas',
     title: 'Extrato da conta',
-    description: 'Movimentos de uma conta financeira no período, com saldo inicial e final.',
+    description:
+      'Movimentos de uma conta financeira no período, com saldo inicial e final, em ordem de data. Sem from e to, vale a janela da tela: 60 dias atrás a 30 dias à frente (o resultado avisa). Com mais movimentos que o limit, vêm os mais recentes e o resultado diz quantos mais antigos ficaram de fora.',
     kind: 'read',
-    input: z.object({ accountId: id, from: optionalDate, to: optionalDate }),
+    input: z.object({ accountId: id, from: optionalDate, to: optionalDate, limit: limit(300, 150) }),
   }),
   define({
     name: 'list_entities',
@@ -174,7 +177,8 @@ export const AGENT_TOOLS = [
     name: 'list_titles',
     category: 'titles',
     title: 'Listar títulos',
-    description: 'Títulos a pagar e a receber com filtros (caixa, direção, status, período de vencimento, entidade, texto).',
+    description:
+      'Títulos a pagar e a receber com filtros (caixa, direção, status, período de vencimento, entidade, texto), por vencimento crescente. Paginado: { items, offset, nextOffset }; com nextOffset, peça a próxima página com offset = nextOffset.',
     kind: 'read',
     input: z.object({
       caixaId: id.optional(),
@@ -184,7 +188,8 @@ export const AGENT_TOOLS = [
       to: optionalDate,
       q: z.string().trim().max(200).optional(),
       entityId: id.optional(),
-      limit: limit(300, 50),
+      limit: limit(100, 50),
+      offset,
     }),
   }),
   define({
@@ -199,9 +204,10 @@ export const AGENT_TOOLS = [
     name: 'list_transfers',
     category: 'caixas',
     title: 'Listar transferências',
-    description: 'Transferências entre contas no período.',
+    description:
+      'Transferências entre contas no período, da mais recente para a mais antiga. Paginado: { items, offset, nextOffset } (offset = nextOffset para a próxima página).',
     kind: 'read',
-    input: z.object({ caixaId: id.optional(), from: optionalDate, to: optionalDate, limit: limit(300, 50) }),
+    input: z.object({ caixaId: id.optional(), from: optionalDate, to: optionalDate, limit: limit(100, 50), offset }),
   }),
   define({
     name: 'get_card',
@@ -223,9 +229,17 @@ export const AGENT_TOOLS = [
     name: 'list_card_purchases',
     category: 'cards',
     title: 'Listar compras do cartão',
-    description: 'Compras, estornos e encargos de um cartão no período.',
+    description:
+      'Compras, estornos e encargos de um cartão no período, da mais recente para a mais antiga. Paginado: { items, offset, nextOffset } (offset = nextOffset para a próxima página).',
     kind: 'read',
-    input: z.object({ cardId: id, from: optionalDate, to: optionalDate, q: z.string().trim().max(200).optional(), limit: limit(300, 50) }),
+    input: z.object({
+      cardId: id,
+      from: optionalDate,
+      to: optionalDate,
+      q: z.string().trim().max(200).optional(),
+      limit: limit(100, 50),
+      offset,
+    }),
   }),
   define({
     name: 'calendar',
@@ -314,6 +328,7 @@ export const AGENT_TOOLS = [
     description:
       'Consulta um CNPJ (numérico ou alfanumérico) na Receita pelo CNPJ Aberto ou pela BrasilAPI: razão social, nome fantasia, situação cadastral, e-mail, telefone e endereço. existingEntity diz se ele já está cadastrado. Para cadastrar com esses dados, use create_entity_from_cnpj.',
     kind: 'read',
+    external: true,
     input: z.object({ cnpj: cnpjField }),
   }),
   define({
@@ -342,6 +357,7 @@ export const AGENT_TOOLS = [
     description:
       'Consulta o CNPJ (como lookup_cnpj) e cadastra a empresa com a razão social, o nome fantasia, o e-mail e o telefone como contatos principais e o endereço. Recusa se o CNPJ já está cadastrado (use get_entity/update_entity). Tags (tagIds), favorita e observações opcionais.',
     kind: 'write',
+    external: true,
     input: z.object({
       cnpj: cnpjField,
       notes: z.string().trim().max(2000).nullish().describe('Observações da entidade.'),
@@ -434,18 +450,30 @@ export const AGENT_TOOLS = [
     category: 'titles',
     title: 'Estornar baixa',
     description:
-      'Estorna uma baixa (get_title lista as baixas do título, com o id): a baixa e a perna do espelho ficam estornadas, cada perna com conta recebe o movimento oposto e o título volta a ter o valor em aberto. Use para corrigir uma baixa errada, inclusive a criada ao casar uma linha do extrato com o título errado (desfaça antes a conciliação com unmatch_statement_line).',
+      'Estorna uma baixa (get_title lista as baixas do título, com o id): a baixa e a perna do espelho ficam estornadas, cada perna com conta recebe o movimento oposto e o título volta a ter o valor em aberto. Use para corrigir uma baixa errada, inclusive a criada ao casar uma linha do extrato com o título errado (desfaça antes a conciliação com unmatch_statement_line). Para REFAZER a baixa (trocar a conta, o valor ou a data), passe reversedOn = settledOn da própria baixa: assim o movimento original e o estorno se anulam no mesmo dia e os lotes de extrato do intervalo não ficam divergentes. Só um estorno de verdade (o dinheiro voltou depois) usa outra data. Estorno com a data errada se corrige com set_reversal_date.',
     kind: 'write',
     destructive: true,
     input: z.object({
       settlementId: id.describe('Baixa a estornar.'),
       reason: settlementReverseInput.shape.reason.describe('Motivo do estorno (fica na baixa).'),
       reversedOn: settlementReverseInput.shape.reversedOn.describe(
-        'Data do estorno (AAAA-MM-DD); omitida = hoje. Não pode ser antes da baixa.',
+        'Data do estorno (AAAA-MM-DD); omitida = hoje. Não pode ser antes da baixa. Para refazer a baixa, a data da própria baixa (settledOn).',
       ),
       undoTransfer: settlementReverseInput.shape.undoTransfer.describe(
         'Baixa paga com conta de outra caixa: true (padrão) desfaz a transferência gerada.',
       ),
+    }),
+  }),
+  define({
+    name: 'set_reversal_date',
+    category: 'titles',
+    title: 'Corrigir data do estorno',
+    description:
+      'Muda a data do estorno de uma baixa já estornada (get_title lista as baixas, com o id e reversalOn): o movimento oposto de cada perna com conta, a do espelho inclusive, passa para reversedOn, com auditoria. Use quando o estorno saiu com a data errada; ao refazer uma baixa, a data certa é a da própria baixa (settledOn). Não pode ser antes da baixa nem cair (ou sair) de um mês fechado; estorno conciliado com uma linha do extrato precisa da conciliação desfeita antes (unmatch_statement_line).',
+    kind: 'write',
+    input: z.object({
+      settlementId: id.describe('Baixa estornada (qualquer das pernas).'),
+      reversedOn: settlementReversalDateInput.shape.reversedOn.describe('Nova data do estorno (AAAA-MM-DD).'),
     }),
   }),
   define({
@@ -574,6 +602,7 @@ export const AGENT_TOOLS = [
     title: 'Enviar mensagem',
     description: 'Envia um texto a um destino do Telegram (use list_message_destinations).',
     kind: 'write',
+    external: true,
     input: z.object({ destinationId: id, text: z.string().trim().min(1).max(3500) }),
   }),
   define({
@@ -583,6 +612,7 @@ export const AGENT_TOOLS = [
     description:
       'Avisa o próprio usuário no sino (e nos destinos dele que assinam "mensagens do agente"). Use para resultados de tarefas longas.',
     kind: 'write',
+    external: true,
     suggestedMode: 'allow',
     input: z.object({
       title: z.string().trim().min(1).max(200),

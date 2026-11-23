@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   ADMIN_TOOLS,
@@ -10,11 +12,14 @@ import {
   aiAgentUpdateInput,
   balanceToolUses,
   blocksText,
+  compactToolResults,
   diffRows,
   effectiveToolMode,
+  fitResult,
   formatSse,
   isValidBlock,
   kitTools,
+  MAX_RESULT_CHARS,
   MCP_ONLY_TOOLS,
   mcpExposed,
   type NeutralMessage,
@@ -52,6 +57,45 @@ describe('registro de tools', () => {
     // 13 da conciliação, as 5 das receitas (spec 030), as 3 do lote provisório (spec 031) e a cobrança esperada da fatura (spec 034).
     expect(AGENT_TOOLS.filter((tool) => tool.category === 'reconciliation')).toHaveLength(22);
     expect(agentTool('send_telegram_message')).toMatchObject({ category: 'messages', suggestedMode: 'ask' });
+  });
+
+  it('a tabela de categorias da spec 021 lista exatamente as tools do registro, cada uma na sua categoria (tarefa 158)', () => {
+    const spec = readFileSync(join(import.meta.dirname, '../../../docs/021-kit-de-ferramentas.md'), 'utf8');
+    const labels = new Map(AGENT_TOOL_CATEGORIES.map((c) => [t.agents.toolCategories[c], c]));
+    const inTable = new Map<string, string>();
+    for (const line of spec.split('\n')) {
+      const cells = /^\| ([^|]+) \| (.+) \|$/.exec(line);
+      const category = cells && labels.get(cells[1]!.trim());
+      if (!category) continue;
+      for (const [, name] of cells[2]!.matchAll(/`([a-z0-9_]+)`/g)) inTable.set(name!, category);
+    }
+    expect([...inTable.keys()].sort()).toEqual([...AGENT_TOOL_NAMES].sort());
+    for (const tool of AGENT_TOOLS) expect(inTable.get(tool.name), tool.name).toBe(tool.category);
+  });
+
+  it('as tools que chamam serviço externo ou gastam IA têm a marca external (openWorldHint no /mcp, tarefa 157)', () => {
+    expect(
+      AGENT_TOOLS.filter((tool) => tool.external)
+        .map((tool) => tool.name)
+        .sort(),
+    ).toEqual(
+      [
+        'archive_message_destination',
+        'convert_contract_pdf',
+        'create_entity_from_cnpj',
+        'list_provider_models',
+        'lookup_cnpj',
+        'notify_user',
+        'read_document',
+        'refresh_mcp_tools',
+        'run_agent_task_now',
+        'run_reconcile_recipe',
+        'semantic_search',
+        'send_telegram_message',
+        'send_test_message',
+        'test_provider',
+      ].sort(),
+    );
   });
 
   it('kit: sem kit tudo allow; com kit só as dele no modo do kit; segredo sempre ask; adminOnly fora para não admin', () => {
@@ -111,6 +155,11 @@ describe('registro de tools', () => {
     expect(() => balance.parse({ importId, mode: 'set', bankBalanceCents: 100 })).toThrow();
     expect(() => balance.parse({ importId, mode: 'clear', bankBalanceCents: 100, bankBalanceOn: '2019-07-31' })).toThrow();
     expect(balance.parse({ importId, mode: 'file' })).toMatchObject({ mode: 'file' });
+    // Aplicar regras (tarefa 152): exatamente um alvo, o lote, a conta ou o cartão.
+    const apply = agentTool('apply_classification_rules')!.input;
+    expect(apply.parse({ importId })).toEqual({ importId });
+    expect(() => apply.parse({})).toThrow();
+    expect(() => apply.parse({ importId, accountId: importId })).toThrow();
     expect(names(AGENT_TOOLS.filter((tool) => tool.category === 'categories'))).toEqual(
       [
         'list_categories',
@@ -120,6 +169,7 @@ describe('registro de tools', () => {
         'list_classification_rules',
         'create_classification_rule',
         'copy_classification_rules',
+        'apply_classification_rules',
         'update_classification_rule',
         'archive_classification_rule',
       ].sort(),
@@ -149,7 +199,9 @@ describe('registro de tools', () => {
     const attachmentId = '0192d8e4-0000-7000-8000-000000000001';
     expect(() => importInput.parse({ attachmentId })).toThrow();
     expect(importInput.parse({ attachmentId, accountId: attachmentId })).toMatchObject({ accountId: attachmentId });
-    expect(() => agentTool('decide_contract_renewal')!.input.parse({ contractId: attachmentId, decision: 'approve' })).toThrow();
+    // A decisão da renovação saiu com os contratos sobre séries (F20): renovar é renew_contract (tarefa 158).
+    expect(agentTool('decide_contract_renewal')).toBeUndefined();
+    expect(agentTool('renew_contract')).toMatchObject({ category: 'contracts', kind: 'write' });
     // /mcp: só admin vê as de admin; segredo e arquivo gerado nunca.
     expect(mcpExposed({ adminOnly: true }, false)).toBe(false);
     expect(mcpExposed({ adminOnly: true }, true)).toBe(true);
@@ -261,6 +313,35 @@ describe('conversão Zod → JSON Schema', () => {
     expect(schema.properties.caixaId!.format).toBe('uuid');
     expect(schema.required).toEqual(expect.arrayContaining(['caixaId', 'direction', 'amountCents']));
   });
+
+  it('todo *Cents diz "centavos" e toda data diz o formato, inclusive os anuláveis (tarefa 154)', () => {
+    type Node = Record<string, unknown>;
+    const missing: string[] = [];
+    const walk = (node: unknown, path: string, key?: string) => {
+      if (!node || typeof node !== 'object') return;
+      const n = node as Node;
+      const description = String(n.description ?? '');
+      if (key && /Cents$/.test(key) && !/centavos/.test(description)) missing.push(path);
+      if (key && /(Date|On)$|^(from|to)$/.test(key) && !/AAAA-MM/.test(description)) missing.push(path);
+      for (const [k, v] of Object.entries(n)) {
+        if (k === 'properties' && v && typeof v === 'object') {
+          for (const [prop, schema] of Object.entries(v as Node)) walk(schema, `${path}.${prop}`, prop);
+        } else if (k === 'items' || k === 'anyOf' || k === 'oneOf' || k === 'allOf') {
+          for (const item of Array.isArray(v) ? v : [v]) walk(item, `${path}[${k}]`);
+        }
+      }
+    };
+    for (const tool of AGENT_TOOLS) walk(toolJsonSchema(tool), tool.name);
+    expect(missing).toEqual([]);
+    const amendment = toolJsonSchema(agentTool('add_contract_amendment')!) as {
+      properties: { amendment: { properties: { amountCents: { description?: string } } } };
+    };
+    expect(amendment.properties.amendment.properties.amountCents.description).toMatch(/centavos/);
+    const balance = toolJsonSchema(agentTool('set_statement_import_balance')!) as {
+      properties: { bankBalanceOn: { description: string } };
+    };
+    expect(balance.properties.bankBalanceOn.description).toMatch(/^Data do saldo.*AAAA-MM-DD/);
+  });
 });
 
 describe('blocos neutros', () => {
@@ -301,6 +382,40 @@ describe('blocos neutros', () => {
         { type: 'text', text: 'b' },
       ]),
     ).toBe('a\nb');
+  });
+
+  it('corte do histórico enviado (tarefa 098): resultados longos das voltas antigas viram marcador, em degraus de keep', () => {
+    /** Conversa com `turns` voltas de tool; o resultado da volta i tem `size` caracteres. */
+    const history = (turns: number, size = 5000): NeutralMessage[] => [
+      { role: 'user', content: [{ type: 'text', text: 'concilie' }] },
+      ...Array.from({ length: turns }, (_, i): NeutralMessage[] => [
+        { role: 'assistant', content: [{ type: 'tool_use', id: `t${i}`, name: 'get_statement_import', input: {} }] },
+        { role: 'tool', content: [{ type: 'tool_result', tool_use_id: `t${i}`, content: `${i}:`.padEnd(size, 'x') }] },
+      ]).flat(),
+    ];
+    const omitted = (chars: number) => `[omitido ${chars}]`;
+    const full = (messages: NeutralMessage[]) =>
+      messages.filter((m) => m.role === 'tool').map((m) => !(m.content[0] as { content: string }).content.includes('[omitido'));
+    // Até 2 × keep − 1 voltas, tudo inteiro (o mesmo array volta).
+    const short = history(19);
+    expect(compactToolResults(short, omitted, { keep: 10 })).toBe(short);
+    // 30 voltas: só as 10 últimas por inteiro; as antigas com o começo e o marcador com o tamanho original.
+    const compacted = compactToolResults(history(30), omitted, { keep: 10 });
+    expect(full(compacted)).toEqual([...Array(20).fill(false), ...Array(10).fill(true)]);
+    const first = (compacted[2]!.content[0] as { content: string }).content;
+    expect(first.startsWith('0:xxx')).toBe(true);
+    expect(first.endsWith('[omitido 5000]')).toBe(true);
+    expect(first.length).toBeLessThan(400);
+    // Degraus: de 30 a 39 voltas o corte não muda (o prefixo fica igual para o cache); com 40, anda mais 10.
+    expect(full(compactToolResults(history(39), omitted, { keep: 10 })).filter(Boolean)).toHaveLength(19);
+    expect(JSON.stringify(compactToolResults(history(39), omitted, { keep: 10 }).slice(0, 41))).toBe(
+      JSON.stringify(compacted.slice(0, 41)),
+    );
+    expect(full(compactToolResults(history(40), omitted, { keep: 10 })).filter(Boolean)).toHaveLength(10);
+    // Resultados curtos ficam como estão; o gravado (a entrada) não muda.
+    const small = history(30, 100);
+    expect(compactToolResults(small, omitted, { keep: 10 })).toEqual(small);
+    expect((history(30)[2]!.content[0] as { content: string }).content).toHaveLength(5000);
   });
 });
 
@@ -386,5 +501,51 @@ describe('entrada do kit de ferramentas (admin)', () => {
         ],
       }),
     ).toThrow();
+  });
+});
+
+describe('resultado das tools no limite (tarefa 101)', () => {
+  const row = (n: number) => ({ id: `0192d8e4-0000-7000-8000-${String(n).padStart(12, '0')}`, description: `Item ${n} `.repeat(20) });
+
+  it('lista grande: itens inteiros até caber, JSON válido, quantos ficaram de fora e como continuar', () => {
+    const list = Array.from({ length: 500 }, (_, n) => row(n));
+    const text = fitResult(list, 20_000);
+    expect(text.length).toBeLessThanOrEqual(20_000);
+    const out = JSON.parse(text);
+    expect(out.items.length).toBeGreaterThan(10);
+    expect(out.items[0]).toEqual(list[0]);
+    expect(out.truncated).toMatchObject({ field: null, shown: out.items.length, total: 500, omitted: 500 - out.items.length });
+    expect(out.truncated.hint).toMatch(/nextOffset/);
+  });
+
+  it('objeto com uma lista: corta a maior lista e mantém o resto (saldo, totais)', () => {
+    const value = { openingCents: 10, closingCents: 99, rows: Array.from({ length: 400 }, (_, n) => row(n)), tags: ['a'] };
+    const out = JSON.parse(fitResult(value, 15_000));
+    expect(out).toMatchObject({ openingCents: 10, closingCents: 99, tags: ['a'] });
+    expect(out.truncated).toMatchObject({ field: 'rows', total: 400, shown: out.rows.length });
+    // O que cabe vai inteiro, sem a marca.
+    expect(JSON.parse(fitResult({ rows: [row(1)] }))).toEqual({ rows: [row(1)] });
+  });
+
+  it('texto solto e um item que sozinho passa do limite: cortados com a contagem, sem JSON quebrado', () => {
+    expect(fitResult('x'.repeat(30), 10)).toBe(`${'x'.repeat(10)}… [texto cortado: 20 de 30 caracteres omitidos]`);
+    const huge = JSON.parse(fitResult({ prompt: 'y'.repeat(5_000) }, 1_000));
+    expect(huge.truncated.hint).toBeTruthy();
+    expect(huge.preview.length).toBeLessThan(1_000);
+  });
+
+  it('o catálogo de list_agent_tools (sem descrições nem os falsos) cabe inteiro no limite', () => {
+    const catalog = AGENT_TOOLS.map((tool) => ({
+      name: tool.name,
+      title: tool.title,
+      kind: tool.kind,
+      category: tool.category,
+      suggestedMode: tool.secrets?.length ? 'ask' : tool.suggestedMode,
+      ...(tool.destructive ? { destructive: true } : {}),
+      ...(tool.adminOnly ? { adminOnly: true } : {}),
+      ...(tool.secrets?.length ? { secret: true } : {}),
+    }));
+    expect(JSON.stringify(catalog).length).toBeLessThan(MAX_RESULT_CHARS);
+    expect(fitResult(catalog)).toBe(JSON.stringify(catalog));
   });
 });

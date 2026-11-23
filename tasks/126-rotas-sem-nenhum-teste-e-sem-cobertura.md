@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 9dcc349
 ---
 
 # Rotas de escrita sem nenhum teste (integração, tool ou e2e) e cobertura nunca medida
@@ -68,9 +68,9 @@ Um script de varredura de rotas (o usado nesta revisão ficou no rascunho do rev
 5. Medir: `@vitest/coverage-v8` no server e no shared, `coverage: { provider: 'v8', reporter: ['text-summary', 'json-summary'] }`, publicar o resumo no CI (sem threshold no começo; depois um piso por pacote para não regredir).
 
 ## Critérios de aceite
-- [ ] Toda rota de escrita tem ao menos um teste de integração ou de tool que a chama.
-- [ ] O CI mostra a cobertura do server e do shared em cada PR.
-- [ ] Os casos dos itens 1–3 existem e passam.
+- [x] Toda rota de escrita tem ao menos um teste de integração ou de tool que a chama.
+- [x] O CI mostra a cobertura do server e do shared em cada PR.
+- [x] Os casos dos itens 1–3 existem e passam.
 
 ## Testes recomendados
 Os dos itens 1–4 acima, nos arquivos citados.
@@ -80,4 +80,25 @@ Nada foi executado; a lista vem de varredura estática. Não medi a cobertura (e
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Refiz a varredura no commit `5fd0efd` (integração da revisão): 339 rotas em `apps/server/src/routes`, 218 de escrita. Procurando cada caminho (parâmetros como curinga) com o método na mesma linha ou nas 3 anteriores em `apps/server/test/*.test.ts`, sobravam 38 rotas de escrita sem chamada; tirando as cobertas por uma tool testada (`update_category`/`archive_category`, `update_classification_rule`, `set_caixa_member`, `archive_ai_provider`, `delete_ai_price`, `archive_mcp_server`) e os falsos negativos dos uploads (`upload(...)`/`inject` com o método noutra linha: `/api/statements/inspect`, `/api/statement-imports`, `/api/attachments`, documentos de contrato, NF-e, `/mcp` pelo cliente MCP), confirmei as da tabela e mais: `PATCH /api/card-purchases/:id`, `PATCH /api/card-invoices/:id`, `PATCH/POST restore /api/contract-documents/:id`, `POST /api/reconcile-recipes/:id/restore`, `PUT /api/statement-imports/:id/reconcile-ai/auto` (só e2e), `POST /api/series` (nem a tool `create_series` tinha teste), `POST /api/categories/:id/restore`, `PATCH /api/caixas/:id/members/:memberId` e `DELETE /mcp`. Cobertura: confirmado, nenhum pacote tinha `@vitest/coverage-v8` nem bloco `coverage`.
+
 ## Resolução (executor)
+
+Testes novos (arquivos próprios, para não colidir com as frentes que mexem em `titles.test.ts`, `statements.test.ts` e `agent-tools.test.ts`), todos registrados no `apps/server/test/related.json`:
+
+- `apps/server/test/entities.test.ts` (item 1): contatos (e-mail em minúsculas, um principal por tipo), endereços (CEP normalizado, CEP inválido 400), dados bancários (dígito em maiúscula, banco ou ISPB), chaves PIX (a primeira nasce principal, trocar a principal pelo PUT, CNPJ alfanumérico em minúsculas e com pontuação normalizado na edição, chave inválida 400), vínculos (os dois lados, apagar por qualquer lado, entidade inexistente 404); o filho de outra entidade dá 404 na edição sem mexer em nada — inclusive o PUT da chave PIX com `isPrimary`, cujo "zera a principal da entidade" é desfeito pela transação (o risco apontado em `entities.ts:416` não se confirma como bug) — e é no-op na exclusão; o leitor recebe 403 em todas as escritas e no restore; arquivar a entidade em uso e restaurar (editor de cadastro), excluir a sem uso; `GET /api/lookup/cep/123` recusa antes de sair para o ViaCEP.
+- `apps/server/test/title-pairs.test.ts` (item 2): cancelar e reabrir o par espelhado (pelo original e pelo espelho), reabrir aberto/parcial/pago não muda nada, o autor editor só da caixa do original cancela e reabre o par com o espelho pendente, o leitor recebe 403 em cancelar/reabrir/restaurar; excluir sem baixa apaga o par, com baixa estornada arquiva o par e restaurar pelo espelho desarquiva os dois; a ocorrência de série "só esta" arquivada com o espelho, o worker não a recria e restaurar a traz de volta; a prévia `GET /api/series/:id/end` não grava.
+- `apps/server/test/charge-link.test.ts` (item 3): `POST /api/card-purchases/:id/charge-link` liga a compra avulsa à ocorrência (guia Pagamentos `charged`, a ocorrência sai das esperadas), solta com `charge: null` (`expected`), com a fatura fechada sem a compra fica `not_charged` (`summary.notCharged` 1) e ligar de novo volta a `charged`; recusa a série de outro cartão (404: `chargeTarget` trata a série de outro cartão como não encontrada, não 422 como a proposta sugeria — mantive), a ocorrência fora da série (422), a já cobrada (409) e o estorno (422 `card_purchases_recurrence_check`); o leitor do cartão recebe 403. Também `POST /api/series` (cobrança esperada solta no outro cartão), `GET /api/card-purchases/:id`, `PATCH /api/card-purchases/:id` (descrição, notas, pagadora só com a fatura aberta: 422 depois de fechada) e `PATCH /api/card-invoices/:id`.
+- `apps/server/test/admin-routes.test.ts` (item 4, um caso por área em vez do `it.each` em `permissions.test.ts`): restaurar caixa (só admin) e conta (quem escreve; a conta com histórico e saldo zero arquiva), `PATCH` do membro (só admin; o de outra caixa 404; o papel vale na hora), categorias ocultas `GET/PUT` (o grupo oculto oculta as filhas, só naquela caixa), o plano de categorias (`PATCH`, `DELETE` em uso arquivando grupo e filhas, `restore`, sem uso exclui; não admin 403), mapeamentos de CSV (`PATCH` trocando o padrão, `DELETE`), `PATCH` da regra (o banco recusa ficar sem alvo ou com categoria sem sentido), `PUT .../reconcile-ai/auto`, cancelar a mensagem da fila (422 já cancelada; outro usuário 404) e restaurar o destino arquivado (desativado, sem o token na resposta), documentos de contrato (`PATCH` e `restore`), receita de conciliação (`restore`), `GET /api/users/:id` (só admin, nunca a senha), tarefas agendadas na visão do admin (`GET`, `PATCH`, `runs`, `DELETE`; não admin 403), excluir provedor (sem uso apaga, em uso arquiva), preço e servidor MCP (os cabeçalhos secretos fora da listagem) e `GET/DELETE /mcp` (401 sem chave, 405 com ela). A Bot API fica num endereço fechado nesse arquivo; os agentes e provedores criados são desativados no `afterAll`, e nenhum caso drena a fila de execuções (não precisou do `stopLeftoverRuns`).
+
+Cobertura (item 5): `@vitest/coverage-v8` 5.0.3 (a versão do vitest) como devDependency do `@moneyflow/server` e do `@moneyflow/shared`, bloco `coverage` (`provider: 'v8'`, `include: ['src/**/*.ts']`, `reporter: ['text-summary', 'json-summary']`) nos dois `vitest.config.ts` e o script `test:coverage` em cada pacote; o CI roda os unitários e a integração com `test:coverage` e o passo "Cobertura (server e shared)" acrescenta a tabela de `scripts/coverage-summary.mjs` (lê os `coverage/coverage-summary.json`; avisa quando falta um) ao resumo do job. Sem piso por enquanto. Teste: `scripts/coverage-summary.test.mjs`. `pnpm audit --audit-level high` depois da instalação: 9 baixos e 18 moderados, nenhum alto ou crítico (no `--prod`, 9 e 15). Medido aqui: shared 76,0% das linhas.
+
+Rotas sem teste que sobram: nenhuma de escrita. Das de leitura, `GET /api/lookup/cep/:value` só tem o caminho da validação (a consulta ao ViaCEP real não roda nos testes) e `GET /api/search` segue coberta só pela tool `search_records`.
+
+Decisão: o restaurar do grupo de categorias desarquiva só o grupo (as filhas arquivadas junto continuam arquivadas e se restauram uma a uma); o teste não fixa esse comportamento e a spec 008 não diz nada — deixei como achado no relatório.
+
+Docs: spec 001 (Qualidade: a cobertura e o resumo no CI) e uma linha no `AGENTS.md` (Comandos).
+
+Verificação: `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_final pnpm verify:quick --base 5fd0efd` (Biome dos alterados, typecheck de todos os pacotes, testes do shared e dos scripts, e os 4 arquivos de integração novos no Postgres local: 30 casos). Não rodei `verify:full` nem o e2e.
+
+Complemento (sobras): (1) o DELETE de contato, endereço, conta bancária, chave PIX ou vínculo pelo caminho de outra entidade (ou de um filho que já não existe) agora dá 404, como o PUT (`apps/server/src/services/entities.ts`); `test/entities.test.ts` confere o 404 e que nada muda, e o CNPJ "inválido" do PUT da chave PIX deixou de ser válido por acaso (1 em 100) quando o dígito sorteado era `00`. (2) O restaurar do grupo de categorias traz de volta as filhas arquivadas pelo arquivamento dele (o mesmo `archived_at`); a filha arquivada antes, à parte, continua arquivada, e arquivar de novo mantém as datas (`coalesce`), o que substitui a decisão acima (`apps/server/src/services/categories.ts`, spec 008; restaurar o inexistente dá 404). Teste: `test/admin-routes.test.ts`, "restaurar o grupo traz de volta as filhas…". (3) Interferência entre arquivos na suíte local inteira: `stopLeftoverRuns(h)` no `beforeAll` de todo arquivo que drena a fila de execuções (agents, agent-prompts, agent-tools-admin, ai-requests, autonomous, budgets, capabilities, chat-media, maintenance, notes, statement-supersede); `cancelLeftoverMessages(h)`, novo em `test/helpers.ts`, cancela as mensagens pendentes de outros arquivos antes do `consumeOutbox` (notes e vision), porque a passada reserva só as 50 mais antigas; e o caso de embeddings por par de `test/capabilities.test.ts` roda num banco novo (`freshDatabase()`), porque a passada completa do índice lê todas as fontes do banco e, no compartilhado, passava dos 30 s (cerca de 2.700 fontes já na primeira rodada, a ~110 vetores/s). (4) O "registro, oferta e /mcp" de `test/agent-tools-admin.test.ts` leva ~0,7 s sozinho: estourava porque era o primeiro `drain()` do arquivo e processava as execuções deixadas pelos outros arquivos (provedores falsos já fechados, com o backoff padrão de 1 s); com o `stopLeftoverRuns` não precisa de timeout próprio. Suíte de integração local inteira (`pnpm --filter @moneyflow/server test:local`): 37 arquivos, 426 casos passando e 3 pulados de uma vez só, em ~145 s (antes, no `fe8786d`: 7 falhas em chat-media e capabilities; nas rodadas intermediárias, notes).

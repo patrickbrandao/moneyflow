@@ -9,7 +9,7 @@ import {
 import OpenAI, { toFile } from 'openai';
 import { attachmentLabel } from './attachment-label';
 import { failureOutcome, type RequestLogBase, RequestRecorder } from './request-log';
-import { type LlmClient, type LlmCredentials, LlmError, type LlmRequest, type LlmStopReason } from './types';
+import { type LlmClient, type LlmCredentials, LlmError, type LlmRequest, type LlmStopReason, providerError } from './types';
 
 /*
  * Adaptador OpenAI-compatível (Chat Completions com tools e streaming,
@@ -97,19 +97,17 @@ function openClient(credentials: LlmCredentials, recorder: RequestRecorder, time
 function wrapError(error: unknown, signal?: AbortSignal): never {
   if (error instanceof OpenAI.APIError && !(error instanceof OpenAI.APIUserAbortError)) {
     const status = typeof error.status === 'number' ? error.status : null;
-    throw new LlmError(
-      String(error.message).slice(0, 500),
-      status,
-      status === null || status === 408 || status === 409 || status === 429 || status >= 500,
-    );
+    const code = (error as { code?: unknown }).code;
+    // A OpenAI manda o código context_length_exceeded à parte da mensagem.
+    throw providerError(code === 'context_length_exceeded' ? `${error.message} (context_length_exceeded)` : String(error.message), status);
   }
   if (signal?.aborted || (error as { name?: string })?.name === 'AbortError') throw error;
   throw new LlmError(String(error instanceof Error ? error.message : error).slice(0, 500), null, true);
 }
 
 export function openaiClient(credentials: LlmCredentials, log: RequestLogBase = {}): LlmClient {
-  const recorderFor = (operation: AiRequestOperation, purpose: AiUsagePurpose | null, model: string | null) =>
-    new RequestRecorder({ ...log, baseUrl: credentials.baseUrl }, { operation, purpose, model });
+  const recorderFor = (operation: AiRequestOperation, purpose: AiUsagePurpose | null, model: string | null, streaming?: boolean) =>
+    new RequestRecorder({ ...log, baseUrl: credentials.baseUrl }, { operation, purpose, model, streaming });
 
   return {
     kind: 'openai',
@@ -139,7 +137,7 @@ export function openaiClient(credentials: LlmCredentials, log: RequestLogBase = 
       let model = request.model;
       const calls = new Map<number, { id: string; name: string; args: string }>();
       const usage = { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 };
-      const recorder = recorderFor(request.operation ?? 'chat', request.purpose ?? 'chat', request.model);
+      const recorder = recorderFor(request.operation ?? 'chat', request.purpose ?? 'chat', request.model, true);
       const client = openClient(credentials, recorder);
       try {
         const stream = await client.chat.completions.create(body, { signal: request.signal });

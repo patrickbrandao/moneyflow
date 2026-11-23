@@ -69,7 +69,11 @@ test('contrato com a obrigação na conta: o pagamento atrasado no extrato vira 
   await obligation.getByTestId('obligation-account').selectOption({ label: `${account.name} · Corrente/pagamento` });
   const terms = obligation.getByTestId('obligation-terms');
   await terms.getByRole('button', { name: 'Ajustes de reconhecimento' }).click();
-  await terms.getByLabel('Multa por atraso (%)').fill('2');
+  // O "%" digitado vale (tarefa 181); um valor que não é número mostra o erro em vez de virar "sem multa".
+  await terms.getByLabel('Multa por atraso (%)').fill('dois');
+  await expect(terms.getByLabel('Multa por atraso (%)')).toHaveAttribute('aria-invalid', 'true');
+  await terms.getByLabel('Multa por atraso (%)').fill('2%');
+  await expect(terms.getByLabel('Multa por atraso (%)')).not.toHaveAttribute('aria-invalid', 'true');
   await terms.getByLabel('Juros de mora (% ao mês)').fill('1');
   await dialog.getByTestId('contract-create').click();
   await expect(page.getByRole('heading', { name })).toBeVisible();
@@ -77,7 +81,11 @@ test('contrato com a obrigação na conta: o pagamento atrasado no extrato vira 
   // A obrigação na corrente, com os ajustes.
   const row = page.getByTestId('contract-obligations').getByTestId('obligation-row').first();
   await expect(row).toContainText(account.name);
-  await expect(row.getByTestId('obligation-terms-summary')).toContainText('2');
+  // Um só resumo dos ajustes: o mesmo texto na obrigação e na gaveta do título (tarefa 181).
+  const summary = 'multa 2% · juros 1% a.m. · janela 15 d';
+  await expect(row.getByTestId('obligation-terms-summary')).toHaveText(summary);
+  await row.getByRole('button', { name: /Abrir a próxima ocorrência/ }).click();
+  await expect(page.getByTestId('title-series-terms')).toHaveText(summary);
 
   // 2. O extrato com julho pago em 20/07 (10 dias de atraso): R$ 2.000,00 + multa R$ 40,00 + juros R$ 6,67.
   const res = await page.request.post(`/api/statement-imports?accountId=${account.id}&fileName=aluguel-${tag}.ofx`, {

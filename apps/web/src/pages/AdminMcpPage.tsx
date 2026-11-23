@@ -2,6 +2,7 @@ import { type AdminApiTokenDto, formatDateTime, type Membership, t, type UserRow
 import { Plus, Trash2 } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { tokenState } from '../components/account/ApiTokensPanel';
+import { ExpiresInDaysField, expiresInDaysOf, TokenRevealModal } from '../components/account/TokenReveal';
 import { LoadError, PageHead, SkelRows } from '../components/domain';
 import { FormError, ModalActions } from '../components/forms';
 import { Badge, Button, CopyButton, cx, EmptyRow, Field, Modal, Panel, useConfirm } from '../components/ui';
@@ -184,29 +185,22 @@ export function AdminMcpPage() {
           }}
         />
       )}
-      <Modal open={created !== null} title={created ? m.createdTitle(created.username) : ''} onClose={() => setCreated(null)}>
+      <TokenRevealModal
+        title={created ? m.createdTitle(created.username) : ''}
+        token={created?.token ?? null}
+        testId="mcp-key-value"
+        onClose={() => setCreated(null)}
+      >
         {created && (
-          <>
-            <div className="key-reveal">
-              <p className="t">{k.createdWarn}</p>
-              <div className="row">
-                <code data-testid="mcp-key-value">{created.token}</code>
-                <CopyButton text={created.token} label={t.common.copy} />
-              </div>
+          <div className="well mt-3">
+            <span className="label">{m.claudeCommand}</span>
+            <div className="flex items-start gap-2">
+              <code className="mono min-w-0 flex-1 text-[12px] break-all">{claudeCommand(mcpUrl, created.token)}</code>
+              <CopyButton text={claudeCommand(mcpUrl, created.token)} />
             </div>
-            <div className="well mt-3">
-              <span className="label">{m.claudeCommand}</span>
-              <div className="flex items-start gap-2">
-                <code className="mono min-w-0 flex-1 text-[12px] break-all">{claudeCommand(mcpUrl, created.token)}</code>
-                <CopyButton text={claudeCommand(mcpUrl, created.token)} />
-              </div>
-            </div>
-            <ModalActions>
-              <Button onClick={() => setCreated(null)}>{k.done}</Button>
-            </ModalActions>
-          </>
+          </div>
         )}
-      </Modal>
+      </TokenRevealModal>
     </div>
   );
 }
@@ -232,10 +226,8 @@ function CreateKeyModal({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const expiresInDays = days.trim() ? Number(days) : null;
-    if (expiresInDays !== null && (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 3650)) {
-      return setError(k.expiresInDays);
-    }
+    const { value: expiresInDays, error: daysError } = expiresInDaysOf(days);
+    if (daysError) return setError(daysError);
     setError(null);
     const token = await run(() => api.post<Created>('/api/admin/api-tokens', { userId, name: name.trim(), expiresInDays }));
     if (token) onCreated(token);
@@ -270,14 +262,7 @@ function CreateKeyModal({
             required
           />
         </Field>
-        <Field label={k.expiresInDays} hint={k.expiresHint}>
-          <input
-            className="field field-mono"
-            inputMode="numeric"
-            value={days}
-            onChange={(e) => setDays(e.target.value.replace(/\D/g, ''))}
-          />
-        </Field>
+        <ExpiresInDaysField value={days} onChange={setDays} />
         <FormError>{error}</FormError>
         <ModalActions>
           <Button variant="ghost" onClick={onClose}>

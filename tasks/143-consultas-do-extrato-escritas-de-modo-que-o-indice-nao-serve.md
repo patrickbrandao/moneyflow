@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 832da3f
 ---
 
 # Consultas do extrato escritas de um jeito que impede o uso dos índices feitos para elas
@@ -71,4 +71,13 @@ Nada foi executado. A troca é só de forma, sem mudança de resultado.
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código atual: os itens 1 e 2 já tinham sido corrigidos pela tarefa 139 (o `notProvisional` passou a ser `NOT statement_lines.provisional`, e o `autoMatch` lê as sugestões pela coluna do alvo do lote). Faltava o item 3: `unreconciledByMonth` (`audit.ts`) filtrava por `coalesce(a.caixa_id, l.card_caixa_id)` e o mês por `date_trunc`, o que impede os índices `(financial_account_id, posted_on)` e `(card_caixa_id, posted_on)`.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/audit.ts` (`unreconciledByMonth`, a guia Fechamento e o `closeMonth`): o alvo pelas colunas da linha, `l.financial_account_id IN (contas da caixa) OR l.card_caixa_id = caixa`, e o mês por intervalo (`posted_on >= mês AND posted_on < mês + 1`), sem o `LEFT JOIN` das contas. Mesmo resultado.
+- Itens 1 e 2: já feitos pela tarefa 139; conferidos, sem mudança.
+- Teste: `apps/server/test/operation.test.ts`, no fechamento de mês, as pendências por mês da caixa com o lote importado e a outra caixa sem nenhuma; os casos de reimportação (`test/statements.test.ts`) e do consolidado sobre o provisório (`test/statement-supersede.test.ts`) passam sem mudança.
+- Verificação: `pnpm verify:quick` (nível rápido).

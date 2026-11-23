@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # A tool de copiar regras manda "aplicar as regras", mas não existe tool para aplicar
@@ -59,4 +59,14 @@ Não há `dryRun` em `applyRulesToAccount` hoje; a prévia precisaria dele (ou c
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: não havia tool para aplicar as regras; a descrição de `copy_classification_rules` e o aviso da prévia mandavam aplicar.
+
 ## Resolução (executor)
+
+- Tool `apply_classification_rules` (escrita, categoria `categories`, `ask`; registro em `tools-operation.ts`, handler em `tool-handlers-operation.ts`): um lote (`importId`) ou todos os lotes da conta (`accountId`) ou do cartão (`cardCaixaId`), exatamente um. A prévia é o plano do serviço sem gravar (`planApplyRules` em `reconciliation.ts`, sobre o `planRuleChanges` que a execução também usa): onde, quantas linhas mudam por regra (entidade e categoria) e as que perdem a classificação de uma regra que não vale mais.
+- Na receita de conciliação ela é recusada (`RECIPE_DENIED_TOOLS`), porque age em linhas fora do escopo.
+- A descrição de `copy_classification_rules` e o aviso da prévia (`t.statements.copyHintAgent`) apontam para a tool nova; o texto da tela (`copyHint`) ficou.
+- Ficou na categoria Categorias e regras (com a cópia), então a contagem da categoria Conciliação no e2e (`agentes.spec.ts`, 22 de 22) não muda. Como toda tool nova, não entra em kit nenhum.
+- Specs 021 (tabela), 027 e 032 e a linha da 032 no `docs/INDEX.md` atualizadas.
+- Testes: `agent-tools.test.ts` (no lote: prévia, uma linha classificada pela regra criada depois da importação e o uso contado; nada mais a mudar avisado; viewer negado; dois alvos recusados; a conta inteira pelo `/mcp`) e o schema no `packages/shared/test/agents.test.ts`.
+- Verificação: `pnpm verify:quick` (Biome, typecheck, os testes do shared relacionados e, passados depois de `--`, os de integração `agents`, `agent-tools`, `agent-tools-admin`, `titles`, `cards`, `contracts`, `statements`, `vision`, `reconcile-recipes`, `statement-supersede`, `autonomous` e `budgets` no Postgres local). Não rodei `verify:full` nem o e2e.

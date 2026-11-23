@@ -54,6 +54,11 @@ export type AgentToolDef<S extends z.ZodType = z.ZodType> = {
   secrets?: readonly string[];
   /** Gera um arquivo (vira anexo de uma mensagem do agente na sessão): fora do /mcp, que não tem sessão. */
   producesFile?: boolean;
+  /**
+   * Fala com um serviço fora do MoneyFlow (provedor de IA, CNPJ Aberto/BrasilAPI, Telegram, servidor MCP) ou
+   * gasta IA: `openWorldHint` no /mcp e o aviso na prévia genérica (tarefa 157).
+   */
+  external?: boolean;
   input: S;
 };
 
@@ -68,6 +73,14 @@ export const date = isoDate.describe('Data no formato AAAA-MM-DD.');
 export const optionalDate = date.optional();
 export const limit = (max: number, fallback: number) =>
   z.number().int().min(1).max(max).default(fallback).describe(`Máximo de itens (padrão ${fallback}).`);
+/** Página seguinte das listas (tarefa 101): o resultado traz `nextOffset` (null = acabou). */
+export const offset = z
+  .number()
+  .int()
+  .min(0)
+  .max(100_000)
+  .default(0)
+  .describe('Pula os N primeiros itens: use o nextOffset do resultado anterior para a página seguinte.');
 /** Anexo usado como entrada (spec 027): um anexo desta sessão (no /mcp, um anexo que o dono do token lê). */
 export const attachmentId = id.describe(
   'Id do anexo enviado nesta sessão (aparece no texto como "attachmentId" ao lado do nome do arquivo).',

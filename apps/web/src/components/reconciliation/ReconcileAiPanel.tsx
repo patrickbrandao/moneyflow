@@ -1,8 +1,8 @@
 import { type AiRunEvent, type ReconcileAiStartResult, type ReconcileAiStateDto, t } from '@moneyflow/shared';
 import { Bot, Check, CheckCheck, Loader2, Sparkles, X } from 'lucide-react';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
-import { useAgents } from '../../agents/AgentsProvider';
-import { PreviewRows } from '../../agents/ConversationPane';
+import { useAgentActions } from '../../agents/AgentsProvider';
+import { PreviewRows } from '../../agents/ConversationBody';
 import { followRun } from '../../agents/stream';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
@@ -22,7 +22,7 @@ export function ReconcileAiPanel({ importId, canWrite, onChanged }: { importId: 
   const path = `/api/statement-imports/${importId}/reconcile-ai`;
   const { data, reload, setData } = useApi<ReconcileAiStateDto>(path);
   const { run, busy } = useAction();
-  const agents = useAgents();
+  const agents = useAgentActions();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState('');
@@ -125,6 +125,7 @@ export function ReconcileAiPanel({ importId, canWrite, onChanged }: { importId: 
           <p className="hint">{data.canDecide ? k.proposesHint : k.otherUser}</p>
           <div className="agent-confirm-list">
             {pending.map((c) => (
+              // biome-ignore lint/a11y/noLabelWithoutControl: a caixa de seleção aparece só para quem decide; sem ela, o item é só texto.
               <label key={c.id} className="agent-confirm-item flex items-start gap-2">
                 {data.canDecide && (
                   <input

@@ -30,9 +30,13 @@ export async function setup(project: TestProject) {
     project.provide('superDatabaseUrl', superUrl);
     return;
   }
-  const image = await GenericContainer.fromDockerfile(DATABASE_DIR, 'docker/Dockerfile')
-    .withCache(true)
-    .build('moneyflow-postgres:test', { deleteOnExit: false });
+  // MONEYFLOW_TEST_PG_IMAGE: a imagem do banco já construída (no CI, pelo cache do GitHub; tarefa 184), sem build aqui.
+  const prebuilt = process.env.MONEYFLOW_TEST_PG_IMAGE;
+  const image = prebuilt
+    ? new GenericContainer(prebuilt)
+    : await GenericContainer.fromDockerfile(DATABASE_DIR, 'docker/Dockerfile')
+        .withCache(true)
+        .build('moneyflow-postgres:test', { deleteOnExit: false });
   container = await image
     .withEnvironment({
       POSTGRES_USER: 'moneyflow',

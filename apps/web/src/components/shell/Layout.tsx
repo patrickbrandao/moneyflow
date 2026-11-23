@@ -1,5 +1,7 @@
+import { t } from '@moneyflow/shared';
 import { ChevronRight, Moon, PanelLeftOpen, Search, Sun } from 'lucide-react';
-import { type CSSProperties, createContext, type ReactNode, useContext, useEffect, useMemo, useState } from 'react';
+
+import { type CSSProperties, createContext, type ReactNode, Suspense, useContext, useEffect, useMemo, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AgentSidePanel, usePanelColumn } from '../../agents/AgentSidePanel';
 import { AgentsMenu } from '../../agents/AgentsMenu';
@@ -7,15 +9,24 @@ import { AgentWindowsLayer } from '../../agents/AgentWindows';
 import { chordShortcuts, matchLink, navigationFor } from '../../config/navigation';
 import { useUser } from '../../lib/auth';
 import { armChord, isChordKey, isTypingTarget, usePalette } from '../../lib/commands';
+import { lazyNamed } from '../../lib/lazy';
 import { useStored } from '../../lib/storage';
 import { useTheme } from '../../lib/theme';
 import { ReminderAlarm } from '../notes/ReminderAlarm';
 import { Kbd } from '../ui';
-import { CommandPalette } from './CommandPalette';
 import { Notifications } from './Notifications';
+import { ErrorBoundary, PageSlot } from './PageSlot';
 import { NARROW, Sidebar } from './Sidebar';
 
 export type Crumb = { label: string; to?: string };
+
+/*
+ * A paleta (⌘K, cmdk + o diálogo do Radix) é um pedaço próprio (tarefa 128):
+ * baixada quando o navegador fica ocioso depois da carga, montada na primeira
+ * abertura e mantida depois.
+ */
+const loadPalette = () => import('./CommandPalette');
+const CommandPalette = lazyNamed(loadPalette, 'CommandPalette');
 
 /*
  * A trilha da topbar sai da navegação (grupo › item) e, além disso, de quem a
@@ -46,7 +57,18 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
   // Recolher é preferência de quem usa, por navegador; na tela estreita não se aplica.
   const [collapsed, setCollapsed] = useStored('sidebar-collapsed', false);
   const [extra, setExtra] = useState<Crumb[]>([]);
-  const { open: openPalette } = usePalette();
+  const { open: openPalette, isOpen: paletteOpen } = usePalette();
+  const [paletteUsed, setPaletteUsed] = useState(false);
+  if (paletteOpen && !paletteUsed) setPaletteUsed(true);
+  useEffect(() => {
+    const prefetch = () => void loadPalette().catch(() => undefined);
+    if (typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(prefetch, { timeout: 5000 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const id = window.setTimeout(prefetch, 2000);
+    return () => window.clearTimeout(id);
+  }, []);
   const [theme, toggleTheme] = useTheme();
   // Agente ancorado à direita: uma terceira coluna do grid (o palco encolhe).
   const panelColumn = usePanelColumn();
@@ -86,19 +108,22 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
         style={panelColumn ? ({ '--agent-panel-w': panelColumn } as CSSProperties) : undefined}
       >
         <Sidebar open={menuOpen} onClose={() => setMenuOpen(false)} onCollapse={() => setCollapsed(true)} />
-        {menuOpen && <div className="overlay" style={{ zIndex: 45 }} onClick={() => setMenuOpen(false)} />}
+        {menuOpen && (
+          // biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: fundo do menu no celular; o botão de recolher fecha pelo teclado.
+          <div className="overlay" style={{ zIndex: 45 }} onClick={() => setMenuOpen(false)} />
+        )}
 
         <header className="topbar">
           <button
             type="button"
             className="icon-btn menu-btn"
             onClick={() => (window.matchMedia(NARROW).matches ? setMenuOpen(true) : setCollapsed(false))}
-            title="Exibir o menu"
-            aria-label="Exibir o menu"
+            title={t.shell.showMenu}
+            aria-label={t.shell.showMenu}
           >
             <PanelLeftOpen />
           </button>
-          <nav className="crumbs" aria-label="Trilha">
+          <nav className="crumbs" aria-label={t.shell.breadcrumbs}>
             {crumbs.map((crumb, index) => (
               <span key={`${crumb.label}-${index}`} className="contents">
                 {index > 0 && <ChevronRight />}
@@ -110,7 +135,13 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
               </span>
             ))}
           </nav>
-          <button type="button" className="icon-btn" onClick={() => openPalette()} title="Buscar (⌘K)" aria-label="Buscar">
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => openPalette()}
+            title={t.shell.searchShortcut}
+            aria-label={t.shell.search}
+          >
             <Search />
           </button>
           <span className="hidden items-center gap-1 pr-1 md:inline-flex" aria-hidden>
@@ -121,8 +152,8 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
             type="button"
             className="icon-btn"
             onClick={toggleTheme}
-            title={theme === 'dark' ? 'Tema claro' : 'Tema escuro'}
-            aria-label={theme === 'dark' ? 'Tema claro' : 'Tema escuro'}
+            title={theme === 'dark' ? t.shell.themeLight : t.shell.themeDark}
+            aria-label={theme === 'dark' ? t.shell.themeLight : t.shell.themeDark}
           >
             {theme === 'dark' ? <Sun /> : <Moon />}
           </button>
@@ -133,12 +164,20 @@ export function Layout({ stage, children }: { stage?: boolean; children?: ReactN
         </header>
 
         <main className="main">
-          <div className={`main-panel${stage ? ' stage' : ''}`}>{children ?? <Outlet />}</div>
+          <div className={`main-panel${stage ? ' stage' : ''}`}>
+            <PageSlot resetKey={location.pathname}>{children ?? <Outlet />}</PageSlot>
+          </div>
         </main>
         <AgentSidePanel />
       </div>
       <AgentWindowsLayer />
-      <CommandPalette />
+      {paletteUsed && (
+        <ErrorBoundary resetKey="" fallback={null}>
+          <Suspense fallback={null}>
+            <CommandPalette />
+          </Suspense>
+        </ErrorBoundary>
+      )}
     </CrumbContext.Provider>
   );
 }

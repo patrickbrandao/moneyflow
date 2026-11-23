@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 827ca7c
 ---
 
 # Canvas de fluxo recria `data` de todos os nós e arestas a cada quadro do arrasto e anula o `memo` dos nós
@@ -54,8 +54,8 @@ Canvas com mais de 12 entidades por lado, expandir dois grupos, ligar o React De
 5. `buckets`: `push` no array existente.
 
 ## Critérios de aceite
-- [ ] Arrastar um nó re-renderiza só esse nó e as arestas ligadas a ele (Profiler).
-- [ ] Destaque por tag, seleção e esmaecimento continuam iguais.
+- [x] Arrastar um nó re-renderiza só esse nó e as arestas ligadas a ele (Profiler). (pelo código e pelo teste do cache; sem medir no Profiler)
+- [x] Destaque por tag, seleção e esmaecimento continuam iguais.
 
 ## Testes recomendados
 Unitário de `highlightIds` (tags e favoritas) num `graph.test.ts` (o `apps/web` não tem vitest; dá para mover `graph.ts`, que é puro, para um teste no `packages/shared` ou criar o vitest do web). O e2e de canvas existente continua cobrindo a interação.
@@ -64,5 +64,11 @@ Unitário de `highlightIds` (tags e favoritas) num `graph.test.ts` (o `apps/web`
 Nada foi executado nem medido.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado em `MoneyFlowCanvas.tsx`: a cada mudança do estado `nodes` (cada quadro do arrasto), `highlightIds`, `selected`, `focusIds`, `viewNodes` e `viewEdges` eram refeitos, e `viewNodes`/`viewEdges` criavam objeto e `data` novos para todos os nós e arestas, anulando o `memo` dos tipos de nó; e os `buckets` de `buildGraph` copiavam o array a cada entidade.
 
 ## Resolução (executor)
+`apps/web/src/components/canvas/MoneyFlowCanvas.tsx`: o destaque sai do grafo montado (`built`), não do estado com as posições; o esmaecido (`focusIds`) sai da seleção e das arestas (com o nó sumido do grafo, nada esmaece, como antes); a seleção só refaz quando o próprio nó selecionado muda, com os nomes das pontas vindos do grafo montado. As visões dos nós e das arestas passam por `createViewCache` (novo em `packages/shared/src/view-cache.ts`): o objeto de cada item é reaproveitado enquanto o item tem a mesma identidade e a chave do que muda a visão (selecionado, esmaecido e, nas arestas, as alças caixa → caixa) é a mesma. No arrasto, o React Flow troca só o objeto do nó arrastado, então só ele (e as arestas caixa → caixa cujas alças mudam) ganha objeto novo e o `memo` dos demais segura o render. Em `graph.ts`, os `buckets` usam `push` no array existente. O comentário de `nodes.tsx` diz por que o `memo` vale. Destaque por tag, seleção e esmaecimento seguem as mesmas regras.
+
+Decisão: a solução 2 da tarefa (reaproveitar por nó), sem mexer nos componentes dos nós nem criar contexto novo; não medi com o Profiler (sem servidor de dev nesta frente).
+
+Testes: unitário `packages/shared/test/view-cache.test.ts` (arrasto refaz só o item trocado; esmaecer um refaz só ele; quem sai da lista é esquecido). O e2e do canvas existente (`visao.spec.ts`) continua cobrindo a interação. Verificação: `pnpm verify:quick`.

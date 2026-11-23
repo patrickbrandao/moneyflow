@@ -516,7 +516,9 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-  flex: 1;
+  /* A base de 220px faz os controles irem para a linha de baixo quando não cabem, em vez de o título
+     encolher até sumir (largura zero com muitos filtros na tela de fluxo). */
+  flex: 1 1 220px;
 }
 .stage-head h1 {
   font-size: 20px;

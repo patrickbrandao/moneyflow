@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # Leitura (e o notify_user) em ask mostra cartão vazio, e leituras com efeito externo vão ao /mcp como inofensivas
@@ -61,4 +61,13 @@ A contagem de prévias foi feita por expressão regular sobre os arquivos de han
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: sem `preview`, o cartão das leituras em `ask` saía vazio (e o "Sem prévia" nem aparecia); `notify_user` também; no `/mcp`, só `send_telegram_message` e `notify_user` tinham `openWorldHint`.
+
 ## Resolução (executor)
+
+- `inputPreview` (`tool-helpers.ts`), usado por `RunTools.preview` quando a tool não tem prévia própria: uma linha por argumento preenchido, ids simples trocados por nomes (caixa, cartão, pagadora, entidade, categoria, conta), centavos em R$ e datas em dd/mm/aaaa; a leitura diz "Consulta, sem gravar nada".
+- Prévias próprias em `notify_user` (título, texto e link) e `read_document` (arquivo, tipo, tamanho e o aviso do custo da IA).
+- Marca `external` no registro (`tool-def.ts`) nas tools que chamam serviço externo ou gastam IA (leitura de documento e conversão do PDF, CNPJ, busca semântica, teste e modelos do provedor, Telegram, aviso, MCP, rodar tarefa e receita); o `/mcp` usa a marca no `openWorldHint` e a prévia genérica avisa o serviço externo.
+- Spec 021 e `AGENTS.md` (a regra das tools novas) atualizados.
+- Testes: `agents.test.ts` (kit com `list_titles`, `notify_user` e `lookup_cnpj` em `ask`: os argumentos com nomes e datas, o título e o texto do aviso e o aviso do serviço externo; `openWorldHint` no `/mcp`) e `packages/shared/test/agents.test.ts` (a lista das tools `external`).
+- Verificação: `pnpm verify:quick` (Biome, typecheck, os testes do shared relacionados e, passados depois de `--`, os de integração `agents`, `agent-tools`, `agent-tools-admin`, `titles`, `cards`, `contracts`, `statements`, `vision`, `reconcile-recipes`, `statement-supersede`, `autonomous` e `budgets` no Postgres local). Não rodei `verify:full` nem o e2e.

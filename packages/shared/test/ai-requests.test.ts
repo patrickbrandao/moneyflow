@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { base64Extension, buildCurl, detectBase64, OMITTED_HEADER } from '../src';
+import { base64Extension, buildCurl, detectBase64, isInterruptedRequest, OMITTED_HEADER } from '../src';
 
 describe('requisições ao provedor (spec 023)', () => {
+  it('a interrompida pela manutenção (tarefa 162) é reconhecida pelo começo da mensagem', () => {
+    expect(isInterruptedRequest('interrupted: the process stopped before the request finished')).toBe(true);
+    expect(isInterruptedRequest('429 rate limited')).toBe(false);
+    expect(isInterruptedRequest('erro: interrupted: no meio')).toBe(false);
+    expect(isInterruptedRequest(null)).toBe(false);
+    expect(isInterruptedRequest(undefined)).toBe(false);
+  });
+
   it('cURL: credenciais viram variáveis de ambiente, sem content-length; corpo com aspas escapadas', () => {
     const curl = buildCurl({
       method: 'post',

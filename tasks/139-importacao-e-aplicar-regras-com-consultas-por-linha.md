@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 9b41c2e
 ---
 
 # Importação, casamento e "Aplicar regras" fazem consultas por linha (N+1) numa transação longa
@@ -66,4 +66,19 @@ Nada foi medido; os números vêm da contagem das consultas no código e de uma 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código: no `importStatement`, `ruleFor` por linha e, no `autoMatch`, `candidatesFor` por linha (2 consultas da conta, mais `seriesCandidates`; no cartão, `expectedCardOccurrences` por linha) e um `UPDATE` por linha casada ou sugerida; `pending` por `coalesce(financial_account_id, card_caixa_id)`, sem índice; a dedup pelo `NOT EXISTS` em `statement_imports`; o "Aplicar regras" e a troca do provisório com um `UPDATE` por linha. Medido no teste novo, antes da correção: 8.020 consultas para um lote de 2.000 linhas.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/statements.ts`:
+  - `rulesFor(tx, alvo, linhas)`: as regras de todas as linhas numa consulta (`classification_rule_for` sobre `json_to_recordset`); `ruleFor` virou o caso de uma linha. `bumpRuleUsage` soma o uso das regras num `UPDATE` só. O `importStatement` usa os dois.
+  - Casamento: `loadCandidatePool` lê de uma vez, para o intervalo das datas e os valores do lote, os movimentos livres da conta, os títulos em aberto, as ocorrências de série (`seriesRows`, pré-filtro de 76 dias) e, no cartão, as parcelas e as cobranças esperadas (`expectedCardOccurrences` uma vez por lote); `candidatesFromPool` filtra o pedaço de cada linha em memória, com os mesmos critérios da consulta por linha. `candidatesFor` (casar à mão, janela de 30 dias) e `seriesCandidates` (o "É o pagamento de…?" do cofre) usam o mesmo caminho com uma linha só.
+  - `autoMatch`: o pool lido uma vez, as sugestões em aberto (`used`) pela coluna do alvo (`financial_account_id` ou `card_caixa_id`, com índice) e os vínculos gravados por `linkLines` num `UPDATE … FROM json_to_recordset`. A baixa automática continua no savepoint, uma por linha baixada; o `used` segue impedindo que a mesma ocorrência ou item vá para duas linhas, inclusive depois de uma baixa automática.
+  - Dedup por `NOT statement_lines.provisional`, a cópia que o banco mantém para o índice parcial `statement_lines_account_dedup_key`.
+- `apps/server/src/services/reconciliation.ts`: o "Aplicar regras" (lote e conta) com `rulesFor`, um `UPDATE … FROM json_to_recordset` das linhas que mudam e `bumpRuleUsage`.
+- `apps/server/src/services/statement-supersede.ts`: a troca do provisório com um `UPDATE` por grupo (as linhas do provisório soltas, as pendentes, as do consolidado que herdam a conciliação, as ignoradas e as classificações do usuário), na mesma ordem de antes (o provisório solta os movimentos antes de o consolidado tomá-los).
+- Sem mudança de spec (o resultado do casamento e das regras não muda).
+- Teste: `apps/server/test/statements.test.ts`, "2.000 linhas: casamento e regras como antes…": lotes de 10 e de 2.000 linhas com regra, movimento e título plantados, por um contexto cujo banco conta as consultas (logger do drizzle); confere classificação, conciliação e sugestão, o uso da regra, o lote de 2.000 com as mesmas consultas do de 10 fora os blocos de 500 do `INSERT` (60 contra 8.020 antes), um teto de tempo folgado, e o "Aplicar regras" com o mesmo número de consultas nos dois lotes. Os testes atuais de `statements.test.ts`, `statement-supersede.test.ts`, `contracts.test.ts`, `agent-tools.test.ts`, `reconcile-recipes.test.ts`, `cards.test.ts`, `account-summary.test.ts`, `agents.test.ts`, `autonomous.test.ts`, `backup.test.ts`, `budgets.test.ts` e `operation.test.ts` passam sem mudança.
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

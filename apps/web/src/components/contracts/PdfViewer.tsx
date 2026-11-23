@@ -3,6 +3,10 @@ import { ChevronLeft, ChevronRight, Download, ZoomIn, ZoomOut } from 'lucide-rea
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '../ui';
 
+/**
+ * O documento aberto. O pdf.js 6 tirou o `destroy()` do documento: quem o
+ * solta é a tarefa de carregamento (`PdfLoad.destroy`, abaixo).
+ */
 export type PdfDocument = {
   numPages: number;
   getPage: (n: number) => Promise<{
@@ -12,16 +16,61 @@ export type PdfDocument = {
       cancel: () => void;
     };
   }>;
-  destroy: () => Promise<void>;
 };
 
-/** pdf.js sob demanda (não pesa no bundle inicial), com o worker servido pelo Vite. */
-export async function loadPdf(url: string): Promise<PdfDocument> {
-  const [pdfjs, worker] = await Promise.all([import('pdfjs-dist'), import('pdfjs-dist/build/pdf.worker.min.mjs?url')]);
-  pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
-  // Só o canvas da página (somente leitura): sem a camada de formulários nem o scripting do PDF.
-  const task = pdfjs.getDocument({ url, withCredentials: true });
-  return (await task.promise) as unknown as PdfDocument;
+type PdfRuntime = {
+  getDocument: (src: { url: string; withCredentials: boolean }) => {
+    promise: Promise<unknown>;
+    destroy: () => Promise<void>;
+  };
+};
+
+let runtime: Promise<PdfRuntime> | null = null;
+
+/**
+ * pdf.js sob demanda (não pesa no bundle inicial), com o worker servido pelo
+ * Vite. Um só worker por aba (tarefa 121): sem ele, cada documento abria um
+ * `new Worker` próprio, vivo até o `destroy`. Os documentos abertos nele não o
+ * encerram ao serem soltos (o `loadingTask.destroy` só encerra o worker que
+ * ele mesmo criou).
+ */
+function pdfRuntime(): Promise<PdfRuntime> {
+  if (!runtime) {
+    runtime = Promise.all([import('pdfjs-dist'), import('pdfjs-dist/build/pdf.worker.min.mjs?url')]).then(([pdfjs, src]) => {
+      pdfjs.GlobalWorkerOptions.workerSrc = src.default;
+      const worker = new pdfjs.PDFWorker();
+      return { getDocument: (params) => pdfjs.getDocument({ ...params, worker }) };
+    });
+    // Falhou ao baixar o pdf.js (rede): a próxima abertura tenta de novo.
+    runtime.catch(() => {
+      runtime = null;
+    });
+  }
+  return runtime;
+}
+
+/** Um PDF aberto no worker da aba. `destroy` solta o documento antes ou depois de carregar (o worker fica). */
+export type PdfLoad = { promise: Promise<PdfDocument>; destroy: () => Promise<void> };
+
+export function openPdf(url: string): PdfLoad {
+  let task: { destroy: () => Promise<void> } | null = null;
+  let destroyed = false;
+  const promise = pdfRuntime().then(({ getDocument }) => {
+    if (destroyed) throw new Error('pdf: carregamento cancelado');
+    // Só o canvas da página (somente leitura): sem a camada de formulários nem o scripting do PDF.
+    const loading = getDocument({ url, withCredentials: true });
+    task = loading;
+    return loading.promise as Promise<PdfDocument>;
+  });
+  return {
+    promise,
+    destroy: async () => {
+      destroyed = true;
+      const current = task;
+      task = null;
+      await current?.destroy().catch(() => undefined);
+    },
+  };
 }
 
 const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
@@ -36,20 +85,14 @@ export function PdfViewer({ url, downloadUrl }: { url: string; downloadUrl: stri
 
   useEffect(() => {
     let cancelled = false;
-    let loaded: PdfDocument | null = null;
     setDoc(null);
     setError(false);
     setPage(1);
-    loadPdf(url)
-      .then((pdf) => {
-        loaded = pdf;
-        if (cancelled) void pdf.destroy();
-        else setDoc(pdf);
-      })
-      .catch(() => !cancelled && setError(true));
+    const load = openPdf(url);
+    load.promise.then((pdf) => !cancelled && setDoc(pdf)).catch(() => !cancelled && setError(true));
     return () => {
       cancelled = true;
-      if (loaded) void loaded.destroy();
+      void load.destroy();
     };
   }, [url]);
 

@@ -181,11 +181,50 @@ export function parseDateWithFormat(text: string, format: string): string | null
 /** Normaliza nome de coluna: aparado, minúsculo, sem acentos. */
 const normalizeHeader = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
 
-export function applyCsvMapping(
-  rows: string[][],
-  mapping: CsvMapping,
-): { headers: string[] | null; lines: CsvLine[]; errors: { row: number; message: string }[] } {
+/**
+ * Sinal sugerido para um mapeamento novo (tarefa 091), só para pré-marcar a opção na tela: na fatura do
+ * cartão, inverter se mais da metade das linhas lidas vem positiva (as compras positivas); na conta, como vem.
+ * A importação nunca decide por isto: usa o sinal gravado no mapeamento.
+ */
+export function suggestCsvAmountSign(lines: Pick<CsvLine, 'amountCents'>[], isCard: boolean): 'as_is' | 'invert' {
+  if (!isCard || lines.length === 0) return isCard ? 'invert' : 'as_is';
+  return lines.filter((l) => l.amountCents > 0).length > lines.length / 2 ? 'invert' : 'as_is';
+}
+
+/** Os valores com o sinal do mapeamento aplicado (tarefa 091). */
+export function applyCsvAmountSign<T extends { amountCents: number }>(lines: T[], sign: 'as_is' | 'invert'): T[] {
+  return sign === 'invert' ? lines.map((l) => ({ ...l, amountCents: -l.amountCents })) : lines;
+}
+
+/**
+ * Saldo do banco de um CSV com a coluna de saldo (spec 009): o saldo final do
+ * dia mais recente. No arquivo do mais antigo para o mais recente é o da
+ * última linha desse dia; no do mais recente para o mais antigo (a primeira
+ * linha com data posterior à última), o da primeira (tarefa 090).
+ */
+export function csvBankBalance(lines: Pick<CsvLine, 'postedOn' | 'balanceCents'>[]): { amountCents: number; date: string } | null {
+  const descending = lines.length > 1 && lines[0]!.postedOn > lines.at(-1)!.postedOn;
+  let last: { amountCents: number; date: string } | null = null;
+  for (const line of lines) {
+    if (line.balanceCents === null) continue;
+    if (!last || line.postedOn > last.date || (line.postedOn === last.date && !descending))
+      last = { amountCents: line.balanceCents, date: line.postedOn };
+  }
+  return last;
+}
+
+export type CsvMappingResult = {
+  headers: string[] | null;
+  lines: CsvLine[];
+  /** Linhas que não foram lidas: data ou valor inválidos (o número da linha e o motivo). */
+  errors: { row: number; message: string }[];
+  /** Linhas de valor zero (o "SALDO ANTERIOR 0,00" de muitos bancos): ficam de fora sem contar como problema (tarefa 140). */
+  zeroRows: number[];
+};
+
+export function applyCsvMapping(rows: string[][], mapping: CsvMapping): CsvMappingResult {
   const errors: { row: number; message: string }[] = [];
+  const zeroRows: number[] = [];
   const lines: CsvLine[] = [];
   let index = Math.max(0, mapping.skipRows);
   let headers: string[] | null = null;
@@ -247,7 +286,7 @@ export function applyCsvMapping(
       continue;
     }
     if (amountCents === 0) {
-      errors.push({ row: rowNumber, message: 'valor zero' });
+      zeroRows.push(rowNumber);
       continue;
     }
 
@@ -262,5 +301,5 @@ export function applyCsvMapping(
       raw,
     });
   }
-  return { headers, lines, errors };
+  return { headers, lines, errors, zeroRows };
 }

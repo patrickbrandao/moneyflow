@@ -3,13 +3,23 @@ import {
   contractAmendmentInput,
   contractCreateInput,
   cycleEnd,
+  DEFAULT_SERIES_TERMS,
+  DIFF_MAX_EDITS,
+  type DiffLine,
   diffLines,
   diffStats,
+  diffText,
   occurrencePeriodEnd,
+  parsePercent,
   periodicityCalendar,
   proratedAmount,
   readjustedTotal,
   readjustmentDateIn,
+  seriesTermsDraft,
+  seriesTermsFieldError,
+  seriesTermsFromDraft,
+  seriesTermsSummary,
+  seriesTermsTouched,
   stripInstallmentSuffix,
   termMonths,
 } from '../src';
@@ -125,11 +135,135 @@ describe('diff de versões do markdown', () => {
     expect(diffLines('x\ny', 'x\ny').every((l) => l.kind === 'same')).toBe(true);
   });
 
+  // Os dois lados saem do diff, com os números de linha em sequência.
+  const rebuild = (lines: DiffLine[]) => {
+    const before = lines.filter((l) => l.kind !== 'add');
+    const after = lines.filter((l) => l.kind !== 'del');
+    expect(before.map((l) => l.oldLine)).toEqual(before.map((_, i) => i + 1));
+    expect(after.map((l) => l.newLine)).toEqual(after.map((_, i) => i + 1));
+    return { before: before.map((l) => l.text), after: after.map((l) => l.text) };
+  };
+  const lcs = (a: string[], b: string[]) => {
+    const row = new Array<number>(b.length + 1).fill(0);
+    for (let i = 1; i <= a.length; i += 1) {
+      let diag = 0;
+      for (let j = 1; j <= b.length; j += 1) {
+        const up = row[j]!;
+        row[j] = a[i - 1] === b[j - 1] ? diag + 1 : Math.max(row[j]!, row[j - 1]!);
+        diag = up;
+      }
+    }
+    return row[b.length]!;
+  };
+
+  it('textos aleatórios: o diff reconstrói os dois lados e é o menor (tarefa 112)', () => {
+    let seed = 112;
+    const rand = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    for (let round = 0; round < 500; round += 1) {
+      const a = Array.from({ length: rand(12) }, () => 'abcd'[rand(4)]!);
+      const b = Array.from({ length: rand(12) }, () => 'abcd'[rand(4)]!);
+      const lines = diffLines(a.join('\n'), b.join('\n'));
+      const sides = rebuild(lines);
+      expect(sides.before).toEqual(a);
+      expect(sides.after).toEqual(b);
+      const { added, removed } = diffStats(lines);
+      expect(added + removed).toBe(a.length + b.length - 2 * lcs(a, b));
+    }
+  });
+
+  it('documento grande com uma linha trocada no meio dá 1 inclusão e 1 remoção', () => {
+    const before = Array.from({ length: 10_000 }, (_, i) => `linha ${i}`);
+    const after = [...before];
+    after[5_000] = 'linha trocada';
+    const result = diffText(before.join('\n'), after.join('\n'));
+    expect(result.truncated).toBe(false);
+    expect(diffStats(result.lines)).toEqual({ added: 1, removed: 1 });
+    expect(result.lines.filter((l) => l.kind !== 'same')).toEqual([
+      { kind: 'del', text: 'linha 5000', oldLine: 5001, newLine: null },
+      { kind: 'add', text: 'linha trocada', oldLine: null, newLine: 5001 },
+    ]);
+  });
+
+  it('8.000 × 8.000 linhas diferentes: o miolo sai resumido, rápido e válido', () => {
+    const before = Array.from({ length: 8_000 }, (_, i) => `linha antiga ${i}`).join('\n');
+    const after = Array.from({ length: 8_000 }, (_, i) => `linha nova ${i}`).join('\n');
+    const started = performance.now();
+    const result = diffText(before, after);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(result.truncated).toBe(true);
+    expect(diffStats(result.lines)).toEqual({ added: 8_000, removed: 8_000 });
+    const sides = rebuild(result.lines);
+    expect(sides.before.join('\n')).toBe(before);
+    expect(sides.after.join('\n')).toBe(after);
+    // Prefixo e sufixo comuns continuam iguais em volta do miolo resumido.
+    const wrapped = diffText(`topo\n${before}\nfim`, `topo\n${after}\nfim`);
+    expect(wrapped.truncated).toBe(true);
+    expect(wrapped.lines[0]).toEqual({ kind: 'same', text: 'topo', oldLine: 1, newLine: 1 });
+    expect(wrapped.lines.at(-1)).toEqual({ kind: 'same', text: 'fim', oldLine: 8_002, newLine: 8_002 });
+  });
+
+  it('até o teto de linhas diferentes, o diff é exato', () => {
+    const half = DIFF_MAX_EDITS / 2;
+    const before = Array.from({ length: half }, (_, i) => `antiga ${i}`).join('\n');
+    const after = Array.from({ length: half }, (_, i) => `nova ${i}`).join('\n');
+    const exact = diffText(before, after);
+    expect(exact.truncated).toBe(false);
+    expect(diffStats(exact.lines)).toEqual({ added: half, removed: half });
+    expect(diffText(`${before}\nx`, after).truncated).toBe(true);
+  });
+
   it('troca de linha vira remoção + inclusão, com os números de linha', () => {
     const lines = diffLines('# Título\nCláusula 1: R$ 100\nFim', '# Título\nCláusula 1: R$ 150\nFim');
     expect(lines.filter((l) => l.kind !== 'same')).toEqual([
       { kind: 'del', text: 'Cláusula 1: R$ 100', oldLine: 2, newLine: null },
       { kind: 'add', text: 'Cláusula 1: R$ 150', oldLine: null, newLine: 2 },
     ]);
+  });
+});
+
+describe('ajustes de reconhecimento da série: um editor e um resumo (tarefa 181)', () => {
+  it('o percentual aceita "2%", vírgula, ponto e espaços; vazio e zero = sem', () => {
+    expect(parsePercent('2%', 20)).toEqual({ value: 2, error: null });
+    expect(parsePercent(' 2,5 % ', 20)).toEqual({ value: 2.5, error: null });
+    expect(parsePercent('2.5', 20)).toEqual({ value: 2.5, error: null });
+    expect(parsePercent('', 20)).toEqual({ value: null, error: null });
+    expect(parsePercent('0', 20)).toEqual({ value: null, error: null });
+  });
+
+  it('o percentual inválido ou acima do teto vira erro, não "sem"', () => {
+    expect(parsePercent('dois', 20).error).toBe('informe um número (ex.: 2 ou 2,5).');
+    expect(parsePercent('2,5,1', 20).error).toBeTruthy();
+    expect(parsePercent('-1', 20).error).toBeTruthy();
+    expect(parsePercent('21', 20).error).toBe('no máximo 20%.');
+    // O reajuste do aditivo aceita o negativo, dentro da faixa do schema.
+    expect(parsePercent('-3,5%', 1000, -100)).toEqual({ value: -3.5, error: null });
+    expect(parsePercent('−3', 1000, -100)).toEqual({ value: -3, error: null });
+    expect(parsePercent('-101', 1000, -100).error).toBe('entre -100% e 1000%.');
+  });
+
+  it('o rascunho vai e volta; o erro de um campo barra o envio com o nome dele', () => {
+    const terms = { ...DEFAULT_SERIES_TERMS, lateFeePercent: 2.5, interestMonthPercent: 1, toleranceCents: 150 };
+    const draft = seriesTermsDraft(terms);
+    expect(draft.lateFee).toBe('2,5');
+    expect(seriesTermsTouched(draft)).toBe(true);
+    expect(seriesTermsTouched(seriesTermsDraft())).toBe(false);
+    expect(seriesTermsFromDraft(draft)).toEqual({ terms, error: null });
+    expect(seriesTermsFromDraft({ ...draft, lateFee: '2%' }).terms?.lateFeePercent).toBe(2);
+    const bad = { ...draft, interest: '11' };
+    expect(seriesTermsFieldError(bad, 'interest')).toBe('no máximo 10%.');
+    expect(seriesTermsFieldError(bad, 'lateFee')).toBeNull();
+    expect(seriesTermsFromDraft(bad)).toEqual({ terms: null, error: 'Juros de mora (% ao mês): no máximo 10%.' });
+    expect(seriesTermsFromDraft({ ...draft, matchWindowDays: 60 }).error).toBe('Janela da conciliação (dias): de 0 a 45 dias.');
+  });
+
+  it('o resumo é um só, com o percentual em vírgula', () => {
+    expect(seriesTermsSummary(DEFAULT_SERIES_TERMS)).toBe('Sem ajustes: valor exato no mês do vencimento ou na janela.');
+    expect(seriesTermsSummary({ ...DEFAULT_SERIES_TERMS, matchWindowDays: 30 })).toBe('janela 30 d');
+    expect(
+      seriesTermsSummary({ ...DEFAULT_SERIES_TERMS, lateFeePercent: 2, interestMonthPercent: 0.5, toleranceCents: 150, autoSettle: true }),
+    ).toMatch(/^multa 2% · juros 0,5% a\.m\. · tolerância R\$\s1,50 · baixa sem confirmação · janela 15 d$/);
   });
 });

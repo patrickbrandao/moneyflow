@@ -1,6 +1,16 @@
-import { contractLink, formatAccounting, formatDate, formatDateTime, type SeriesDto, type TitleDetail, t } from '@moneyflow/shared';
+import {
+  contractLink,
+  formatAccounting,
+  formatDate,
+  formatDateTime,
+  type SeriesDto,
+  seriesTermsSummary,
+  type TitleDetail,
+  t,
+} from '@moneyflow/shared';
 import {
   Ban,
+  CalendarClock,
   CalendarDays,
   CalendarX,
   Check,
@@ -17,32 +27,37 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAgentScreenContext } from '../../agents/AgentsProvider';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { useAction, useApi } from '../../lib/hooks';
 import { invoiceLink, titleLink } from '../../lib/links';
+import { useDrawerFocus } from '../a11y';
 import { AttachmentsPanel } from '../attachments/AttachmentsPanel';
+
 import { AuditHistory } from '../audit/AuditHistory';
-import { SeriesEditModal } from '../contracts/ObligationFormModal';
 import { PlannedAccountButton, PlannedAccountLabel } from '../contracts/PlannedAccount';
 import { CategoryLabel, LoadError, MirrorBadge, Money, TitleStatusBadge } from '../domain';
 import { TitleEntryInfo } from '../entry/TitleEntryInfo';
 import { CategorySelect, ModalActions } from '../forms';
-import { Badge, Button, Field, Modal, Skel, useConfirm } from '../ui';
+import { SeriesEditModal } from '../series/SeriesEditModal';
+import { Badge, Button, Field, Modal, Skel, useConfirm, useEscapeLayer } from '../ui';
 import { SeriesEndModal } from './SeriesEndModal';
-import { termsSummary } from './SeriesTermsFields';
-import { ReverseModal, SetAccountModal, SettlementModal } from './SettlementModal';
+import { ReversalDateModal, ReverseModal, SetAccountModal, SettlementModal } from './SettlementModal';
 import { TitleFormModal } from './TitleFormModal';
 
 /**
  * Gaveta do título: dados, espelho (aceitar/contestar), baixas (estornar,
  * definir conta) e as ações do título. Toda ação também vira comando da paleta.
  */
+const TD = t.title.drawer;
+
 export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; onClose: () => void; onChanged: () => void }) {
   const { data: title, error, reload, setData } = useApi<TitleDetail>(`/api/titles/${titleId}`);
+  // Foco no título da gaveta ao abrir; ao fechar, de volta à linha (tarefa 114).
+  const heading = useDrawerFocus<HTMLSpanElement>(titleId);
   const [modal, setModal] = useState<
     | null
     | { kind: 'settle' }
@@ -51,7 +66,8 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
     | { kind: 'seriesEnd' }
     | { kind: 'seriesEdit'; series: SeriesDto }
     | { kind: 'dispute' }
-    | { kind: 'reverse'; id: string; hasTransfer: boolean }
+    | { kind: 'reverse'; id: string; settledOn: string; hasTransfer: boolean; undoAllowed: boolean }
+    | { kind: 'reversalDate'; id: string }
     | { kind: 'account'; id: string }
     | { kind: 'history'; table: 'titles' | 'settlements'; id: string }
   >(null);
@@ -70,13 +86,8 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
       : null,
   );
 
-  useEffect(() => {
-    const down = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !modal) onClose();
-    };
-    document.addEventListener('keydown', down);
-    return () => document.removeEventListener('keydown', down);
-  }, [onClose, modal]);
+  // Esc fecha a gaveta só quando ela é a camada de cima (os modais e as confirmações abertos dela fecham antes).
+  useEscapeLayer(true, onClose);
 
   const saved = (next: TitleDetail) => {
     setData(next);
@@ -88,19 +99,21 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
   const awaiting = title?.mirrorStatus === 'pending' || title?.mirrorStatus === 'disputed';
   /** Título de fatura de cartão: valor, vencimento, cancelamento e exclusão mudam pela fatura. */
   const isInvoice = Boolean(title?.cardInvoiceId);
+  /** O par é do lado original: pelo espelho, cancelar, excluir e mexer na série pedem escrita também lá (tarefa 079). */
+  const ownsPair = Boolean(title?.canWrite && (title.mirrorStatus === null || title.mirror?.canWrite));
   /** Recorrência (não parcelamento): pode ser encerrada ou estendida numa data. */
-  const canEndSeries = Boolean(title?.canWrite && title.rule && title.rule.installmentsTotal === null);
+  const canEndSeries = Boolean(ownsPair && title?.rule && title.rule.installmentsTotal === null);
 
   async function cancel() {
     if (!title) return;
     const ok = await confirm({
-      title: 'Cancelar o título?',
-      description: title.mirrorTitleId ? 'O espelho na outra caixa também é cancelado.' : 'Ele deixa de contar como em aberto.',
+      title: TD.cancelTitle,
+      description: title.mirrorTitleId ? TD.cancelMirrorBody : TD.cancelBody,
       confirmLabel: t.title.cancelTitle,
       danger: true,
     });
     if (!ok) return;
-    const next = await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/cancel`), 'Título cancelado.');
+    const next = await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/cancel`), TD.canceled);
     if (next) saved(next);
   }
 
@@ -113,18 +126,15 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
 
   async function reopen() {
     if (!title) return;
-    const next = await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/reopen`), 'Título reaberto.');
+    const next = await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/reopen`), TD.reopened);
     if (next) saved(next);
   }
 
   async function remove(scope: 'this' | 'following') {
     if (!title) return;
     const ok = await confirm({
-      title: scope === 'following' ? 'Excluir este e os próximos?' : 'Excluir o título?',
-      description:
-        scope === 'following'
-          ? 'A série termina antes desta ocorrência; as seguintes somem.'
-          : 'Sem baixas, o título (e o espelho) é excluído; com histórico, é arquivado.',
+      title: scope === 'following' ? TD.deleteFollowingTitle : TD.deleteTitle,
+      description: scope === 'following' ? TD.deleteFollowingBody : TD.deleteBody,
       confirmLabel: t.common.delete,
       danger: true,
     });
@@ -157,7 +167,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
             ? [
                 {
                   id: 't-edit',
-                  label: `Editar: ${title.description}`,
+                  label: TD.editCommand(title.description),
                   group: 'Recurso' as const,
                   icon: <Pencil />,
                   run: () => setModal({ kind: 'edit' }),
@@ -218,10 +228,12 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
   );
 
   return (
-    <aside className="drawer page-drawer" aria-label={title?.description ?? 'Título'}>
+    <aside className="drawer page-drawer" aria-label={title?.description ?? t.title.titleLabel}>
       <div className="dh">
-        <span className="t">{title?.description ?? t.common.loading}</span>
-        <button type="button" className="icon-btn" onClick={onClose} title="Fechar (Esc)" aria-label={t.common.close}>
+        <span className="t" ref={heading} tabIndex={-1}>
+          {title?.description ?? t.common.loading}
+        </span>
+        <button type="button" className="icon-btn" onClick={onClose} title={t.shell.closeEsc} aria-label={t.common.close}>
           <X />
         </button>
       </div>
@@ -263,7 +275,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                 <Button size="sm" variant="ghost" onClick={() => setModal({ kind: 'edit' })}>
                   <Pencil /> {t.common.edit}
                 </Button>
-                {isInvoice ? null : title.status === 'canceled' ? (
+                {isInvoice || !ownsPair ? null : title.status === 'canceled' ? (
                   <Button size="sm" variant="ghost" onClick={() => void reopen()}>
                     <RotateCcw /> Reabrir
                   </Button>
@@ -297,10 +309,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
               <div className="sec">
                 <div className="alert warn">
                   <span>
-                    {title.mirrorStatus === 'pending'
-                      ? 'Lançado por outra caixa e aguardando o seu aceite.'
-                      : 'Você contestou este lançamento.'}{' '}
-                    Aceite (podendo ajustar a categoria) ou conteste.
+                    {title.mirrorStatus === 'pending' ? TD.mirrorPending : TD.mirrorDisputed} {TD.mirrorDecide}
                   </span>
                 </div>
                 <div className="mt-3 flex gap-2">
@@ -333,7 +342,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                 <dd className="mono">{formatDate(title.dueDate)}</dd>
                 <dt>{t.title.competence}</dt>
                 <dd className="mono">{formatDate(title.competenceDate)}</dd>
-                <dt>Origem</dt>
+                <dt>{t.title.origin}</dt>
                 <dd>{t.title.origins[title.origin]}</dd>
                 {/* Conta prevista (spec 034): conta da caixa do título onde o dinheiro se move; trocável em aberto. */}
                 <dt>{t.contracts.payment.plannedAccount}</dt>
@@ -388,10 +397,10 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                   </dd>
                   <dt>{t.contracts.planned.terms}</dt>
                   <dd className="text-[13px]" data-testid="title-series-terms">
-                    {termsSummary(title.rule.terms)}
+                    {seriesTermsSummary(title.rule.terms)}
                   </dd>
                 </dl>
-                {title.canWrite && (
+                {ownsPair && (
                   <div className="mt-2 flex flex-wrap gap-2">
                     <Button size="sm" variant="ghost" onClick={() => void editSeries()} data-testid="title-series-edit">
                       <Pencil /> {t.contracts.planned.seriesEdit}
@@ -410,7 +419,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
               <div className="sec">
                 <p className="eyebrow">{t.title.mirror}</p>
                 <dl className="kv">
-                  <dt>Caixa</dt>
+                  <dt>{t.title.caixa}</dt>
                   <dd>
                     {title.mirror.canRead ? (
                       <Link
@@ -441,7 +450,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
 
             <div className="sec">
               <p className="eyebrow">{t.settlement.history}</p>
-              {title.settlements.length === 0 && <p className="text-[13px] text-faint">Nenhuma baixa.</p>}
+              {title.settlements.length === 0 && <p className="text-[13px] text-faint">{TD.noSettlements}</p>}
               <div className="item-list">
                 {title.settlements.map((s) => (
                   <div key={s.id} className={`item${s.reversedAt ? ' opacity-60' : ''}`}>
@@ -464,6 +473,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                       {s.reversedAt && (
                         <div className="text-[12px] text-faint">
                           {formatDateTime(s.reversedAt)} · {s.reversalReason}
+                          {s.reversalOn && ` · ${t.settlement.reversalOn(formatDate(s.reversalOn))}`}
                         </div>
                       )}
                       <AttachmentsPanel target="settlement" targetId={s.id} canWrite={title.canWrite} compact />
@@ -488,12 +498,31 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                       >
                         <History />
                       </button>
+                      {title.canWrite && s.reversedAt && s.reversalOn && (
+                        <button
+                          type="button"
+                          className="row-action"
+                          title={t.settlement.reversalDate}
+                          aria-label={t.settlement.reversalDate}
+                          onClick={() => setModal({ kind: 'reversalDate', id: s.id })}
+                        >
+                          <CalendarClock />
+                        </button>
+                      )}
                       {title.canWrite && !s.reversedAt && (
                         <button
                           type="button"
                           className="row-action danger"
                           title={t.settlement.reverse}
-                          onClick={() => setModal({ kind: 'reverse', id: s.id, hasTransfer: Boolean(s.transferId) })}
+                          onClick={() =>
+                            setModal({
+                              kind: 'reverse',
+                              id: s.id,
+                              settledOn: s.settledOn,
+                              hasTransfer: Boolean(s.transferId),
+                              undoAllowed: s.transferUndoAllowed,
+                            })
+                          }
                         >
                           <Undo2 />
                         </button>
@@ -522,7 +551,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
               />
             </div>
 
-            {title.canWrite && !title.archivedAt && !isInvoice && (
+            {ownsPair && !title.archivedAt && !isInvoice && (
               <div className="sec flex flex-wrap gap-2">
                 <Button size="sm" variant="danger" onClick={() => void remove('this')}>
                   <Trash2 /> {title.recurrenceRuleId ? t.title.scopeThis : t.common.delete}
@@ -555,7 +584,17 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
         />
       )}
       {title && modal?.kind === 'reverse' && (
-        <ReverseModal settlementId={modal.id} hasTransfer={modal.hasTransfer} onClose={() => setModal(null)} onSaved={saved} />
+        <ReverseModal
+          settlementId={modal.id}
+          settledOn={modal.settledOn}
+          hasTransfer={modal.hasTransfer}
+          undoAllowed={modal.undoAllowed}
+          onClose={() => setModal(null)}
+          onSaved={saved}
+        />
+      )}
+      {title && modal?.kind === 'reversalDate' && (
+        <ReversalDateModal settlementId={modal.id} onClose={() => setModal(null)} onSaved={saved} />
       )}
       {title && modal?.kind === 'account' && (
         <SetAccountModal settlementId={modal.id} caixaId={title.caixaId} onClose={() => setModal(null)} onSaved={saved} />
@@ -594,9 +633,9 @@ function MirrorDecisionModal({
       mode === 'accept'
         ? await run(
             () => api.post<TitleDetail>(`/api/titles/${title.id}/mirror/accept`, { categoryId: categoryId ?? undefined }),
-            'Espelho aceito.',
+            TD.mirrorAccepted,
           )
-        : await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/mirror/dispute`, { reason }), 'Espelho contestado.');
+        : await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/mirror/dispute`, { reason }), TD.mirrorDisputedToast);
     if (next) onSaved(next);
   }
   return (
@@ -613,7 +652,7 @@ function MirrorDecisionModal({
             />
           </Field>
         ) : (
-          <Field label="Motivo">
+          <Field label={TD.disputeReason}>
             <textarea className="field" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
           </Field>
         )}

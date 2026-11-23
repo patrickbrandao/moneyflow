@@ -1,3 +1,4 @@
+import { isInterruptedRequest } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
@@ -5,9 +6,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { embed } from '../src/agents/llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
-import { purgeAiRequests } from '../src/agents/worker';
+import { closeStaleAiRequests, purgeAiRequests } from '../src/agents/worker';
 import { EXCLUDED_TABLES, fullTables, loadCatalog } from '../src/services/backup/catalog';
-import { client, type Harness, newSession, startApp, uid, userSession } from './helpers';
+import { client, type Harness, newSession, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * Requisições ao provedor (spec 023), com o provedor FALSO: cada chamada vira
@@ -59,6 +60,8 @@ beforeAll(async () => {
   llm = await startFakeLlm(0, '127.0.0.1');
   // Backoff curto: as esperas de 1 s, 2 s… viram milissegundos (o retry-after continua valendo).
   h = await startApp({ AI_REQUEST_BACKOFF_MS: '5', AI_REQUEST_MAX_ATTEMPTS: '3', AI_REQUEST_RETENTION_DAYS: '30' });
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminCookie = (await userSession(h, 'admin')).cookie;
   admin = client(h, adminCookie);
   provider = await admin.post('/api/admin/ai/providers', {
@@ -182,6 +185,71 @@ describe('tentativas', () => {
     expect(all.map((r) => r.status)).toEqual(['error', 'ok']);
   });
 
+  it('5xx persistente: a execução falha depois de max_attempts − 1 voltas à fila, com espera entre elas (tarefa 074)', async () => {
+    const conversation = await newSession(admin, agent.id);
+    llm.queue = Array.from({ length: 30 }, () => ({ status: 503 }));
+    const sent = await admin.post(`/api/conversations/${conversation.id}/messages`, { text: 'oi' });
+    await drain();
+    const run = await runStatus(sent.run.id);
+    expect(run.status).toBe('failed');
+    expect(run.error).toContain('O provedor de IA respondeu com erro');
+    expect(run.error).toContain('falha simulada');
+    // 3 reservas, cada uma com as 3 tentativas da chamada; nenhuma chamada a mais.
+    const requests = await chatRequests(sent.run.id);
+    expect(requests.map((r) => [r.status, r.attempts])).toEqual([
+      ['error', 3],
+      ['error', 3],
+      ['error', 3],
+    ]);
+    expect(llm.queue).toHaveLength(21);
+    // Cada volta: o aviso provider_retry ao console e, depois da espera, o status queued.
+    const events = await h.db.execute<{ event_type: string; payload: any; created_at: Date }>(sql`
+      SELECT event_type, payload, created_at FROM ai_run_events
+       WHERE run_id = ${sent.run.id} AND event_type IN ('error', 'status', 'done') ORDER BY seq`);
+    const flow = events.rows.map((e) => (e.event_type === 'error' ? `error:${e.payload.code}` : `${e.event_type}:${e.payload.status}`));
+    expect(flow).toEqual([
+      'status:queued',
+      'status:running',
+      'error:provider_retry',
+      'status:queued',
+      'status:running',
+      'error:provider_retry',
+      'status:queued',
+      'status:running',
+      'done:failed',
+    ]);
+    const retry = events.rows.findIndex((e) => e.payload.code === 'provider_retry');
+    const waited = new Date(events.rows[retry + 1]!.created_at).getTime() - new Date(events.rows[retry]!.created_at).getTime();
+    // A espera é 4 × a base do backoff (5 ms aqui).
+    expect(waited).toBeGreaterThanOrEqual(15);
+  });
+
+  it('provedor fora do ar (porta fechada, sem status HTTP): também desiste depois das voltas à fila (tarefa 074)', async () => {
+    const offline = await admin.post('/api/admin/ai/providers', {
+      name: `Fora ${uid()}`,
+      kind: 'anthropic',
+      baseUrl: 'http://127.0.0.1:9',
+      apiKey: API_KEY,
+      defaultModels: { text: 'claude-sonnet-5-5' },
+    });
+    const down = await admin.post('/api/admin/ai/agents', {
+      name: `Agente fora ${uid()}`,
+      systemPrompt: 'Provedor fora.',
+      defaultProviderId: offline.id,
+      model: 'claude-sonnet-5-5',
+      params: { max_tokens: 1000 },
+      isActive: true,
+    });
+    const conversation = await newSession(admin, down.id);
+    const sent = await admin.post(`/api/conversations/${conversation.id}/messages`, { text: 'oi' });
+    await drain();
+    expect((await runStatus(sent.run.id)).status).toBe('failed');
+    const requests = await chatRequests(sent.run.id);
+    expect(requests).toHaveLength(3);
+    expect(requests.every((r) => r.status === 'error' && r.http_status === null)).toBe(true);
+    await admin.patch(`/api/admin/ai/agents/${down.id}`, { isActive: false });
+  });
+
   it('erro que não repete (400): uma tentativa só e a execução falha', async () => {
     const conversation = await newSession(admin, agent.id);
     llm.queue = [{ status: 400 }, { status: 400 }];
@@ -207,9 +275,16 @@ describe('tentativas', () => {
       sql`SELECT error_type FROM ai_request_attempts WHERE request_id = ${request!.id}`,
     );
     expect(attempt.rows).toEqual([{ error_type: 'stream_interrupted' }]);
-    // Os deltas que já tinham chegado foram ao SSE.
+    // Os deltas que já tinham chegado foram ao SSE; o aviso provider_retry e o status queued dizem ao console que a
+    // resposta recomeça (ele descarta o texto parcial, tarefa 151).
     const deltas = await h.db.execute(sql`SELECT 1 FROM ai_run_events WHERE run_id = ${sent.run.id} AND event_type = 'text_delta'`);
     expect(deltas.rows.length).toBeGreaterThan(0);
+    const tail = await h.db.execute<{ event_type: string; payload: any }>(sql`
+      SELECT event_type, payload FROM ai_run_events WHERE run_id = ${sent.run.id} ORDER BY seq DESC LIMIT 2`);
+    expect(tail.rows.reverse().map((e) => [e.event_type, e.payload.code ?? e.payload.status])).toEqual([
+      ['error', 'provider_retry'],
+      ['status', 'queued'],
+    ]);
     await drain();
     expect((await runStatus(sent.run.id)).status).toBe('completed');
   });
@@ -365,6 +440,30 @@ describe('retenção e configurações', () => {
     const audit = await h.db.execute(sql`
       SELECT 1 FROM audit_log WHERE table_name = 'app_settings' AND record_id = md5('ai.request_retention_days')::uuid`);
     expect(audit.rows.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('a requisição presa em running (o processo parou no meio) fecha como interrompida; a de agora fica (tarefa 162)', async () => {
+    const running = async (minutesAgo: number) => {
+      const r = await h.db.execute<{ id: string }>(sql`
+        INSERT INTO ai_requests (provider_id, operation, purpose, model, path, started_at)
+        VALUES (${provider.id}, 'chat', 'chat', 'claude-sonnet-5-5', '/v1/messages', now() - make_interval(mins => ${minutesAgo}::int))
+        RETURNING id`);
+      return r.rows[0]!.id;
+    };
+    const stale = await running(120);
+    const fresh = await running(0);
+    expect(await closeStaleAiRequests(h.db)).toBeGreaterThanOrEqual(1);
+    const rows = await h.db.execute<{ id: string; status: string; error_message: string | null; finished_at: string | null }>(sql`
+      SELECT id, status, error_message, finished_at FROM ai_requests WHERE id IN (${stale}, ${fresh})`);
+    const byId = new Map(rows.rows.map((r) => [r.id, r]));
+    expect(byId.get(stale)).toMatchObject({ status: 'error' });
+    expect(byId.get(stale)?.finished_at).toBeTruthy();
+    expect(isInterruptedRequest(byId.get(stale)?.error_message)).toBe(true);
+    expect(byId.get(fresh)).toMatchObject({ status: 'running', error_message: null });
+    // Na lista da tela, a interrompida aparece como erro, com a mensagem que a tela traduz.
+    const page = await admin.get(`/api/admin/ai/requests?providerId=${provider.id}&status=error&limit=200`);
+    expect(page.items.find((i: { id: string }) => i.id === stale)).toMatchObject({ status: 'error' });
+    await h.db.execute(sql`UPDATE ai_requests SET status = 'canceled', finished_at = now() WHERE id = ${fresh}`);
   });
 
   it('valores fora da faixa e chaves desconhecidas são recusados', async () => {

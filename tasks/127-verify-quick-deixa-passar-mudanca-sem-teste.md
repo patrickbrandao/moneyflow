@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 258af1e
 ---
 
 # `verify:quick` sai verde sem rodar teste nenhum na maior parte das mudanças do servidor
@@ -96,4 +96,46 @@ Não executei o `verify:quick` (rodaria testes contra o Postgres local, fora do 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código atual:
+- a seleção só pelo nome (`test/<basename>.test.ts`);
+- o passo pulado conta como sucesso;
+- o `existsSync` tira o arquivo apagado da lista: "Nada a verificar", sem typecheck;
+- o `biome.json` fora da configuração da raiz;
+- nenhum mapeamento do shared, dos ajudantes de teste nem dos falsos.
+
 ## Resolução (executor)
+
+- **`scripts/verify-plan.mjs`** (novo): a seleção em funções puras.
+  - `selectServerTests` junta o `test/*.test.ts` alterado, as entradas do mapa e o teste de mesmo nome; devolve também `unmapped`, os arquivos de `apps/server/src` sem teste nenhum;
+  - `typecheckPlan` marca o pacote pelo arquivo apagado;
+  - `lintPlan` faz o lint do repositório inteiro quando o `biome.json` muda;
+  - `needsScriptTests` diz quando rodar os testes de `scripts/`.
+- **`apps/server/test/related.json`** (novo): o mapa versionado, de glob (`*` na pasta, `**` em qualquer profundidade) para os testes.
+  - Cobre todos os arquivos de `apps/server/src`. Os da raiz (`main`, `app`, `config`, `http`, `worker`…) levam ao menos o boot da API, pelo `security-headers` e pelo `auth`; o glob `apps/server/src/*.ts` já cobre os arquivos novos da raiz que outras frentes criaram.
+  - Cobre também as regras do shared que a integração usa: `reconcile`, `supersede`, `contracts`, `recurrence`, `messages`, `notes`, `documents`, `parsers`, `reports`, `backup` e as tools dos agentes.
+  - Cobre `packages/db/src` e `database/migrations`, pelo `test/generated-schema.test.ts` da tarefa 163, que pega a migration sem `db:pull`.
+  - Cobre os ajudantes (`helpers.ts`, `global-setup`, `local-db`, `migrate`, `fake-mcp`, as fixtures) e os falsos do `e2e/fakes`.
+  - Decisão: o caminho é do repositório (não relativo a `src`), para o mesmo mapa servir ao shared, ao banco e aos falsos.
+- **`scripts/verify.mjs`**:
+  - a lista de alterados inclui os apagados (para o typecheck e para a seleção);
+  - o lint do repositório roda quando o `biome.json` muda;
+  - os testes dos scripts rodam quando um script ou uma versão conferida muda;
+  - arquivo de `src` sem teste mapeado **falha com código 2**, com a lista e o que fazer. Os testes escolhidos rodam mesmo assim. `--sem-integracao` pula a integração de propósito, e os testes depois de `--` continuam vencendo;
+  - o `verify:full` ganhou os testes dos scripts.
+- `AGENTS.md` (Verificação): o mapa e a falha. O `.claude/agents/app.md:16` também cita a heurística, mas não foi editado aqui, porque é configuração de agente; a frase dele continua correta.
+- Decisão: sem hook de pre-commit (opcional na tarefa), para não instalar dependência nova.
+
+Testes: `scripts/verify-plan.test.mjs` (`pnpm test:scripts`), com casos para:
+- o `reconciliation.ts` escolhendo `test/statements.test.ts` sem argumento;
+- o `shared/src/reconcile.ts` escolhendo `statements` e `contracts`;
+- o arquivo apagado ainda escolhendo a área e marcando o pacote para o typecheck;
+- o mesmo nome e o teste alterado;
+- o arquivo sem mapa em `unmapped`;
+- o `biome.json` pedindo o lint completo;
+- o repositório inteiro: todo arquivo de `apps/server/src` mapeado, todo teste citado existente e todo glob casando com algum arquivo.
+
+À mão, com um `apps/server/src/zz/novo.ts` temporário, o `verify:quick --base HEAD` fez lint, typecheck e testes dos scripts, listou o arquivo e saiu com código 2.
+
+Verificação: rápida, `pnpm verify:quick --base 290403d`. Com o mapa novo, ela escolheu sozinha `agents`, `autonomous`, `capabilities`, `e2e-fakes`, `generated-schema` e `vision`, pelos falsos, pelo `global-setup` e pelo schema gerado alterados na frente: 77 testes, todos passaram.

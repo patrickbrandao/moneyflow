@@ -12,6 +12,7 @@ import { useAction, useApi } from '../lib/hooks';
 import { useParamState } from '../lib/params';
 
 type Kind = (typeof CATEGORY_KINDS)[number];
+const CP = t.category.page;
 const SLOTS = Array.from({ length: 12 }, (_, i) => i + 1);
 
 /**
@@ -39,7 +40,7 @@ export function CategoriesPage() {
     isAdmin
       ? CATEGORY_KINDS.map((kind) => ({
           id: `category-new-${kind}`,
-          label: `${t.palette.newCategory} de ${t.category.kinds[kind]!.toLowerCase()}`,
+          label: CP.newOfKind(t.palette.newCategory, t.category.kinds[kind]!),
           group: 'Criar' as const,
           icon: <Plus />,
           run: () => setEditing({ kind, parentId: null }),
@@ -62,8 +63,8 @@ export function CategoriesPage() {
 
   async function archive(node: CategoryNode) {
     const ok = await confirm({
-      title: `Excluir a categoria ${node.name}?`,
-      description: 'Sem uso ela é excluída; usada em títulos, é arquivada (com as subcategorias).',
+      title: CP.deleteTitle(node.name),
+      description: CP.deleteBody,
       confirmLabel: t.common.delete,
       danger: true,
     });
@@ -78,7 +79,7 @@ export function CategoriesPage() {
   }
 
   async function restore(node: CategoryNode) {
-    if (await run(() => api.post(`/api/categories/${node.id}/restore`), 'Categoria restaurada.')) void tree.reload();
+    if (await run(() => api.post(`/api/categories/${node.id}/restore`), CP.restored)) void tree.reload();
   }
 
   const explicit = new Set(hidden.data ?? []);
@@ -93,12 +94,7 @@ export function CategoriesPage() {
       {node.hidden && <Badge tone="outline">{t.category.hidden}</Badge>}
       <span className="row-actions">
         {canHide && !node.archivedAt && (!node.hidden || explicit.has(node.id)) && (
-          <button
-            type="button"
-            className="row-action"
-            title={node.hidden ? 'Mostrar nesta caixa' : 'Ocultar nesta caixa'}
-            onClick={() => void toggleHidden(node)}
-          >
+          <button type="button" className="row-action" title={node.hidden ? CP.show : CP.hide} onClick={() => void toggleHidden(node)}>
             {node.hidden ? <Eye /> : <EyeOff />}
           </button>
         )}
@@ -106,7 +102,7 @@ export function CategoriesPage() {
           <button
             type="button"
             className="row-action"
-            title={`Nova ${t.category.subcategory.toLowerCase()}`}
+            title={CP.newSubcategory(t.category.subcategory)}
             onClick={() => setEditing({ kind: node.kind, parentId: node.id })}
           >
             <Plus />
@@ -135,19 +131,19 @@ export function CategoriesPage() {
     <div className="page wide">
       <PageHead
         title={t.nav.categories}
-        sub="Plano único para todas as caixas, em dois níveis. Cada caixa pode ocultar o que não usa."
+        sub={CP.sub}
         actions={
           <>
             <select
               className="field field-auto"
               value={caixaId ?? ''}
               onChange={(e) => setCaixaId(e.target.value || null)}
-              aria-label="Caixa"
+              aria-label={CP.caixa}
             >
-              <option value="">Todas as caixas (plano global)</option>
+              <option value="">{CP.allCaixas}</option>
               {(caixas.data ?? []).map((c) => (
                 <option key={c.id} value={c.id}>
-                  Ocultas em: {c.name}
+                  {CP.hiddenIn(c.name)}
                 </option>
               ))}
             </select>
@@ -166,7 +162,7 @@ export function CategoriesPage() {
             return (
               <Panel
                 key={kind}
-                title={kind === 'expense' ? 'Despesas' : 'Receitas'}
+                title={kind === 'expense' ? CP.expenses : CP.incomes}
                 icon={<Tags />}
                 actions={
                   isAdmin && (
@@ -177,7 +173,7 @@ export function CategoriesPage() {
                 }
               >
                 {!tree.data && <Skel h={120} />}
-                {tree.data && groups.length === 0 && <p className="text-[13px] text-faint">Nenhuma categoria.</p>}
+                {tree.data && groups.length === 0 && <p className="text-[13px] text-faint">{CP.empty}</p>}
                 <div className="grid gap-0.5">{groups.map((group) => [row(group, false), ...group.children.map((c) => row(c, true))])}</div>
               </Panel>
             );
@@ -230,24 +226,20 @@ function CategoryModal({
     const body = { name, parentId, colorSlot, icon: icon || null };
     const ok = await run(
       () => (node ? api.patch(`/api/categories/${node.id}`, body) : api.post('/api/categories', { kind, ...body })),
-      node ? 'Categoria atualizada.' : 'Categoria criada.',
+      node ? CP.updated : CP.created,
     );
     if (ok) onSaved();
   }
 
   return (
-    <Modal
-      open
-      title={node ? 'Editar categoria' : `${t.palette.newCategory} de ${t.category.kinds[kind]!.toLowerCase()}`}
-      onClose={onClose}
-    >
+    <Modal open title={node ? CP.editTitle : CP.newOfKind(t.palette.newCategory, t.category.kinds[kind]!)} onClose={onClose}>
       <form onSubmit={submit} className="form-grid">
         <Field label={t.common.name}>
           <input className="field" value={name} onChange={(e) => setName(e.target.value)} required autoFocus maxLength={80} />
         </Field>
-        <Field label={t.category.group} hint={hasChildren ? 'Um grupo com subcategorias não vira subcategoria.' : undefined}>
+        <Field label={t.category.group} hint={hasChildren ? CP.groupHasChildren : undefined}>
           <select className="field" value={parentId ?? ''} disabled={hasChildren} onChange={(e) => setParentId(e.target.value || null)}>
-            <option value="">— é um grupo —</option>
+            <option value="">{CP.isGroup}</option>
             {groups
               .filter((g) => g.id !== node?.id)
               .map((g) => (
@@ -263,8 +255,8 @@ function CategoryModal({
               type="button"
               className={colorSlot === null ? 'active' : ''}
               onClick={() => setColorSlot(null)}
-              title="Sem cor"
-              aria-label="Sem cor"
+              title={CP.noColor}
+              aria-label={CP.noColor}
             >
               <CategoryDot slot={null} />
             </button>
@@ -274,16 +266,16 @@ function CategoryModal({
                 type="button"
                 className={colorSlot === slot ? 'active' : ''}
                 onClick={() => setColorSlot(slot)}
-                title={`Cor ${slot}`}
-                aria-label={`Cor ${slot}`}
+                title={CP.colorN(slot)}
+                aria-label={CP.colorN(slot)}
               >
                 <CategoryDot slot={slot} />
               </button>
             ))}
           </div>
         </Field>
-        <Field label={t.category.icon} hint="Nome lucide em kebab-case, ex.: shopping-cart.">
-          <input className="field field-mono" value={icon} onChange={(e) => setIcon(e.target.value)} placeholder="opcional" />
+        <Field label={t.category.icon} hint={CP.iconHint}>
+          <input className="field field-mono" value={icon} onChange={(e) => setIcon(e.target.value)} placeholder={t.common.optional} />
         </Field>
         <FormError>{error}</FormError>
         <ModalActions>

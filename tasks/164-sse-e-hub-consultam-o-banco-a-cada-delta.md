@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: fc16066
 ---
 
 # SSE e hub de eventos consultam o banco a cada delta de texto (e o aviso do banco não diz o tipo do evento)
@@ -74,4 +74,64 @@ Nada foi executado. As contagens são da leitura do código; o ganho real depend
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado no `schema.sql`: `ai_run_event_append` avisava com `json_build_object('run_id', …, 'seq', s)`, sem o tipo do evento. Sem o tipo, o hub precisa consultar o banco a cada aviso para descartar os deltas. O resto da tarefa (o `pump` do SSE chamando `getRun` a cada volta e o `loadMessages` inteiro no aviso de conclusão) é só da aplicação.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+Migration `database/migrations/0068_ai_run_event_notice_type.sql`; teste `database/tests/0068_ai_run_event_notice_type.sql`.
+
+- Função nova `ai_run_event_notice(p_run_id uuid, p_seq integer, p_event_type text, p_payload jsonb) RETURNS text` (`IMMUTABLE`) monta o payload do aviso:
+  - sempre `{"run_id", "seq", "type"}`;
+  - nos eventos `status` e `done` com `status` no payload, também `"status"`, cortado em 40 caracteres;
+  - nada mais do payload: o `error` do `done` continua só na tabela.
+- `ai_run_event_append` passa a avisar com `pg_notify('ai_run_events', ai_run_event_notice(…))`. A assinatura e o resto não mudam.
+- Exemplos conferidos com `LISTEN` num `psql`, depois do COMMIT:
+  - `{"run_id":"…","seq":1,"type":"text_delta"}`;
+  - `{"run_id":"…","seq":2,"type":"done","status":"completed"}`.
+- Decisão: incluir o `status`, que a tarefa deixava opcional. Assim o hub decide `done`/`awaiting_confirmation` sem consultar. A consulta continua necessária só para os eventos que avisam (o título, a finalidade da conversa e o erro).
+
+Testes:
+- o JSON de cada tipo, sem o texto do delta e sem o erro do `done`;
+- o status só em `status`/`done`;
+- o corte em 40 caracteres e o tamanho abaixo de 8000 bytes;
+- a função usada pelo append;
+- os eventos gravados iguais aos de antes, com o tipo validado e a execução inexistente.
+
+Verificação:
+- `make test T=/tests/0068_ai_run_event_notice_type.sql` passou, com o down da 0068.
+- `docs/016` (Execuções, eventos) atualizada. `make dump` rodado.
+
+### Pendente na aplicação
+
+1. `pnpm db:pull`. Só função nova, sem coluna.
+2. `apps/server/src/agents/events-hub.ts`:
+   - no `client.on('notification')`, ler também `type` e `status` do JSON (`{ run_id, seq, type?, status? }`) e passá-los ao `dispatch`;
+   - em `dispatch`, sem listener, chamar `notifyIfFinished` só quando `type` for `done`, ou `status` com `status === 'awaiting_confirmation'`. Com `type` ausente (aviso de uma versão anterior durante o deploy), manter o caminho de hoje.
+3. Em `notifyIfFinished`, trocar o `loadMessages` da sessão inteira por uma consulta da última mensagem `assistant` com texto, por exemplo `ORDER BY seq DESC LIMIT 5` com `MESSAGE_COLUMNS`.
+4. `apps/server/src/routes/agents.ts` (`pump` do SSE): chamar `conversations.getRun` só quando a leitura de `runEvents` vier vazia e nas voltas do timer de 5 s, nunca logo depois de enviar eventos.
+5. Testes em `apps/server/test/agents.test.ts`:
+   - um cliente `pg` com `LISTEN ai_run_events` recebe `type` (e `status` no `done`);
+   - o número de chamadas a `getRun` no SSE e de consultas do hub sem stream não cresce com os deltas;
+   - o aviso de conclusão e o de espera de confirmação continuam saindo, inclusive com `Last-Event-ID`.
+
+### Aplicação (app)
+
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: o hub consultava o banco a cada aviso sem stream aberto, o `pump` do SSE chamava `getRun` depois de cada leitura e o aviso de conclusão lia a sessão inteira. Conferido o lado do web (tarefas 120 e 122): o console já fecha o SSE na espera de aprovação e com a aba escondida e volta pelo `Last-Event-ID`; nada a mudar lá.
+
+1. `pnpm db:pull`: nada a gerar (só função).
+2. `apps/server/src/agents/events-hub.ts`: o `notification` lê `{ run_id, seq, type?, status? }`; sem listener, `dispatch` só chama `notifyIfFinished` com `type` `done` ou `status` + `awaiting_confirmation`; aviso sem `type` (versão anterior, no deploy) segue o caminho de antes.
+3. `notifyIfFinished`: `recentAssistantMessages(db, conversa, 5)` (novo em `agents/store.ts`, `MESSAGE_COLUMNS`, `role = 'assistant'`, `ORDER BY seq DESC LIMIT`) no lugar do `loadMessages`.
+4. `apps/server/src/routes/agents.ts` (`pump`): `getRun` só quando a leitura de `runEvents` vem vazia ou na volta do timer de 5 s (`pump(true)` marca `checkRun`, que sobrevive à volta que chega com o `pump` rodando); nunca logo depois de enviar eventos.
+5. Spec 011 (SSE): o aviso com o tipo e as consultas do stream e do hub.
+
+Testes (`test/agents.test.ts`, "eventos dos agentes sem consulta por delta"):
+- um cliente `pg` com `LISTEN ai_run_events` recebe `type` e, no `done`, `status`, sem o erro do payload;
+- um `RunEventsHub` com o `db` espiado, sem stream aberto: 30 deltas e um `status running` não geram consulta; a espera de confirmação e o `done` consultam uma vez cada; o aviso no sino sai com a última resposta do agente, e a leitura das mensagens é a das últimas (`ORDER BY m.seq DESC LIMIT`); o aviso sem `type` consulta como antes;
+- o SSE com o `db` espiado: 20 deltas entregues e o `done` fechando o stream, com no máximo uma leitura da execução durante os deltas (conferido à mão: sem a mudança no `pump`, eram 20);
+- o teste existente do SSE com `Last-Event-ID` segue passando.
+
+Verificação: rápida, `pnpm verify:quick --base HEAD`.

@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # Erros inesperados das tools viram "Algo deu errado" sem nenhum log
@@ -82,4 +82,14 @@ Nada foi executado.
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `RunTools.execute`, a prévia no runner, `executeSecretTool` e o `/mcp` traduziam o erro sem log; o genérico mandava "Tente de novo"; o código da regra do banco não chegava ao modelo; e no `callModel` uma falha de `appendEvent` deixava a corrente rejeitada e descartava os deltas seguintes em silêncio.
+
 ## Resolução (executor)
+
+- `ServiceContext.log` (opcional, `context.ts`): preenchido pela requisição (`app.ts`), pelo `/mcp` (`routes/mcp.ts`) e pelo runner (`agents/runner.ts`).
+- `tools-runtime.ts`: `toolFailure` classifica o erro (esperado = `AppError`, Zod ou regra do banco traduzida; inesperado = o resto, com uma referência de 8 caracteres) e `reportToolError` registra `info` com o código no esperado e `error` com a pilha, a tool, o estágio (`run`/`preview`/`mcp`), o `runId`, o `toolUseId` e a referência no inesperado. Usado na execução, na prévia (runner), na tool de segredo e no `/mcp`. A tool MCP externa que falha gera um `warn`.
+- Segredos: na tool de segredo o log leva só o tipo do erro, o código do banco e os quadros da pilha (sem a primeira linha, que tem a mensagem); nunca a entrada, a mensagem nem `meta.secrets`.
+- Ao modelo: a regra do banco vai com o código (`[constraint] mensagem`); o erro inesperado vira `t.agents.errors.toolInternal(ref, write)` ("Erro interno … (ref. abc123) … confira o resultado antes de repetir" na escrita). `toolErrorMessage` (falha da execução inteira) continua com a mensagem genérica.
+- `callModel` (exportado para o teste): cada gravação de delta tem o próprio `catch` com `warn`, e o flush vazio não grava nada.
+- Testes: `apps/server/test/agents.test.ts`, `describe('erros das tools (tarefa 099)')` — leitura com `TypeError` (mensagem segura com a referência e o `error` no log com a pilha e o `runId`), regra do banco com `[pg_22P02]` e log `info`, prévia quebrada (estágio `preview`, sem cartão), `/mcp` com o log da requisição, tool de segredo sem a mensagem nem o valor no log, e o delta que falha sem descartar o seguinte.
+- Verificação: `pnpm verify:quick` (Biome, typecheck, os testes do shared relacionados e, passados depois de `--`, os de integração `agents`, `agent-tools`, `agent-tools-admin`, `titles`, `cards`, `contracts`, `statements`, `vision`, `reconcile-recipes`, `statement-supersede`, `autonomous` e `budgets` no Postgres local). Não rodei `verify:full` nem o e2e.

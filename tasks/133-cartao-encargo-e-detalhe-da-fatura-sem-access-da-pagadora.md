@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: b492cc7
 ---
 
 # Cartão: encargo aceita pagadora sem Access, e o detalhe da fatura abre com uma pagadora que não é dela
@@ -58,4 +58,12 @@ Nada foi executado. Não foi conferido se a tela já limita o seletor de pagador
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `createCharge` usava `input.payerCaixaId ?? card.defaultPayerCaixaId` sem conferir a leitura (a compra conferia). `getInvoice`, sem leitura do cartão, liberava o resumo da fatura para qualquer caixa legível em `?payerCaixaId=`. As linhas 115 e 116 repetiam a checagem.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/cards.ts`: `createCharge` confere `assertRead` na pagadora resolvida (a pedida ou a padrão), como a compra. Sem leitura do cartão, `getInvoice` exige que a caixa esteja em `card_invoice_payer_totals` da fatura (senão 404), e as linhas redundantes saíram.
+- `apps/server/src/agents/tool-handlers-operation.ts`: a prévia de `create_card_charge` confere a leitura da pagadora pedida.
+- `docs/007-cartao-de-credito.md`.
+- Teste: `apps/server/test/cards.test.ts`, no caso "a pagadora só vê as compras dela". A caixa legível sem compras na fatura de 12/2026 recebe 404. O editor só do cartão recebe 404 no encargo para a pagadora B e para a padrão (A), que ele não lê. O teste falha sem a correção.
+- Verificação: `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s1 pnpm verify:quick` (nível rápido).

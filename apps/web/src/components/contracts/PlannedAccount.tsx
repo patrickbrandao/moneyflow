@@ -103,6 +103,7 @@ export function PlannedAccountButton({ title, onSaved }: { title: PlannedAccount
   const [open, setOpen] = useState(false);
   return (
     // O botão fica dentro de linhas clicáveis: nada do modal (portal) chega ao clique da linha.
+    // biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions: só segura o clique da linha; o controle é o botão dentro.
     <span className="contents" onClick={(e) => e.stopPropagation()}>
       <button
         type="button"

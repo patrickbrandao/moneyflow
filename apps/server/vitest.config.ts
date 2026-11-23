@@ -13,5 +13,7 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 300_000,
     fileParallelism: false,
+    // Cobertura (tarefa 126): só com `--coverage` (`pnpm test:coverage`); o CI publica o resumo, ainda sem piso.
+    coverage: { provider: 'v8', include: ['src/**/*.ts'], reporter: ['text-summary', 'json-summary'] },
   },
 });

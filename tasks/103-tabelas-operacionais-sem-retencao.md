@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 0d8d59c
 ---
 
 # Fila, sino, logs operacionais e anexos órfãos crescem sem nenhuma purga
@@ -85,4 +85,105 @@ Nada foi executado. Os prazos propostos são sugestões e precisam da decisão d
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado no banco:
+- nenhuma função de purga para `attachments` sem vínculo, `message_outbox`, `notifications`, `note_reminder_firings`, `telegram_pairing_codes`, `ai_scheduled_task_runs` e `ai_reconcile_recipe_runs`;
+- `moneyflow_app` não tem DELETE em `note_reminder_firings` nem em `ai_reconcile_recipe_runs`;
+- nenhuma FK aponta para essas tabelas;
+- `message_outbox_destination_id_idx (destination_id, created_at)` não serve ao `max(sent_at)` nem à contagem de `failed` da lista de destinos.
+
+Toda FK para `attachments` aparece em `attachment_links`, menos `ai_attachment_derivatives.attachment_id`, que é a origem de um cache. O pgTAP novo confere isso.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+Migration `database/migrations/0070_operational_purge.sql`; teste `database/tests/0070_operational_purge.sql`.
+
+Função nova `operational_purge(p_limit integer DEFAULT 1000) RETURNS TABLE (target text, deleted integer)`:
+- `SECURITY DEFINER`, com `EXECUTE` para a aplicação;
+- limite de 1 a 100000; fora disso, `22023`;
+- para cada tabela, apaga até o limite, as mais velhas primeiro, pulando as travadas;
+- devolve uma linha por tabela, nesta ordem: `attachments`, `message_outbox`, `notifications`, `note_reminder_firings`, `telegram_pairing_codes`, `ai_scheduled_task_runs`, `ai_reconcile_recipe_runs`.
+
+Prazos (decisão: os sugeridos pela tarefa, fixos no banco e acima da janela de dedup de 120 dias):
+
+| Tabela | Sai |
+|---|---|
+| `attachments` | sem vínculo em `attachment_links`, criado há mais de 7 dias |
+| `message_outbox` | `sent`/`canceled`/`failed` criada há mais de 180 dias |
+| `notifications` | lida, criada há mais de 180 dias (não lida fica) |
+| `note_reminder_firings` | lido, com o último disparo há mais de 180 dias |
+| `telegram_pairing_codes` | usado ou vencido há mais de 1 dia |
+| `ai_scheduled_task_runs` | criado há mais de 1 ano |
+| `ai_reconcile_recipe_runs` | `completed`/`skipped`/`failed` terminado há mais de 1 ano |
+
+Mudar um prazo é uma migration. Não há `app_settings`, porque a dedup depende deles.
+
+- Anexo órfão:
+  - os candidatos são travados (`FOR UPDATE OF a SKIP LOCKED`) e apagados num segundo comando, com snapshot novo, só se continuarem sem vínculo. Um vínculo criado ao mesmo tempo espera a trava e falha na FK, e o anexo nunca sai em CASCADE;
+  - a transcrição de um áudio órfão sai junto;
+  - a exclusão é auditada.
+- Índices parciais novos para a lista de destinos:
+  - `message_outbox_destination_sent_idx (destination_id, sent_at) WHERE sent_at IS NOT NULL`;
+  - `message_outbox_destination_failed_idx (destination_id) WHERE status = 'failed'`.
+
+  A consulta atual de `listDestinations` já os usa sem mudança: o `max(sent_at)` vira, no planner, uma busca com `sent_at IS NOT NULL`. O pgTAP confere os dois planos.
+- Medição: `make -C database sizes` (`DB=<banco>` mede outro) mostra as 30 maiores tabelas, com o total, o heap, os índices e o TOAST, e as linhas estimadas.
+  - `audit_log`, `ai_messages`, `ai_runs` e `ai_usage` seguem sem retenção (docs/008).
+  - O plano registrado na `docs/016`: particionar `audit_log` por mês quando passar de alguns milhões de linhas.
+
+Testes:
+- a função e os índices, e os parâmetros;
+- `attachment_links` cobre todas as FKs para `attachments`;
+- a aplicação sem DELETE nos disparos, e a purga como a aplicação:
+  - com limite 1, uma linha por tabela;
+  - depois, o resto;
+  - depois, zero;
+- o que fica em cada tabela:
+  - os anexos ligados por título, baixa, movimento, entidade, compra e mensagem;
+  - o anexo órfão recente;
+  - a outbox pendente e a enviada recente;
+  - a notificação não lida e a lida recente;
+  - o disparo não lido;
+  - o código vencido recente e o válido;
+  - o disparo de tarefa recente;
+  - a receita em andamento e a recente;
+- a auditoria da exclusão dos anexos como `system`;
+- o plano das duas subconsultas da lista de destinos.
+
+Verificação:
+- `make test T=/tests/0070_operational_purge.sql` passou, com o down da 0070.
+- `docs/016` (Retenção operacional) e `database/AGENTS.md` (`make sizes`) atualizados. `make dump` rodado.
+
+### Pendente na aplicação
+
+1. `pnpm db:pull`. Só função e índices.
+2. `apps/server/src/agents/worker.ts`, no laço de manutenção, numa transação própria sem `app.user_id` (a exclusão dos anexos sai como `system`):
+   - `SELECT target, deleted FROM operational_purge(1000)`;
+   - repetir enquanto alguma linha devolver `deleted = 1000`, com um teto de rodadas por passada;
+   - registrar no log as contagens diferentes de zero.
+
+   Basta uma vez por hora, porque os prazos são de dias.
+3. `apps/server/src/auth/session.ts` (`purgeExpiredSessions`): apagar também as sessões ociosas além de `SESSION_IDLE_HOURS`, `last_seen_at < now() - make_interval(hours => idleHours)` quando `idleHours > 0`. A aplicação já tem DELETE em `sessions`, então não precisa do banco.
+4. `listDestinations` (`services/messages.ts`): nada obrigatório, porque os índices novos já servem à consulta de hoje. Não troque `max(o.sent_at)` por outra forma sem conferir o plano.
+5. Testes: um `test/maintenance.test.ts`, ou o `describe` da manutenção em `agents.test.ts`, com um anexo de chat não enviado e `created_at` ajustado para 8 dias atrás, que some depois da manutenção, e um ligado a uma mensagem, que fica.
+6. Specs: registrar os prazos na 013 (outbox e sino), na 025 (o upload do chat não enviado some em 7 dias), na 029 (códigos de pareamento e disparos das tarefas), na 030 (histórico das receitas por 1 ano) e na 035 (log dos disparos lidos por 180 dias).
+
+### Aplicação (app)
+
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: nada chamava `operational_purge`, e `purgeExpiredSessions` só olhava o `expires_at`.
+
+1. `pnpm db:pull`: nada a gerar (só função e índices; o schema gerado da integração já estava em dia).
+2. `apps/server/src/agents/worker.ts`: `purgeOperational(db)` chama `operational_purge(1000)` numa transação própria sem `app.user_id` (a exclusão dos anexos sai como `system`), repete enquanto alguma tabela devolve o lote cheio (teto de 20 lotes por passada) e devolve as contagens diferentes de zero, que vão ao log (`manutenção: retenção operacional`). O laço de manutenção a chama na primeira passada e depois a cada hora (`OPERATIONAL_PURGE_EVERY_MS`), isolada: a falha vai ao log com `step: 'operational_purge'` e o resto da manutenção segue.
+3. `apps/server/src/auth/session.ts`: `purgeExpiredSessions(db, idleHours)` apaga também as sessões com `last_seen_at` além de `SESSION_IDLE_HOURS` (com `idleHours` > 0) e devolve quantas; o laço de hora em hora passa `config.sessionIdleHours`.
+4. `listDestinations`: sem mudança, como pedido (os índices novos servem à consulta de hoje).
+5. Specs: os prazos na 013 (outbox 180 dias, acima dos 120 da dedup; sino lido 180 dias), 025 (upload do chat não enviado e `upload_file` não usado: 7 dias), 029 (código de pareamento: 1 dia; disparos das tarefas: 1 ano), 030 (histórico das receitas: 1 ano) e 035 (log dos disparos lidos: 180 dias); a 002 diz que o worker apaga as sessões vencidas e as ociosas.
+
+Testes (`test/maintenance.test.ts`, novo, no mapa `related.json` do `agents/worker.ts` e do `auth/session.ts`):
+- o laço de manutenção (`startAgentWorker`, a primeira passada) apaga o anexo sem vínculo de 8 dias; o recente e o ligado a uma entidade, de 30 dias, ficam; a exclusão sai na auditoria como `system`, sem usuário;
+- `purgeOperational` devolve só as contagens diferentes de zero e `{}` quando não há o que apagar;
+- as sessões: com `0`, só a vencida sai; com 72 h, a ociosa de 100 h também, e a usada há 1 h fica.
+
+Verificação: rápida, `pnpm verify:quick --base HEAD` (com `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_p2b`).

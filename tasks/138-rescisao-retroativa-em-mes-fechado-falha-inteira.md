@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: d658050
 ---
 
 # Rescisão com data em mês fechado falha inteira (última ocorrência proporcional e multa)
@@ -61,4 +61,13 @@ Nada foi executado. Supõe-se que a tela mande o `lastAmounts` preenchido por pa
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `planTermination` tratava o mês fechado só nas ocorrências depois da data. A "última" entrava em `preview.last` sem olhar `closed`, `terminateContract` aplicava o `lastAmounts` nela e a multa nascia com a competência na data. A transação inteira voltava com `period_closings_locked_check`.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/contracts.ts`: `preview.last[].closed`, com a competência em mês fechado na caixa da série ou do espelho. Nesse caso `terminateContract` ignora o `lastAmounts`, como na com baixa. A multa aceita `penalty.competenceDate` (padrão a data da rescisão). `assertPenaltyMonthOpen` recusa mês fechado (caixa do contrato ou do espelho) com 422 `penalty_closed_month` e uma mensagem com o mês, já na prévia e de novo na transação.
+- `packages/shared`: `competenceDate` em `contractTerminationInput`, `closed` em `TerminationPreview.last`, textos `errors.penaltyClosedMonth`, `termination.lastClosed` e `termination.penaltyCompetence`.
+- `apps/web/src/components/contracts/ContractActionModals.tsx`: a última em mês fechado não recebe o proporcional ("mês fechado (não muda)"). A multa ganhou o campo Competência (padrão a data) e vai junto na prévia, então o mês fechado aparece como erro antes de rescindir.
+- `docs/020-contratos.md` (ciclo de vida e decisões) e `docs/034-contratos-sobre-series.md` (decisões).
+- Teste: `apps/server/test/contracts.test.ts`, "a última ocorrência em mês fechado não muda, a multa pede competência aberta e a rescisão conclui". Fecha setembro e rescinde em 15/09: a prévia traz `closed: true`, a multa em setembro dá 422 na prévia e em novembro entra. A rescisão conclui com as canceladas, e a de setembro fica com o valor.
+- Verificação: `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s1 pnpm verify:quick` (nível rápido).

@@ -12,7 +12,7 @@ import { useAuth } from '../lib/auth';
  * Anatomia do template: cartão de 380px sobre o fundo pontilhado; marca,
  * título, campos com ícone, erro em faixa tingida, botão de largura total.
  */
-export function LoginPage({ notice }: { notice?: string | null }) {
+export function LoginPage() {
   const { login } = useAuth();
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
@@ -78,7 +78,6 @@ export function LoginPage({ notice }: { notice?: string | null }) {
         </div>
 
         {error && <p className="form-error">{error}</p>}
-        {!error && notice && <p className="form-notice">{notice}</p>}
 
         <Button type="submit" disabled={submitting || !identifier || !password} className="mt-5 w-full">
           {submitting ? t.auth.submitting : t.auth.submit}

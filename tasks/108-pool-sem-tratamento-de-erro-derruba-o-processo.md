@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 09b0ea7
 ---
 
 # Pool do Postgres sem `on('error')`: conexão ociosa que cai derruba a API e o worker
@@ -76,4 +76,16 @@ Nada foi executado. O comportamento do `pg` e do `pg-pool` foi lido no código i
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado no `pg-pool@3.14.0`: o `idleListener` reemite no pool a queda da conexão ociosa, e ninguém ouvia `error` no pool. Achado a mais: o pool tira esse ouvinte do cliente emprestado (`_acquireClient`), então a conexão de uma transação parada que o servidor encerra (o `idle_in_transaction_session_timeout` da tarefa 102) também derrubava o processo, com um `25P03` não capturado.
+
 ## Resolução (executor)
+
+Feita junto com a tarefa 102, no mesmo arquivo.
+
+- `packages/db/src/index.ts` (`createPool`): `onError` opcional nas opções; cada cliente novo ganha um ouvinte de `error` próprio (`pool.on('connect')`), que vale ocioso ou emprestado e chama o `onError`; o `pool.on('error')` fica vazio (a queda da ociosa chega aos dois, e o aviso sai uma vez). `keepAlive: true` e o `connectionTimeoutMillis` entraram com a 102.
+- `apps/server/src/main.ts`: o aviso `banco: conexão ociosa caiu` pelo logger do modo (o do worker ou o da API, assim que existem; antes, no stderr, redigido por `loggableError`).
+- Decisão: sem `process.on('unhandledRejection')` (opcional na tarefa); o caso concreto da queda está coberto.
+
+Testes (`test/db-pool.test.ts`, novo): a conexão ociosa encerrada por `pg_terminate_backend` (pelo pid dela, sem tocar nas outras conexões) chama o `onError`, o processo segue e a consulta seguinte abre outra conexão; a transação parada além do `idle_in_transaction_session_timeout` (300 ms no teste) falha, o `onError` é chamado e a consulta seguinte funciona. Conferido à mão que, sem o ouvinte por cliente, a transação encerrada pelo servidor dá exceção não capturada (25P03).
+
+Verificação: rápida, `pnpm verify:quick --base f2f6e4d`.

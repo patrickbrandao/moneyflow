@@ -24,7 +24,7 @@ import { loadMessages, loadRun } from '../agents/store';
 import type { ServiceContext } from '../context';
 import { AppError, notFound, unprocessable } from '../errors';
 import { assertCanStartRun } from './ai-budgets';
-import { flowAgentId, waitRun } from './ai-flows';
+import { awaitFlowRun, flowAgentId } from './ai-flows';
 import { assertUpload, cleanFileName, storeAttachment } from './attachments';
 import { contractReadMode, loadContract } from './contracts';
 import { createConversation, sendMessage } from './conversations';
@@ -294,16 +294,29 @@ async function currentContent(tx: Executor, documentId: string): Promise<string 
   return result.rows[0]?.content ?? null;
 }
 
+/**
+ * Nova versão do markdown. Concorrência otimista (tarefa 135): com
+ * `baseVersionId` (a versão que o editor abriu), ou com `unchangedSince` (a
+ * tool aprovada depois: a hora da prévia), uma versão atual mais nova recusa a
+ * gravação com 409 `version_conflict`, sem criar versão.
+ */
 export async function saveVersion(
   ctx: ServiceContext,
   documentId: string,
-  input: z.output<typeof contractVersionCreateInput>,
+  input: Omit<z.output<typeof contractVersionCreateInput>, 'baseVersionId'> & { baseVersionId?: string | null },
+  opts: { unchangedSince?: string | null } = {},
 ): Promise<{ version: number; document: ContractDocumentDto }> {
   const { doc } = await documentAccess(ctx, documentId, true);
   if (doc.format !== 'markdown') throw unprocessable(E.notMarkdown, 'not_markdown');
   const version = await withTx(ctx, async (tx) => {
     await loadDocument(tx, documentId, true);
-    if ((await currentContent(tx, documentId)) === input.content) throw unprocessable(t.contracts.documents.noChanges, 'no_changes');
+    const current = await tx.execute<{ id: string; version: number; content: string; newer: boolean | null }>(sql`
+      SELECT v.id, v.version, v.content, (v.created_at > ${opts.unchangedSince ?? null}::timestamptz) AS newer
+        FROM contract_documents d JOIN contract_document_versions v ON v.id = d.current_version_id WHERE d.id = ${documentId}`);
+    const row = current.rows[0];
+    if (row && ((input.baseVersionId && row.id !== input.baseVersionId) || row.newer))
+      throw new AppError(409, 'version_conflict', t.contracts.documents.versionConflict(Number(row.version)));
+    if (row?.content === input.content) throw unprocessable(t.contracts.documents.noChanges, 'no_changes');
     return appendVersion(ctx, tx, documentId, input.content, { note: input.note });
   });
   return { version, document: await getContractDocument(ctx, documentId) };
@@ -334,7 +347,10 @@ export async function restoreVersion(
 
 /* ---------------- IA: leitura do contrato e PDF → markdown ---------------- */
 
-/** Abre a conversa arquivada do fluxo, envia o arquivo e espera a execução (até AI_DOCUMENT_TIMEOUT_MS). */
+/**
+ * Abre a conversa arquivada do fluxo, envia o arquivo e espera a execução: até AI_DOCUMENT_TIMEOUT_MS na leitura e
+ * AI_DOCUMENT_CONVERT_TIMEOUT_MS na conversão em markdown (a saída é o documento inteiro); esgotado, cancela (tarefa 150).
+ */
 async function runFlow(
   ctx: ServiceContext,
   purpose: 'contract_reading' | 'contract_markdown',
@@ -355,10 +371,8 @@ async function runFlow(
     storeAttachment(tx, ctx, { name: file.name, mime: 'application/pdf', content: file.content }),
   );
   const sent = await sendMessage(ctx, conversation.id, { text, attachmentIds: [attachmentId] });
-  const run = await waitRun(ctx.db, sent.run.id, ctx.config.aiDocumentTimeoutMs);
-  if (run?.status !== 'completed') {
-    throw new AppError(422, 'document_unreadable', run?.status === 'failed' && run.error ? run.error : failure);
-  }
+  const timeout = purpose === 'contract_markdown' ? ctx.config.aiDocumentConvertTimeoutMs : ctx.config.aiDocumentTimeoutMs;
+  await awaitFlowRun(ctx, sent.run.id, conversation.id, timeout, failure);
   const messages = await loadMessages(ctx.db, conversation.id);
   const answer = [...messages].reverse().find((m) => m.role === 'assistant');
   return { text: answer ? blocksText(answer.content) : '', runId: sent.run.id, conversationId: conversation.id };

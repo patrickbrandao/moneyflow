@@ -7,14 +7,16 @@ import type { AddressInfo } from 'node:net';
  * /bot<token>/<método> com JSON) para o MoneyFlow:
  *  - sendMessage (devolve message_id), sendChatAction, answerCallbackQuery;
  *  - setWebhook / deleteWebhook (guarda a URL e o secret_token por token, para
- *    o teste chamar o webhook simulando o Telegram), com `failNext` para recusar;
+ *    o teste chamar o webhook simulando o Telegram), com `failNext` para recusar
+ *    (400, ou o status de `failStatus`, como um 502 passageiro);
  *  - getFile e o download em GET /file/bot<token>/<file_path> dos arquivos
  *    registrados com `addFile` (voz, foto, documento).
  * Todas as chamadas ficam em `calls` (método, token e corpo). `update*`
  * monta as atualizações que o Telegram mandaria ao webhook.
  */
 
-export type FakeTelegramCall = { method: string; token: string; body: Record<string, any> };
+/** `failed`: a chamada foi recusada por `failNext` (não conta como entregue em `messagesTo`). */
+export type FakeTelegramCall = { method: string; token: string; body: Record<string, any>; failed?: boolean };
 export type FakeWebhook = { url: string; secret: string; allowedUpdates: string[] };
 
 export type FakeTelegram = {
@@ -25,9 +27,11 @@ export type FakeTelegram = {
   webhooks: Map<string, FakeWebhook>;
   /** Próximas chamadas de um método que falham (ex.: { setWebhook: 1 }). */
   failNext: Record<string, number>;
+  /** Status da falha de `failNext` por método (padrão 400; ex.: { sendMessage: 502 }). */
+  failStatus: Record<string, number>;
   /** Registra um arquivo para getFile/download; devolve o file_id. */
   addFile: (data: Buffer, mime: string, ext?: string) => string;
-  /** Mensagens enviadas a um chat (sendMessage). */
+  /** Mensagens entregues a um chat (sendMessage; sem as recusadas por `failNext`). */
   messagesTo: (chatId: number | string) => FakeTelegramCall[];
   close: () => Promise<void>;
 };
@@ -137,6 +141,7 @@ export async function startFakeTelegram(port = 0, host = '127.0.0.1'): Promise<F
   const calls: FakeTelegramCall[] = [];
   const webhooks = new Map<string, FakeWebhook>();
   const failNext: Record<string, number> = {};
+  const failStatus: Record<string, number> = {};
   const files = new Map<string, { path: string; data: Buffer; mime: string }>();
   let fileSeq = 0;
 
@@ -166,10 +171,14 @@ export async function startFakeTelegram(port = 0, host = '127.0.0.1'): Promise<F
     } catch {
       body = {};
     }
-    calls.push({ method, token, body });
+    const call: FakeTelegramCall = { method, token, body };
+    calls.push(call);
     const failures = failNext[method] ?? 0;
     if (failures > 0) {
       failNext[method] = failures - 1;
+      call.failed = true;
+      const status = failStatus[method] ?? 400;
+      if (status !== 400) return json(res, status, { ok: false, error_code: status, description: 'Bad Gateway' });
       return json(res, 400, { ok: false, error_code: 400, description: 'Bad Request: bad webhook: HTTPS url must be provided' });
     }
     switch (method) {
@@ -193,13 +202,25 @@ export async function startFakeTelegram(port = 0, host = '127.0.0.1'): Promise<F
         return json(res, 200, { ok: true, result: true });
     }
   });
-  await new Promise<void>((resolve) => server.listen(port, host, resolve));
+  // Porta ocupada (por exemplo, o fake-telegram rodando à mão na mesma porta) vira um erro claro no beforeAll, em vez de uma
+  // exceção solta que derruba o worker do Playwright (tarefa 125).
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', (error: NodeJS.ErrnoException) =>
+      reject(
+        error.code === 'EADDRINUSE'
+          ? new Error(`Bot API falsa: a porta ${port} está ocupada (pare o fake-telegram manual ou o processo que a usa)`)
+          : error,
+      ),
+    );
+    server.listen(port, host, resolve);
+  });
   const address = server.address() as AddressInfo;
   return {
     url: `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${address.port}`,
     port: address.port,
     calls,
     webhooks,
+    failStatus,
     failNext,
     addFile: (data, mime, ext = 'bin') => {
       fileSeq += 1;
@@ -207,7 +228,7 @@ export async function startFakeTelegram(port = 0, host = '127.0.0.1'): Promise<F
       files.set(id, { path: `files/${id}.${ext}`, data, mime });
       return id;
     },
-    messagesTo: (chatId) => calls.filter((c) => c.method === 'sendMessage' && String(c.body.chat_id) === String(chatId)),
+    messagesTo: (chatId) => calls.filter((c) => c.method === 'sendMessage' && !c.failed && String(c.body.chat_id) === String(chatId)),
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }

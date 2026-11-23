@@ -1,18 +1,8 @@
-import { type AiRunStatus, agentTool, t, type UsageTotals } from '@moneyflow/shared';
+import { type AiRunStatus, t, type UsageTotals } from '@moneyflow/shared';
 
 /* Formatação dos agentes no console: nomes de tools, custo e status. */
 
 const u = t.agentsUi;
-
-/** Nome amigável da tool: título do registro interno ou "servidor › tool" para MCP ("servidor__tool"). */
-export function toolLabel(name: string, fallbackTitle?: string | null): string {
-  const internal = agentTool(name);
-  if (internal) return internal.title;
-  if (fallbackTitle && fallbackTitle !== name) return fallbackTitle;
-  const cut = name.indexOf('__');
-  if (cut > 0) return `${name.slice(cut + 2)} (${u.tool.mcp(name.slice(0, cut))})`;
-  return name;
-}
 
 const intFormat = new Intl.NumberFormat('pt-BR');
 export const formatInt = (n: number) => intFormat.format(n);

@@ -1,22 +1,24 @@
-import type {
-  AgentOptionDto,
-  AgentSendResult,
-  AgentThreadView,
-  AiMessageDto,
-  AiRunDto,
-  AiRunEvent,
-  ChatAttachmentDto,
-  ConversationDetail,
-  ConversationDto,
-  DecideResult,
-  ScreenContext,
-  SendMessageResult,
-  ToolConfirmationDto,
+import {
+  type AgentOptionDto,
+  type AgentSendResult,
+  type AgentThreadView,
+  type AiMessageDto,
+  type AiRunDto,
+  type AiRunEvent,
+  type ChatAttachmentDto,
+  type ConversationDetail,
+  type ConversationDto,
+  createLiveBuffer,
+  type DecideResult,
+  type ScreenContext,
+  type SendMessageResult,
+  type ToolConfirmationDto,
 } from '@moneyflow/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { usePolling } from '../components/ui';
 import { ApiError, api } from '../lib/api';
 import { upload } from '../lib/upload';
-import { useAgents } from './AgentsProvider';
+import { useAgentActions, useAgentVersions } from './AgentsProvider';
 import { isActiveStatus } from './format';
 import { followRun } from './stream';
 
@@ -53,6 +55,9 @@ export type LiveTool = { name: string; title?: string; status: 'running' | 'ok' 
 
 const bySeq = (a: AiMessageDto, b: AiMessageDto) => a.seq - b.seq;
 
+/** Consulta da execução que espera aprovação (decidida em outra aba ou no Telegram). */
+const AWAITING_POLL_MS = 10_000;
+
 function upsertMessage(list: AiMessageDto[], message: AiMessageDto): AiMessageDto[] {
   const index = list.findIndex((m) => m.id === message.id);
   if (index === -1) return [...list, message].sort(bySeq);
@@ -73,16 +78,31 @@ function mergeConfirmations(current: ToolConfirmationDto[], incoming: ToolConfir
 }
 
 export function useConversation(target: PaneTarget) {
-  const agents = useAgents();
-  const { updateMeta, bumpList, screenContext } = agents;
+  // Só as ações e as versões (tarefa 120): a conversa não re-renderiza a cada clique ou arrasto nas janelas.
+  const { updateMeta, bumpList, screenContext } = useAgentActions();
+  const { sessionsVersion } = useAgentVersions();
   const [detail, setDetail] = useState<PaneDetail | null>(null);
   const [agent, setAgent] = useState<AgentOptionDto | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [run, setRun] = useState<AiRunDto | null>(null);
-  const [liveText, setLiveText] = useState('');
-  const [liveThinking, setLiveThinking] = useState('');
+  // Texto e raciocínio ao vivo fora do estado (tarefa 120): um aviso por quadro, só para a bolha ao vivo.
+  const [live] = useState(() =>
+    createLiveBuffer(
+      (flush) => requestAnimationFrame(flush),
+      (handle) => cancelAnimationFrame(handle),
+    ),
+  );
   const [liveTools, setLiveTools] = useState<Record<string, LiveTool>>({});
   const [streamError, setStreamError] = useState<string | null>(null);
+  /** Volta à fila por erro temporário do provedor (tarefa 151): aviso passageiro até a nova tentativa responder. */
+  const [retrying, setRetryingState] = useState(false);
+  // O valor atual fora do estado: os deltas desligam o aviso sem marcar um render a cada token (tarefa 120).
+  const retryingNow = useRef(false);
+  const setRetrying = useCallback((value: boolean) => {
+    if (retryingNow.current === value) return;
+    retryingNow.current = value;
+    setRetryingState(value);
+  }, []);
   const [reconnecting, setReconnecting] = useState(false);
   const alive = useRef(true);
   /** Anexos enviados nesta tela (spec 025): entram nos metadados do detalhe ao enviar a mensagem. */
@@ -96,8 +116,9 @@ export function useConversation(target: PaneTarget) {
     alive.current = true;
     return () => {
       alive.current = false;
+      live.dispose();
     };
-  }, []);
+  }, [live]);
 
   const apply = useCallback(
     (value: PaneDetail) => {
@@ -142,7 +163,6 @@ export function useConversation(target: PaneTarget) {
   }, [load]);
 
   // Na janela do agente: a ativa mudou por fora (bifurcar numa janela de leitura) → relê o fio.
-  const sessionsVersion = agents.sessionsVersion;
   const seenVersion = useRef(sessionsVersion);
   useEffect(() => {
     if (seenVersion.current === sessionsVersion) return;
@@ -152,12 +172,12 @@ export function useConversation(target: PaneTarget) {
 
   const resetLive = useCallback(() => {
     setRun(null);
-    setLiveText('');
-    setLiveThinking('');
+    live.clear();
     setLiveTools({});
     setStreamError(null);
+    setRetrying(false);
     setReconnecting(false);
-  }, []);
+  }, [live, setRetrying]);
 
   const handleEvent = useCallback(
     (event: AiRunEvent) => {
@@ -166,10 +186,12 @@ export function useConversation(target: PaneTarget) {
           setRun((r) => (r ? { ...r, status: event.status, error: event.error ?? r.error } : r));
           break;
         case 'text_delta':
-          setLiveText((text) => text + event.text);
+          setRetrying(false);
+          live.push('text', event.text);
           break;
         case 'thinking_delta':
-          setLiveThinking((text) => text + event.text);
+          setRetrying(false);
+          live.push('thinking', event.text);
           break;
         case 'tool_start':
           setLiveTools((tools) => ({ ...tools, [event.toolUseId]: { name: event.name, title: event.title, status: 'running' } }));
@@ -188,8 +210,8 @@ export function useConversation(target: PaneTarget) {
         case 'message':
           setDetail((d) => (d ? { ...d, messages: upsertMessage(d.messages, event.message) } : d));
           if (event.message.role === 'assistant') {
-            setLiveText('');
-            setLiveThinking('');
+            live.clear();
+            setRetrying(false);
           }
           break;
         case 'confirmation':
@@ -204,40 +226,76 @@ export function useConversation(target: PaneTarget) {
           bumpList();
           break;
         case 'error':
+          if (event.code === 'provider_retry' || event.code === 'worker_shutdown') {
+            // A execução volta à fila (erro do provedor ou parada do worker, tarefa 107) e a resposta recomeça do zero:
+            // o texto parcial da tentativa que caiu sai da tela.
+            live.clear();
+            setRetrying(true);
+            break;
+          }
           setStreamError(event.message);
           break;
         case 'done':
           setRun((r) => (r ? { ...r, status: event.status, error: event.error ?? r.error } : r));
+          setRetrying(false);
           if (event.error) setStreamError(event.error);
+          else if (event.status === 'completed') setStreamError(null);
           break;
       }
     },
-    [windowId, updateMeta, bumpList],
+    [windowId, updateMeta, bumpList, live, setRetrying],
   );
 
-  // Segue o SSE enquanto houver execução ativa.
-  const runId = run && isActiveStatus(run.status) ? run.id : null;
+  /** O último evento visto da execução seguida: o SSE retoma dele depois da espera por aprovação. */
+  const seen = useRef<{ runId: string; seq: number } | null>(null);
+  // Execução que terminou (pelo SSE ou pela consulta da espera): limpa o ao vivo e relê o detalhe.
+  const finished = useCallback(() => {
+    seen.current = null;
+    setReconnecting(false);
+    setRetrying(false);
+    setRun(null);
+    live.clear();
+    setLiveTools({});
+    bumpList();
+    void load();
+  }, [live, bumpList, load, setRetrying]);
+
+  // Segue o SSE só enquanto a execução anda, na fila ou rodando (tarefa 122): esperando aprovação, a
+  // conexão fecha e volta ao decidir, do último evento visto (`seen`). Com a aba escondida, o
+  // `followRun` fecha sozinho e retoma ao voltar.
+  const streamRunId = run && (run.status === 'queued' || run.status === 'running') ? run.id : null;
   useEffect(() => {
-    if (!runId) return;
+    if (!streamRunId) return;
     const controller = new AbortController();
-    setLiveText('');
-    setLiveThinking('');
-    void followRun(runId, {
+    const resume = seen.current?.runId === streamRunId ? seen.current.seq : null;
+    if (resume === null) live.clear();
+    void followRun(streamRunId, {
       signal: controller.signal,
-      onEvent: handleEvent,
+      after: resume,
+      onEvent: (event, seq) => {
+        if (seq !== null) seen.current = { runId: streamRunId, seq };
+        handleEvent(event);
+      },
       onConnection: (connected) => setReconnecting(!connected),
     }).then((result) => {
       if (result === 'aborted' || !alive.current) return;
-      setReconnecting(false);
-      setRun(null);
-      setLiveText('');
-      setLiveThinking('');
-      setLiveTools({});
-      bumpList();
-      void load();
+      finished();
     });
     return () => controller.abort();
-  }, [runId, handleEvent, load, bumpList]);
+  }, [streamRunId, handleEvent, finished, live]);
+
+  // Esperando aprovação: sem conexão aberta; uma consulta leve a cada 10 s, só com a aba visível, percebe a
+  // decisão tomada em outro lugar (outra aba, o Telegram) e retoma o SSE ou relê o fim.
+  const awaitingRunId = run?.status === 'awaiting_confirmation' ? run.id : null;
+  const checkAwaiting = useCallback(async () => {
+    if (!awaitingRunId) return;
+    const current = await api.get<AiRunDto>(`/api/runs/${awaitingRunId}`).catch(() => null);
+    if (!current || !alive.current || current.status === 'awaiting_confirmation') return;
+    // Voltou a andar: relê o detalhe (as confirmações decididas lá) e o SSE retoma do último evento visto.
+    if (isActiveStatus(current.status)) void load();
+    else finished();
+  }, [awaitingRunId, finished, load]);
+  usePolling(checkAwaiting, AWAITING_POLL_MS, Boolean(awaitingRunId));
 
   const send = useCallback(
     async (text: string, attachmentIds: string[], context?: ScreenContext) => {
@@ -317,9 +375,11 @@ export function useConversation(target: PaneTarget) {
           : d,
       );
       setRun((r) => (r ? { ...r, status: result.runStatus } : r));
+      // Decidida e já encerrada (sem voltar à fila): não há SSE para reabrir; relê o fim.
+      if (!isActiveStatus(result.runStatus)) finished();
       return result;
     },
-    [detail, run],
+    [detail, run, finished],
   );
 
   // Upload do chat: no áudio, a duração medida pelo navegador vai junto (spec 025). No fio ainda
@@ -353,10 +413,11 @@ export function useConversation(target: PaneTarget) {
     error,
     run,
     busy: Boolean(run && isActiveStatus(run.status)),
-    liveText,
-    liveThinking,
+    /** Texto e raciocínio ao vivo (assinados só pela bolha ao vivo). */
+    live,
     liveTools,
     streamError,
+    retrying,
     reconnecting,
     reload: load,
     send,

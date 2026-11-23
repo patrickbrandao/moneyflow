@@ -5,36 +5,33 @@
  *   pnpm verify:quick [--base <ref>] [-- <args do vitest da API>]
  *     O padrão durante o desenvolvimento. Olha só o que mudou desde o ponto em
  *     que o branch saiu do main (commits, alterações e arquivos novos):
- *     lint dos arquivos alterados, typecheck dos pacotes afetados (e dos que
- *     dependem deles), testes do shared relacionados, testes de integração dos
- *     arquivos tocados (test/x.test.ts alterado ou de src/.../x.ts) contra o
- *     Postgres local (MONEYFLOW_TEST_DB=local, sem container) e o pgTAP dos
- *     testes do banco alterados. Sem build, sem e2e.
+ *     lint dos arquivos alterados (o repositório inteiro se o biome.json mudou),
+ *     typecheck dos pacotes afetados, inclusive por arquivo apagado (e dos que
+ *     dependem deles), testes do shared relacionados, testes dos scripts,
+ *     testes de integração dos arquivos tocados contra o Postgres local
+ *     (MONEYFLOW_TEST_DB=local, sem container) e o pgTAP dos testes do banco
+ *     alterados. Sem build, sem e2e. Os testes de integração saem de
+ *     scripts/verify-plan.mjs: o test/x.test.ts alterado, o mapa
+ *     apps/server/test/related.json e o de mesmo nome de src/.../x.ts. Arquivo
+ *     de apps/server/src sem teste nenhum faz a verificação FALHAR (código 2)
+ *     com a lista (tarefa 127); --sem-integracao pula a integração de propósito.
  *     Com args depois de `--`, a API roda exatamente esses testes:
  *       pnpm verify:quick -- test/contracts.test.ts -t "renovação"
  *
  *   pnpm verify:full [--local] [--e2e]
  *     Só quando pedido, antes de PR ou de release: lint, typecheck, todos os
  *     testes (integração em Testcontainers; --local usa o Postgres local),
- *     build e pgTAP completo. --e2e acrescenta o Playwright (pilha no ar).
+ *     testes dos scripts, build e pgTAP completo. --e2e acrescenta o Playwright (pilha no ar).
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { Socket } from 'node:net';
-import { basename, dirname, join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
+import { lintPlan, needsScriptTests, PACKAGES, selectServerTests, typecheckPlan } from './verify-plan.mjs';
 
 const ROOT = join(dirname(new URL(import.meta.url).pathname), '..');
 process.chdir(ROOT);
-
-const PACKAGES = {
-  'apps/server': '@moneyflow/server',
-  'apps/web': '@moneyflow/web',
-  'packages/shared': '@moneyflow/shared',
-  'packages/db': '@moneyflow/db',
-  e2e: '@moneyflow/e2e',
-};
-const ROOT_CONFIG = new Set(['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.json', 'tsconfig.base.json']);
-const LINTABLE = /\.(m?[jt]sx?|json|css)$/;
+const RELATED = 'apps/server/test/related.json';
 
 const argv = process.argv.slice(2);
 const mode = argv.shift();
@@ -74,7 +71,9 @@ function summary(extra) {
     console.log(`${mark} ${r.label}${r.ok === null ? ` (pulado: ${r.why})` : ` (${r.secs}s)`}`);
   }
   if (extra) console.log(`\n${extra}`);
-  process.exit(results.some((r) => r.ok === false) ? 1 : 0);
+  // Código 2 = arquivo sem teste mapeado (tarefa 127); 1 = algum passo falhou.
+  const failed = results.filter((r) => r.ok === false);
+  process.exit(failed.length ? Math.max(...failed.map((r) => r.code ?? 1)) : 0);
 }
 
 function portOpen(port, host = 'localhost') {
@@ -93,48 +92,52 @@ async function ensureLocalPostgres() {
   return run('Postgres local (make -C database up)', 'make', ['-C', 'database', 'up']);
 }
 
+/** Alterados desde a base (commits, árvore e arquivos novos); `all` inclui os apagados, `existing` não. */
 function changedFiles(base) {
   const tracked = git('diff', '--name-only', base).split('\n');
   const untracked = git('ls-files', '--others', '--exclude-standard').split('\n');
-  return [...new Set([...tracked, ...untracked])].filter((f) => f && existsSync(f));
-}
-
-function packageOf(file) {
-  return Object.keys(PACKAGES).find((dir) => file.startsWith(`${dir}/`));
+  const all = [...new Set([...tracked, ...untracked])].filter(Boolean);
+  return { all, existing: all.filter((f) => existsSync(f)) };
 }
 
 async function quick() {
   const baseRef = option('--base') ?? (git('rev-parse', '--verify', '--quiet', 'origin/main') ? 'origin/main' : 'main');
   const base = git('merge-base', 'HEAD', baseRef) || 'HEAD';
-  const files = changedFiles(base);
-  console.log(`Verificação rápida: ${files.length} arquivo(s) alterado(s) desde ${baseRef} (${base.slice(0, 7)}).`);
-  if (files.length === 0 && passthrough.length === 0) {
+  const { all, existing } = changedFiles(base);
+  const deleted = all.filter((f) => !existing.includes(f));
+  console.log(
+    `Verificação rápida: ${all.length} arquivo(s) alterado(s) desde ${baseRef} (${base.slice(0, 7)})` +
+      `${deleted.length ? `, ${deleted.length} apagado(s)` : ''}.`,
+  );
+  if (all.length === 0 && passthrough.length === 0) {
     console.log('Nada a verificar.');
     return summary();
   }
 
-  const lintable = files.filter((f) => LINTABLE.test(f) && !f.startsWith('database/'));
-  if (lintable.length) {
+  const lint = lintPlan(existing);
+  if (lint.full) run('Lint do repositório (a configuração do Biome mudou)', 'pnpm', ['lint']);
+  else if (lint.files.length) {
     run('Lint dos arquivos alterados', 'pnpm', [
       'exec',
       'biome',
       'check',
       '--no-errors-on-unmatched',
       '--files-ignore-unknown=true',
-      ...lintable,
+      ...lint.files,
     ]);
   } else skip('Lint', 'nenhum arquivo de código alterado');
 
-  const allPackages = files.some((f) => ROOT_CONFIG.has(f));
-  const touched = [...new Set(files.map(packageOf).filter(Boolean))];
-  if (allPackages) {
+  const typecheck = typecheckPlan(all);
+  if (typecheck.all) {
     run('Typecheck (todos os pacotes: configuração da raiz mudou)', 'pnpm', ['-r', 'typecheck']);
-  } else if (touched.length) {
-    const filters = touched.flatMap((dir) => ['--filter', `...${PACKAGES[dir]}`]);
-    run(`Typecheck (${touched.map((d) => PACKAGES[d]).join(', ')} e dependentes)`, 'pnpm', [...filters, 'typecheck']);
+  } else if (typecheck.packages.length) {
+    const filters = typecheck.packages.flatMap((dir) => ['--filter', `...${PACKAGES[dir]}`]);
+    run(`Typecheck (${typecheck.packages.map((d) => PACKAGES[d]).join(', ')} e dependentes)`, 'pnpm', [...filters, 'typecheck']);
   } else skip('Typecheck', 'nenhum pacote alterado');
 
-  const sharedFiles = files.filter((f) => f.startsWith('packages/shared/') && /\.tsx?$/.test(f)).map((f) => relative('packages/shared', f));
+  const sharedFiles = existing
+    .filter((f) => f.startsWith('packages/shared/') && /\.tsx?$/.test(f))
+    .map((f) => relative('packages/shared', f));
   if (sharedFiles.length) {
     run('Testes do shared relacionados', 'pnpm', [
       '--filter',
@@ -148,37 +151,48 @@ async function quick() {
     ]);
   } else skip('Testes do shared', 'shared não mudou');
 
+  if (needsScriptTests(all)) run('Testes dos scripts (node --test)', 'pnpm', ['test:scripts']);
+  else skip('Testes dos scripts', 'scripts e versões não mudaram');
+
   let serverArgs = passthrough;
-  if (serverArgs.length === 0) {
-    const tests = new Set();
-    for (const f of files) {
-      if (/^apps\/server\/test\/[^/]+\.test\.ts$/.test(f)) tests.add(relative('apps/server', f));
-      else if (/^apps\/server\/src\/.+\.ts$/.test(f)) {
-        const candidate = `test/${basename(f, '.ts')}.test.ts`;
-        if (existsSync(join('apps/server', candidate))) tests.add(candidate);
+  if (flag('--sem-integracao')) skip('Testes de integração', 'pedido --sem-integracao');
+  else {
+    if (serverArgs.length === 0) {
+      const map = JSON.parse(readFileSync(RELATED, 'utf8')).map;
+      const { tests, unmapped } = selectServerTests(all, { map, exists: existsSync });
+      serverArgs = tests;
+      if (unmapped.length) {
+        results.push({
+          label: `Testes de integração: ${unmapped.length} arquivo(s) de src sem teste mapeado`,
+          ok: false,
+          secs: '0',
+          code: 2,
+        });
+        console.error(
+          `\n✗ Sem teste de integração escolhido para:\n${unmapped.map((f) => `  - ${f}`).join('\n')}\n` +
+            `  Acrescente-os em ${RELATED} (ou crie o test/<nome>.test.ts), passe os testes depois de \`--\` ` +
+            'ou use --sem-integracao de propósito.',
+        );
       }
     }
-    serverArgs = [...tests];
+    if (serverArgs.length) {
+      if (await ensureLocalPostgres()) {
+        run(
+          'Testes de integração tocados (Postgres local)',
+          'pnpm',
+          ['--filter', '@moneyflow/server', 'exec', 'vitest', 'run', ...serverArgs],
+          {
+            MONEYFLOW_TEST_DB: 'local',
+          },
+        );
+      }
+    } else skip('Testes de integração', 'nenhum arquivo da API, do banco ou do shared mapeado mudou');
   }
-  if (serverArgs.length) {
-    if (await ensureLocalPostgres()) {
-      run(
-        'Testes de integração tocados (Postgres local)',
-        'pnpm',
-        ['--filter', '@moneyflow/server', 'exec', 'vitest', 'run', ...serverArgs],
-        {
-          MONEYFLOW_TEST_DB: 'local',
-        },
-      );
-    }
-  } else if (files.some((f) => f.startsWith('apps/server/') || f.startsWith('packages/'))) {
-    skip('Testes de integração', 'nenhum test/*.test.ts alterado nem com o nome do arquivo de src; passe-os depois de `--`');
-  } else skip('Testes de integração', 'API não mudou');
 
-  const pgtap = files.filter((f) => /^database\/tests\/.+\.sql$/.test(f)).map((f) => `/${relative('database', f)}`);
+  const pgtap = existing.filter((f) => /^database\/tests\/.+\.sql$/.test(f)).map((f) => `/${relative('database', f)}`);
   if (pgtap.length) {
     run('pgTAP dos testes alterados', 'make', ['-C', 'database', 'test', `T=${pgtap.join(' ')}`]);
-  } else if (files.some((f) => f.startsWith('database/migrations/'))) {
+  } else if (all.some((f) => f.startsWith('database/migrations/'))) {
     skip('pgTAP', 'migration alterada sem teste pgTAP alterado');
   } else skip('pgTAP', 'banco não mudou');
 
@@ -190,6 +204,7 @@ async function full() {
     ['Lint', 'pnpm', ['lint']],
     ['Typecheck', 'pnpm', ['typecheck']],
     ['Testes unitários (shared)', 'pnpm', ['test:unit']],
+    ['Testes dos scripts (node --test)', 'pnpm', ['test:scripts']],
     flag('--local')
       ? ['Testes de integração (Postgres local)', 'pnpm', ['test:integration'], { MONEYFLOW_TEST_DB: 'local' }]
       : ['Testes de integração (Testcontainers)', 'pnpm', ['test:integration']],

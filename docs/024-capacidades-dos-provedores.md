@@ -1,5 +1,7 @@
 # 024 — Capacidades dos provedores e provedor por inferência (F10)
 
+> **Conteúdo:** F10: dois tipos (OpenAI e Anthropic, com compatíveis por `base_url`: modelo de texto obrigatório, interruptores de cache e raciocínio), flags de capacidade (texto, visão, embeddings, áudio→texto, texto→áudio) com modelo padrão e teste flag a flag, provedor por inferência no agente ("Provedor padrão"; agentes antigos migrados sem mudar de comportamento), visão direta, por descrição ou pela camada de texto do PDF (imagem recusada sem visão), índice de embeddings por par em uso com a busca pelo par do agente, uso e preços de áudio, backup de arquivos antigos.
+
 Os provedores declaram o que sabem fazer. O agente escolhe um provedor (e um modelo) para cada tipo de inferência. O tipo `anthropic` passa a cobrir formalmente as APIs compatíveis com a Messages API. Decisões da entrevista de 2026-10-13.
 
 ## Tipos de provedor
@@ -61,7 +63,7 @@ Os provedores declaram o que sabem fazer. O agente escolhe um provedor (e um mod
 - O worker indexa, para **cada par distinto (provedor, modelo)** de embeddings usado por algum agente ativo, as entidades, os títulos, as compras de cartão e as linhas de extrato. O custo da indexação cresce com cada par novo, o que é aceito.
 - A dimensão continua fixa em 1536.
 - A busca (`semantic_search`; a `search_records` é por texto e não muda) usa o par do agente que a chamou, pela execução. O vetor da consulta é cobrado do usuário e do agente.
-  - Enquanto o índice do par não está completo (sem fila e com todos os registros que a busca enxerga), a busca usa o que já existe e completa com trigramas, avisando "índice em construção" (`building: true` e `notice` no resultado da tool).
+  - Enquanto o índice do par não está completo, a busca usa o que já existe e completa com trigramas, avisando "índice em construção" (`building: true` e `notice` no resultado da tool). Completo é a marca do worker (tarefa 161): ao fim de uma passada que alcançou o fim das fontes, sem vetor na fila, ele grava `complete_at` (`ai_embedding_index_mark`); a passada incompleta ou com erro, e a primeira de um processo novo (que relê do começo), desmarcam. A busca só lê a marca e a fila (`ai_embedding_index_ready`), sem contar as fontes; um registro criado depois da marcação fica fora da busca vetorial, e do aviso, até a passada seguinte (um ciclo de `AGENT_MAINTENANCE_MS`), e o texto editado de um registro já indexado volta a avisar assim que é sincronizado. O total das fontes fica só no detalhe do provedor.
   - Agente sem embeddings, ou a busca fora de um agente (o servidor `/mcp`): só trigramas, como hoje.
 - Os vetores de um par que nenhum agente ativo usa mais são apagados depois de 7 dias. O par em uso fica registrado em `ai_embedding_indexes` (abaixo), com a última vez em que esteve em uso.
 - O ciclo do worker: `ai_embedding_indexes_touch()` registra os pares em uso (antes de gravar qualquer vetor de um par novo), cada par grava os textos-fonte e calcula os vetores pendentes com as credenciais do provedor dele, e `ai_embedding_indexes_purge()` apaga os parados. Um par com problema (provedor fora, modelo com outra dimensão) não segura os demais.

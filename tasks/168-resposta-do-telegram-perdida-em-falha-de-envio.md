@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: b066caf
 ---
 
 # Resposta e botões do agente no Telegram são marcados como enviados antes do envio e se perdem numa falha
@@ -64,4 +64,16 @@ Nada foi executado. A escolha entre "no máximo uma vez" e "pelo menos uma vez" 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado em `deliverRunToTelegram` (`apps/server/src/services/telegram-inbound.ts`): `mark(key)` vinha antes do `say`, que só logava a falha; `sendChatMessage` não repete erro de rede, tempo esgotado nem 5xx; e a entrega só é chamada uma vez, no fim de `processRun`.
+
 ## Resolução (executor)
+
+- Decisão: "pelo menos uma vez", como a tarefa propõe (uma resposta repetida é menos grave que perder os botões de aprovação).
+- `apps/server/src/services/telegram-inbound.ts`: `Bot.deliver` (só para a resposta do agente e os botões) tenta de novo na falha passageira — rede/tempo esgotado (status 0), 5xx e 429 — depois de 1 s e de 3 s, e devolve se chegou; o `say` das respostas do webhook continua com uma tentativa. Em `deliverRunToTelegram`, cada envio é marcado `telegram`/`sent` depois de chegar; a resposta vai por parte (`final:<n>`, e `final` no fim, que também é a marca das execuções antigas); o que não chegou grava `telegram`/`failed` e para ali, mantendo a ordem. `redeliverFailed`: na próxima mensagem do chat (com sessão ativa), as até 3 execuções recentes da sessão com um `failed` passam de novo pela entrega, que manda só o que falta, antes do "aguarde"/"responda pelos botões".
+- `packages/shared/src/agents/types.ts`: a ação `failed` no evento interno `telegram`.
+- `e2e/fakes/fake-telegram.ts`: `failStatus` (o status da falha de `failNext`, ex. 502) e a chamada recusada marcada `failed`, fora do `messagesTo`.
+- Spec: `docs/029`, "Telegram de entrada".
+- Testes: `apps/server/test/autonomous.test.ts` ("falha do Telegram na resposta…"): um 502 passageiro — a resposta chega uma vez na nova tentativa e as marcas são `final:0` e `final`; o Telegram fora nas três tentativas do cartão de aprovação — fica só `failed`; a mensagem seguinte do chat leva o cartão com os botões antes do aviso de aprovação pendente, a marca `sent` aparece, aprovar conclui a execução, e um comando depois não repete nada.
+- Verificação: `pnpm verify:quick`.

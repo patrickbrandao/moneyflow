@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: e035b34
 ---
 
 # Janelas do agente re-renderizam a conversa inteira a cada token e a página aberta a cada clique na janela
@@ -72,4 +72,14 @@ Nada foi medido; o custo real depende do tamanho da sessão e da página atrás.
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código: um `setLiveText` por `text_delta` no estado do `useConversation`, então o `ConversationPane` inteiro (cabeçalho, mensagens, compositor, rodapé) re-renderizava a cada token, com `MessageView`/`ToolView` sem `memo` (o `JSON.stringify` da entrada e o `slice` do resultado de toda tool, aberta ou fechada) e o `useLayoutEffect` do rolamento sem dependências; o `MediaProvider` com `Map` e valor novos a cada render. No provider, `update` passava `normalizeUiState(current)` (sempre objeto novo), então `focus`/`updateMeta` "sem mudança" gravavam no `localStorage` e re-renderizavam; o `useStored` não comparava; um só contexto fazia o `Layout`, todas as janelas e as páginas com `useAgentScreenContext` re-renderizarem a cada clique numa janela.
+
 ## Resolução (executor)
+
+**Por token.** O texto e o raciocínio ao vivo saíram do estado do React: `packages/shared/src/agents/live-buffer.ts` (`createLiveBuffer`, com o agendador injetado) junta os deltas de um quadro e avisa uma vez por quadro (`requestAnimationFrame` no navegador); o `useConversation` devolve `live` no lugar de `liveText`/`liveThinking`, e só a `LiveBubble` do `ConversationPane` assina (`useSyncExternalStore`). Assim o miolo da conversa não re-renderiza a cada token. `MessageView` e `ToolView` com `memo` (o da mensagem compara só as tools ao vivo, os resultados e as confirmações dos blocos dela); os resultados das tools ficam o mesmo objeto enquanto o bloco é o mesmo; o corpo do `ToolView` (JSON da entrada e do resultado) só é montado com o `<details>` aberto (`ToolBody`); o rolamento roda quando o conteúdo muda (e a bolha ao vivo chama o mesmo); o `MediaProvider` memoriza o mapa e o valor.
+
+**Por clique.** `update` devolve o estado atual quando a função devolve a própria base; `focus`, `updateMeta`, `setGeometry`, `setPanelWidth`, `setPanelCollapsed`, `setAudioMode` e o `resize` (com `clampGeometry` devolvendo a mesma janela) não criam objeto quando nada muda; o `useStored` não grava nem re-renderiza com o mesmo valor (`lib/storage.ts`). O contexto foi dividido em três (`AgentsProvider.tsx`): ações estáveis (`useAgentActions`), versões das listas (`useAgentVersions`) e o estado das janelas; o `useAgents()` junta os três para quem precisa do estado (janelas, painel, `Layout`). `useAgentScreenContext`, o `useConversation`, o `useConversationActions`, o menu Agentes, as sessões anteriores e as telas que só abrem conversas (receitas, conciliação com IA, requisições, uso, tarefas) usam só as ações; o `ConversationPane` recebe o `audioMode` da janela por prop.
+
+Sem mudança visível (ordem das janelas, títulos, modo áudio). Testes: `packages/shared/test/live-buffer.test.ts` (um aviso por quadro, o limpar que descarta o pendente, a mesma leitura enquanto nada muda). E2e novo (não rodado aqui) em `e2e/tests/agentes.spec.ts` → "janelas (tarefa 120): clicar na janela da frente não grava o estado; a resposta em 400 pedaços chega inteira" (conta as gravações de `agents-ui` e uma resposta do provedor falso em 400 pedaços). A medição pelo Profiler não foi feita aqui. Spec 011 (SSE e janelas) atualizada. Verificação: `pnpm verify:quick`.

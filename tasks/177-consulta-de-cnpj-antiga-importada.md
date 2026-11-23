@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 6a7d975
 ---
 
 # Nova entidade importa o endereço e os contatos de um CNPJ consultado antes de trocar o documento
@@ -75,5 +75,9 @@ e2e com o CNPJ Aberto desligado e o fallback falso (ou `page.route('**/api/looku
 Nada foi executado.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `lookup` só era escrito em `lookupCnpj()` e nunca voltava a nulo; o `submit` importava o endereço e os contatos dele qualquer que fosse o documento e o tipo.
 
 ## Resolução (executor)
+`EntityFormModal.tsx`: a consulta guarda o documento consultado (`lookedUp.document`, o `normalized` da hora do clique) e só vale enquanto ele for o documento na tela e o tipo for empresa: trocado o documento ou o tipo, a caixa "Incluir endereço e contatos da consulta", o aviso da fonte e o da situação cadastral somem, e nada da consulta entra ao salvar. Uma resposta que chega depois de trocar o documento é descartada (não preenche nome nem fantasia).
+
+Testes: e2e novo `e2e/tests/cnpj-consulta.spec.ts` (a consulta falsa por `page.route`, consulta A, troca para B, salva e confere pela API que a entidade ficou sem endereço e sem contatos; não rodado aqui). Verificação: `pnpm verify:quick`.

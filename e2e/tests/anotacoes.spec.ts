@@ -111,7 +111,9 @@ test('alarme: dispara, autoplay bloqueado e liberado, adiar, dispensar e marcar 
   expect(plays.some((src) => src.endsWith('/sounds/chime.wav'))).toBe(true);
 
   // Adiar: continua não lido (adiado até…); dispensar: lido. O som para quando nenhum toca mais.
-  if (!(await popover.isVisible())) await alarm.click();
+  // O clique no título, fora do popover, o fechou (useClickOutside): reabre pelo ícone.
+  await expect(popover).toBeHidden();
+  await alarm.click();
   const snoozed = popover.locator('[data-firing]', { hasText: snoozeTitle });
   await snoozed.getByRole('button', { name: 'Adiar 5 min' }).click();
   await expect(snoozed).toContainText('adiado até');
@@ -182,7 +184,8 @@ test('calendário anual e mensal, dia filtrando a tabela, janela do lembrete, ab
   await expect(page.locator(`tr[data-note="${infoTitle}"]`)).toBeVisible();
 
   // A janela: corpo renderizado, guia Escopo; e um lembrete mensal pela tela.
-  await page.locator(`tr[data-note="${infoTitle}"]`).click();
+  // O botão do título abre a janela; o centro da linha pode cair no link da entidade (tarefa 114).
+  await page.locator(`tr[data-note="${infoTitle}"]`).getByRole('button', { name: infoTitle }).click();
   const view = page.getByRole('dialog', { name: infoTitle });
   await expect(view.getByRole('heading', { name: 'Título' })).toBeVisible();
   await view.getByRole('tab', { name: 'Escopo' }).click();

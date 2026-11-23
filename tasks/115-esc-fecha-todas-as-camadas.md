@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d6f991c
 ---
 
 # Esc fecha todas as camadas de uma vez: fechar a lista do seletor de entidade descarta o formulário inteiro
@@ -74,5 +74,11 @@ e2e em `fluxo-principal` (ou novo `teclado.spec.ts`): abrir "Novo título", digi
 Nada foi executado. As janelas dos agentes (`src/agents/`, outra área) podem ter ouvintes de Esc próprios e precisam entrar na mesma pilha.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado no código atual: `useClickOutside`, `ConfirmProvider`, `Modal`, as gavetas do título e da compra, a gaveta do destino (`MessagesPage`), a da requisição (`RequestDrawer`), a prévia de mídia (`MediaDialog`) e o canvas registravam cada um o próprio `keydown` em `document`, sem saber qual camada estava por cima; o mesmo Esc fechava a lista do seletor e o modal, a confirmação e a gaveta.
 
 ## Resolução (executor)
+Uma pilha de camadas em `apps/web/src/components/ui.tsx`: `useEscapeLayer(active, onEscape)` empilha a camada enquanto ativa, e um único ouvinte de `keydown` em `document` (registrado no carregamento do módulo, antes de qualquer tela) chama só a camada de cima e faz `preventDefault`; quem já tratou o Esc (a paleta do cmdk/Radix, o gráfico com o dia em destaque) chama `preventDefault` antes, e a pilha não age. Passaram a usar a pilha: o Esc de `useClickOutside` (seletor de entidade, de tags, `Menu`, popover do calendário, sino, lembretes, menu dos agentes), `Modal`, `ConfirmProvider`, `TitleDrawer` e `PurchaseDrawer` (sem o `!modal`, que não via as confirmações nem o `PlannedAccountModal`), a gaveta do destino em `MessagesPage` (sem o `document.querySelector('.modal')`), `RequestDrawer`, `MediaDialog` (`agents/ImageLightbox.tsx`; as setas continuam no ouvinte dela) e a seleção do canvas (`MoneyFlowCanvas`). A janela da sessão expirada (tarefa 119) também é uma camada, que segura o Esc.
+
+Decisões: a ordem da pilha é a de ativação (quem abriu depois fica por cima); a pergunta "Descartar o que foi digitado?" (item 3, opcional) e a extração do bloco de modal para outro arquivo (item 4) ficaram de fora, para não mexer mais em `ui.tsx` do que o necessário.
+
+Testes: e2e novo `e2e/tests/teclado.spec.ts` (não rodado aqui): no "Novo título", Esc com a lista do recebedor aberta fecha só a lista e mantém a descrição, o segundo fecha o modal; na gaveta, Esc na confirmação de "Cancelar título" fecha só a confirmação (o título continua aberto) e o seguinte fecha a gaveta; Esc na "Nova tag" volta às "Tags de entidade". Verificação: `pnpm verify:quick` (typecheck e Biome do web).

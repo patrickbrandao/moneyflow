@@ -3,14 +3,17 @@ import { build } from 'esbuild';
 /*
  * Empacota a API/worker num único arquivo (dist/main.mjs) com todas as
  * dependências, inclusive os pacotes do workspace (TypeScript), para a imagem
- * Docker rodar sem node_modules.
+ * Docker rodar sem node_modules. Ao lado, o healthcheck da imagem
+ * (dist/healthcheck.mjs, pequeno: só node:fs; tarefa 107).
  */
 await build({
-  entryPoints: ['src/main.ts'],
-  outfile: 'dist/main.mjs',
+  entryPoints: { main: 'src/main.ts', healthcheck: 'src/healthcheck.ts' },
+  outdir: 'dist',
+  outExtension: { '.js': '.mjs' },
   bundle: true,
   platform: 'node',
-  target: 'node22',
+  // A major do Node do .nvmrc e da imagem (tarefa 187).
+  target: 'node26',
   format: 'esm',
   sourcemap: true,
   legalComments: 'none',

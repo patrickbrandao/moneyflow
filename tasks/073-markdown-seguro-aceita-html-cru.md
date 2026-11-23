@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: 2aad6e7
 ---
 
 # O markdown "seguro" aceita HTML cru: `<style>`, `style=`, formulários e `popover` mudam o console inteiro
@@ -76,9 +76,9 @@ Usuário da mesma instalação (ou conteúdo externo lido pelo agente) consegue 
 ```
 
 ## Critérios de aceite
-- [ ] `<style>`, `style=`, `<form>`, `<input type=password>`, `<dialog>` e `popover` no markdown aparecem como texto escapado (ou somem), em todos os quatro usos.
-- [ ] Negrito, listas, tabelas, código, links internos (`/entities/…`) e externos (`target=_blank`, `rel=noopener noreferrer`) continuam como hoje.
-- [ ] A spec 035 e o comentário de `Markdown.tsx` dizem "sem HTML cru".
+- [x] `<style>`, `style=`, `<form>`, `<input type=password>`, `<dialog>` e `popover` no markdown aparecem como texto escapado (ou somem), em todos os quatro usos.
+- [x] Negrito, listas, tabelas, código, links internos (`/entities/…`) e externos (`target=_blank`, `rel=noopener noreferrer`) continuam como hoje.
+- [x] A spec 035 e o comentário de `Markdown.tsx` dizem "sem HTML cru".
 
 ## Testes recomendados
 - `e2e/tests/agentes.spec.ts`: o provedor falso (`e2e/fakes/fake-llm.ts`) responde com `Oi\n\n<style>body{display:none}</style><div style="position:fixed;inset:0">X</div>`; esperar o `body` visível, nenhum `style` dentro de `.agent-md` e o texto `<style>` escapado.
@@ -89,5 +89,13 @@ Usuário da mesma instalação (ou conteúdo externo lido pelo agente) consegue 
 Nada foi executado no navegador; o comportamento do DOMPurify foi conferido pelas listas do pacote instalado, e o do marked por script. A severidade assume usuários da mesma instalação com papéis diferentes (família, empresa) e a CSP da produção como a da tarefa 065.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado no código atual: `Markdown.tsx` usava o `marked` global sem escapar HTML e `DOMPurify.sanitize` com o perfil `html` (que deixa `style`, `form`, `input`, `dialog`, `class`, `id`, `popover`), com o hook `afterSanitizeAttributes` registrado no DOMPurify global. O mesmo componente serve ao chat (`ConversationPane`), ao anexo `.md` (`MarkdownDocument`), às anotações (`NoteModal`) e ao documento do contrato (`DocumentView`).
 
 ## Resolução (executor)
+`apps/web/src/agents/Markdown.tsx` agora tem uma instância própria do marked (`new Marked`) cujo renderizador `html` escapa todo HTML cru (bloco vira parágrafo de texto, tag no meio da linha vira texto), e uma instância própria do DOMPurify (`DOMPurify(window)`, com o hook só nela) com lista explícita: tags `p br strong em del code pre blockquote ul ol li h1–h6 hr table thead tbody tr th td a img input`, atributos `href title alt src align start colspan rowspan type checked disabled`, `FORBID_ATTR` `style class id popover popovertarget popovertargetaction form formaction`, sem `data-*` nem `aria-*`, e URLs só `http(s):`, `mailto:`, `tel:` ou caminho interno `/` (nunca `//host` nem `/\host`). Só `href`/`src` passam pela regra das URLs (`ADD_URI_SAFE_ATTR` com os demais, senão o DOMPurify derrubava o `align` da tabela e o `start` da lista). O único `input` que sobra é forçado a caixa desabilitada (a lista de tarefas do GFM). O clique em link interno usa a mesma checagem (`isInternalHref`). Os quatro usos (chat, anexo .md, anotações e documento do contrato) passam pelo mesmo `renderMarkdown`.
+
+A política (listas, `MARKDOWN_SAFE_URI`, `isSafeMarkdownUri`, `isInternalHref` e `rewriteInternalLinks`, que saiu do componente) foi para `packages/shared/src/markdown.ts`, exportada pelo índice; o escape reaproveita o `escapeHtml` de `messages.ts`. Specs: 011 (UX das janelas: o renderizador seguro sem HTML cru), 025 e 035 ("sem HTML cru"), alinhadas com a 020.
+
+Conferido no Chromium do Playwright com um script descartável (marked e DOMPurify do `node_modules`, a mesma configuração): `<style>`, `style=`, `popover`, `<form>`, `<input type=password>` e `<dialog>` saem escapados como texto, `body` continua visível, nenhum `<style>` no documento; negrito, listas, lista de tarefas, tabela com alinhamento, lista começando em 3, código, links internos (sem `target`) e externos (`target=_blank`, `rel=noopener noreferrer`) continuam; `//host` e `javascript:` ficam sem `href`.
+
+Testes: unitário `packages/shared/test/markdown.test.ts` (escape, listas sem estilo/formulário/diálogo/popover, URLs aceitas e recusadas — `//host`, `/\host`, `/<tab>/host`, `javascript:` com espaço, `data:` —, link interno e as referências internas); e2e novo em `e2e/tests/agentes.spec.ts` → "markdown seguro: HTML cru na resposta aparece como texto e não muda o console (tarefa 073)", com o provedor falso respondendo HTML cru (não rodado aqui). Verificação: `pnpm verify:quick`.

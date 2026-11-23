@@ -48,18 +48,22 @@ export const flowQuery = z.object(period).refine(checkPeriod, { message: E.inval
 
 const nodeKind = z.enum(['caixa', 'entity']);
 
+const flowLinesSelection = {
+  nodeKind: nodeKind.optional(),
+  nodeId: id.optional(),
+  sourceKind: nodeKind.optional(),
+  sourceId: id.optional(),
+  targetKind: nodeKind.optional(),
+  targetId: id.optional(),
+  edgeKind: z.enum(['payment', 'receipt', 'transfer', 'card_invoice', 'card_purchase']).optional(),
+  payerCaixaId: id.optional(),
+};
+
 /** Linhas da gaveta: de uma aresta (origem + destino + tipo) ou de um nó (todas as que o tocam). */
 export const flowLinesQuery = z
   .object({
     ...period,
-    nodeKind: nodeKind.optional(),
-    nodeId: id.optional(),
-    sourceKind: nodeKind.optional(),
-    sourceId: id.optional(),
-    targetKind: nodeKind.optional(),
-    targetId: id.optional(),
-    edgeKind: z.enum(['payment', 'receipt', 'transfer', 'card_invoice', 'card_purchase']).optional(),
-    payerCaixaId: id.optional(),
+    ...flowLinesSelection,
     /** Ids de entidades (folhas agrupadas): linhas que tocam qualquer uma delas. */
     entityIds: z
       .string()
@@ -69,6 +73,27 @@ export const flowLinesQuery = z
     limit: z.coerce.number().int().min(1).max(1000).default(500),
   })
   .refine(checkPeriod, { message: E.invalidPeriod, path: ['to'] });
+
+/** Teto de entidades de um grupo do canvas na gaveta (`POST /api/flow/lines`). */
+export const FLOW_LINES_MAX_ENTITIES = 5000;
+
+/**
+ * As mesmas linhas pelo corpo (`POST /api/flow/lines`, tarefa 171): a gaveta de
+ * um grupo grande leva os ids das entidades no JSON, não na URL (que estoura no
+ * Node ou no proxy a partir de algumas centenas).
+ */
+export const flowLinesBody = z
+  .object({
+    from: isoDate,
+    to: isoDate,
+    caixaIds: z.array(id).max(200).default([]),
+    ...flowLinesSelection,
+    entityIds: z.array(id).max(FLOW_LINES_MAX_ENTITIES).default([]),
+    limit: z.number().int().min(1).max(1000).default(500),
+  })
+  .refine(checkPeriod, { message: E.invalidPeriod, path: ['to'] });
+
+export type FlowLinesBody = z.input<typeof flowLinesBody>;
 
 export const canvasPositionsInput = z.object({
   layout: z.string().trim().min(1).max(60).default('default'),
@@ -217,6 +242,8 @@ export const outboxQuery = z.object({
 export const notificationQuery = z.object({
   unread: queryBool,
   limit: z.coerce.number().int().min(1).max(200).default(30),
+  /** O `nextCursor` da página anterior (tarefa 169). */
+  cursor: z.string().max(200).optional(),
 });
 
 export type ReportQuery = z.input<typeof reportQuery>;

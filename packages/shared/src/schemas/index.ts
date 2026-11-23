@@ -108,7 +108,8 @@ export const entityListQuery = z.object({
   kind: z.enum(ENTITY_KINDS).optional(),
   archived: queryBool,
   ...entityFilterFields,
-  limit: z.coerce.number().int().min(1).max(500).default(100),
+  // A tela pede até 900 + 1 (a sonda de "há mais", tarefa 116).
+  limit: z.coerce.number().int().min(1).max(1000).default(100),
 });
 
 /* ---------------- tags de entidade (spec 003) ---------------- */
@@ -487,6 +488,9 @@ export const settlementReverseInput = z.object({
   reversedOn: isoDate.optional(),
   undoTransfer: z.boolean().default(true),
 });
+
+/** Nova data do estorno de uma baixa já estornada (tarefa 045): o movimento oposto de cada perna com conta. */
+export const settlementReversalDateInput = z.object({ reversedOn: isoDate });
 
 /* ---------------- transferências ---------------- */
 

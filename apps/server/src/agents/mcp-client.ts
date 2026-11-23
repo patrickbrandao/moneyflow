@@ -14,7 +14,7 @@ export type McpSession = {
   /** As instructions da resposta do initialize (spec 022); null = o servidor não mandou. */
   instructions(): string | null;
   listTools(): Promise<McpToolInfo[]>;
-  callTool(name: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>;
+  callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<{ text: string; isError: boolean }>;
   close(): Promise<void>;
 };
 
@@ -51,8 +51,8 @@ export async function connectMcp(url: string, headers: Record<string, string>): 
       }
       return tools;
     },
-    async callTool(name, args) {
-      const result = await client.callTool({ name, arguments: args }, undefined, { timeout: TIMEOUT_MS });
+    async callTool(name, args, signal) {
+      const result = await client.callTool({ name, arguments: args }, undefined, { timeout: TIMEOUT_MS, ...(signal ? { signal } : {}) });
       const parts = (Array.isArray(result.content) ? result.content : []) as { type: string; text?: string; mimeType?: string }[];
       const text = parts
         .map((part) => (part.type === 'text' ? (part.text ?? '') : `[${part.type}${part.mimeType ? ` ${part.mimeType}` : ''}]`))

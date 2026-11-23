@@ -75,14 +75,14 @@ export function EntityPage() {
       ? [
           {
             id: 'entity-edit',
-            label: `Editar ${entity.name}`,
+            label: t.entity.page.editCommand(entity.name),
             group: 'Recurso',
             icon: <Pencil />,
             run: () => setEditing({ kind: 'entity' }),
           },
           {
             id: 'entity-pix',
-            label: `Nova chave PIX para ${entity.name}`,
+            label: t.entity.page.newPixCommand(entity.name),
             group: 'Criar',
             icon: <QrCode />,
             run: () => setEditing({ kind: 'pix' }),
@@ -117,15 +117,15 @@ export function EntityPage() {
   };
 
   async function removeChild(segment: string, childId: string, label: string) {
-    const ok = await confirm({ title: `Remover ${label}?`, confirmLabel: t.common.remove, danger: true });
-    if (ok && (await run(() => api.del(`/api/entities/${id}/${segment}/${childId}`), 'Removido.'))) void reload();
+    const ok = await confirm({ title: t.entity.page.removeTitle(label), confirmLabel: t.common.remove, danger: true });
+    if (ok && (await run(() => api.del(`/api/entities/${id}/${segment}/${childId}`), t.entity.page.removed))) void reload();
   }
 
   async function archive() {
     if (!entity) return;
     const ok = await confirm({
-      title: `Excluir ${entity.name}?`,
-      description: 'Sem vínculos ela é excluída; usada em títulos ou caixas, é arquivada.',
+      title: t.entity.page.deleteTitle(entity.name),
+      description: t.entity.page.deleteBody,
       confirmLabel: t.common.delete,
       danger: true,
     });
@@ -139,7 +139,7 @@ export function EntityPage() {
   }
 
   async function restore() {
-    if (await run(() => api.post(`/api/entities/${id}/restore`), 'Entidade restaurada.')) void reload();
+    if (await run(() => api.post(`/api/entities/${id}/restore`), t.entity.page.restored)) void reload();
   }
 
   const add = (kind: Editing['kind']) =>
@@ -179,7 +179,7 @@ export function EntityPage() {
         sub={
           <>
             {entity.tradeName && `${entity.tradeName} · `}
-            {entity.document ? <span className="mono">{formatDocument(entity.document)}</span> : 'sem documento'}
+            {entity.document ? <span className="mono">{formatDocument(entity.document)}</span> : t.entity.page.noDocument}
             {entity.birthDate && ` · ${t.entity.birthDate} ${formatDate(entity.birthDate)}`}
           </>
         }
@@ -234,7 +234,7 @@ export function EntityPage() {
 
           <div className="grid gap-4 lg:grid-cols-2">
             <Panel title={t.entity.pixKeys} icon={<QrCode />} actions={add('pix')}>
-              <Items empty="Nenhuma chave PIX.">
+              <Items empty={t.entity.page.noPixKeys}>
                 {entity.pixKeys.map((key) => (
                   <div key={key.id} className="item">
                     <div className="grow">
@@ -254,14 +254,14 @@ export function EntityPage() {
                       )}
                     </div>
                     <CopyButton text={key.keyValue} />
-                    {actions(() => setEditing({ kind: 'pix', item: key }), 'pix-keys', key.id, 'a chave PIX')}
+                    {actions(() => setEditing({ kind: 'pix', item: key }), 'pix-keys', key.id, t.entity.page.childNames.pix)}
                   </div>
                 ))}
               </Items>
             </Panel>
 
             <Panel title={t.entity.contacts} icon={<Contact />} actions={add('contact')}>
-              <Items empty="Nenhum contato.">
+              <Items empty={t.entity.page.noContacts}>
                 {entity.contacts.map((c) => (
                   <div key={c.id} className="item">
                     <div className="grow">
@@ -273,14 +273,14 @@ export function EntityPage() {
                       {c.label && <div className="text-[12px] text-muted">{c.label}</div>}
                     </div>
                     <CopyButton text={c.value} />
-                    {actions(() => setEditing({ kind: 'contact', item: c }), 'contacts', c.id, 'o contato')}
+                    {actions(() => setEditing({ kind: 'contact', item: c }), 'contacts', c.id, t.entity.page.childNames.contact)}
                   </div>
                 ))}
               </Items>
             </Panel>
 
             <Panel title={t.entity.addresses} icon={<MapPin />} actions={add('address')}>
-              <Items empty="Nenhum endereço.">
+              <Items empty={t.entity.page.noAddresses}>
                 {entity.addresses.map((a) => (
                   <div key={a.id} className="item">
                     <div className="grow text-[13px]">
@@ -293,14 +293,14 @@ export function EntityPage() {
                         {a.label && ` · ${a.label}`}
                       </div>
                     </div>
-                    {actions(() => setEditing({ kind: 'address', item: a }), 'addresses', a.id, 'o endereço')}
+                    {actions(() => setEditing({ kind: 'address', item: a }), 'addresses', a.id, t.entity.page.childNames.address)}
                   </div>
                 ))}
               </Items>
             </Panel>
 
             <Panel title={t.entity.bankAccounts} icon={<Landmark />} actions={add('bank')}>
-              <Items empty="Nenhum dado bancário.">
+              <Items empty={t.entity.page.noBankAccounts}>
                 {entity.bankAccounts.map((b) => (
                   <div key={b.id} className="item">
                     <div className="grow text-[13px]">
@@ -313,14 +313,14 @@ export function EntityPage() {
                         {[t.entity.bankAccountTypes[b.accountType], b.holderName, b.label].filter(Boolean).join(' · ')}
                       </div>
                     </div>
-                    {actions(() => setEditing({ kind: 'bank', item: b }), 'bank-accounts', b.id, 'o dado bancário')}
+                    {actions(() => setEditing({ kind: 'bank', item: b }), 'bank-accounts', b.id, t.entity.page.childNames.bank)}
                   </div>
                 ))}
               </Items>
             </Panel>
 
             <Panel title={t.entity.links} icon={<Link2 />} actions={add('link')}>
-              <Items empty="Nenhum vínculo.">
+              <Items empty={t.entity.page.noLinks}>
                 {entity.links.map((l) => (
                   <div key={l.id} className="item">
                     <div className="grow text-[13px] text-dim">
@@ -335,7 +335,7 @@ export function EntityPage() {
                         type="button"
                         className="row-action danger"
                         title={t.common.remove}
-                        onClick={() => void removeChild('links', l.id, 'o vínculo')}
+                        onClick={() => void removeChild('links', l.id, t.entity.page.childNames.link)}
                       >
                         <Trash2 />
                       </button>
@@ -346,7 +346,7 @@ export function EntityPage() {
             </Panel>
 
             <Panel title={t.entity.caixas} icon={<Wallet />} actions={add('caixa')}>
-              <Items empty="Não é titular de nenhuma caixa.">
+              <Items empty={t.entity.page.noCaixas}>
                 {entity.caixas.map((c) => (
                   <div key={c.id} className={`item${c.archivedAt ? ' opacity-60' : ''}`}>
                     <Wallet className="size-4 text-muted" />
@@ -356,7 +356,7 @@ export function EntityPage() {
                           {c.name}
                         </Link>
                       ) : (
-                        <span className="text-dim" title="Você não tem acesso a esta caixa">
+                        <span className="text-dim" title={t.entity.page.caixaNoAccess}>
                           {c.name}
                         </span>
                       )}

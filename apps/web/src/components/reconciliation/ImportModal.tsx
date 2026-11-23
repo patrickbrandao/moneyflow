@@ -1,9 +1,11 @@
 import {
+  applyCsvAmountSign,
   applyCsvMapping,
   type CardOverview,
   CSV_DELIMITERS,
   CSV_ENCODINGS,
   type CsvMappingRow,
+  decodeCsvFile,
   formatDate,
   formatMonth,
   parseCsv,
@@ -11,6 +13,8 @@ import {
   type StatementImportDetail,
   type StatementImportSummary,
   type StatementInspect,
+  statementImportNotices,
+  suggestCsvAmountSign,
   t,
   todayIso,
 } from '@moneyflow/shared';
@@ -43,6 +47,8 @@ type MappingForm = {
   decimalSeparator: ',' | '.';
   split: boolean;
   cols: Cols;
+  /** Sinal dos valores (tarefa 091); null no mapeamento novo até a escolha: vale a sugestão pelas linhas lidas. */
+  amountSign: CsvMappingRow['amountSign'] | null;
   isDefault: boolean;
 };
 
@@ -98,13 +104,8 @@ function guessLayout(text: string, fallback: MappingForm['delimiter']) {
   return best;
 }
 
-function decode(buffer: ArrayBuffer, encoding: string): string {
-  try {
-    return new TextDecoder(encoding === 'latin1' ? 'iso-8859-1' : encoding).decode(buffer);
-  } catch {
-    return new TextDecoder().decode(buffer);
-  }
-}
+/** A mesma leitura do servidor (tarefa 088): o CSV em Latin-1 com mapeamento em UTF-8 não aparece com "�". */
+const decode = (buffer: ArrayBuffer, encoding: string): string => decodeCsvFile(new Uint8Array(buffer), encoding);
 
 /** Importar extrato (conta) ou fatura (cartão): lê o arquivo, mostra o resumo do OFX ou o mapeamento do CSV, e importa. */
 export function ImportModal({
@@ -151,22 +152,28 @@ export function ImportModal({
   const [replaceIds, setReplaceIds] = useState<Set<string> | null>(null);
   const replacing = replaceIds ?? new Set(overlapping.map((p) => p.id));
 
+  // Só a inspeção do último arquivo escolhido vale (tarefa 118): trocado o arquivo antes
+  // do resumo, a resposta do anterior não pinta o resumo nem o mapeamento do novo.
+  const pickSeq = useRef(0);
   async function pick(next: File) {
+    const mine = ++pickSeq.current;
     setFile(next);
     setInspect(null);
+    setBuffer(null);
     setOwnBalance(false);
     setBankBalance(null);
     setError(null);
     setBusy(true);
     try {
       const [result, bytes] = await Promise.all([upload<StatementInspect>('/api/statements/inspect', next, target), next.arrayBuffer()]);
+      if (mine !== pickSeq.current) return;
       setInspect(result);
       setOfxPosition(result.ofx ? (result.ofx.selected ?? result.ofx.suggested) : null);
       setBuffer(bytes);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (mine === pickSeq.current) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(false);
+      if (mine === pickSeq.current) setBusy(false);
     }
   }
 
@@ -197,7 +204,8 @@ export function ImportModal({
         provisional: provisional || undefined,
         supersede: !isCard && !provisional && replacing.size ? [...replacing].join(',') : undefined,
       });
-      toast.success(s.imported(detail.lineCount, detail.skippedDuplicates ?? 0));
+      // Tarefas 140 e 089: as linhas que não foram lidas e o FITID repetido que entrou como linha nova.
+      toast.success([s.imported(detail.lineCount, detail.skippedDuplicates ?? 0), ...statementImportNotices(detail)].join(' '));
       onImported(detail);
       return true;
     } catch (err) {
@@ -218,8 +226,8 @@ export function ImportModal({
             <option value="">{s.invoiceAuto}</option>
             {card.invoices.map((invoice) => (
               <option key={invoice.id} value={invoice.id}>
-                {formatMonth(invoice.referenceMonth)} · {s.invoiceStatuses[invoice.status] ?? invoice.status} · venc.{' '}
-                {formatDate(invoice.dueDate)}
+                {formatMonth(invoice.referenceMonth)} · {s.invoiceStatuses[invoice.status] ?? invoice.status} ·{' '}
+                {s.invoiceDue(formatDate(invoice.dueDate))}
               </option>
             ))}
           </select>
@@ -228,7 +236,8 @@ export function ImportModal({
       {!isCard && fileBalance && !ownBalance && (
         <div className="notice info flex flex-wrap items-center gap-2" data-testid="file-balance">
           <span className="min-w-0 flex-1">
-            {s.fileBalance}: <Money cents={fileBalance.amountCents} /> em {formatDate(fileBalance.date)}
+            {s.fileBalance}: <Money cents={fileBalance.amountCents} />
+            {s.balanceOn(formatDate(fileBalance.date))}
           </span>
           <Button
             variant="ghost"
@@ -305,6 +314,7 @@ export function ImportModal({
   return (
     <Modal open title={isCard ? s.importInvoice : s.importStatement} onClose={onClose} wide>
       <div className="modal-body flex flex-col gap-4">
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: só recebe o arquivo arrastado; pelo teclado, o botão de escolher o arquivo faz o mesmo. */}
         <div
           className={cx('rec-drop', over && 'is-over')}
           onDragOver={(e) => {
@@ -318,7 +328,7 @@ export function ImportModal({
           <span>
             {file ? <strong>{file.name}</strong> : s.dropHere}{' '}
             <button type="button" className="link" onClick={() => input.current?.click()}>
-              {file ? 'trocar' : s.chooseFile}
+              {file ? s.changeFile : s.chooseFile}
             </button>
           </span>
           <span className="hint">{busy && !inspect ? s.inspecting : s.fileHint}</span>
@@ -382,7 +392,8 @@ export function ImportModal({
                   <>
                     <dt>{s.ledgerBalance}</dt>
                     <dd>
-                      <Money cents={ofx.ledgerBalance.amountCents} /> em {formatDate(ofx.ledgerBalance.date)}
+                      <Money cents={ofx.ledgerBalance.amountCents} />
+                      {s.balanceOn(formatDate(ofx.ledgerBalance.date))}
                     </dd>
                   </>
                 )}
@@ -494,17 +505,21 @@ function CsvMapper({
       decimalSeparator: ',',
       split: cols.amount === null && cols.debit !== null && cols.credit !== null,
       cols,
+      amountSign: null,
       isDefault: (mappings.data ?? []).length === 0,
     };
   };
   const [form, setForm] = useState<MappingForm>(fresh);
 
-  // Com mapeamentos salvos, começa pelo padrão (ou o primeiro).
+  // Com mapeamentos salvos, começa pelo padrão (ou o primeiro). Só na primeira chegada da lista
+  // (tarefa 118): salvar ou excluir recarrega a lista, e o formulário não troca sozinho de mapeamento.
+  const started = useRef(false);
   useEffect(() => {
     const list = mappings.data;
-    if (!list || list.length === 0) return;
-    const chosen = list.find((m) => m.isDefault) ?? list[0]!;
-    load(chosen);
+    if (started.current || !list) return;
+    started.current = true;
+    const chosen = list.find((m) => m.isDefault) ?? list[0];
+    if (chosen) load(chosen);
   }, [mappings.data]);
 
   const text = useMemo(() => decode(buffer, form.encoding), [buffer, form.encoding]);
@@ -528,6 +543,7 @@ function CsvMapper({
       decimalSeparator: mapping.decimalSeparator as ',' | '.',
       split: cols.amount === null,
       cols,
+      amountSign: mapping.amountSign,
       isDefault: mapping.isDefault,
     });
   }
@@ -569,11 +585,14 @@ function CsvMapper({
       return { headers: null, lines: [], errors: [{ row: 0, message: err instanceof Error ? err.message : String(err) }] };
     }
   }, [rows, form.hasHeader, form.skipRows, form.dateFormat, form.decimalSeparator, form.cols, form.split, complete]);
+  // O sinal gravado no mapeamento; no novo, pré-marcado pela maioria das linhas lidas (só como sugestão, tarefa 091).
+  const amountSign = form.amountSign ?? suggestCsvAmountSign(parsed?.lines ?? [], isCard);
+  const signed = useMemo(() => (parsed ? applyCsvAmountSign(parsed.lines, amountSign) : []), [parsed, amountSign]);
 
   async function submit() {
     setLocalError(null);
     if (!complete) return setLocalError(s.mappingIncomplete);
-    if (!form.name.trim()) return setLocalError(`${s.mappingName}: obrigatório.`);
+    if (!form.name.trim()) return setLocalError(s.mappingNameRequired(s.mappingName));
     const body = {
       name: form.name.trim(),
       delimiter: form.delimiter,
@@ -583,6 +602,7 @@ function CsvMapper({
       dateFormat: form.dateFormat,
       decimalSeparator: form.decimalSeparator,
       columns,
+      amountSign,
       isDefault: form.isDefault,
     };
     let id = mappingId === 'new' ? undefined : mappingId;
@@ -628,7 +648,7 @@ function CsvMapper({
         onChange={(e) => setCol(key, e.target.value === '' ? null : Number(e.target.value))}
         aria-label={label}
       >
-        <option value="">{optional ? s.colNone : 'Escolha…'}</option>
+        <option value="">{optional ? s.colNone : t.common.choose}</option>
         {colOptions.map((i) => (
           <option key={i} value={i}>
             {s.column(i, headerRow?.[i]?.trim() || null)}
@@ -760,6 +780,17 @@ function CsvMapper({
         )}
         {colSelect('fitid', s.colFitid, true)}
         {colSelect('balance', s.colBalance, true)}
+        <div className="span-all">
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={amountSign === 'invert'}
+              onChange={(e) => set({ amountSign: e.target.checked ? 'invert' : 'as_is' })}
+            />{' '}
+            {isCard ? s.amountSignInvertCard : s.amountSignInvertAccount}
+          </label>
+          <span className="hint">{s.amountSignHint}</span>
+        </div>
       </fieldset>
 
       <div>
@@ -793,13 +824,39 @@ function CsvMapper({
         <span className="hint">{s.previewHint}</span>
         {parsed && (
           <p className={cx('notice mt-2', parsed.errors.length ? 'warn' : 'ok')}>
-            {parsed.lines.length} linha(s) lidas
+            {s.parsedLines(parsed.lines.length)}
             {parsed.errors.length > 0 &&
-              ` · ${parsed.errors.length} com problema (ex.: ${parsed.errors
-                .slice(0, 3)
-                .map((e) => (e.row ? `linha ${e.row}: ${e.message}` : e.message))
-                .join('; ')})`}
+              s.parsedErrors(
+                parsed.errors.length,
+                parsed.errors
+                  .slice(0, 3)
+                  .map((e) => (e.row ? s.parsedErrorRow(e.row, e.message) : e.message))
+                  .join('; '),
+              )}
           </p>
+        )}
+        {signed.length > 0 && (
+          <div className="mt-2" data-testid="csv-signed-preview">
+            <span className="label">
+              {s.signedPreview} · {s.signedPreviewIn(signed.filter((l) => l.amountCents > 0).length)} ·{' '}
+              {s.signedPreviewOut(signed.filter((l) => l.amountCents < 0).length)}
+            </span>
+            <div className="rec-preview">
+              <table>
+                <tbody>
+                  {signed.slice(0, 5).map((line) => (
+                    <tr key={line.row}>
+                      <td>{formatDate(line.postedOn)}</td>
+                      <td>{line.description}</td>
+                      <td className="num">
+                        <Money cents={line.amountCents} signed />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         )}
       </div>
 

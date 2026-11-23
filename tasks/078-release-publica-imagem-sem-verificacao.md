@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: 83af4a3
 ---
 
 # Release publica `:X.Y.Z` e `:latest` sem verificação e a partir da árvore de trabalho
@@ -85,4 +85,29 @@ Nada foi executado. Não sei se o repositório tem os secrets do Docker Hub conf
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código atual: `make release` constrói de `.` com `-t :latest` fixo, sem conferir árvore, tag nem testes; `release.yml` não depende de nada (só QEMU, buildx, login e build) e move o `latest` em toda tag; a `docs/018` não cita a verificação.
+
 ## Resolução (executor)
+
+- **`Makefile`**:
+  - alvo `release-check`, chamado pelo `release`, que falha com a árvore suja (`git status --porcelain`), falha se o `HEAD` não tem a tag `v$(VERSION)` (`git tag --points-at HEAD`) e roda `pnpm verify:full $(VERIFY_ARGS)` (ex.: `VERIFY_ARGS="--e2e"`);
+  - o `release` constrói a partir do commit (`git archive --format=tar HEAD | docker buildx build … -`), nunca da árvore de trabalho;
+  - o `:latest` só vai junto se `v$(VERSION)` for a maior tag (`git tag --sort=-v:refname`).
+- **`release.yml`**:
+  - job `ci`, que chama o `ci.yml` como workflow reutilizável (`workflow_call` acrescentado a ele). É o CI inteiro no commit da tag: lint, typecheck, audit, testes, pgTAP, as referências geradas, a imagem e o e2e;
+  - job `image`, com `needs: [ci]`;
+  - antes do build, recusa a tag que não é a versão do `package.json`;
+  - o `metadata-action` usa `flavor: latest=false` e `type=raw,value=latest,enable=<é a maior tag>`, com `fetch-depth: 0` para ver as tags;
+  - as actions pelo SHA, `permissions` e `timeout-minutes` vêm da tarefa 184.
+- Decisão: reaproveitar o `ci.yml` em vez de copiar os passos num job `verify`. Assim a release roda exatamente o portão dos PRs, e o e2e entra.
+- **`docs/018`** (Versões, Como publicar) e **`docs/001`** (CI/CD) descrevem o fluxo novo. O `AGENTS.md` (linha do `make release`) também.
+
+Testes: não há teste automatizado da publicação, como a própria tarefa prevê. À mão:
+- `make release-check` com a árvore alterada recusou antes de qualquer build: "release: há alterações não commitadas…", código 2;
+- `make -n release` mostra o portão, o `git archive` e o `:latest` condicional;
+- `git tag --points-at HEAD --list v0.1.22` vazio aqui e `v0.1.22` no commit da tag, que é a condição do portão;
+- o `release.yml` só se confere no GitHub, com uma tag de teste num fork.
+
+Verificação: rápida, `pnpm verify:quick --base 290403d` (só o que esta frente mudou; o portão do lint, o typecheck de todos os pacotes e os testes de integração tocados no Postgres local), `pnpm test:scripts` e o build do servidor com o target `node26`.

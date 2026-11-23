@@ -173,6 +173,9 @@ export const backupStrings = {
     emptyFile: 'O arquivo não contém registros deste recurso.',
     tooLarge: 'Arquivo grande demais para importar.',
     unzippedTooLarge: 'O conteúdo do .zip descompactado passa do limite (4× o limite de upload do backup).',
+    jsonTooLarge:
+      'O JSON do backup passa do limite que o servidor consegue ler (cerca de 512 MB de texto). Para um backup deste tamanho, use o dump do banco.',
+    attachmentEntryMissing: 'O conteúdo do anexo não está no .zip (entrada attachments/ ausente).',
     dumpUnavailable: 'Dump indisponível: configure DATABASE_OWNER_URL (conexão do dono do banco) e o pg_dump 18.',
     noOwnerUrl: 'DATABASE_OWNER_URL (conexão do dono do banco) não está configurada.',
     noPgDump: 'pg_dump não encontrado (instale o cliente do PostgreSQL 18 ou ajuste PG_BIN_DIR).',

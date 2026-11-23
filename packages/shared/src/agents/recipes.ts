@@ -213,6 +213,7 @@ export const RECIPE_TOOLS = [
     description:
       'Roda uma receita sobre um lote de extrato (statementImportId), numa sessão nova, nas linhas dadas ou em todas as pendentes. Uma execução de conciliação por lote: com outra ativa, recusa.',
     kind: 'write',
+    external: true,
     input: z.object({ recipeId: id, statementImportId: id, lineIds: z.array(id).min(1).max(500).optional() }),
   }),
 ] as const;

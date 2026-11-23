@@ -17,7 +17,7 @@ import { useRegisterCommands } from '../../lib/commands';
 import { useAction } from '../../lib/hooks';
 import { accountLink } from '../../lib/links';
 import { useParamState } from '../../lib/params';
-import { Money } from '../domain';
+import { FutureEntries, Money } from '../domain';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
 import { ImportRecipesHint } from '../reconciliation/RecipesPanel';
 import { Badge, Button, EmptyRow, Field, Modal, useConfirm, useDebounced } from '../ui';
@@ -25,6 +25,8 @@ import { Badge, Button, EmptyRow, Field, Modal, useConfirm, useDebounced } from 
 type Kind = (typeof ACCOUNT_KINDS)[number];
 
 /** Contas financeiras da caixa (spec 004): corrente, cofre e poupança/investimento, com saldo. */
+const AT = t.caixa.accountsTab;
+
 export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChanged: () => void }) {
   const [editing, setEditingState] = useState<AccountRow | 'new' | null>(null);
   // ?editAccount=<id>: atalho "Ajustar a conta" da conciliação (spec 009) abre a edição direto.
@@ -56,8 +58,8 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
 
   async function archive(account: AccountRow) {
     const ok = await confirm({
-      title: `Excluir a conta ${account.name}?`,
-      description: 'Sem movimentos ela é excluída; com histórico, é arquivada (some das listas e continua nos relatórios).',
+      title: AT.deleteTitle(account.name),
+      description: AT.deleteBody,
       confirmLabel: t.common.delete,
       danger: true,
     });
@@ -70,16 +72,19 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
   }
 
   async function restore(account: AccountRow) {
-    if (await run(() => api.post(`/api/accounts/${account.id}/restore`), 'Conta restaurada.')) onChanged();
+    if (await run(() => api.post(`/api/accounts/${account.id}/restore`), AT.restored)) onChanged();
   }
 
-  const total = caixa.accounts.filter((a) => !a.archivedAt).reduce((sum, a) => sum + a.balanceCents, 0);
+  const active = caixa.accounts.filter((a) => !a.archivedAt);
+  const total = active.reduce((sum, a) => sum + a.balanceCents, 0);
+  const future = active.reduce((sum, a) => sum + a.futureCents, 0);
 
   return (
     <>
       <div className="mb-3 flex items-center justify-between gap-2">
         <p className="text-[13px] text-muted">
           {t.caixa.balance}: <Money cents={total} />
+          <FutureEntries cents={future} />
         </p>
         {caixa.canWrite && (
           <Button onClick={() => setEditing('new')}>
@@ -91,16 +96,16 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
         <table className="data">
           <thead>
             <tr>
-              <th>Conta</th>
+              <th>{AT.account}</th>
               <th>{t.common.kind}</th>
-              <th>Banco</th>
+              <th>{AT.bank}</th>
               <th className="num">{t.caixa.openingBalance}</th>
               <th className="num">{t.common.balance}</th>
               <th />
             </tr>
           </thead>
           <tbody>
-            {caixa.accounts.length === 0 && <EmptyRow colSpan={6}>Nenhuma conta nesta caixa.</EmptyRow>}
+            {caixa.accounts.length === 0 && <EmptyRow colSpan={6}>{AT.empty}</EmptyRow>}
             {caixa.accounts.map((account) => (
               <tr key={account.id} className={account.archivedAt ? 'is-off' : ''}>
                 <td>
@@ -123,6 +128,7 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
                 </td>
                 <td className="num">
                   <Money cents={account.balanceCents} />
+                  <FutureEntries cents={account.futureCents} />
                 </td>
                 <td className="text-right">
                   <span className="row-actions">
@@ -217,13 +223,13 @@ export function AccountFormModal({
     };
     const saved = await run(
       () => (account ? api.patch(`/api/accounts/${account.id}`, body) : api.post(`/api/caixas/${caixaId}/accounts`, { ...body, kind })),
-      account ? 'Conta atualizada.' : 'Conta criada.',
+      account ? AT.updated : AT.created,
     );
     if (saved) onSaved();
   }
 
   return (
-    <Modal open title={account ? 'Editar conta' : t.palette.newAccount} onClose={onClose}>
+    <Modal open title={account ? AT.editTitle : t.palette.newAccount} onClose={onClose}>
       <form onSubmit={submit} className="form-grid cols-2">
         <Field label={t.common.kind} className="span-all">
           <select className="field" value={kind} disabled={Boolean(account)} onChange={(e) => setKind(e.target.value as Kind)}>
@@ -331,7 +337,7 @@ export function AdjustmentModal({ account, onClose, onSaved }: { account: Accoun
           categoryId,
           entityId: entity?.id ?? null,
         }),
-      'Lançamento registrado.',
+      AT.adjustmentSaved,
     );
     if (saved) onSaved();
   }
@@ -365,10 +371,10 @@ export function AdjustmentModal({ account, onClose, onSaved }: { account: Accoun
       <form onSubmit={submit} className="form-grid cols-2">
         <div className="segmented span-all" role="group">
           <button type="button" className={direction === 'in' ? 'active' : ''} onClick={() => setDirection('in')}>
-            Entrada
+            {AT.inflow}
           </button>
           <button type="button" className={direction === 'out' ? 'active' : ''} onClick={() => setDirection('out')}>
-            Saída
+            {AT.outflow}
           </button>
         </div>
         <Field label={t.common.amount}>
@@ -386,7 +392,7 @@ export function AdjustmentModal({ account, onClose, onSaved }: { account: Accoun
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             required={offer.length === 0}
-            placeholder="Rendimento, tarifa, ajuste de contagem…"
+            placeholder={AT.adjustmentPlaceholder}
           />
         </Field>
         <Field label={`${t.title.category} (${t.common.optional})`} className="span-all">
@@ -440,32 +446,35 @@ export function AdjustmentModal({ account, onClose, onSaved }: { account: Accoun
   );
 }
 
-/** Ocorrências em aberto do cofre que o lançamento pode baixar (só no cofre, com entidade, valor e data). */
+/**
+ * Ocorrências em aberto do cofre que o lançamento pode baixar (só no cofre, com entidade, valor e data).
+ * A resposta guarda a chave que a pediu e só vale enquanto ela for a da tela (tarefa 117): durante o
+ * debounce e a requisição de um valor novo não há oferta, e "Baixar a ocorrência" nunca usa a
+ * repartição calculada para o valor anterior.
+ */
 function useObligationMatches(account: AccountRow, entityId: string | null, signedCents: number | null, occurredOn: string) {
-  const [matches, setMatches] = useState<ObligationMatch[]>([]);
+  const [result, setResult] = useState<{ key: string; rows: ObligationMatch[] } | null>(null);
   const query = account.kind === 'cash' && entityId && signedCents && occurredOn ? { entityId, signedCents, occurredOn } : null;
-  const debounced = useDebounced(query ? `${query.entityId}|${query.signedCents}|${query.occurredOn}` : '', 300);
+  const key = query ? `${account.id}|${query.entityId}|${query.signedCents}|${query.occurredOn}` : '';
+  const debounced = useDebounced(key, 300);
   useEffect(() => {
-    if (!debounced) {
-      setMatches([]);
-      return;
-    }
-    const [entity, cents, date] = debounced.split('|');
+    if (!debounced) return;
+    const [accountId, entity, cents, date] = debounced.split('|');
     let cancelled = false;
     api
-      .get<ObligationMatch[]>(`/api/accounts/${account.id}/obligation-matches`, { occurredOn: date, amountCents: cents, entityId: entity })
+      .get<ObligationMatch[]>(`/api/accounts/${accountId}/obligation-matches`, { occurredOn: date, amountCents: cents, entityId: entity })
       .then((rows) => {
-        if (!cancelled) setMatches(rows);
+        if (!cancelled) setResult({ key: debounced, rows });
       })
       .catch(() => {
         // Sem a sugestão, o lançamento avulso segue normal.
-        if (!cancelled) setMatches([]);
+        if (!cancelled) setResult({ key: debounced, rows: [] });
       });
     return () => {
       cancelled = true;
     };
-  }, [debounced, account.id]);
-  return query ? matches : [];
+  }, [debounced]);
+  return key && result?.key === key ? result.rows : [];
 }
 
 function ObligationMatchOffer({ match, busy, onSettle }: { match: ObligationMatch; busy: boolean; onSettle: () => void }) {

@@ -1,21 +1,24 @@
 import {
-  diffLines,
   diffRows,
   diffStats,
+  diffText,
   formatBRL,
   formatDate,
+  formatFileSize,
   formatMonth,
+  localDateOf,
   type OPERATION_TOOLS,
   type PreviewField,
   type PreviewRow,
   parseBoleto,
   parseNfeXml,
+  statementImportNotices,
   t,
   todayIso,
 } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
-import { forbidden, notFound, unprocessable } from '../errors';
+import { AppError, forbidden, notFound, unprocessable } from '../errors';
 import { assertAttachTarget, linkExistingAttachment } from '../services/attachments';
 import * as caixas from '../services/caixas';
 import * as cards from '../services/cards';
@@ -29,7 +32,7 @@ import { nfeEntry, pixEntry, readDocument } from '../services/title-entry';
 import * as titles from '../services/titles';
 import * as transfers from '../services/transfers';
 import { supersedeRows } from './tool-handlers-supersede';
-import { type Handlers, nameOf, toolAttachment, withNames } from './tool-helpers';
+import { type Handlers, listed, listPage, nameOf, toolAttachment, withNames } from './tool-helpers';
 
 /*
  * Executores do lote F13a (spec 027): Contratos, Importação a partir de
@@ -42,8 +45,6 @@ type OperationToolName = (typeof OPERATION_TOOLS)[number]['name'];
 
 const DIRECTION = (v: unknown) => t.contracts.directionsShort[String(v)] ?? String(v);
 const EVERY: Record<string, string> = { weekly: 'semana(s)', monthly: 'mês(es)', yearly: 'ano(s)' };
-const listed = (items: string[], max = 12) =>
-  items.length > max ? `${items.slice(0, max).join(', ')} e mais ${items.length - max}` : items.join(', ') || '—';
 
 /* ---------------- contratos ---------------- */
 
@@ -122,6 +123,16 @@ async function writableTitle(ctx: ServiceContext, titleId: string) {
   const title = await titles.getTitle(ctx, titleId);
   if (!title.canWrite) throw forbidden(t.errors.readOnly);
   return title;
+}
+
+/**
+ * Pelo lado espelho, cancelar, arquivar e excluir mexem no original: o serviço pede escrita também na caixa dele
+ * (tarefa 079), e a prévia recusa do mesmo jeito, antes do cartão.
+ */
+function assertPairOwnerPreview(ctx: ServiceContext, title: { mirrorStatus: string | null; counterpartyCaixaId: string | null }) {
+  if (title.mirrorStatus !== null && title.counterpartyCaixaId && !ctx.access.canWrite(title.counterpartyCaixaId)) {
+    throw forbidden(t.errors.mirrorPairOriginal);
+  }
 }
 
 const titleLabel = (title: { description: string; entityName: string; amountCents: number; dueDate: string }) =>
@@ -224,8 +235,7 @@ const ruleTargetLabel = (target: { caixaId: string; accountId: string | null; na
 
 /* ---------------- importação ---------------- */
 
-const fileLabel = (file: { fileName: string; sizeBytes: number }) =>
-  `${file.fileName} (${file.sizeBytes < 1024 ? `${file.sizeBytes} B` : `${Math.ceil(file.sizeBytes / 1024)} KB`})`;
+const fileLabel = (file: { fileName: string; sizeBytes: number }) => `${file.fileName} (${formatFileSize(file.sizeBytes)})`;
 
 /** Pagamento de boleto ou PIX copia-e-cola: o PIX começa pelo cabeçalho do BR Code. */
 const lotBalance = (cents: number | null, on: string | null) =>
@@ -236,7 +246,12 @@ const isPixPayload = (code: string) => /^000201/.test(code.trim());
 
 export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
   /* ---- contratos ---- */
-  list_contracts: { run: (ctx, i) => contracts.listContracts(ctx, i) },
+  list_contracts: {
+    run: async (ctx, i) => {
+      const { offset, ...query } = i;
+      return listPage(await contracts.listContracts(ctx, { ...query, limit: i.limit + 1 }, { offset }), i);
+    },
+  },
   get_contract: { run: (ctx, i) => contracts.getContract(ctx, i.contractId) },
   create_contract: {
     preview: async (ctx, i) => {
@@ -442,24 +457,39 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         rows.push({ label: 'Categoria', before: before.categoryName, after: (await nameOf(ctx, 'category', i.changes.categoryId)) ?? '' });
       if (i.changes.accountId)
         rows.push({ label: 'Conta', before: before.accountName ?? '—', after: (await nameOf(ctx, 'account', i.changes.accountId)) ?? '' });
+      if (i.changes.payerCaixaId)
+        rows.push({
+          label: 'Caixa pagadora',
+          before: before.payerCaixaName ?? '—',
+          after: (await nameOf(ctx, 'caixa', i.changes.payerCaixaId)) ?? '',
+        });
       if (i.changes.contractId !== undefined)
         rows.push({
           label: 'Contrato',
           before: before.contractName ?? '—',
           after: i.changes.contractId ? (await contracts.getContract(ctx, i.changes.contractId)).name : '—',
         });
-      const changesSeries = ['amountCents', 'description', 'anchorDay', 'categoryId', 'accountId', 'payerCaixaId'].some(
-        (k) => (i.changes as Record<string, unknown>)[k] !== undefined,
-      );
-      return {
-        title: 'Editar série',
-        summary: before.description,
-        action: 'update',
-        rows,
-        warnings: changesSeries
-          ? [`Vale para as ocorrências em aberto sem baixa a partir de ${formatDate(i.changes.effectiveOn ?? todayIso())}.`]
-          : [],
-      };
+      // As ocorrências que mudam, pelo mesmo plano que a execução aplica (tarefa 100), como no aditivo.
+      const plan = await series.previewSeriesUpdate(ctx, i.ruleId, i.changes);
+      const warnings: string[] = [];
+      if (plan) {
+        const changed = plan.affected.filter((a) => a.before.amountCents !== a.after.amountCents || a.before.dueDate !== a.after.dueDate);
+        for (const a of changed.slice(0, 24)) rows.push(changeRow(a));
+        for (const c of plan.cardFrom)
+          rows.push({
+            label: `Cobrança no cartão (a partir da ${c.fromOccurrence}ª)`,
+            before: formatBRL(c.beforeCents),
+            after: formatBRL(c.afterCents),
+          });
+        if (before.kind === 'card') warnings.push('Na cobrança do cartão, vale a partir da próxima ocorrência esperada.');
+        else
+          warnings.push(
+            `Vale para ${plan.affected.length} ocorrência(s) em aberto sem baixa a partir de ${formatDate(i.changes.effectiveOn ?? todayIso())}.`,
+          );
+        if (changed.length > 24) warnings.push(`E mais ${changed.length - 24} ocorrência(s) com valor ou vencimento alterados.`);
+        if (plan.skipped.length > 0) warnings.push(`${plan.skipped.length} ocorrência(s) ficam como estão (com baixa ou em mês fechado).`);
+      }
+      return { title: 'Editar série', summary: before.description, action: 'update', rows, warnings };
     },
     run: (ctx, i) => series.updateSeries(ctx, i.ruleId, i.changes),
   },
@@ -480,8 +510,11 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
       if (i.documentId) {
         const doc = await documents.writableContractDocument(ctx, i.documentId);
         if (doc.format !== 'markdown') throw unprocessable(t.contracts.errors.notMarkdown, 'not_markdown');
+        if (i.baseVersionId && doc.currentVersionId && i.baseVersionId !== doc.currentVersionId)
+          throw new AppError(409, 'version_conflict', t.contracts.documents.versionConflict(doc.currentVersion ?? 0));
         if (doc.content === i.content) throw unprocessable(t.contracts.documents.noChanges, 'no_changes');
-        const stats = diffStats(diffLines(doc.content ?? '', i.content));
+        const diff = diffText(doc.content ?? '', i.content);
+        const stats = diffStats(diff.lines);
         return {
           title: 'Salvar nova versão do markdown',
           summary: doc.title,
@@ -491,7 +524,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
             { label: 'Linhas', after: `+${stats.added} / −${stats.removed}` },
             ...(i.note ? [{ label: 'Nota', after: i.note }] : []),
           ],
-          warnings: ['As versões anteriores ficam no histórico.'],
+          warnings: ['As versões anteriores ficam no histórico.', ...(diff.truncated ? [t.contracts.documents.diffTruncated] : [])],
         };
       }
       const contract = await writableContract(ctx, i.contractId!);
@@ -506,8 +539,21 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         ],
       };
     },
-    run: async (ctx, i) => {
-      if (i.documentId) return documents.saveVersion(ctx, i.documentId, { content: i.content, note: i.note });
+    run: async (ctx, i, meta) => {
+      if (i.documentId) {
+        // Aprovada depois da prévia: uma versão gravada nesse meio tempo recusa a gravação (409, tarefa 135).
+        const since = meta?.runId
+          ? await ctx.db.execute<{ at: string }>(
+              sql`SELECT created_at::text AS at FROM ai_tool_confirmations WHERE run_id = ${meta.runId} AND tool_use_id = ${meta.toolUseId}`,
+            )
+          : null;
+        return documents.saveVersion(
+          ctx,
+          i.documentId,
+          { content: i.content, note: i.note, baseVersionId: i.baseVersionId },
+          { unchangedSince: since?.rows[0]?.at ?? null },
+        );
+      }
       return documents.createMarkdownDocument(ctx, i.contractId!, {
         kind: i.kind,
         title: i.title!,
@@ -561,7 +607,14 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         { label: 'Entradas', after: formatBRL(info.inCents) },
         { label: 'Saídas', after: formatBRL(info.outCents) },
       ];
-      if (i.csvMapping) rows.push({ label: 'Mapeamento CSV (salvo)', after: i.csvMapping.name });
+      if (i.csvMapping) {
+        // O sinal que o mapeamento salvo vai ter (tarefa 091): o informado ou o padrão do alvo.
+        const sign = i.csvMapping.amountSign ?? (i.cardCaixaId ? 'invert' : 'as_is');
+        rows.push(
+          { label: 'Mapeamento CSV (salvo)', after: i.csvMapping.name },
+          { label: t.statements.amountSignRow, after: t.statements.amountSignLabels[sign] ?? sign },
+        );
+      }
       if (info.provisional) rows.push({ label: 'Lote', after: 'Provisório (extrato parcial do mês)' });
       if (info.superseded) rows.push(...supersedeRows(info.superseded));
       return {
@@ -572,6 +625,8 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         warnings: [
           ...(info.duplicated > 0 ? [`${info.duplicated} linha(s) já importada(s) ficam de fora.`] : []),
           ...(info.ofxLeftOut.length ? [t.statements.ofxLeftOut(info.ofxLeftOut.join(', '))] : []),
+          // Tarefas 140 e 089: as linhas do CSV que não foram lidas e o FITID repetido que entra como linha nova.
+          ...statementImportNotices(info),
           ...(!info.superseded && info.provisionalOverlap.length
             ? [t.statements.supersede.overlapWarning(info.provisionalOverlap.map((p) => `${p.fileName} (${p.id})`).join(', '))]
             : []),
@@ -654,7 +709,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
       const issuer = await ctx.db.execute<{ name: string }>(sql`SELECT name FROM entities WHERE document = ${nfe.issuer.document}`);
       const rows: PreviewRow[] = [
         { label: 'Arquivo', after: fileLabel(file) },
-        { label: 'NF-e', after: `nº ${nfe.number} série ${nfe.series} · ${formatDate(nfe.issuedAt.slice(0, 10))}` },
+        { label: 'NF-e', after: `nº ${nfe.number} série ${nfe.series} · ${formatDate(localDateOf(nfe.issuedAt))}` },
         { label: 'Emitente', after: `${nfe.issuer.name} (${issuer.rows[0] ? 'já cadastrado' : 'novo cadastro'})` },
         { label: 'Valor', after: formatBRL(nfe.totalCents) },
         { label: 'Itens', after: String(nfe.items.length) },
@@ -678,14 +733,16 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     run: async (ctx, i) => {
       const file = await toolAttachment(ctx, i.attachmentId);
       const result = await nfeEntry(ctx, { name: file.fileName, mime: file.mime, content: file.content });
-      const due = result.duplicates.find((d) => d.dueDate)?.dueDate ?? result.issuedAt.slice(0, 10);
+      // A data da emissão em São Paulo, e não a do ISO em UTC (a NF-e da noite cairia no dia seguinte; tarefa 178).
+      const issuedOn = localDateOf(result.issuedAt);
+      const due = result.duplicates.find((d) => d.dueDate)?.dueDate ?? issuedOn;
       return {
         ...result,
         suggestedTitle: {
           direction: 'payable',
           entityId: result.issuer.entityId,
           description: `NF-e ${result.number} — ${result.issuer.name}`.slice(0, 300),
-          competenceDate: result.issuedAt.slice(0, 10),
+          competenceDate: issuedOn,
           dueDate: due,
           amountCents: result.totalCents,
           nfeDocumentId: result.nfeDocumentId,
@@ -694,6 +751,21 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     },
   },
   read_document: {
+    // Em ask (tarefa 157): o arquivo e o custo, porque a leitura roda o agente dos fluxos.
+    preview: async (ctx, i) => {
+      const file = await toolAttachment(ctx, i.attachmentId);
+      return {
+        title: 'Ler documento',
+        summary: file.fileName,
+        action: 'other',
+        rows: [
+          { label: 'Arquivo', after: file.fileName },
+          { label: 'Tipo', after: file.mime },
+          { label: 'Tamanho', after: formatFileSize(file.sizeBytes) },
+        ],
+        warnings: ['A leitura usa o agente dos fluxos (IA paga, conta no orçamento do mês) e não grava nada.'],
+      };
+    },
     run: async (ctx, i) => {
       const file = await toolAttachment(ctx, i.attachmentId);
       return readDocument(ctx, { name: file.fileName, mime: file.mime, content: file.content });
@@ -855,6 +927,8 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     preview: async (ctx, i) => {
       ctx.access.assertWrite(i.cardId);
       const c = i.charge;
+      // A pagadora pedida precisa ser legível, como na compra (tarefa 133).
+      if (c.payerCaixaId) ctx.access.assertRead(c.payerCaixaId);
       return {
         title: 'Lançar encargo do cartão',
         summary: `${t.card.chargeKinds[c.chargeKind] ?? c.chargeKind} · ${formatBRL(c.amountCents)}`,
@@ -970,12 +1044,28 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     preview: async (ctx, i) => {
       const account = await writableAccount(ctx, i.accountId);
       if (account.archivedAt) throw unprocessable(t.agents.errors.alreadyArchived, 'already_archived');
+      // Com movimentos ela é arquivada, e arquivar pede saldo zero (tarefa 080): a prévia recusa como o serviço.
+      const state = await ctx.db.execute<{ cents: string; used: boolean }>(sql`
+        SELECT b.balance_cents AS cents,
+               EXISTS (SELECT 1 FROM movements m WHERE m.financial_account_id = b.financial_account_id) AS used
+          FROM financial_account_balances b WHERE b.financial_account_id = ${i.accountId}`);
+      const cents = Number(state.rows[0]?.cents ?? 0);
+      if (cents !== 0 && state.rows[0]?.used) {
+        throw unprocessable(t.errors.accountArchiveBalance(formatBRL(cents)), 'account_archive_balance');
+      }
       return {
         title: 'Arquivar conta financeira',
         summary: (await nameOf(ctx, 'account', i.accountId)) ?? account.name,
         action: 'delete',
-        rows: [{ label: 'Tipo', after: ACCOUNT_KIND(account.kind) }],
-        warnings: ['Sem nenhum movimento, a conta é excluída em vez de arquivada.'],
+        rows: [{ label: 'Tipo', after: ACCOUNT_KIND(account.kind) }, ...(cents !== 0 ? [{ label: 'Saldo', after: formatBRL(cents) }] : [])],
+        warnings: [
+          'Sem nenhum movimento, a conta é excluída em vez de arquivada.',
+          ...(cents !== 0
+            ? [
+                `Com saldo de ${formatBRL(cents)}, ela só sai se puder ser excluída; com outros vínculos (extrato, títulos), zere o saldo antes.`,
+              ]
+            : []),
+        ],
       };
     },
     run: (ctx, i) => caixas.deleteAccount(ctx, i.accountId),
@@ -1054,6 +1144,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     preview: async (ctx, i) => {
       const title = await writableTitle(ctx, i.titleId);
       if (title.status === 'canceled') throw unprocessable(t.agents.errors.titleAlreadyCanceled, 'title_canceled');
+      assertPairOwnerPreview(ctx, title);
       return {
         title: 'Cancelar título',
         summary: titleLabel(title),
@@ -1072,6 +1163,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
       const title = await writableTitle(ctx, i.titleId);
       if (title.cardInvoiceId) throw unprocessable(t.errors.cardInvoiceTitleLocked);
       if (title.archivedAt) throw unprocessable(t.agents.errors.alreadyArchived, 'already_archived');
+      assertPairOwnerPreview(ctx, title);
       return {
         title: 'Arquivar título',
         summary: titleLabel(title),
@@ -1086,6 +1178,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     preview: async (ctx, i) => {
       const title = await writableTitle(ctx, i.titleId);
       if (title.cardInvoiceId) throw unprocessable(t.errors.cardInvoiceTitleLocked);
+      assertPairOwnerPreview(ctx, title);
       const series = Boolean(title.recurrenceRuleId && title.occurrence);
       const warnings: string[] = [];
       let outcome = 'Excluído';
@@ -1234,7 +1327,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
           after: `${describeRule({ ...skip, direction: source?.direction ?? null })}: pulada, ${t.statements.copySkippedReasons[skip.reason]}`,
         });
       }
-      const warnings: string[] = [t.statements.copyHint];
+      const warnings: string[] = [t.statements.copyHintAgent];
       if (plan.toCopy.length === 0) warnings.unshift('Nenhuma regra nova entra: todas já existem no destino ou estão arquivadas.');
       return {
         title: 'Copiar regras de classificação',
@@ -1245,6 +1338,54 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
       };
     },
     run: (ctx, i) => rec.copyRules(ctx, i),
+  },
+  apply_classification_rules: {
+    // A prévia é o mesmo plano da execução, sem gravar (tarefa 152): quantas linhas mudam e por qual regra.
+    preview: async (ctx, i) => {
+      const plan = await rec.planApplyRules(ctx, i);
+      const caixaName = await nameOf(ctx, 'caixa', plan.target.caixaId);
+      const where = i.importId
+        ? await ctx.db.execute<{ file_name: string }>(sql`
+            SELECT f.file_name FROM statement_imports s JOIN attachments f ON f.id = s.attachment_id WHERE s.id = ${i.importId}`)
+        : null;
+      const targetName = plan.target.accountId
+        ? await nameOf(ctx, 'account', plan.target.accountId)
+        : `${caixaName ?? plan.target.cardCaixaId} (cartão)`;
+      const rules = plan.byRule.length
+        ? await ctx.db.execute<{
+            id: string;
+            match_kind: string;
+            pattern: string;
+            entity_name: string | null;
+            category_name: string | null;
+          }>(sql`
+            SELECT r.id, r.match_kind, r.pattern, e.name AS entity_name, c.name AS category_name
+              FROM classification_rules r LEFT JOIN entities e ON e.id = r.entity_id LEFT JOIN categories c ON c.id = r.category_id
+             WHERE r.id = ANY (${`{${plan.byRule.map((x) => x.ruleId).join(',')}}`}::uuid[])`)
+        : { rows: [] };
+      const byId = new Map(rules.rows.map((r) => [r.id, r]));
+      const rows: PreviewRow[] = [
+        { label: 'Onde', after: where?.rows[0] ? `Lote ${where.rows[0].file_name} · ${targetName}` : `Todos os lotes de ${targetName}` },
+        ...plan.byRule.map(({ ruleId, lines }) => {
+          const rule = byId.get(ruleId);
+          const target = [rule?.entity_name, rule?.category_name].filter(Boolean).join(' · ') || '—';
+          return {
+            label: rule ? `${MATCH_KIND(rule.match_kind)} "${rule.pattern}"` : ruleId,
+            after: `${lines} linha(s) → ${target}`,
+          };
+        }),
+      ];
+      if (plan.cleared > 0)
+        rows.push({ label: 'Sem regra que sirva', after: `${plan.cleared} linha(s) perdem a classificação da regra antiga` });
+      return {
+        title: 'Aplicar regras de classificação',
+        summary: `${plan.changes} linha(s) mudam`,
+        action: 'update',
+        rows,
+        warnings: plan.changes === 0 ? ['Nenhuma linha nova muda de classificação com as regras atuais.'] : [],
+      };
+    },
+    run: (ctx, i) => (i.importId ? rec.applyRulesToImport(ctx, i.importId) : rec.applyRulesToAccount(ctx, i)),
   },
   update_classification_rule: {
     preview: async (ctx, i) => {

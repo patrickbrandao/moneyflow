@@ -1,4 +1,13 @@
-import { barcodeToDigitableLine, formatAccounting, formatDate, type NfeDetail, parseBrCode, type TitleRow, t } from '@moneyflow/shared';
+import {
+  barcodeToDigitableLine,
+  formatAccounting,
+  formatDate,
+  localDateOf,
+  type NfeDetail,
+  parseBrCode,
+  type TitleRow,
+  t,
+} from '@moneyflow/shared';
 import { Download } from 'lucide-react';
 import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
@@ -92,7 +101,8 @@ function NfeInfo({ id }: { id: string }) {
               </Link>
             </dd>
             <dt>{t.entry.nfeIssued}</dt>
-            <dd className="mono">{formatDate(nfe.issuedAt.slice(0, 10))}</dd>
+            {/* O instante vem em UTC: a data é a de São Paulo, como no formulário da importação (tarefa 178). */}
+            <dd className="mono">{formatDate(localDateOf(nfe.issuedAt))}</dd>
             <dt>{t.entry.nfeTotal}</dt>
             <dd className="mono">{formatAccounting(nfe.totalCents)}</dd>
             <dt>{t.entry.nfeKey}</dt>

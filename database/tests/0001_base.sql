@@ -15,6 +15,11 @@ SELECT ok(NOT (SELECT rolsuper OR rolcreatedb OR rolcreaterole FROM pg_roles WHE
 SELECT ok(has_schema_privilege('moneyflow_app', 'public', 'USAGE'), 'moneyflow_app usa o schema public');
 SELECT ok(NOT has_schema_privilege('moneyflow_app', 'public', 'CREATE'), 'moneyflow_app não cria objetos (sem DDL)');
 SELECT ok(NOT has_database_privilege('moneyflow_app', current_database(), 'CREATE'), 'moneyflow_app não cria schemas');
+-- Rede de segurança fora da aplicação (tarefa 102): o servidor encerra a transação ociosa do papel da aplicação. Vem do
+-- docker/initdb/02-app-role.sh (no primeiro boot e no make owner, que o make test roda antes).
+SELECT is((SELECT array_to_string(s.setconfig, ',') FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole
+            WHERE r.rolname = 'moneyflow_app' AND s.setdatabase = 0),
+          'idle_in_transaction_session_timeout=5min', 'moneyflow_app: transação ociosa encerrada em 5 minutos');
 
 -- Funções
 SELECT has_function('set_updated_at', '{}'::name[]);

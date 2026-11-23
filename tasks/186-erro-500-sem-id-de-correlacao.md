@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 8ed8fd2
 ---
 
 # Erro 500 sem identificador: o usuário vê "Algo deu errado" e o log não tem como ser achado
@@ -80,4 +80,16 @@ Nada foi executado. Não vi o proxy da produção. Métricas (fila de execuçõe
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: o `Fastify(...)` não definia `genReqId` (o padrão é o contador `req-1`, `req-2`… do processo), nenhuma resposta levava o id e o 500 respondia só `{ code: 'internal', message }`.
+
 ## Resolução (executor)
+
+- `apps/server/src/app.ts`: `genReqId` devolve um UUID (`randomUUID`) por requisição; com `TRUSTED_PROXIES` definido, aceita o `X-Request-Id` do proxy quando ele casa com `^[\w-]{8,64}$` (sem `TRUSTED_PROXIES`, o do cliente é ignorado, como no IP da tarefa 050). Um `onSend` põe `x-request-id` em toda resposta, e o 500 devolve `requestId` no corpo; a linha do erro no log já leva o mesmo id (`reqId`), resolvido junto com a tarefa 070.
+- Shared: `ApiError.error.requestId` opcional (`types.ts`) e `t.errors.genericWithCode(código)`.
+- Console: `apiErrorFrom` (`apps/web/src/lib/api.ts`, usado também por `upload.ts` e `download.ts`) guarda o `requestId` no `ApiError` e, no 500, mostra "Algo deu errado (código abc12345). Tente de novo." com os 8 primeiros caracteres do id. Decisão: sem botão de copiar (o código é texto selecionável na mensagem; o id completo fica no cabeçalho e no log).
+- O `log.child` por passada do worker ficou para a tarefa 107 (laços do worker), que mexe no mesmo arquivo.
+- Testes: `apps/server/test/security-headers.test.ts` (o `x-request-id` UUID e diferente em cada resposta, inclusive 401/404 e o SPA; o do cliente ignorado sem `TRUSTED_PROXIES`; com `TRUSTED_PROXIES`, o do proxy vale e o fora do formato vira UUID) e `apps/server/test/errors.test.ts` (o `requestId` do 500 igual ao cabeçalho e presente no log).
+- Spec: `docs/001`, linha "Logs e erros".
+- Verificação: `pnpm verify:quick` (com `test/errors.test.ts` e `test/security-headers.test.ts`).

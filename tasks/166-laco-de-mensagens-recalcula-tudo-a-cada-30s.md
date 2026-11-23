@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 4c1fd05
 ---
 
 # O laço de mensagens recalcula resumos e views pesadas a cada 30 s só para a dedup descartar
@@ -59,4 +59,17 @@ Nada foi medido. O ganho real depende do volume de dados da instalação.
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado na leitura: o resumo era montado (quatro consultas) a cada passada depois do `send_at` para a dedup descartar, `card_limits` era lida em `eventsFor` e de novo em `produceNotifications`, e os blocos do sino rodavam todos a cada 30 s. Não medi tempos; a correção não muda o que é entregue.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/message-worker.ts`:
+  - resumos: a chave do dia (ou da semana) é conferida na `message_outbox` do destino (`alreadyQueued`, pelo índice único) antes de montar; já enfileirado, nada é consultado;
+  - `TickCache`: o uso dos cartões (`cardsOf`, todos os cartões filtrados por escopo em memória) sai uma vez por passada e serve ao `card_limit` do Telegram e ao do sino;
+  - `MessageLoopState` (guardado pelo worker em `worker.ts`): os blocos caros do sino (limite, divergência, contratos e os avisos diários por caixa) rodam no máximo a cada 5 min por processo, e sempre na primeira passada do dia e na primeira depois do `NOTIFY_AT` (os avisos diários continuam no horário). Sem estado (testes e chamadas avulsas), toda passada calcula tudo, como antes. Espelhos, faturas e orçamentos seguem a cada passada.
+- Decisão: espaçar em vez de "uma vez por dia" nos avisos diários, para que uma caixa que passa a ter vencimento no dia depois do horário ainda receba o aviso (em até 5 min).
+- Spec: `docs/013`, "Fila e envio".
+- Testes: `apps/server/test/vision.test.ts` ("sem recálculo à toa…"): a 2ª passada não consulta `financial_account_balances` da caixa do resumo já enfileirado; com o estado, `card_limits` é lida às 07:00, não às 07:01, de novo às 08:00 (com o aviso "vence hoje" da caixa criado), não às 08:01 e de novo 5 min depois; uma passada inteira do `messageTick` com uma assinatura `card_limit` lê `card_limits` uma vez.
+- Verificação: `pnpm verify:quick`.

@@ -84,9 +84,8 @@ test('importar OFX de exemplo e conciliar', async ({ page }) => {
     .getByRole('button', { name: 'Lançar' })
     .click();
   const createDialog = page.getByRole('dialog', { name: 'Lançar a linha' });
-  // Com um agente dos fluxos configurado (outros testes), a linha pode chegar com a entidade sugerida e travada.
-  const swapEntity = createDialog.getByRole('button', { name: 'Trocar entidade' });
-  if (await swapEntity.isVisible()) await swapEntity.click();
+  // Nenhum agente dos fluxos ativo aqui (um arquivo por vez, tarefa 125): a linha chega sem entidade sugerida.
+  await expect(createDialog.getByRole('button', { name: 'Trocar entidade' })).toHaveCount(0);
   await createDialog.getByLabel('Entidade', { exact: true }).fill(customer.name);
   await createDialog.getByRole('option', { name: new RegExp(customer.name) }).click();
   await createDialog.getByLabel('Categoria', { exact: true }).selectOption({ label: income.name });
@@ -170,21 +169,10 @@ test('conciliação: título da caixa, última conta lembrada, aplicar regras e 
     headers: { 'content-type': 'application/x-ofx' },
   });
   expect(upload.ok(), await upload.text()).toBeTruthy();
-  // Com um agente dos fluxos ligado por outro teste na mesma pilha, o import enfileira sugestões do agente,
-  // que o "Aplicar regras" não sobrescreve (spec 009): espera a execução e começa sem elas.
+  // Nenhum agente dos fluxos ativo aqui (um arquivo por vez, tarefa 125): o import não enfileira sugestão, e as
+  // linhas chegam sem classificação para o "Aplicar regras" abaixo.
   const imported = await upload.json();
-  const runId: string | null = imported.aiSuggestion?.runId ?? null;
-  if (runId) {
-    await expect
-      .poll(async () => (await (await page.request.get(`/api/runs/${runId}`)).json()).status, { timeout: 30_000 })
-      .toMatch(/completed|failed|canceled|awaiting_confirmation/);
-    const detail = await (await page.request.get(`/api/statement-imports/${imported.id}`)).json();
-    for (const line of detail.lines as { id: string; classificationSource: string | null }[]) {
-      if (line.classificationSource !== 'agent') continue;
-      const cleared = await page.request.patch(`/api/statement-lines/${line.id}`, { data: { entityId: null, categoryId: null } });
-      expect(cleared.ok(), await cleared.text()).toBeTruthy();
-    }
-  }
+  expect(imported.aiSuggestion).toMatchObject({ queued: false, runId: null });
 
   // Escolhe a poupança; sai pelo nome da caixa no título e volta: a conta escolhida continua.
   await page.goto(`/caixas/${caixa.id}/reconciliation`);

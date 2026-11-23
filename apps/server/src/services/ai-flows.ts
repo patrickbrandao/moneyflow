@@ -20,7 +20,7 @@ import { AppError } from '../errors';
 import { assertCanStartRun } from './ai-budgets';
 import { assertUpload, storeAttachment } from './attachments';
 import { updateAccount, updateCaixa } from './caixas';
-import { assertReadsImages, createConversation, sendMessage } from './conversations';
+import { assertReadsImages, createConversation, sendMessage, stopRun } from './conversations';
 import { enqueueImportRecipes, importBusy, insertReconcileSession, lockImport, recipeNameOf, startNextRecipe } from './reconcile-recipes';
 import { assertNotSuperseded, getImport } from './statements';
 import { withTx } from './tx';
@@ -57,6 +57,27 @@ export async function waitRun(db: Executor, runId: string, timeoutMs: number) {
   }
 }
 
+/**
+ * Espera a execução de um fluxo síncrono (leitura e conversão de documento).
+ * Esgotado o prazo, cancela a execução (tarefa 150: senão ela seguiria rodando,
+ * paga, com o resultado jogado fora) e responde 422 com "demorou demais"; o
+ * worker para na próxima batida. Falhou ou foi cancelada: 422 com o erro dela
+ * ou `failure`.
+ */
+export async function awaitFlowRun(ctx: ServiceContext, runId: string, conversationId: string, timeoutMs: number, failure: string) {
+  let run = await waitRun(ctx.db, runId, timeoutMs);
+  if (run && ['queued', 'running', 'awaiting_confirmation'].includes(run.status)) {
+    await withTx(ctx, (tx) => stopRun(tx, runId, conversationId));
+    // Terminou entre a última leitura e o pedido de parar: o resultado vale.
+    run = await loadRun(ctx.db, runId);
+    if (run?.status !== 'completed') throw new AppError(422, 'document_timeout', t.agents.errors.flowTimeout);
+  }
+  if (run?.status !== 'completed') {
+    throw new AppError(422, 'document_unreadable', run?.status === 'failed' && run.error ? run.error : failure);
+  }
+  return run;
+}
+
 const digits = (value: unknown) => (typeof value === 'string' ? value.replace(/\D/g, '') : '');
 const text = (value: unknown, max = 300) => (typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null);
 
@@ -82,10 +103,7 @@ export async function readDocumentWithAi(
     text: 'Leia o documento anexo e devolva o JSON pedido.',
     attachmentIds: [attachmentId],
   });
-  const run = await waitRun(ctx.db, sent.run.id, ctx.config.aiDocumentTimeoutMs);
-  if (run?.status !== 'completed') {
-    throw new AppError(422, 'document_unreadable', run?.status === 'failed' && run.error ? run.error : t.agents.errors.documentUnreadable);
-  }
+  await awaitFlowRun(ctx, sent.run.id, conversation.id, ctx.config.aiDocumentTimeoutMs, t.agents.errors.documentUnreadable);
   const messages = await loadMessages(ctx.db, conversation.id);
   const answer = [...messages].reverse().find((m) => m.role === 'assistant');
   const data = (extractJson(answer ? blocksText(answer.content) : '') ?? {}) as Record<string, unknown>;

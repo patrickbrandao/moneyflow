@@ -1,10 +1,12 @@
-import { type Database, userColumns, users } from '@moneyflow/db';
+import { type Database, type Executor, userColumns, users } from '@moneyflow/db';
 import {
   type AgentParams,
   type AiUsagePurpose,
   type AssistantBlock,
   balanceToolUses,
   blocksText,
+  compactToolResults,
+  formatFileSize,
   type NeutralMessage,
   type ToolResultBlock,
   t,
@@ -20,7 +22,7 @@ import { notifyAwaitingApproval } from '../services/autonomous-notify';
 import { recipeNameOf } from '../services/reconcile-recipes';
 import { deliverRunToTelegram, startTyping, telegramOrigin } from '../services/telegram-inbound';
 import { applyFlowResult, isJsonFlow, isToolFlow } from './flows';
-import { createLlmClient, type LlmClient, LlmError, type LlmResponse } from './llm';
+import { createLlmClient, type LlmAttachment, type LlmClient, LlmError, type LlmResponse, type LlmTool } from './llm';
 import { assemblePrompt, loadPromptInputs } from './prompt';
 import { RunAttachments } from './run-attachments';
 import {
@@ -35,22 +37,33 @@ import {
   runDto,
   toNeutral,
 } from './store';
-import { RunTools, toolErrorMessage } from './tools-runtime';
+import { RunTools, reportToolError, toolErrorMessage } from './tools-runtime';
 
 /*
  * Loop do agente no worker (spec 011, guia do DBA em docs/016):
  *  - a execução chega reservada (ai_run_claim, status running, lock_token);
  *  - transações curtas: nada fica aberto durante a chamada ao modelo;
  *  - heartbeat a cada poucos segundos (renova a reserva e descobre o pedido de
- *    cancelamento; perder a reserva = parar sem gravar mais nada);
+ *    cancelamento; perder a reserva = parar sem gravar mais nada: as gravações
+ *    conferem o lock_token, e o lote de tools confere o "parar" antes de cada
+ *    tool, tarefa 097);
+ *  - erro temporário do provedor (esgotadas as tentativas da chamada): a
+ *    execução volta à fila depois de uma espera, até max_attempts − 1 vezes
+ *    seguidas, contadas pelos eventos `provider_retry` (o banco zera attempts
+ *    nessa volta, tarefa 074); depois, failed;
  *  - eventos de streaming em ai_run_events (NOTIFY → SSE da API);
  *  - tools em ask no kit do agente (spec 021) e as escritas de MCP viram ai_tool_confirmations e a execução
  *    passa a awaiting_confirmation; decididas, ela volta à fila e este mesmo
  *    loop retoma executando as aprovadas e devolvendo a recusa das rejeitadas;
- *  - escritas de negócio com o ator agent + app.agent_run_id (ServiceContext).
+ *  - escritas de negócio com o ator agent + app.agent_run_id (ServiceContext);
+ *  - parada do worker (tarefa 107, `shutdown`): corta a chamada ao modelo e as
+ *    esperas (transcrição, volta à fila) e, no próximo ponto seguro (antes de
+ *    cada volta e de cada tool), devolve a execução à fila com a cerca da
+ *    reserva, sem gastar tentativa; a tool em andamento termina antes.
  */
 
-export type WorkerDeps = { db: Database; config: Config; log: FastifyBaseLogger };
+/** `shutdown`: o sinal de desligamento do worker (tarefa 107); sem ele (testes, API), a execução vai até o fim. */
+export type WorkerDeps = { db: Database; config: Config; log: FastifyBaseLogger; shutdown?: AbortSignal };
 export type ClaimedRun = RunRow & { lock_token: string };
 
 const HEARTBEAT_MS = 3_000;
@@ -58,9 +71,89 @@ const DEFAULT_MAX_ITERATIONS = 20;
 /** Voltas mínimas da conciliação com IA (spec 029): uma ou mais tools por linha do lote. */
 const RECONCILE_MIN_ITERATIONS = 60;
 const FLUSH_MS = 120;
+/** Código do evento `error` de uma volta à fila por erro temporário do provedor (tarefas 074 e 151). */
+export const PROVIDER_RETRY = 'provider_retry';
+/** Código do evento `error` da volta à fila pela parada do worker (tarefa 107; não conta como erro do provedor). */
+export const WORKER_SHUTDOWN = 'worker_shutdown';
 
 class LockLost extends Error {}
 class Canceled extends Error {}
+class Shutdown extends Error {}
+
+/** Espera da volta à fila por erro do provedor: 4 × a base do backoff, dobrando a cada volta (até 60 s). */
+export const requeueDelay = (backoffMs: number, requeues: number) => Math.min(60_000, backoffMs * 4 * 2 ** requeues);
+
+/** Espera que termina antes no abort (o "parar" ou a perda da reserva). */
+function pause(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted || ms <= 0) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
+/** Voltas à fila seguidas por erro do provedor: os eventos provider_retry depois da última mensagem gravada. */
+async function providerRequeues(db: Database, runId: string): Promise<number> {
+  const result = await db.execute<{ n: number }>(sql`
+    SELECT count(*)::int AS n FROM ai_run_events e
+     WHERE e.run_id = ${runId} AND e.event_type = 'error' AND e.payload ->> 'code' = ${PROVIDER_RETRY}
+       AND e.seq > coalesce((SELECT max(m.seq) FROM ai_run_events m WHERE m.run_id = ${runId} AND m.event_type = 'message'), 0)`);
+  return Number(result.rows[0]?.n ?? 0);
+}
+
+/**
+ * Devolve a execução à fila com a cerca da reserva (só se esta reserva ainda vale): o banco limpa a
+ * reserva e zera as tentativas; o evento opcional vai antes do status.
+ */
+async function requeue(db: Database, runId: string, token: string, event?: { type: 'error'; message: string; code: string }) {
+  await db.transaction(async (tx) => {
+    const moved = await tx.execute(sql`
+      UPDATE ai_runs SET status = 'queued' WHERE id = ${runId} AND status = 'running' AND lock_token = ${token}::uuid RETURNING id`);
+    if (moved.rows.length === 0) return;
+    if (event) await appendEvent(tx, runId, event);
+    await appendEvent(tx, runId, { type: 'status', status: 'queued' });
+  });
+}
+
+/** Cerca da reserva nas gravações (tarefa 097): só grava se esta reserva ainda vale; senão, LockLost. */
+async function assertLock(tx: Executor, runId: string, token: string) {
+  const held = await tx.execute(sql`
+    SELECT 1 FROM ai_runs WHERE id = ${runId} AND status = 'running' AND lock_token = ${token}::uuid FOR UPDATE`);
+  if (held.rows.length === 0) throw new LockLost();
+}
+
+/**
+ * Tamanho estimado da chamada ao modelo (tarefa 098), sem montar o corpo: o
+ * prompt, as tools, o histórico e os anexos (binários em base64). Os anexos
+ * já estão no cache da execução (RunAttachments.prepare).
+ */
+async function estimateRequestBytes(
+  parts: (string | undefined)[],
+  tools: LlmTool[],
+  messages: NeutralMessage[],
+  load: (attachmentId: string) => Promise<LlmAttachment | null>,
+): Promise<number> {
+  let bytes = Buffer.byteLength(JSON.stringify(tools));
+  for (const part of parts) if (part) bytes += Buffer.byteLength(part);
+  for (const message of messages) {
+    for (const block of message.content) {
+      if (block.type === 'attachment') {
+        const file = await load(block.attachment_id);
+        if (!file) continue;
+        bytes += 'text' in file ? Buffer.byteLength(file.text) : Math.ceil(file.data.length / 3) * 4;
+      } else if (block.type === 'text') bytes += Buffer.byteLength(block.text);
+      else if (block.type === 'tool_result') bytes += Buffer.byteLength(block.content);
+      else if (block.type === 'tool_use') bytes += Buffer.byteLength(JSON.stringify(block.input));
+      else if (block.type === 'thinking') bytes += Buffer.byteLength(block.thinking);
+    }
+  }
+  return bytes;
+}
 
 type AgentRow = {
   id: string;
@@ -104,6 +197,9 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
   const abort = new AbortController();
   let canceled = false;
   let lost = false;
+  const stopping = () => deps.shutdown?.aborted === true;
+  // Chamada ao modelo e esperas: param também na parada do worker. As tools, não (terminam antes).
+  const signal = deps.shutdown ? AbortSignal.any([abort.signal, deps.shutdown]) : abort.signal;
 
   const beat = async () => {
     try {
@@ -124,6 +220,12 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
     await beat();
     if (lost) throw new LockLost();
     if (canceled) throw new Canceled();
+    if (stopping()) throw new Shutdown();
+  };
+  /** Cancelada: fecha os tool_use pendentes com "cancelado" e encerra. */
+  const stopCanceled = async () => {
+    await cancelOpenToolUses(db, runId, claimed.conversation_id).catch(() => {});
+    await finish(db, runId, token, 'canceled', null).catch(() => {});
   };
 
   let tools: RunTools | null = null;
@@ -145,6 +247,7 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
       actorKind: 'agent',
       agentRunId: runId,
       recipeLineIds: recipe ? new Set(recipe.lineIds) : null,
+      log,
     };
 
     const creds = await db.execute<{ kind: 'anthropic' | 'openai'; base_url: string | null; api_key: string | null; model: string }>(
@@ -199,7 +302,7 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
       agentId: agent.id,
       userId: actor.id,
       textProviderId: claimed.provider_id,
-      signal: abort.signal,
+      signal,
     });
 
     await appendEvent(db, runId, { type: 'status', status: 'running' });
@@ -217,7 +320,7 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
       const rows = await loadMessages(db, conversation.id);
       const pending = pendingToolUses(rows);
       if (pending.length > 0) {
-        const outcome = await resolvePending(ctx, tools, runId, token, conversation.id, pending);
+        const outcome = await resolvePending(ctx, tools, runId, token, conversation.id, pending, { checkpoint, signal: abort.signal });
         if (outcome === 'awaiting') {
           // Tarefa agendada e conciliação (spec 029): o sino avisa que há ação esperando aprovação.
           if (toolFlow) {
@@ -251,14 +354,22 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
         screen: toolFlow ? null : conversation.screen_context,
         recipe,
       });
-      const history = balanceToolUses(toNeutral(rows));
+      // O histórico enviado (nunca o gravado): balanceado e com os resultados longos das voltas antigas cortados (tarefa 098).
+      const history = compactToolResults(balanceToolUses(toNeutral(rows)), t.agents.attachments.resultOmitted);
       // MCP no modo user: bloco do papel user no início do histórico enviado, nunca gravado em ai_messages.
       const messages: NeutralMessage[] = system.mcpUserBlock
         ? [{ role: 'user', content: [{ type: 'text', text: system.mcpUserBlock }] }, ...history]
         : history;
       await attachments.prepare(messages);
       if (lost) throw new LockLost();
-      const response = await callModel(db, llm, runId, {
+      if (stopping()) throw new Shutdown();
+      // Acima do teto (AI_REQUEST_MAX_BYTES), a chamada nem sai: o provedor recusaria e a sessão travaria (tarefa 098).
+      const size = await estimateRequestBytes([system.stable, system.user, system.volatile], tools.list, messages, attachments.load);
+      if (size > deps.config.aiRequestMaxBytes) {
+        const detail = `cerca de ${formatFileSize(size)}, acima do teto de ${formatFileSize(deps.config.aiRequestMaxBytes)}`;
+        throw new LlmError(detail, null, false, 'context_overflow');
+      }
+      const response = await callModel(db, log, llm, runId, {
         model: claimed.model,
         system: system.stable,
         systemUser: system.user,
@@ -267,7 +378,7 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
         tools: tools.list,
         params: agent.params,
         loadAttachment: attachments.load,
-        signal: abort.signal,
+        signal,
         operation: 'chat',
         purpose: usagePurpose,
       });
@@ -275,6 +386,7 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
 
       const content: AssistantBlock[] = response.content.length > 0 ? response.content : [{ type: 'text', text: '' }];
       await db.transaction(async (tx) => {
+        await assertLock(tx, runId, token);
         const message = await insertMessage(tx, conversation.id, 'assistant', content, runId);
         await tx.execute(sql`
           INSERT INTO ai_usage (run_id, message_id, purpose, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, request_id)
@@ -285,6 +397,11 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
         if (run) await appendEvent(tx, runId, { type: 'usage', run: runDto(run) });
       });
 
+      // Fluxo JSON cortado pelo max_tokens (tarefa 095): o JSON ou o markdown viriam incompletos como se fossem o resultado.
+      if (purpose && response.stopReason === 'max_tokens') {
+        await finish(db, runId, token, 'failed', t.agents.errors.flowTruncated);
+        return;
+      }
       const toolUses = content.filter((b) => b.type === 'tool_use');
       if (toolUses.length === 0 || response.stopReason !== 'tool_use') {
         if (response.stopReason === 'refusal') {
@@ -296,6 +413,7 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
           await insertToolResults(
             db,
             runId,
+            token,
             conversation.id,
             toolUses.map((b) => ({
               type: 'tool_result',
@@ -325,19 +443,42 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
       return;
     }
     if (error instanceof Canceled || canceled || ((error as { name?: string })?.name === 'AbortError' && canceled)) {
-      await cancelOpenToolUses(db, runId, claimed.conversation_id).catch(() => {});
-      await finish(db, runId, token, 'canceled', null).catch(() => {});
+      await stopCanceled();
+      return;
+    }
+    if (error instanceof Shutdown || stopping()) {
+      // Parada do worker (tarefa 107): volta à fila na hora; o console descarta o texto parcial e espera a retomada.
+      log.info({ runId }, 'agente: parada do worker; execução devolvida à fila');
+      await requeue(db, runId, token, { type: 'error', message: t.agents.errors.workerShutdown, code: WORKER_SHUTDOWN }).catch((e) =>
+        log.error({ err: e, runId }, 'agente: falha ao devolver à fila'),
+      );
+      return;
+    }
+    if (error instanceof LlmError && error.code === 'context_overflow') {
+      // Sessão acima do limite do provedor (tarefa 098): a próxima mensagem falharia igual; a mensagem manda finalizar a sessão.
+      const message = t.agents.errors.contextOverflow(error.message).slice(0, 4000);
+      log.warn({ runId, detail: error.message }, 'agente: sessão acima do limite do provedor');
+      await appendEvent(db, runId, { type: 'error', message, code: 'context_overflow' }).catch(() => {});
+      await finish(db, runId, token, 'failed', message).catch((e) => log.error({ err: e, runId }, 'agente: falha ao encerrar'));
       return;
     }
     const message = error instanceof LlmError ? t.agents.errors.providerError(error.message) : toolErrorMessage(error) || t.errors.generic;
     log.error({ err: error, runId }, 'agente: execução falhou');
-    if (error instanceof LlmError && error.retryable && claimed.attempts < claimed.max_attempts) {
-      // Volta à fila para nova tentativa (a reserva conta as tentativas).
-      await db
-        .execute(sql`UPDATE ai_runs SET status = 'queued' WHERE id = ${runId} AND status = 'running' AND lock_token = ${token}::uuid`)
-        .catch(() => {});
-      await appendEvent(db, runId, { type: 'error', message }).catch(() => {});
-      return;
+    if (error instanceof LlmError && error.retryable) {
+      const requeues = await providerRequeues(db, runId).catch(() => Number.POSITIVE_INFINITY);
+      if (requeues < claimed.max_attempts - 1) {
+        // Erro temporário do provedor (tarefa 074): o aviso vai já ao console (ele descarta o texto parcial, tarefa 151),
+        // a espera corre com o heartbeat ligado (o "parar" a corta) e a execução volta à fila. O contador fica nos eventos.
+        await appendEvent(db, runId, { type: 'error', message, code: PROVIDER_RETRY }).catch(() => {});
+        await pause(requeueDelay(deps.config.aiRequestBackoffMs, requeues), signal);
+        if (lost) return;
+        if (canceled) {
+          await stopCanceled();
+          return;
+        }
+        await requeue(db, runId, token).catch((e) => log.error({ err: e, runId }, 'agente: falha ao devolver à fila'));
+        return;
+      }
     }
     await finish(db, runId, token, 'failed', message.slice(0, 4000)).catch((e) =>
       log.error({ err: e, runId }, 'agente: falha ao encerrar'),
@@ -382,8 +523,17 @@ async function loadContext(db: Database, run: RunRow) {
   };
 }
 
-/** Chama o modelo com streaming: deltas de texto viram eventos (agrupados a cada ~120 ms). */
-async function callModel(db: Database, llm: LlmClient, runId: string, request: Parameters<LlmClient['chat']>[0]): Promise<LlmResponse> {
+/**
+ * Chama o modelo com streaming: deltas de texto viram eventos (agrupados a cada ~120 ms). Cada gravação
+ * tem o próprio catch (tarefa 099): uma falha registra no log e não descarta os deltas seguintes.
+ */
+export async function callModel(
+  db: Database,
+  log: WorkerDeps['log'],
+  llm: LlmClient,
+  runId: string,
+  request: Parameters<LlmClient['chat']>[0],
+): Promise<LlmResponse> {
   let text = '';
   let thinking = '';
   let flushing: Promise<unknown> = Promise.resolve();
@@ -392,10 +542,13 @@ async function callModel(db: Database, llm: LlmClient, runId: string, request: P
     const pendingThinking = thinking;
     text = '';
     thinking = '';
-    flushing = flushing.then(async () => {
-      if (pendingThinking) await appendEvent(db, runId, { type: 'thinking_delta', text: pendingThinking });
-      if (pendingText) await appendEvent(db, runId, { type: 'text_delta', text: pendingText });
-    });
+    if (!pendingText && !pendingThinking) return;
+    flushing = flushing
+      .then(async () => {
+        if (pendingThinking) await appendEvent(db, runId, { type: 'thinking_delta', text: pendingThinking });
+        if (pendingText) await appendEvent(db, runId, { type: 'text_delta', text: pendingText });
+      })
+      .catch((error) => log.warn({ err: error, runId }, 'agente: delta do stream não gravado'));
   };
   const timer = setInterval(flush, FLUSH_MS);
   try {
@@ -415,9 +568,20 @@ async function callModel(db: Database, llm: LlmClient, runId: string, request: P
   }
 }
 
-/** Grava os resultados das tools; os arquivos gerados (producesFile) viram anexos desta mensagem da sessão (spec 027). */
-async function insertToolResults(db: Database, runId: string, conversationId: string, results: ToolResultBlock[], files: string[] = []) {
+/**
+ * Grava os resultados das tools (com a cerca da reserva); os arquivos gerados (producesFile) viram anexos desta
+ * mensagem da sessão (spec 027).
+ */
+async function insertToolResults(
+  db: Database,
+  runId: string,
+  token: string,
+  conversationId: string,
+  results: ToolResultBlock[],
+  files: string[] = [],
+) {
   await db.transaction(async (tx) => {
+    await assertLock(tx, runId, token);
     const message = await insertMessage(tx, conversationId, 'tool', results, runId);
     for (const attachmentId of files) {
       await tx.execute(sql`
@@ -429,7 +593,11 @@ async function insertToolResults(db: Database, runId: string, conversationId: st
 
 /**
  * Resolve os tool_use pendentes: pede confirmação do que precisa (e para) ou
- * executa tudo na ordem (aprovadas, recusadas viram erro para o modelo).
+ * executa tudo na ordem (aprovadas, recusadas viram erro para o modelo). Antes
+ * de cada tool a partir da segunda, confere o "parar" e a reserva (tarefa
+ * 097): cancelada no meio do lote, grava os resultados reais das que rodaram e
+ * "cancelado" nas demais; reserva perdida, para sem gravar (a retomada trata o
+ * tool_start como interrompido).
  */
 async function resolvePending(
   ctx: ServiceContext,
@@ -438,6 +606,7 @@ async function resolvePending(
   token: string,
   conversationId: string,
   pending: { id: string; name: string; input: Record<string, unknown> }[],
+  guard: { checkpoint: () => Promise<void>; signal: AbortSignal },
 ): Promise<'awaiting' | 'done'> {
   const db = ctx.db;
   const confirmations = new Map((await loadConfirmations(db, runId)).map((c) => [c.toolUseId, c]));
@@ -455,7 +624,17 @@ async function resolvePending(
     try {
       toConfirm.push({ use, preview: await tools.preview(ctx, tool, use.input) });
     } catch (error) {
-      preErrors.set(use.id, toolErrorMessage(error));
+      preErrors.set(
+        use.id,
+        reportToolError(ctx.log, error, {
+          tool: use.name,
+          runId,
+          toolUseId: use.id,
+          stage: 'preview',
+          write: tool.write,
+          secret: tool.source === 'internal' && Boolean(tool.def.secrets?.length),
+        }),
+      );
     }
   }
 
@@ -489,7 +668,20 @@ async function resolvePending(
 
   const results: ToolResultBlock[] = [];
   const files: string[] = [];
-  for (const use of pending) {
+  for (const [index, use] of pending.entries()) {
+    if (index > 0) {
+      try {
+        await guard.checkpoint();
+      } catch (stop) {
+        if (stop instanceof Canceled) {
+          const rest = pending
+            .slice(index)
+            .map((u): ToolResultBlock => ({ type: 'tool_result', tool_use_id: u.id, content: t.agents.errors.canceled, is_error: true }));
+          await insertToolResults(db, runId, token, conversationId, [...results, ...rest], files);
+        }
+        throw stop;
+      }
+    }
     const tool = tools.resolve(use.name);
     const confirmation = confirmations.get(use.id);
     const secret = tool?.source === 'internal' && Boolean(tool.def.secrets?.length);
@@ -509,7 +701,7 @@ async function resolvePending(
       outcome = errorOutcome('A execução foi interrompida durante esta ação; confira o resultado antes de repetir.');
     else {
       await appendEvent(db, runId, { type: 'tool_start', toolUseId: use.id, name: use.name, title: tool.title });
-      outcome = await tools.execute(ctx, tool, use.input, { toolUseId: use.id, runId });
+      outcome = await tools.execute(ctx, tool, use.input, { toolUseId: use.id, runId, signal: guard.signal });
     }
     if (announce) {
       await appendEvent(db, runId, {
@@ -523,7 +715,7 @@ async function resolvePending(
     files.push(...(outcome.files ?? []));
     results.push({ type: 'tool_result', tool_use_id: use.id, content: outcome.content, ...(outcome.isError ? { is_error: true } : {}) });
   }
-  await insertToolResults(db, runId, conversationId, results, files);
+  await insertToolResults(db, runId, token, conversationId, results, files);
   return 'done';
 }
 

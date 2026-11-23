@@ -6,6 +6,7 @@ import {
   type PeriodClosingRow,
   type periodClosingInput,
   t,
+  todayIso,
 } from '@moneyflow/shared';
 import { and, eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
@@ -97,7 +98,12 @@ async function assertRecordReadable(ctx: ServiceContext, table: string, recordId
 }
 
 /** Histórico de um registro (antes/depois de cada alteração). */
-export async function recordHistory(ctx: ServiceContext, table: string, recordId: string): Promise<AuditEntry[]> {
+export async function recordHistory(
+  ctx: ServiceContext,
+  table: string,
+  recordId: string,
+  page: { limit?: number; offset?: number } = {},
+): Promise<AuditEntry[]> {
   await assertRecordReadable(ctx, table, recordId);
   // Atribuir e remover tags é alteração da entidade: as ligações são auditadas com record_id = entity_id.
   const tables = table === 'entities' ? ['entities', 'entity_tag_links'] : [table];
@@ -105,7 +111,7 @@ export async function recordHistory(ctx: ServiceContext, table: string, recordId
     sql`${entrySql} WHERE l.table_name IN (${sql.join(
       tables.map((name) => sql`${name}`),
       sql`, `,
-    )}) AND l.record_id = ${recordId} ORDER BY l.id DESC LIMIT 500`,
+    )}) AND l.record_id = ${recordId} ORDER BY l.id DESC LIMIT ${page.limit ?? 500} OFFSET ${page.offset ?? 0}`,
   );
   return result.rows.map(toEntry);
 }
@@ -147,20 +153,31 @@ export async function closingsOverview(ctx: ServiceContext, caixaId: string): Pr
   };
 }
 
+/**
+ * Linhas pendentes por mês das contas da caixa ou do cartão que ela é. O alvo pelas colunas da linha, e não
+ * por um coalesce, e o mês por intervalo: os índices (conta, data) e (cartão, data) servem (tarefa 143).
+ */
 async function unreconciledByMonth(ctx: ServiceContext, caixaId: string, month?: string) {
   const result = await ctx.db.execute<{ month: string; lines: number }>(sql`
     SELECT date_trunc('month', l.posted_on)::date AS month, count(*)::int AS lines
       FROM statement_lines l
-      LEFT JOIN financial_accounts a ON a.id = l.financial_account_id
-     WHERE coalesce(a.caixa_id, l.card_caixa_id) = ${caixaId} AND l.status IN ('new', 'suggested')
-       ${month ? sql`AND date_trunc('month', l.posted_on)::date = ${month}::date` : sql``}
+     WHERE (l.financial_account_id IN (SELECT a.id FROM financial_accounts a WHERE a.caixa_id = ${caixaId}::uuid)
+            OR l.card_caixa_id = ${caixaId}::uuid)
+       AND l.status IN ('new', 'suggested')
+       ${month ? sql`AND l.posted_on >= ${month}::date AND l.posted_on < (${month}::date + interval '1 month')::date` : sql``}
      GROUP BY 1 ORDER BY 1 DESC`);
   return result.rows.map((r) => ({ month: r.month, lines: Number(r.lines) }));
+}
+
+/** Só se fecha até o mês atual em São Paulo: o fechamento congela o que já aconteceu (spec 008, tarefa 082). */
+export function assertClosableMonth(month: string) {
+  if (month > `${todayIso().slice(0, 7)}-01`) throw new AppError(422, 'closing_future_month', t.errors.closingFutureMonth);
 }
 
 /** Fecha o mês na caixa (spec 008: depois da conciliação; `force` fecha com pendências). */
 export async function closeMonth(ctx: ServiceContext, caixaId: string, input: z.output<typeof periodClosingInput>) {
   ctx.access.assertWrite(caixaId);
+  assertClosableMonth(input.month);
   if (!input.force) {
     const [pending] = await unreconciledByMonth(ctx, caixaId, input.month);
     if (pending && pending.lines > 0) throw new AppError(422, 'closing_unreconciled', t.errors.closingUnreconciled(pending.lines));

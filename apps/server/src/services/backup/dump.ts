@@ -3,6 +3,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Transform } from 'node:stream';
 import { pg } from '@moneyflow/db';
 import { type BackupStatus, type DumpRestoreResult, t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
@@ -12,6 +13,7 @@ import type { ServiceContext } from '../../context';
 import { AppError, unprocessable } from '../../errors';
 import { resetCatalog } from './catalog';
 import { schemaVersion } from './export';
+import { withBackupLock } from './lock';
 import { backupUnzipLimit, UnzipTooLarge, unzipLimited } from './unzip';
 
 /*
@@ -89,6 +91,7 @@ function pipeRun(
   producer: { command: string; args: string[] },
   consumer: { command: string; args: string[] },
   env: NodeJS.ProcessEnv,
+  through?: Transform,
 ): Promise<{ producer: Run; consumer: Run }> {
   return new Promise((resolve, reject) => {
     const from = spawn(producer.command, producer.args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -102,7 +105,6 @@ function pipeRun(
     to.stderr.on('data', collect('consumer'));
     // EPIPE quando o psql para antes: o erro que importa é o dele.
     to.stdin.on('error', () => {});
-    from.stdout.pipe(to.stdin);
     let failed = false;
     const fail = (error: Error) => {
       if (failed) return;
@@ -113,6 +115,12 @@ function pipeRun(
     };
     from.on('error', fail);
     to.on('error', fail);
+    if (through) {
+      through.on('error', fail);
+      from.stdout.pipe(through).pipe(to.stdin);
+    } else {
+      from.stdout.pipe(to.stdin);
+    }
     const done = () => {
       if (!failed && results.producer && results.consumer) resolve(results as { producer: Run; consumer: Run });
     };
@@ -122,8 +130,53 @@ function pipeRun(
     });
     to.on('close', (code) => {
       results.consumer = { code: code ?? 1, stdout: '', stderr: errs.consumer };
+      // Com a passagem no meio, o produtor não vê o pipe fechar: sem ler a saída dele, ficaria bloqueado na escrita.
+      // Fechar a ponta de leitura dá a ele o EPIPE, como no pipe direto.
+      if (through && !results.producer) {
+        from.stdout.unpipe();
+        from.stdout.destroy();
+      }
       done();
     });
+  });
+}
+
+const LOCK_TIMEOUT_OFF = Buffer.from('\nSET lock_timeout = 0;\n');
+/** Até onde procurar o SET no começo do SQL (o cabeçalho tem poucas centenas de bytes). */
+const HEADER_SCAN_BYTES = 64 * 1024;
+
+/**
+ * O prazo da espera por lock na restauração (tarefa 102). O SQL que o `pg_restore -f -` gera começa com
+ * `SET lock_timeout = 0;`, que vence o `PGOPTIONS`: esta passagem troca essa linha do cabeçalho por
+ * `SET lock_timeout = '<ms>ms';`. Uma restauração que espera um lock (uma transação longa da API ou do
+ * worker) falha no prazo, com a transação desfeita, em vez de enfileirar atrás dela as consultas da
+ * aplicação. O resto do SQL passa sem mudança; sem a linha no começo, passa inteiro (o `PGOPTIONS` vale).
+ */
+export function restoreLockTimeout(ms: number): Transform {
+  const replacement = Buffer.from(`\nSET lock_timeout = '${Math.max(1, Math.round(ms))}ms';\n`);
+  let head: Buffer | null = Buffer.alloc(0);
+  return new Transform({
+    transform(chunk: Buffer, _encoding, done) {
+      if (!head) return done(null, chunk);
+      head = Buffer.concat([head, chunk]);
+      const at = head.indexOf(LOCK_TIMEOUT_OFF);
+      if (at >= 0) {
+        const out = Buffer.concat([head.subarray(0, at), replacement, head.subarray(at + LOCK_TIMEOUT_OFF.length)]);
+        head = null;
+        return done(null, out);
+      }
+      if (head.length > HEADER_SCAN_BYTES) {
+        const out = head;
+        head = null;
+        return done(null, out);
+      }
+      done();
+    },
+    flush(done) {
+      const out = head;
+      head = null;
+      done(null, out && out.length > 0 ? out : undefined);
+    },
   });
 }
 
@@ -190,18 +243,6 @@ export async function backupStatus(ctx: ServiceContext): Promise<BackupStatus> {
   };
 }
 
-let busy = false;
-
-async function exclusive<T>(fn: () => Promise<T>): Promise<T> {
-  if (busy) throw new AppError(409, 'backup_busy', t.backup.errors.busy);
-  busy = true;
-  try {
-    return await fn();
-  } finally {
-    busy = false;
-  }
-}
-
 async function assertAvailable(config: Config) {
   const availability = await dumpAvailability(config);
   if (availability.error) throw unprocessable(`${t.backup.errors.dumpUnavailable} (${availability.error})`, 'dump_unavailable');
@@ -211,8 +252,9 @@ async function assertAvailable(config: Config) {
 /** Gera o dump (formato custom do pg_dump) e o grava em `zipPath` com um manifest. */
 export async function createDumpZip(ctx: ServiceContext, zipPath: string, log: BackupLog): Promise<void> {
   ctx.access.assertAdmin();
-  const version = await assertAvailable(ctx.config);
-  await exclusive(async () => {
+  // A trava antes de tudo (tarefa 172): com outra operação em andamento, 409 na hora.
+  await withBackupLock(ctx.db, async () => {
+    const version = await assertAvailable(ctx.config);
     const dir = await mkdtemp(join(tmpdir(), 'moneyflow-dump-'));
     try {
       const dumpPath = join(dir, DUMP_FILE);
@@ -332,10 +374,11 @@ async function dumpSchemaVersion(config: Config, dumpPath: string): Promise<stri
 /** Restaura o banco inteiro a partir do dump (destrói o conteúdo atual). */
 export async function restoreDump(ctx: ServiceContext, body: unknown, log: BackupLog): Promise<DumpRestoreResult> {
   ctx.access.assertAdmin();
-  await assertAvailable(ctx.config);
   const started = Date.now();
-  const { dump, manifest } = extractDump(body, backupUnzipLimit(ctx.config));
-  return exclusive(async () => {
+  // A trava antes de tudo (tarefa 172): com uma importação ou exportação em andamento, 409 na hora.
+  return withBackupLock(ctx.db, async () => {
+    await assertAvailable(ctx.config);
+    const { dump, manifest } = extractDump(body, backupUnzipLimit(ctx.config));
     const dir = await mkdtemp(join(tmpdir(), 'moneyflow-restore-'));
     try {
       const dumpPath = join(dir, DUMP_FILE);
@@ -354,7 +397,10 @@ export async function restoreDump(ctx: ServiceContext, body: unknown, log: Backu
       }
       const listPath = join(dir, 'restore.list');
       await writeFile(listPath, await restoreList(ctx.config, dumpPath), { mode: 0o600 });
-      const env: NodeJS.ProcessEnv = { ...pgEnv(ownerUrl), PGOPTIONS: '-c lock_timeout=30s' };
+      // A espera por lock com o prazo do pool (DB_LOCK_TIMEOUT_MS): o PGOPTIONS vale para o começo da sessão do psql,
+      // e o SET do cabeçalho do SQL, que o zeraria, é trocado no caminho (restoreLockTimeout).
+      const lockMs = ctx.config.dbTimeouts.lockTimeoutMs;
+      const env: NodeJS.ProcessEnv = { ...pgEnv(ownerUrl), PGOPTIONS: `-c lock_timeout=${lockMs}ms` };
       // pg_restore só gera o SQL (sem conexão); o psql o roda numa transação, zerando antes os privilégios padrão.
       const out = await pipeRun(
         { command: pgBin(ctx.config, 'pg_restore'), args: ['--clean', '--if-exists', '--no-owner', '-L', listPath, '-f', '-', dumpPath] },
@@ -363,6 +409,7 @@ export async function restoreDump(ctx: ServiceContext, body: unknown, log: Backu
           args: ['-X', '-q', '--single-transaction', '-v', 'ON_ERROR_STOP=1', '-c', 'SELECT restore_reset_default_privileges()', '-f', '-'],
         },
         env,
+        restoreLockTimeout(lockMs),
       );
       if (out.producer.code !== 0 || out.consumer.code !== 0) {
         const stderr = [out.consumer.stderr, out.producer.stderr].filter(Boolean).join('\n');

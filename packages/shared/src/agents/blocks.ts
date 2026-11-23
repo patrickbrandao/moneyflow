@@ -58,6 +58,48 @@ export function blocksText(blocks: readonly AiBlock[]): string {
     .join('\n');
 }
 
+/** Voltas de tool mantidas por inteiro no histórico enviado (tarefa 098): de `keep` a `2 × keep − 1` mais recentes. */
+export const HISTORY_FULL_TOOL_TURNS = 10;
+/** Resultado de tool antigo com mais caracteres que isto vira o marcador (os curtos ficam como estão). */
+export const HISTORY_COMPACT_MIN_CHARS = 2000;
+/** Começo do resultado antigo mantido antes do marcador. */
+const HISTORY_COMPACT_HEAD = 300;
+
+/**
+ * Corte do histórico ENVIADO ao modelo (tarefa 098, spec 026); o gravado em
+ * ai_messages não muda. Os resultados de tool longos das voltas antigas viram
+ * o começo do texto mais um marcador (`omitted`, com o tamanho original). As
+ * voltas mantidas por inteiro andam em degraus de `keep`: o corte só muda a
+ * cada `keep` voltas, e entre um degrau e outro o prefixo do histórico fica
+ * igual (o cache do histórico da spec 022 continua valendo). Determinístico:
+ * o mesmo histórico dá sempre o mesmo corte.
+ */
+export function compactToolResults(
+  messages: NeutralMessage[],
+  omitted: (chars: number) => string,
+  options: { keep?: number; minChars?: number } = {},
+): NeutralMessage[] {
+  const keep = Math.max(1, options.keep ?? HISTORY_FULL_TOOL_TURNS);
+  const minChars = options.minChars ?? HISTORY_COMPACT_MIN_CHARS;
+  const turns = messages.filter((m) => m.role === 'tool').length;
+  const cut = Math.max(0, Math.floor((turns - keep) / keep) * keep);
+  if (cut === 0) return messages;
+  let seen = 0;
+  return messages.map((message) => {
+    if (message.role !== 'tool') return message;
+    seen += 1;
+    if (seen > cut || !message.content.some((b) => b.content.length > minChars)) return message;
+    return {
+      role: 'tool',
+      content: message.content.map((block) =>
+        block.content.length > minChars
+          ? { ...block, content: `${block.content.slice(0, HISTORY_COMPACT_HEAD)}…\n${omitted(block.content.length)}` }
+          : block,
+      ),
+    };
+  });
+}
+
 /**
  * Corta o histórico para não deixar tool_use sem tool_result (o provedor
  * recusaria): remove do fim as mensagens do assistente com tool_use cujo

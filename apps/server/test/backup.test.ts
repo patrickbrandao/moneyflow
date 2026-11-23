@@ -1,13 +1,18 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pg } from '@moneyflow/db';
-import { formatCnpj } from '@moneyflow/shared';
+import { DUMP_RESTORE_CONFIRMATION, formatCnpj } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
-import { extractDump } from '../src/services/backup/dump';
-import { parseBackupUpload } from '../src/services/backup/import';
+import { loadAccess } from '../src/authz/access';
+import type { ServiceContext } from '../src/context';
+import { loadCatalog } from '../src/services/backup/catalog';
+import { extractDump, restoreLockTimeout } from '../src/services/backup/dump';
+import { ATTACHMENT_ENTRY_PREFIX, exportFullZip, tableBatches } from '../src/services/backup/export';
+import { backupText, parseBackupUpload } from '../src/services/backup/import';
 import { backupUnzipLimit, UnzipTooLarge } from '../src/services/backup/unzip';
 import {
   alphaCnpj,
@@ -823,6 +828,66 @@ describe('backup: recursos num sistema novo', () => {
     expect((await bApi.get('/api/classification-rules')).some((r: any) => r.pattern === orphan.pattern)).toBe(false);
   });
 
+  it('mapeamento de CSV de arquivo antigo, sem o sinal, entra invertido no cartão e como vem na conta (tarefa 091)', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const bApi = client(b, adminB.cookie);
+    const tag = uid();
+    const holder = await bApi.post('/api/entities', { kind: 'company', name: `Titular CSV ${tag}` });
+    const caixa = await bApi.post('/api/caixas', { name: `Caixa CSV ${tag}`, holderEntityId: holder.id });
+    const checking = await bApi.post(`/api/caixas/${caixa.id}/accounts`, {
+      kind: 'checking',
+      name: 'Corrente',
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const issuer = await bApi.post('/api/entities', { kind: 'company', name: `Emissor CSV ${tag}` });
+    const card = await bApi.post('/api/caixas', {
+      name: `Cartão CSV ${tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: caixa.id,
+      creditLimitCents: 100_000,
+      closingDay: 25,
+      dueDay: 5,
+      cardLast4: '5151',
+    });
+    const mapping = (target: { financial_account_id?: string; card_caixa_id?: string }, name: string, extra: object = {}) => ({
+      id: randomUUID(),
+      financial_account_id: null,
+      card_caixa_id: null,
+      ...target,
+      name,
+      delimiter: ';',
+      encoding: 'utf-8',
+      has_header: true,
+      skip_rows: 0,
+      date_format: 'dd/MM/yyyy',
+      decimal_separator: ',',
+      columns: { date: 0, description: 1, amount: 2 },
+      is_default: false,
+      ...extra,
+    });
+    const base = await exportJson(h, adminA.cookie, 'categories');
+    const rows = [
+      mapping({ card_caixa_id: card.id }, 'Fatura antiga'),
+      mapping({ financial_account_id: checking.id }, 'Conta antiga'),
+      // Arquivo novo: o sinal gravado vale.
+      mapping({ card_caixa_id: card.id }, 'Fatura nova', { amount_sign: 'as_is' }),
+    ];
+    const report = await importFile(b, adminB.cookie, 'full', {
+      ...base,
+      kind: 'full',
+      tables: { statement_csv_mappings: rows },
+      references: {},
+    });
+    expect(failures(report)).toEqual([]);
+    const signOf = async (query: string) =>
+      Object.fromEntries((await bApi.get(`/api/csv-mappings?${query}`)).map((m: any) => [m.name, m.amountSign]));
+    expect(await signOf(`cardCaixaId=${card.id}`)).toEqual({ 'Fatura antiga': 'invert', 'Fatura nova': 'as_is' });
+    expect(await signOf(`accountId=${checking.id}`)).toEqual({ 'Conta antiga': 'as_is' });
+  });
+
   it('contratos de arquivo antigo (parcelas por ciclo, conta de passagem, tarefa aberta) viram obrigações em série (spec 034)', async () => {
     if (skip) return;
     const adminA = await userSession(h, 'admin');
@@ -1270,6 +1335,80 @@ describe('backup: dump e restauração pelo dono (tarefa 054)', () => {
     if (!inject('superDatabaseUrl')) return ctx.skip();
     if ((await roundTrip('super')) === 'skip') ctx.skip();
   });
+
+  it('o SQL da restauração troca o SET lock_timeout = 0 do cabeçalho pelo prazo (tarefa 102), mesmo partido em pedaços', async () => {
+    const header = [
+      '--',
+      '-- PostgreSQL database dump',
+      '--',
+      '',
+      'SET statement_timeout = 0;',
+      'SET lock_timeout = 0;',
+      'SET idle_in_transaction_session_timeout = 0;',
+      "SET client_encoding = 'UTF8';",
+      '',
+      "INSERT INTO t VALUES ('SET lock_timeout = 0;');",
+      'SET lock_timeout = 0;',
+      '',
+    ].join('\n');
+    const through = async (input: Buffer, size: number) => {
+      const transform = restoreLockTimeout(1500);
+      const out: Buffer[] = [];
+      transform.on('data', (chunk: Buffer) => out.push(chunk));
+      const ended = new Promise((resolve) => transform.on('end', resolve));
+      for (let at = 0; at < input.length; at += size) transform.write(input.subarray(at, at + size));
+      transform.end();
+      await ended;
+      return Buffer.concat(out).toString('utf8');
+    };
+    for (const size of [1, 7, 4096]) {
+      const out = await through(Buffer.from(header), size);
+      // Só a linha do cabeçalho muda: o resto (inclusive o mesmo texto adiante) passa igual.
+      expect(out).toBe(header.replace('\nSET lock_timeout = 0;\n', "\nSET lock_timeout = '1500ms';\n"));
+    }
+    // Sem a linha no começo (outro formato), tudo passa sem mudança, inclusive o que vem depois dos 64 KB.
+    const plain = Buffer.from(`${'-- x\n'.repeat(20_000)}SET lock_timeout = 0;\n`);
+    expect(await through(plain, 1000)).toBe(plain.toString('utf8'));
+  });
+
+  it('a restauração que espera um lock falha no prazo da DB_LOCK_TIMEOUT_MS, sem mudar nada (tarefa 102)', async (ctx) => {
+    const urls = await freshDatabaseUrls();
+    if (!urls) return ctx.skip();
+    const app = await startApp({ DATABASE_OWNER_URL: urls.owner, PG_BIN_DIR: pgBinDir, DB_LOCK_TIMEOUT_MS: '1000' }, urls.app);
+    const holder = new pg.Client({ connectionString: urls.app });
+    // O DROP DATABASE … WITH (FORCE) do fim derruba a conexão: sem ouvinte, a queda viraria exceção.
+    holder.on('error', () => {});
+    try {
+      const admin = await userSession(app, 'admin');
+      const api = client(app, admin.cookie);
+      if (!(await api.get('/api/backup/status')).dumpAvailable) return ctx.skip();
+      const dump = await app.app.inject({ method: 'GET', url: '/api/backup/dump', headers: { cookie: admin.cookie } });
+      expect(dump.statusCode, dump.body).toBe(200);
+      const after = await api.post('/api/categories', { kind: 'expense', name: `Depois ${uid()}`, colorSlot: 5 });
+      // Uma transação longa da aplicação segura a tabela: o DROP da restauração espera o lock.
+      await holder.connect();
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM categories LIMIT 1');
+      const started = Date.now();
+      const restored = await app.app.inject({
+        method: 'POST',
+        url: '/api/backup/restore-dump?confirm=RESTAURAR',
+        payload: dump.rawPayload,
+        headers: { cookie: admin.cookie, 'content-type': 'application/zip' },
+      });
+      expect(restored.statusCode, restored.body).toBe(422);
+      expect(restored.json().error.code).toBe('restore_failed');
+      expect(restored.body).toMatch(/lock timeout/i);
+      expect(Date.now() - started).toBeLessThan(20_000);
+      await holder.query('ROLLBACK');
+      // Desfeita inteira: o que foi criado depois do dump continua lá.
+      const ids = (await api.get('/api/categories')).map((c: { id: string }) => c.id);
+      expect(ids).toContain(after.id);
+    } finally {
+      await holder.end().catch(() => {});
+      await app.close();
+    }
+  }, 120_000);
 });
 
 describe('backup: JSON completo num sistema novo', () => {
@@ -1461,6 +1600,23 @@ describe('backup: JSON completo num sistema novo', () => {
     expect(json.tables.audit_log).toBeUndefined();
     expect(json.tables.users.find((u: any) => u.id === session.id).password).toBe(session.password);
     expect(json.tables.attachments.length).toBeGreaterThan(0);
+    // Anexos (tarefa 077): o conteúdo em entradas próprias do zip, fora do JSON.
+    const entries = unzipSync(new Uint8Array(zip));
+    for (const row of json.tables.attachments) {
+      expect(row.content).toBeUndefined();
+      expect(row.content_entry).toBe(`${ATTACHMENT_ENTRY_PREFIX}${row.id}`);
+      expect(entries[row.content_entry]).toBeDefined();
+    }
+    const shaOf = async (target: Harness) =>
+      Object.fromEntries(
+        (
+          await target.db.execute<{ id: string; sha256: string }>(
+            sql`SELECT id::text AS id, sha256 FROM attachments WHERE id = ANY(${`{${json.tables.attachments.map((r: any) => r.id).join(',')}}`}::uuid[])`,
+          )
+        ).rows.map((r) => [r.id, r.sha256]),
+      );
+    const shaA = await shaOf(h);
+    expect(Object.keys(shaA)).toHaveLength(json.tables.attachments.length);
 
     const b = await startApp({}, url);
     try {
@@ -1474,6 +1630,9 @@ describe('backup: JSON completo num sistema novo', () => {
       expect(failures(report)).toEqual([]);
       expect(sum(report, 'titles').imported).toBe(json.tables.titles.length);
       expect(sum(report, 'movements').imported).toBe(json.tables.movements.length);
+      expect(sum(report, 'attachments').imported).toBe(json.tables.attachments.length);
+      // O conteúdo de cada anexo chega igual (o sha256 é calculado pelo banco).
+      expect(await shaOf(b)).toEqual(shaA);
 
       // Mesmos saldos e situações nos dois sistemas.
       const accountsA = await admin.get('/api/accounts');
@@ -1525,6 +1684,205 @@ describe('backup: JSON completo num sistema novo', () => {
   }, 180_000);
 });
 
+describe('backup: anexos, escrita, paginação e trava do JSON completo (tarefas 077, 113, 172 e 173)', () => {
+  const adminCtx = async (session: Awaited<ReturnType<typeof userSession>>): Promise<ServiceContext> => ({
+    db: h.db,
+    config: h.config,
+    access: await loadAccess(h.db, {
+      id: session.id,
+      username: session.username,
+      email: `${session.username}@teste.local`,
+      role: 'admin' as const,
+      isActive: true,
+    }),
+  });
+
+  it('arquivo antigo, com o conteúdo do anexo em hex no JSON, continua importando', async () => {
+    const session = await userSession(h, 'admin');
+    const content = randomBytes(2048);
+    const id = randomUUID();
+    const file = {
+      format: 'moneyflow-backup',
+      version: 1,
+      kind: 'full',
+      schemaVersion: null,
+      exportedAt: new Date().toISOString(),
+      exportedBy: 'antigo',
+      tables: {
+        attachments: [
+          {
+            id,
+            file_name: 'antigo.bin',
+            mime_type: 'application/octet-stream',
+            content: `\\x${content.toString('hex')}`,
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+          },
+        ],
+      },
+    };
+    const report = await importFile(h, session.cookie, 'full', Buffer.from(zipSync({ 'moneyflow.json': strToU8(JSON.stringify(file)) })));
+    expect(failures(report)).toEqual([]);
+    expect(sum(report, 'attachments').imported).toBe(1);
+    const row = await h.db.execute<{ sha256: string; size_bytes: number }>(
+      sql`SELECT sha256, size_bytes FROM attachments WHERE id = ${id}::uuid`,
+    );
+    expect(row.rows[0]).toEqual({ sha256: createHash('sha256').update(content).digest('hex'), size_bytes: 2048 });
+
+    // O formato novo sem a entrada do anexo no zip: o anexo não entra, com o motivo; o resto segue.
+    const missing = {
+      ...file,
+      tables: { attachments: [{ ...file.tables.attachments[0]!, id: randomUUID(), content: undefined, content_entry: 'attachments/x' }] },
+    };
+    const bad = await importFile(h, session.cookie, 'full', Buffer.from(zipSync({ 'moneyflow.json': strToU8(JSON.stringify(missing)) })), {
+      dryRun: true,
+    });
+    expect(failures(bad).map((i) => i.reason)).toEqual(['O conteúdo do anexo não está no .zip (entrada attachments/ ausente).']);
+  });
+
+  it('JSON acima do limite de string recebe 413 com a mensagem, não 500', () => {
+    const error = (() => {
+      try {
+        backupText(new Uint8Array(64), 32);
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(error).toMatchObject({ status: 413, code: 'backup_json_too_large' });
+    expect(backupText(strToU8('{"a":1}'))).toBe('{"a":1}');
+  });
+
+  it('falha de escrita do zip volta como erro da chamada e solta a trava (tarefa 113)', async () => {
+    const session = await userSession(h, 'admin');
+    const ctx = await adminCtx(session);
+    await expect(exportFullZip(ctx, join(tmpdir(), `moneyflow-nao-existe-${uid()}`, 'x.zip'))).rejects.toThrow(/ENOENT/);
+    // A trava do backup foi solta: outra conexão a pega.
+    const probe = new pg.Client({ connectionString: h.config.databaseUrl });
+    await probe.connect();
+    try {
+      const got = await probe.query<{ ok: boolean }>(`SELECT pg_try_advisory_lock(hashtext('moneyflow:backup')) AS ok`);
+      expect(got.rows[0]?.ok).toBe(true);
+      await probe.query(`SELECT pg_advisory_unlock(hashtext('moneyflow:backup'))`);
+    } finally {
+      await probe.end();
+    }
+  });
+
+  it('uma operação de backup por vez: a trava do banco vale para todas, de sessão ou de transação (tarefa 172)', async () => {
+    const session = await userSession(h, 'admin');
+    const call = (method: 'GET' | 'POST', url: string, payload?: Buffer) =>
+      h.app.inject({ method, url, payload, headers: { cookie: session.cookie, 'content-type': 'application/octet-stream' } });
+    const small = Buffer.from(
+      JSON.stringify({
+        format: 'moneyflow-backup',
+        version: 1,
+        kind: 'full',
+        schemaVersion: null,
+        exportedAt: '',
+        exportedBy: '',
+        tables: { categories: [{ id: randomUUID(), kind: 'expense', name: `Trava ${uid()}`, color_slot: 1 }] },
+      }),
+    );
+    const all = () => [
+      call('GET', '/api/backup/full'),
+      call('GET', '/api/backup/dump'),
+      call('POST', '/api/backup/import/full', small),
+      call('POST', `/api/backup/restore-dump?confirm=${DUMP_RESTORE_CONFIRMATION}`, Buffer.from('PGDMP-nada')),
+    ];
+    const holder = new pg.Client({ connectionString: h.config.databaseUrl });
+    await holder.connect();
+    try {
+      // Outra réplica (ou outra aba) com o dump, a restauração ou o JSON completo: trava de sessão.
+      await holder.query(`SELECT pg_advisory_lock(hashtext('moneyflow:backup'))`);
+      for (const res of await Promise.all(all())) {
+        expect(res.statusCode, res.body.slice(0, 200)).toBe(409);
+        expect(res.json().error.code).toBe('backup_busy');
+      }
+      await holder.query(`SELECT pg_advisory_unlock(hashtext('moneyflow:backup'))`);
+      // Uma importação em andamento: a trava de transação.
+      await holder.query('BEGIN');
+      await holder.query(`SELECT pg_advisory_xact_lock(hashtext('moneyflow:backup'))`);
+      for (const res of await Promise.all(all())) expect(res.statusCode, res.body.slice(0, 200)).toBe(409);
+      await holder.query('ROLLBACK');
+    } finally {
+      await holder.end();
+    }
+    // Sem ninguém com a trava, a importação volta a rodar.
+    expect((await call('POST', '/api/backup/import/full?dryRun=1', small)).statusCode).toBe(200);
+  });
+
+  it('a paginação do JSON completo com lote 2 dá o mesmo conteúdo, com a chave composta na ordem do tipo (tarefa 173)', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    // entity_tag_links: 3 ligações.
+    const tags = [];
+    for (let i = 0; i < 3; i += 1) tags.push(await admin.post('/api/entity-tags', { name: `Lote ${i} ${s.tag}`, colorSlot: i + 1 }));
+    await admin.patch(`/api/entities/${s.supplier.id}`, { tagIds: tags.map((tag: any) => tag.id) });
+    // ai_tool_kit_tools: um kit com 3 tools.
+    const catalog: any[] = await admin.get('/api/admin/ai/tools');
+    await admin.post('/api/admin/ai/tool-kits', {
+      name: `Kit lote ${s.tag}`,
+      tools: catalog
+        .filter((tool) => !tool.secret)
+        .slice(0, 3)
+        .map((tool) => ({ name: tool.name, mode: 'allow' })),
+    });
+    // card_recurring_charge_amounts: degraus nas ocorrências 2, 3 e 10 da cobrança no cartão.
+    const issuer = await admin.post('/api/entities', { kind: 'company', name: `Emissor lote ${s.tag}` });
+    const card = await admin.post('/api/caixas', {
+      name: `Cartão lote ${s.tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: s.caixaA.id,
+      creditLimitCents: 500_000,
+      closingDay: 3,
+      dueDay: 10,
+      cardLast4: '9876',
+    });
+    const contract = await admin.post('/api/contracts', {
+      caixaId: s.caixaA.id,
+      entityId: s.supplier.id,
+      direction: 'payable',
+      categoryId: s.expense.id,
+      name: `Assinatura lote ${s.tag}`,
+      startsOn: '2026-11-01',
+      endsOn: '2027-12-31',
+      obligations: [{ kind: 'card', description: 'Streaming', amountCents: 1_000, firstDueDate: '2026-11-15', cardCaixaId: card.id }],
+    });
+    const ruleId = contract.obligations[0].id;
+    for (const [effectiveOn, amountCents] of [
+      ['2026-12-01', 1_100],
+      ['2027-01-01', 1_200],
+      ['2027-08-01', 1_300],
+    ] as const) {
+      await admin.post(`/api/contracts/${contract.id}/amendments`, { effectiveOn, ruleIds: [ruleId], amountCents });
+    }
+
+    const ctx = await adminCtx(session);
+    const meta = await loadCatalog(h.db);
+    const read = (table: string, maxRows?: number) =>
+      h.db.transaction(
+        async (tx) => {
+          const rows = [];
+          for await (const batch of tableBatches(tx as never, meta, table, ctx.access.actor.id, { maxRows })) rows.push(...batch);
+          return rows;
+        },
+        { isolationLevel: 'repeatable read', accessMode: 'read only' },
+      );
+    for (const table of ['entity_tag_links', 'ai_tool_kit_tools', 'card_recurring_charge_amounts']) {
+      const paged = await read(table, 2);
+      expect(paged.length, table).toBeGreaterThanOrEqual(3);
+      expect(paged, table).toEqual(await read(table));
+    }
+    const steps = (await read('card_recurring_charge_amounts', 2))
+      .filter((row: any) => row.recurrence_rule_id === ruleId)
+      .map((row: any) => row.from_occurrence);
+    expect(steps).toEqual([...steps].sort((a, b) => a - b));
+    expect(steps).toEqual(expect.arrayContaining([2, 3, 10]));
+  });
+});
+
 describe('backup: lote provisório substituído (spec 031) num sistema novo', () => {
   it('o substituído, o vínculo, os desfechos e a conciliação da linha do consolidado chegam iguais, sem conflito', async () => {
     const url = await freshDatabase();
@@ -1562,15 +1920,18 @@ ${list}
     };
     const byName = (lines: any[], name: string) => lines.find((l) => l.description === name);
 
-    // Provisório com duas linhas conciliadas: a tarifa acha o par no consolidado; o lanche, com a data deslocada, não.
+    // Provisório com três linhas conciliadas: a tarifa e a farmácia acham o par no consolidado; o lanche, com a data
+    // deslocada, não. A regra aprendida da farmácia classifica a linha que a substitui: regra → linha do provisório →
+    // substituta → regra, um ciclo só por referências opcionais, que a importação desfaz.
     const prov = await importOfx(
       ofx('2026-10-01', '2026-10-15', [
         { date: '2026-10-03', cents: -5_990, name: 'TARIFA PACOTE' },
+        { date: '2026-10-05', cents: -3_300, name: 'FARMACIA' },
         { date: '2026-10-10', cents: -7_700, name: 'LANCHE' },
       ]),
       '&provisional=true',
     );
-    for (const name of ['TARIFA PACOTE', 'LANCHE']) {
+    for (const name of ['TARIFA PACOTE', 'FARMACIA', 'LANCHE']) {
       await admin.post(`/api/statement-lines/${byName(prov.lines, name).id}/create`, {
         mode: 'adjustment',
         entityId: s.supplier.id,
@@ -1580,11 +1941,25 @@ ${list}
     const cons = await importOfx(
       ofx('2026-10-01', '2026-10-31', [
         { date: '2026-10-03', cents: -5_990, name: 'TARIFA PCT MENSAL' },
+        { date: '2026-10-05', cents: -3_300, name: 'FARMACIA POPULAR' },
         { date: '2026-10-12', cents: -7_700, name: 'LANCHONETE' },
       ]),
     );
     const result = await admin.post(`/api/statement-imports/${cons.id}/supersede`, {});
-    expect(result.transferred.map((i: any) => i.description)).toEqual(['TARIFA PACOTE']);
+    expect(result.transferred.map((i: any) => i.description).sort()).toEqual(['FARMACIA', 'TARIFA PACOTE']);
+    /** A regra aprendida da farmácia, a linha de onde veio e a substituta classificada por ela. */
+    const cycle = async (target: Harness) =>
+      (
+        await target.db.execute(sql`
+          SELECT r.id AS rule_id, r.created_from_line_id, l.superseded_by_line_id, c.classification_rule_id
+            FROM classification_rules r
+            JOIN statement_lines l ON l.id = r.created_from_line_id
+            JOIN statement_lines c ON c.id = l.superseded_by_line_id
+           WHERE l.statement_import_id = ${prov.id} AND l.description = 'FARMACIA'`)
+      ).rows;
+    const cycleBefore = await cycle(h);
+    expect(cycleBefore).toHaveLength(1);
+    expect(cycleBefore[0]).toMatchObject({ classification_rule_id: (cycleBefore[0] as any).rule_id });
     expect(result.pending.map((i: any) => i.description)).toEqual(['LANCHE']);
 
     /** O que importa da troca, lido do banco: lotes, desfechos, vínculos e a conciliação. */
@@ -1620,6 +1995,8 @@ ${list}
       expect(issuesOf(report, 'statement_imports')).toEqual([]);
       expect(issuesOf(report, 'statement_lines')).toEqual([]);
       expect(await snapshot(b)).toEqual(before);
+      // O ciclo da regra com as linhas chega inteiro: a referência opcional volta depois do INSERT.
+      expect(await cycle(b)).toEqual(cycleBefore);
 
       // A API do sistema novo mostra a mesma troca.
       const apiB = client(b, adminB.cookie);

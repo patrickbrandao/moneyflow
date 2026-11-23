@@ -1,10 +1,12 @@
 import { formatDateTime, type MessageDestinationDto, type OutboxMessageDto, type OutboxStatus, t } from '@moneyflow/shared';
-import { Ban, ChevronDown, ChevronRight, History, RotateCcw } from 'lucide-react';
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Ban, History, RotateCcw } from 'lucide-react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '../../lib/api';
 import { useAction } from '../../lib/hooks';
 import { useParamState } from '../../lib/params';
+import { ExpandToggle } from '../a11y';
 import { LoadError, SkelRows } from '../domain';
+
 import { Badge, Button, cx, EmptyRow, type Tone } from '../ui';
 
 const PAGE = 50;
@@ -26,18 +28,27 @@ export function HistoryTab({ destinations }: { destinations: MessageDestinationD
   const [rows, setRows] = useState<OutboxMessageDto[] | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [done, setDone] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   const { run, busy } = useAction();
+  // Só a última carga pedida vale (tarefa 118): a resposta de um filtro anterior, ou um
+  // "Carregar mais" pedido antes da troca, nunca substitui nem se anexa à lista atual.
+  const seq = useRef(0);
 
   const load = useCallback(
     async (before: string | null) => {
+      const mine = ++seq.current;
+      setLoading(true);
       try {
         const page = await api.get<OutboxMessageDto[]>('/api/message-outbox', { destinationId, status, before, limit: PAGE });
+        if (mine !== seq.current) return;
         setRows((current) => (before && current ? [...current, ...page] : page));
         setDone(page.length < PAGE);
         setError(null);
       } catch (err) {
-        setError(err instanceof ApiError ? err : new ApiError(0, 'unknown', String(err)));
+        if (mine === seq.current) setError(err instanceof ApiError ? err : new ApiError(0, 'unknown', String(err)));
+      } finally {
+        if (mine === seq.current) setLoading(false);
       }
     },
     [destinationId, status],
@@ -117,7 +128,11 @@ export function HistoryTab({ destinations }: { destinations: MessageDestinationD
                 <Fragment key={row.id}>
                   <tr className={cx('cursor-pointer', open.has(row.id) && 'is-selected')} onClick={() => toggle(row.id)}>
                     <td>
-                      <span className="report-caret">{open.has(row.id) ? <ChevronDown /> : <ChevronRight />}</span>
+                      <ExpandToggle
+                        open={open.has(row.id)}
+                        label={`${t.messages.events[row.eventKind] ?? row.eventKind} · ${formatDateTime(row.createdAt)}`}
+                        onToggle={() => toggle(row.id)}
+                      />
                     </td>
                     <td className="mono text-xs">{formatDateTime(row.createdAt)}</td>
                     <td>{row.destinationName}</td>
@@ -185,8 +200,8 @@ export function HistoryTab({ destinations }: { destinations: MessageDestinationD
           {done ? (
             <span className="text-[13px] text-faint">{t.messages.end}</span>
           ) : (
-            <Button variant="ghost" onClick={() => void load(rows[rows.length - 1]!.id)}>
-              <History /> {t.messages.loadMore}
+            <Button variant="ghost" disabled={loading} onClick={() => void load(rows[rows.length - 1]!.id)}>
+              <History /> {loading ? t.common.loading : t.messages.loadMore}
             </Button>
           )}
         </div>

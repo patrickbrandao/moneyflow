@@ -80,6 +80,26 @@ describe('mensagens: escape HTML do Telegram', () => {
     expect(summary.text).toContain('<b>Resumo do dia 11/10/2026</b>');
     expect(summary.text).toContain('Internet');
     expect(summary.text).toContain('Atrasados: 2 títulos');
+    expect(summary.text).not.toContain('e mais');
+    // A lista vem cortada pelo worker; o "… e mais N" sai da contagem real (tarefa 105).
+    const many = summaryMessage({
+      heading: 'Resumo',
+      dueLabel: 'Vencem hoje',
+      due: Array.from({ length: 25 }, (_, i) => ({
+        description: `Conta ${i}`,
+        direction: 'payable' as const,
+        dueDate: '2026-10-11',
+        openCents: 100,
+        caixaName: 'Casa',
+      })),
+      dueCount: 260,
+      overdue: { count: 0, cents: 0 },
+      balances: [],
+      flowLabel: 'Ontem',
+      flow: [],
+      showDueDate: false,
+    });
+    expect(many.text).toContain('… e mais 235');
     const invoice = invoiceClosedMessage({
       cardName: 'Nubank',
       referenceMonth: '2026-10-01',

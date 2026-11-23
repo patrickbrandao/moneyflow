@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: d4bf9d3
 ---
 
 # Sino: as não lidas não vêm primeiro e as que passam das 30 mais recentes ficam inalcançáveis
@@ -68,4 +68,15 @@ Nada foi executado. Não verifiquei se a especificação queria "não lidas prim
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: `listNotifications` ordenava só por `created_at DESC, id DESC` com `LIMIT`, sem cursor, e o console pedia 30 sem "ver mais"; a spec 013 diz "não lidas primeiro".
+
 ## Resolução (executor)
+
+- `apps/server/src/services/notifications.ts`: `ORDER BY (read_at IS NULL)::int DESC, created_at DESC, id DESC` e cursor por chave (`nextCursor`, base64url de não lida?/criação em microssegundos/id; `cursor` inválido = 400). Decisão: o cursor guarda a posição, não o id, para que ler uma notificação entre as páginas não pule as não lidas que faltam (a lida pode reaparecer entre as lidas; o console descarta o repetido).
+- `packages/shared`: `notificationQuery.cursor`, `NotificationList.nextCursor`, os textos `loadMore` e `invalidCursor` (`i18n/areas/notifications.ts`) e a descrição da tool `list_notifications` ("as não lidas primeiro").
+- `apps/web/src/components/shell/Notifications.tsx`: "Ver mais" no fim da lista (página de 30 pelo cursor, sem repetir) e a atualização de cada minuto relê o que já está carregado (até 200); CSS `.notif-more` em `styles/vision.css`.
+- Spec: `docs/013`, "Notificações do sino".
+- Testes: `apps/server/test/vision.test.ts` ("não lidas primeiro e todas alcançáveis pelo cursor…"): 35 avisos com as 5 mais recentes lidas — a 1ª página traz as 30 não lidas da mais nova para a mais antiga e a 2ª as 5 lidas; lendo a última da página de 20, a seguinte ainda traz as 10 não lidas que faltavam; cursor inválido dá 400. O fluxo de tela do "Ver mais" não tem e2e.
+- Verificação: `pnpm verify:quick`.

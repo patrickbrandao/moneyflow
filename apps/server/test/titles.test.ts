@@ -1,6 +1,7 @@
-import { addMonths, todayIso } from '@moneyflow/shared';
+import { addDays, addMonths, daysInMonth, t, todayIso } from '@moneyflow/shared';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { materializeAll } from '../src/services/recurrence';
+import { MATERIALIZE_LOCK, materializeAll, materializeRule } from '../src/services/recurrence';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
 let h: Harness;
@@ -66,6 +67,60 @@ describe('espelhamento (spec 006)', () => {
     expect(accepted.categoryId).toBe(otherIncome.id);
     // O autor original não aceita pelo outro lado.
     await author.post(`/api/titles/${title.mirror.id}/mirror/accept`, {}, 404);
+  });
+
+  it('pelo espelho, só quem edita também o original exclui, arquiva, cancela ou encerra a série (tarefa 079)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const authorUser = await userSession(h);
+    const otherUser = await userSession(h);
+    await admin.put(`/api/users/${authorUser.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'editor' }] });
+    await admin.put(`/api/users/${otherUser.id}/memberships`, { memberships: [{ caixaId: s.caixaB.id, role: 'editor' }] });
+    const author = client(h, authorUser.cookie);
+    const other = client(h, otherUser.cookie);
+
+    // Título avulso: o editor só da caixa B não exclui, cancela, reabre nem restaura o par.
+    const single = await author.post('/api/titles', base(s));
+    const mirrorId = single.mirror.id;
+    const denied = async (method: 'POST' | 'DELETE', url: string) => {
+      const res = await other.raw(method, url, {});
+      expect(res.statusCode, url).toBe(403);
+      expect(res.json().error.message).toMatch(/original/);
+    };
+    await denied('DELETE', `/api/titles/${mirrorId}`);
+    await denied('POST', `/api/titles/${mirrorId}/cancel`);
+    await denied('POST', `/api/titles/${mirrorId}/restore`);
+    await admin.post(`/api/titles/${single.id}/cancel`);
+    await denied('POST', `/api/titles/${mirrorId}/reopen`);
+    await admin.post(`/api/titles/${single.id}/reopen`);
+    expect(await admin.get(`/api/titles/${single.id}`)).toMatchObject({ status: 'open', archivedAt: null });
+    // Aceitar e contestar continuam com ele.
+    expect((await other.post(`/api/titles/${mirrorId}/mirror/dispute`, { reason: 'não reconheço' })).mirrorStatus).toBe('disputed');
+
+    // Série: nem "só esta" nem "este e os próximos" pelo espelho.
+    const today = todayIso();
+    const first = await author.post('/api/titles', {
+      ...base(s),
+      dueDate: today,
+      competenceDate: today,
+      series: { kind: 'recurrence', frequency: 'monthly', endsOn: addMonths(today, 5) },
+    });
+    const ruleId = first.recurrenceRuleId;
+    const inCaixa = async (caixaId: string) =>
+      ((await admin.get(`/api/titles?caixaId=${caixaId}&limit=1000`)) as { id: string; recurrenceRuleId: string; occurrence: number }[])
+        .filter((t) => t.recurrenceRuleId === ruleId)
+        .sort((a, b) => a.occurrence - b.occurrence);
+    const mirrors = await inCaixa(s.caixaB.id);
+    expect(mirrors).toHaveLength(6);
+    await denied('DELETE', `/api/titles/${mirrors[2]!.id}?scope=following`);
+    await denied('DELETE', `/api/titles/${mirrors[2]!.id}?scope=this`);
+    expect(await inCaixa(s.caixaA.id)).toHaveLength(6);
+    expect((await admin.get(`/api/series/${ruleId}`)).endsOn).toBe(addMonths(today, 5));
+
+    // Quem escreve nas duas caixas continua podendo.
+    await admin.del(`/api/titles/${mirrors[2]!.id}?scope=following`);
+    expect(await inCaixa(s.caixaA.id)).toHaveLength(2);
+    expect(await inCaixa(s.caixaB.id)).toHaveLength(2);
   });
 
   it('dispensa o espelho com mirrorCaixaId = null', async () => {
@@ -177,6 +232,64 @@ describe('baixas (spec 005)', () => {
     await admin.post(`/api/settlements/${settled.settlements[0].id}/reverse`, { reason: 'de novo' }, 422);
   });
 
+  it('sem escrita na caixa da outra conta, o estorno não desfaz a transferência (tarefa 081)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const title = await admin.post('/api/titles', { ...base(s), caixaId: s.caixaB.id, entityId: s.supplier.id, amountCents: 30_000 });
+    const settled = await admin.post(`/api/titles/${title.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 30_000,
+      financialAccountId: s.accountB.id,
+      sourceAccountId: s.accountA.id,
+    });
+    const legId = settled.settlements[0].id;
+    const editorB = await userSession(h);
+    await admin.put(`/api/users/${editorB.id}/memberships`, { memberships: [{ caixaId: s.caixaB.id, role: 'editor' }] });
+    const editor = client(h, editorB.cookie);
+    const balanceA = async () => (await admin.get('/api/accounts')).find((a: { id: string }) => a.id === s.accountA.id).balanceCents;
+
+    const denied = await editor.post(
+      `/api/settlements/${legId}/reverse`,
+      { reason: 'erro', reversedOn: '2026-10-16', undoTransfer: true },
+      403,
+    );
+    expect(denied.error.message).toMatch(/sem desfazer a transferência/);
+    expect(await admin.get(`/api/transfers?caixaId=${s.caixaA.id}`)).toHaveLength(1);
+    expect(await balanceA()).toBe(70_000);
+
+    // Sem desfazer, o estorno sai; a conta da caixa A não muda.
+    const reversed = await editor.post(`/api/settlements/${legId}/reverse`, {
+      reason: 'erro',
+      reversedOn: '2026-10-16',
+      undoTransfer: false,
+    });
+    expect(reversed.status).toBe('open');
+    expect(await admin.get(`/api/transfers?caixaId=${s.caixaA.id}`)).toHaveLength(1);
+    expect(await balanceA()).toBe(70_000);
+  });
+
+  it('baixas simultâneas nos dois lados do espelho não se travam (tarefa 188)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    for (let i = 0; i < 20; i += 1) {
+      const title = await admin.post('/api/titles', { ...base(s), amountCents: 2_000 });
+      const [a, b] = await Promise.all([
+        admin.raw('POST', `/api/titles/${title.id}/settlements`, {
+          settledOn: '2026-10-15',
+          amountCents: 1_000,
+          financialAccountId: s.accountA.id,
+        }),
+        admin.raw('POST', `/api/titles/${title.mirror.id}/settlements`, {
+          settledOn: '2026-10-15',
+          amountCents: 1_000,
+          financialAccountId: s.accountB.id,
+        }),
+      ]);
+      expect([a.statusCode, b.statusCode], `${a.body} ${b.body}`).toEqual([200, 200]);
+      expect((await admin.get(`/api/titles/${title.id}`)).status).toBe('paid');
+    }
+  }, 120_000);
+
   it('baixa do espelho: duas pernas; o lado sem acesso fica com conta a definir', async () => {
     const admin = client(h, (await userSession(h, 'admin')).cookie);
     const s = await scenario(h, admin);
@@ -258,6 +371,206 @@ describe('séries (recorrência e parcelamento)', () => {
     );
     expect(left).toHaveLength(2);
     expect((await materializeAll(h.db, addMonths(today, 30))).created).toBe(0);
+  });
+});
+
+describe('competência da série no fim do mês (tarefa 170)', () => {
+  it('a série no dia 31 mantém o último dia do mês nas ocorrências do worker, também depois de fevereiro', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const monthly = await admin.post('/api/titles', {
+      ...base(s),
+      entityId: s.supplier.id,
+      description: 'Condomínio do dia 31',
+      dueDate: '2026-01-31',
+      competenceDate: '2026-01-31',
+      series: { kind: 'recurrence', frequency: 'monthly' },
+    });
+    // O worker avança o horizonte mês a mês: o modelo de cada passada é a ocorrência mais recente.
+    // Até 30 meses, o maior horizonte dos outros testes deste arquivo, para não lhes deixar o que materializar.
+    const today = todayIso();
+    for (let k = 13; k <= 30; k += 1) {
+      await h.db.transaction((tx) => materializeRule(tx, monthly.recurrenceRuleId, addMonths(today, k)));
+    }
+    const rows = (await admin.get(`/api/titles?caixaId=${s.caixaA.id}&limit=1000`)) as {
+      recurrenceRuleId: string;
+      occurrence: number;
+      competenceDate: string;
+      dueDate: string;
+    }[];
+    const series = rows.filter((t) => t.recurrenceRuleId === monthly.recurrenceRuleId).sort((a, b) => a.occurrence - b.occurrence);
+    expect(series.length).toBeGreaterThan(26);
+    const lastDay = (iso: string) => {
+      const [y, m] = iso.split('-').map(Number);
+      return `${iso.slice(0, 8)}${String(daysInMonth(y!, m!)).padStart(2, '0')}`;
+    };
+    for (const t of series) {
+      expect(t.competenceDate).toBe(lastDay(t.competenceDate));
+      expect(t.dueDate).toBe(lastDay(t.dueDate));
+    }
+    expect(series.find((t) => t.competenceDate.startsWith('2028-03'))?.competenceDate).toBe('2028-03-31');
+  });
+});
+
+describe('esta e as próximas no formulário do título (tarefa 075)', () => {
+  type Row = { id: string; occurrence: number; amountCents: number; categoryId: string; notes: string | null; dueDate: string };
+  const seriesOf = async (c: ReturnType<typeof client>, caixaId: string, ruleId: string) =>
+    ((await c.get(`/api/titles?caixaId=${caixaId}&limit=1000`)) as (Row & { recurrenceRuleId: string })[])
+      .filter((t) => t.recurrenceRuleId === ruleId)
+      .sort((a, b) => a.occurrence - b.occurrence);
+  /** O corpo que o formulário manda: todos os campos, mudados ou não. */
+  const formBody = (t: Row & { description: string; competenceDate: string; entityId: string }, change: Record<string, unknown>) => ({
+    description: t.description,
+    categoryId: t.categoryId,
+    amountCents: t.amountCents,
+    dueDate: t.dueDate,
+    competenceDate: t.competenceDate,
+    notes: t.notes,
+    entityId: t.entityId,
+    scope: 'following',
+    ...change,
+  });
+
+  it('só o que mudou vai para as seguintes; o reajuste e as notas delas ficam', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const first = await admin.post('/api/titles', {
+      ...base(s),
+      entityId: s.supplier.id,
+      mirrorCaixaId: null,
+      description: 'Aluguel',
+      dueDate: today,
+      competenceDate: today,
+      amountCents: 100_000,
+      // Com fim: os testes seguintes do arquivo contam o que o worker cria.
+      series: { kind: 'recurrence', frequency: 'monthly', endsOn: addMonths(today, 12) },
+    });
+    const ruleId = first.recurrenceRuleId;
+    const all = await seriesOf(admin, s.caixaA.id, ruleId);
+    expect(all).toHaveLength(13);
+    // Reajuste a partir da 7ª e uma nota própria na 5ª.
+    await admin.patch(`/api/series/${ruleId}`, { amountCents: 110_000, effectiveOn: all[6]!.dueDate });
+    await admin.patch(`/api/titles/${all[4]!.id}`, { notes: 'nota da 5ª', scope: 'this' });
+
+    // Na 3ª, troca só a categoria com "Este e os próximos" (corpo completo do formulário).
+    const other = await admin.post('/api/categories', { kind: 'expense', name: `Moradia ${s.tag}`, colorSlot: 2 });
+    const third = await admin.get(`/api/titles/${all[2]!.id}`);
+    await admin.patch(`/api/titles/${third.id}`, formBody(third, { categoryId: other.id }));
+    const after = await seriesOf(admin, s.caixaA.id, ruleId);
+    expect(after.slice(2).every((t) => t.categoryId === other.id)).toBe(true);
+    expect(after.slice(0, 2).every((t) => t.categoryId === s.expense.id)).toBe(true);
+    expect(after.map((t) => t.amountCents)).toEqual([...Array(6).fill(100_000), ...Array(7).fill(110_000)]);
+    expect(after[4]!.notes).toBe('nota da 5ª');
+
+    // Mudar as notas com "Este e os próximos" leva as notas novas.
+    const fourth = await admin.get(`/api/titles/${after[3]!.id}`);
+    await admin.patch(`/api/titles/${fourth.id}`, formBody(fourth, { notes: 'reajuste combinado' }));
+    const notes = (await seriesOf(admin, s.caixaA.id, ruleId)).map((t) => t.notes);
+    expect(notes.slice(3).every((n) => n === 'reajuste combinado')).toBe(true);
+    expect(notes.slice(0, 3).every((n) => n === null)).toBe(true);
+  });
+
+  it('valor e dia novos vão para as seguintes em aberto, sem as de mês fechado nem as com baixa', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const start = `${addMonths(todayIso(), -3).slice(0, 7)}-10`;
+    const first = await admin.post('/api/titles', {
+      ...base(s),
+      description: 'Condomínio',
+      dueDate: start,
+      competenceDate: start,
+      amountCents: 50_000,
+      series: { kind: 'recurrence', frequency: 'monthly' },
+    });
+    expect(first.mirror).not.toBeNull();
+    const ruleId = first.recurrenceRuleId;
+    const all = await seriesOf(admin, s.caixaA.id, ruleId);
+    // A 3ª fica num mês fechado; a 5ª tem baixa.
+    await admin.post(`/api/caixas/${s.caixaA.id}/closings`, { month: `${all[2]!.dueDate.slice(0, 7)}-01`, force: true });
+    await admin.post(`/api/titles/${all[4]!.id}/settlements`, { settledOn: todayIso(), amountCents: 1_000, financialAccountId: null });
+
+    const second = await admin.get(`/api/titles/${all[1]!.id}`);
+    await admin.patch(`/api/titles/${second.id}`, formBody(second, { amountCents: 55_000, dueDate: `${second.dueDate.slice(0, 7)}-20` }));
+    const after = await seriesOf(admin, s.caixaA.id, ruleId);
+    const day = (t: Row) => t.dueDate.slice(8);
+    expect(after[0]).toMatchObject({ amountCents: 50_000, dueDate: start });
+    expect(after[1]).toMatchObject({ amountCents: 55_000 });
+    expect(day(after[1]!)).toBe('20');
+    // Mês fechado e baixa: ficam como estavam.
+    expect(after[2]).toMatchObject({ amountCents: 50_000, dueDate: all[2]!.dueDate });
+    expect(after[4]).toMatchObject({ amountCents: 50_000, dueDate: all[4]!.dueDate });
+    const moved = after.filter((_, i) => i === 3 || i >= 5);
+    expect(moved.every((t) => t.amountCents === 55_000 && day(t) === '20')).toBe(true);
+    // O espelho acompanha, e a série passa a vencer no dia 20 (as novas ocorrências também).
+    const mirrors = await seriesOf(admin, s.caixaB.id, ruleId);
+    expect(mirrors.map((m) => [m.amountCents, m.dueDate])).toEqual(after.map((t) => [t.amountCents, t.dueDate]));
+    expect((await admin.get(`/api/series/${ruleId}`)).anchorDay).toBe(20);
+    await materializeAll(h.db, addMonths(todayIso(), 14));
+    const last = (await seriesOf(admin, s.caixaA.id, ruleId)).at(-1)!;
+    expect(day(last)).toBe('20');
+    // Termina na última: os testes seguintes do arquivo contam o que o worker cria.
+    await admin.post(`/api/series/${ruleId}/end`, { endsOn: last.dueDate });
+  });
+
+  it('a mudança espera a materialização em curso e alcança a ocorrência nova (tarefa 149)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const first = await admin.post('/api/titles', {
+      ...base(s),
+      description: 'Mensalidade',
+      dueDate: today,
+      competenceDate: today,
+      amountCents: 40_000,
+      mirrorCaixaId: null,
+      series: { kind: 'recurrence', frequency: 'monthly' },
+    });
+    const ruleId = first.recurrenceRuleId;
+    const before = await seriesOf(admin, s.caixaA.id, ruleId);
+
+    // Um "worker" segura a trava da série e materializa depois que a mudança já pediu a trava.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => {
+      holding = resolve;
+    });
+    let created = 0;
+    const worker = h.db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${ruleId}))`);
+      holding();
+      await released;
+      created = await materializeRule(tx, ruleId, addMonths(today, 14));
+    });
+    await held;
+    const second = await admin.get(`/api/titles/${before[1]!.id}`);
+    const patch = admin.patch(`/api/titles/${second.id}`, formBody(second, { amountCents: 45_000 }));
+    // A mudança fica esperando a trava da série (a mesma chave do worker).
+    let waiting = 0;
+    try {
+      for (let i = 0; i < 60 && waiting === 0; i++) {
+        const locks = await h.db.execute<{ n: number }>(sql`
+          SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = ${MATERIALIZE_LOCK}`);
+        waiting = Number(locks.rows[0]?.n ?? 0);
+        if (waiting === 0) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      release();
+      await worker;
+      await patch;
+    }
+    expect(waiting).toBe(1);
+    expect(created).toBeGreaterThan(0);
+
+    const after = await seriesOf(admin, s.caixaA.id, ruleId);
+    expect(after).toHaveLength(before.length + created);
+    expect(after[0]!.amountCents).toBe(40_000);
+    // Inclusive as que o worker criou com o modelo de antes: a mudança as viu depois da trava.
+    expect(after.slice(1).every((t) => t.amountCents === 45_000)).toBe(true);
+    await admin.post(`/api/series/${ruleId}/end`, { endsOn: after.at(-1)!.dueDate });
   });
 });
 
@@ -365,5 +678,266 @@ describe('encerrar série (spec 005)', () => {
     await admin.put(`/api/users/${viewerUser.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
     const viewer = client(h, viewerUser.cookie);
     await viewer.post(`/api/titles/${monthly.id}/series/end`, { endsOn: '2026-12-15' }, 403);
+  });
+});
+
+describe('listagem cortada e os totais do filtro (tarefa 116)', () => {
+  it('os totais contam o filtro inteiro, e o limite maior repete as mesmas primeiras linhas', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    // Cinco títulos no mesmo vencimento (o desempate é pelo id) e um sexto pago, fora do "em aberto".
+    const amounts = [10_000, 20_000, 30_000, 40_000, 50_000];
+    for (const [i, amountCents] of amounts.entries()) {
+      await admin.post('/api/titles', { ...base(s), description: `Corte ${i}`, amountCents, mirrorCaixaId: null });
+    }
+    const paid = await admin.post('/api/titles', { ...base(s), description: 'Corte pago', amountCents: 7_000, mirrorCaixaId: null });
+    await admin.post(`/api/titles/${paid.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 7_000,
+      financialAccountId: s.accountA.id,
+    });
+    const partial = await admin.post('/api/titles', { ...base(s), description: 'Corte parcial', amountCents: 9_000, mirrorCaixaId: null });
+    await admin.post(`/api/titles/${partial.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 4_000,
+      financialAccountId: s.accountA.id,
+    });
+
+    const filter = `caixaId=${s.caixaA.id}&direction=payable&status=unpaid`;
+    const firstPage = await admin.get(`/api/titles?${filter}&limit=2`);
+    expect(firstPage).toHaveLength(2);
+    const totals = await admin.get(`/api/titles/totals?${filter}&limit=2`);
+    // O limite não conta nos totais: os 5 + o parcial; o pago fica de fora pelo filtro.
+    expect(totals).toEqual({ count: 6, amountCents: 150_000 + 9_000, openCents: 150_000 + 5_000 });
+
+    // "Carregar mais" pede a mesma consulta com um limite maior: as primeiras linhas são as mesmas.
+    const more = await admin.get(`/api/titles?${filter}&limit=4`);
+    expect(more.slice(0, 2).map((r: { id: string }) => r.id)).toEqual(firstPage.map((r: { id: string }) => r.id));
+    const all = await admin.get(`/api/titles?${filter}&limit=10`);
+    expect(new Set(all.map((r: { id: string }) => r.id)).size).toBe(6);
+
+    // Todos os status: entra o pago.
+    const everything = await admin.get(`/api/titles/totals?caixaId=${s.caixaA.id}&direction=payable`);
+    expect(everything.count).toBe(7);
+
+    // Sem acesso à caixa, os totais respondem 404, como a lista.
+    const outsider = client(h, (await userSession(h)).cookie);
+    await outsider.get(`/api/titles/totals?caixaId=${s.caixaA.id}`, 404);
+  });
+});
+
+describe('saldo em aberto pelo status (tarefa 093)', () => {
+  it('a caixa e a visão geral somam só o aberto e o parcial, com o estornado de volta em aberto', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const past = addDays(today, -5);
+    const future = addDays(today, 5);
+    const title = (amountCents: number, dueDate: string, direction: 'payable' | 'receivable' = 'payable') =>
+      admin.post('/api/titles', {
+        ...base(s),
+        direction,
+        categoryId: direction === 'payable' ? s.expense.id : s.income.id,
+        description: `Aberto ${amountCents}`,
+        competenceDate: dueDate,
+        dueDate,
+        amountCents,
+        mirrorCaixaId: null,
+      });
+    const pay = (id: string, amountCents: number) =>
+      admin.post(`/api/titles/${id}/settlements`, { settledOn: past, amountCents, financialAccountId: s.accountA.id });
+
+    await title(10_000, past); // aberto e vencido
+    const partial = await title(9_000, past); // parcial e vencido: 5.000 em aberto
+    await pay(partial.id, 4_000);
+    const paid = await title(7_000, past); // pago: fora
+    await pay(paid.id, 7_000);
+    const canceled = await title(3_000, past); // cancelado: fora
+    await admin.post(`/api/titles/${canceled.id}/cancel`, {});
+    const archived = await title(2_000, past); // arquivado (tem baixa estornada): fora
+    const archivedPaid = await pay(archived.id, 2_000);
+    await admin.post(`/api/settlements/${archivedPaid.settlements[0].id}/reverse`, { reason: 'Errado', reversedOn: past });
+    expect(await admin.del(`/api/titles/${archived.id}`)).toMatchObject({ archived: true });
+    const reversed = await title(6_000, future); // pago e estornado: volta a 6.000 em aberto, a vencer
+    const reversedPaid = await pay(reversed.id, 6_000);
+    await admin.post(`/api/settlements/${reversedPaid.settlements[0].id}/reverse`, { reason: 'Refazer', reversedOn: past });
+    await title(8_000, future, 'receivable');
+
+    const expected = {
+      payableOpenCents: 10_000 + 5_000 + 6_000,
+      receivableOpenCents: 8_000,
+      overdueCount: 2,
+      overdueCents: 15_000,
+    };
+    expect(await admin.get(`/api/caixas/${s.caixaA.id}`)).toMatchObject(expected);
+    const overview = await admin.get('/api/overview');
+    expect(overview.caixas.find((c: { id: string }) => c.id === s.caixaA.id)).toMatchObject(expected);
+    // A lista de vencidos da visão geral corta em 50 de todas as caixas: confere-se a da caixa, pelo mesmo filtro.
+    const overdueHere = await admin.get(`/api/titles?caixaId=${s.caixaA.id}&status=overdue`);
+    expect(overdueHere.map((t: { openCents: number }) => t.openCents).sort((a: number, b: number) => a - b)).toEqual([5_000, 10_000]);
+    const unpaid = await admin.get(`/api/titles/totals?caixaId=${s.caixaA.id}&status=unpaid`);
+    expect(unpaid).toMatchObject({ count: 4, openCents: 10_000 + 5_000 + 6_000 + 8_000 });
+  });
+});
+
+describe('busca de títulos (tarefa 147)', () => {
+  it('acha pelo trecho da descrição e pelo nome da entidade', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const byDescription = await admin.post('/api/titles', {
+      ...base(s),
+      description: `Manutenção do elevador ${s.tag}`,
+      mirrorCaixaId: null,
+    });
+    const other = await admin.post('/api/entities', { kind: 'company', name: `Zeladoria Ômega ${s.tag}` });
+    const byEntity = await admin.post('/api/titles', {
+      ...base(s),
+      entityId: other.id,
+      description: 'Serviço mensal',
+      mirrorCaixaId: null,
+    });
+    const ids = async (q: string) =>
+      (await admin.get(`/api/titles?caixaId=${s.caixaA.id}&q=${encodeURIComponent(q)}`)).map((r: { id: string }) => r.id);
+
+    expect(await ids(`elevador ${s.tag}`)).toEqual([byDescription.id]);
+    expect(await ids('ELEVADOR')).toEqual([byDescription.id]);
+    expect(await ids(`ômega ${s.tag}`)).toEqual([byEntity.id]);
+    // O mesmo texto na descrição de um e no nome da entidade de outro: os dois.
+    expect((await ids(s.tag)).sort()).toEqual([byDescription.id, byEntity.id].sort());
+    expect(await ids('nada-disso-aqui')).toEqual([]);
+    expect((await admin.get(`/api/titles/totals?caixaId=${s.caixaA.id}&q=${encodeURIComponent(`ômega ${s.tag}`)}`)).count).toBe(1);
+  });
+});
+
+/** OFX mínimo de uma conta (SGML), para conciliar uma linha com um movimento. */
+function ofxOf(lines: { date: string; cents: number; memo: string }[]) {
+  const key = Math.random().toString(36).slice(2, 10);
+  const trn = lines
+    .map(
+      (l, i) =>
+        `<STMTTRN><TRNTYPE>${l.cents < 0 ? 'DEBIT' : 'CREDIT'}</TRNTYPE><DTPOSTED>${l.date.replaceAll('-', '')}120000</DTPOSTED>` +
+        `<TRNAMT>${(l.cents / 100).toFixed(2)}</TRNAMT><FITID>${key}-${i}</FITID><NAME>${l.memo}</NAME></STMTTRN>`,
+    )
+    .join('\n');
+  const dates = lines.map((l) => l.date.replaceAll('-', '')).sort();
+  return Buffer.from(`OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+
+<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>BRL</CURDEF>
+<BANKACCTFROM><BANKID>077</BANKID><ACCTID>9</ACCTID><ACCTTYPE>CHECKING</ACCTTYPE></BANKACCTFROM>
+<BANKTRANLIST><DTSTART>${dates[0]}</DTSTART><DTEND>${dates.at(-1)}</DTEND>
+${trn}
+</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`);
+}
+
+describe('data do estorno (tarefa 045)', () => {
+  it('muda as duas pernas com auditoria; recusa antes da baixa, mês fechado, estorno conciliado e quem não edita a outra caixa', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    // A pagar na A contra o titular da B: espelho aceito, baixa com as duas pernas com conta.
+    const title = await admin.post('/api/titles', { ...base(s), amountCents: 43_210, dueDate: '2026-10-15' });
+    expect(title.mirror).not.toBeNull();
+    const paid = await admin.post(`/api/titles/${title.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 43_210,
+      financialAccountId: s.accountA.id,
+      mirrorAccountId: s.accountB.id,
+    });
+    const settlementId = paid.settlements[0].id;
+    // Sem a data, o estorno cai hoje (o caso do agente que estornou para refazer a baixa).
+    const reversed = await admin.post(`/api/settlements/${settlementId}/reverse`, { reason: 'Refazer na outra conta' });
+    expect(reversed.settlements[0]).toMatchObject({ reversalOn: today });
+
+    const info = await admin.get(`/api/settlements/${settlementId}/reversal`);
+    expect(info).toMatchObject({ settlementId, titleId: title.id, settledOn: '2026-10-15', canChange: true });
+    expect(info.legs.map((l: any) => [l.caixaId, l.financialAccountId, l.occurredOn, l.amountCents, l.reconciled])).toEqual([
+      [s.caixaA.id, s.accountA.id, today, 43_210, false],
+      [s.caixaB.id, s.accountB.id, today, -43_210, false],
+    ]);
+    const post = (c: ReturnType<typeof client>, id: string, reversedOn: string) =>
+      c.raw('POST', `/api/settlements/${id}/reversal-date`, { reversedOn });
+    const refused = async (res: { statusCode: number; json: () => any }, status: number, code: string) => {
+      expect(res.statusCode).toBe(status);
+      expect(res.json().error.code).toBe(code);
+    };
+
+    // Antes da baixa e baixa sem estorno: recusados.
+    await refused(await post(admin, settlementId, '2026-10-14'), 422, 'unprocessable');
+    const active = await admin.post('/api/titles', { ...base(s), amountCents: 1_000, mirrorCaixaId: null });
+    const activePaid = await admin.post(`/api/titles/${active.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 1_000,
+      financialAccountId: s.accountA.id,
+    });
+    await refused(await post(admin, activePaid.settlements[0].id, '2026-10-15'), 422, 'settlement_not_reversed');
+
+    // Permissões: quem edita só a A não muda a perna da B; leitor e quem não vê a caixa também não.
+    const editor = await userSession(h);
+    await admin.put(`/api/users/${editor.id}/memberships`, {
+      memberships: [
+        { caixaId: s.caixaA.id, role: 'editor' },
+        { caixaId: s.caixaB.id, role: 'viewer' },
+      ],
+    });
+    const editorApi = client(h, editor.cookie);
+    expect((await editorApi.get(`/api/settlements/${settlementId}/reversal`)).canChange).toBe(false);
+    const other = await post(editorApi, settlementId, '2026-10-15');
+    expect(other.statusCode).toBe(403);
+    expect(other.json().error.message).toBe(t.errors.reversalDateOtherCaixa);
+    const viewer = await userSession(h);
+    await admin.put(`/api/users/${viewer.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
+    expect((await post(client(h, viewer.cookie), settlementId, '2026-10-15')).statusCode).toBe(403);
+    const outsider = await userSession(h);
+    expect((await post(client(h, outsider.cookie), settlementId, '2026-10-15')).statusCode).toBe(404);
+
+    // Pela perna do espelho: as duas mudam para a data da baixa, com o ator na auditoria.
+    const moved = await admin.post(`/api/settlements/${info.legs[1].settlementId}/reversal-date`, { reversedOn: '2026-10-15' });
+    expect(moved.id).toBe(title.mirrorTitleId);
+    const after = await admin.get(`/api/settlements/${settlementId}/reversal`);
+    expect(after.legs.map((l: any) => l.occurredOn)).toEqual(['2026-10-15', '2026-10-15']);
+    for (const leg of after.legs) {
+      const audit = await h.db.execute<{ actor_kind: string; user_id: string | null; changed: string[] | null }>(sql`
+        SELECT actor_kind, user_id, changed_columns AS changed FROM audit_log
+         WHERE table_name = 'movements' AND record_id = ${leg.movementId} ORDER BY id DESC LIMIT 1`);
+      expect(audit.rows[0]).toMatchObject({ actor_kind: 'human', user_id: session.id });
+      expect(audit.rows[0]!.changed).toContain('occurred_on');
+    }
+    const statementA = await admin.get(`/api/accounts/${s.accountA.id}/statement?from=2026-10-01&to=2026-10-31`);
+    expect(statementA.rows.map((r: any) => [r.occurredOn, r.amountCents, r.isReversal])).toEqual([
+      ['2026-10-15', -43_210, false],
+      ['2026-10-15', 43_210, true],
+      ['2026-10-15', -1_000, false],
+    ]);
+
+    // Mês fechado na caixa do espelho (na data antiga): nenhuma perna muda.
+    await admin.post(`/api/caixas/${s.caixaB.id}/closings`, { month: '2026-10', force: true });
+    await refused(await post(admin, settlementId, '2026-11-01'), 422, 'period_closings_locked_check');
+    expect((await admin.get(`/api/settlements/${settlementId}/reversal`)).legs.map((l: any) => l.occurredOn)).toEqual([
+      '2026-10-15',
+      '2026-10-15',
+    ]);
+    await admin.del(`/api/caixas/${s.caixaB.id}/closings/2026-10-01`);
+
+    // Estorno conciliado com uma linha do extrato: só depois de desfazer a conciliação.
+    const imported = await h.app.inject({
+      method: 'POST',
+      url: `/api/statement-imports?accountId=${s.accountA.id}&fileName=estorno.ofx`,
+      payload: ofxOf([{ date: '2026-10-15', cents: 43_210, memo: 'ESTORNO' }]),
+      headers: { cookie: session.cookie, 'content-type': 'application/x-ofx' },
+    });
+    expect(imported.statusCode, imported.body).toBe(200);
+    const line = imported.json().lines[0];
+    if (line.movementId !== after.legs[0].movementId || line.status !== 'matched') {
+      if (line.status !== 'new') await admin.post(`/api/statement-lines/${line.id}/unmatch`, {});
+      await admin.post(`/api/statement-lines/${line.id}/match`, { movementId: after.legs[0].movementId });
+    }
+    expect((await admin.get(`/api/settlements/${settlementId}/reversal`)).legs[0]).toMatchObject({ reconciled: true });
+    await refused(await post(admin, settlementId, '2026-10-16'), 422, 'settlements_reversal_reconciled_check');
+    await admin.post(`/api/statement-lines/${line.id}/unmatch`, {});
+    const fixed = await admin.post(`/api/settlements/${settlementId}/reversal-date`, { reversedOn: '2026-10-16' });
+    expect(fixed.settlements.find((x: any) => x.id === settlementId).reversalOn).toBe('2026-10-16');
   });
 });

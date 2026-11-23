@@ -1,4 +1,6 @@
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { type CardMaintenanceFailure, cardMaintenance } from '../src/services/cards';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
 let h: Harness;
@@ -185,6 +187,15 @@ describe('cartão de crédito (spec 007)', () => {
     const mine = await payer.get(`/api/card-invoices/${oct.id}?payerCaixaId=${s.caixaB.id}`);
     expect(mine.lines.map((l: any) => l.description)).toEqual(['Presente']);
     await payer.get(`/api/card-invoices/${oct.id}?payerCaixaId=${s.caixaA.id}`, 404);
+    // Uma caixa legível que não paga esta fatura não abre o resumo dela (tarefa 133).
+    const december = invoiceOf(await admin.get(`/api/cards/${s.card.id}`), '2026-12-01');
+    await payer.get(`/api/card-invoices/${december.id}?payerCaixaId=${s.caixaB.id}`, 404);
+    // Quem edita só o cartão não lança encargo para uma pagadora que não lê.
+    const cardEditor = await userSession(h);
+    await admin.put(`/api/users/${cardEditor.id}/memberships`, { memberships: [{ caixaId: s.card.id, role: 'editor' }] });
+    const charge = { chargeKind: 'fee', amountCents: 1_000, categoryId: s.expense.id, chargedOn: '2026-11-25' };
+    await client(h, cardEditor.cookie).post(`/api/cards/${s.card.id}/charges`, { ...charge, payerCaixaId: s.caixaB.id }, 404);
+    await client(h, cardEditor.cookie).post(`/api/cards/${s.card.id}/charges`, charge, 404);
 
     const reopened = await admin.post(`/api/card-invoices/${oct.id}/reopen`);
     expect(reopened.status).toBe('open');
@@ -213,5 +224,140 @@ describe('cartão de crédito (spec 007)', () => {
     expect(closed.carriedOutCents).toBe(-200_000);
     const nov = invoiceOf(await admin.get(`/api/cards/${s.card.id}`), '2026-11-01');
     expect(nov.totalCents).toBe(100_000 - 200_000);
+  });
+
+  it('o detalhe da fatura traz os títulos dela mesmo com mais de mil títulos antes na pagadora (tarefa 084)', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await cardScenario(admin);
+    await admin.post(`/api/cards/${s.card.id}/purchases`, {
+      entityId: s.store.id,
+      categoryId: s.expense.id,
+      purchasedOn: '2026-09-12',
+      description: 'Mesa',
+      amountCents: 10_000,
+    });
+    await h.db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT set_config('app.user_id', ${session.id}, true), set_config('app.actor_kind', 'human', true)`);
+      await tx.execute(sql`
+        INSERT INTO titles (caixa_id, direction, entity_id, category_id, description, competence_date, due_date, amount_cents, origin)
+        SELECT ${s.caixaA.id}, 'payable', ${s.store.id}, ${s.expense.id}, 'Antigo ' || n, '2025-01-01', '2025-01-01'::date + (n % 300), 100, 'manual'
+          FROM generate_series(1, 1005) n`);
+    });
+    const oct = invoiceOf(await admin.get(`/api/cards/${s.card.id}`), '2026-10-01');
+    const closed = await admin.post(`/api/card-invoices/${oct.id}/close`, {});
+    expect(closed.titles.map((tr: any) => [tr.caixaId, tr.direction]).sort()).toEqual(
+      [
+        [s.caixaA.id, 'payable'],
+        [s.card.id, 'receivable'],
+      ].sort(),
+    );
+  });
+
+  it('pagamento parcial e crédito do fechamento com a fatura seguinte já fechada rolam para a primeira aberta (tarefa 085)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await cardScenario(admin);
+    // 2× de 100,00: 10/2026 e 11/2026; as duas fechadas.
+    await admin.post(`/api/cards/${s.card.id}/purchases`, {
+      entityId: s.store.id,
+      categoryId: s.expense.id,
+      purchasedOn: '2026-09-12',
+      description: 'Estante',
+      amountCents: 20_000,
+      installmentsTotal: 2,
+    });
+    let overview = await admin.get(`/api/cards/${s.card.id}`);
+    const oct = invoiceOf(overview, '2026-10-01');
+    await admin.post(`/api/card-invoices/${oct.id}/close`, {});
+    await admin.post(`/api/card-invoices/${invoiceOf(overview, '2026-11-01').id}/close`, {});
+    const paid = await admin.post(`/api/card-invoices/${oct.id}/pay`, {
+      payerCaixaId: s.caixaA.id,
+      settledOn: '2026-11-20',
+      amountCents: 4_000,
+      financialAccountId: s.accountA.id,
+    });
+    expect(paid.carriedOutCents).toBe(6_000);
+    overview = await admin.get(`/api/cards/${s.card.id}`);
+    const dec = await admin.get(`/api/card-invoices/${invoiceOf(overview, '2026-12-01').id}`);
+    expect(dec.lines).toEqual([expect.objectContaining({ itemKind: 'carryover', amountCents: 6_000, carriedFromInvoiceId: oct.id })]);
+
+    // Crédito: 3× de 1.000,00 estornadas em 10/2026 (−2.000,00); 11/2026 fecha antes, e o crédito vai para 12/2026.
+    const t = await cardScenario(admin);
+    const purchase = await admin.post(`/api/cards/${t.card.id}/purchases`, {
+      entityId: t.store.id,
+      categoryId: t.expense.id,
+      purchasedOn: '2026-08-10',
+      description: 'Notebook',
+      amountCents: 300_000,
+      installmentsTotal: 3,
+    });
+    await admin.post(`/api/card-purchases/${purchase.id}/refund`, { amountCents: 300_000, refundedOn: '2026-09-10' });
+    overview = await admin.get(`/api/cards/${t.card.id}`);
+    await admin.post(`/api/card-invoices/${invoiceOf(overview, '2026-11-01').id}/close`, {});
+    const credit = await admin.post(`/api/card-invoices/${invoiceOf(overview, '2026-10-01').id}/close`, {});
+    expect(credit.carriedOutCents).toBe(-200_000);
+    expect(invoiceOf(await admin.get(`/api/cards/${t.card.id}`), '2026-12-01').totalCents).toBe(-200_000);
+  });
+
+  it('fechamento automático que falha vai para o log com a fatura e o motivo (tarefa 136)', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await cardScenario(admin);
+    await admin.post(`/api/cards/${s.card.id}/purchases`, {
+      entityId: s.store.id,
+      categoryId: s.expense.id,
+      purchasedOn: '2026-09-12',
+      description: 'Cadeira',
+      amountCents: 10_000,
+    });
+    const oct = invoiceOf(await admin.get(`/api/cards/${s.card.id}`), '2026-10-01');
+    // Outubro fechado na pagadora: o título da fatura não nasce.
+    await h.db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT set_config('app.user_id', ${session.id}, true), set_config('app.actor_kind', 'human', true)`);
+      await tx.execute(
+        sql`INSERT INTO period_closings (caixa_id, month, closed_by_user_id) VALUES (${s.caixaA.id}, '2026-10-01', ${session.id})`,
+      );
+    });
+    const failures: CardMaintenanceFailure[] = [];
+    const result = await cardMaintenance(h.db, { autoClose: true, onError: (failure) => failures.push(failure) });
+    expect(result.failed).toBeGreaterThanOrEqual(1);
+    expect(failures.find((f) => f.invoiceId === oct.id)).toMatchObject({
+      code: 'period_closings_locked_check',
+      pgCode: '23514',
+      message: expect.stringMatching(/mês está fechado/),
+    });
+    expect((await admin.get(`/api/card-invoices/${oct.id}`)).status).toBe('open');
+  });
+});
+
+describe('compras cortadas e os totais do filtro (tarefa 116)', () => {
+  it('os totais contam o filtro inteiro, com o estorno negativo, e o limite maior repete as primeiras', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await cardScenario(admin);
+    const buy = (purchasedOn: string, amountCents: number) =>
+      admin.post(`/api/cards/${s.card.id}/purchases`, {
+        entityId: s.store.id,
+        categoryId: s.expense.id,
+        purchasedOn,
+        description: `Compra ${amountCents}`,
+        amountCents,
+      });
+    const first = await buy('2026-09-05', 10_000);
+    await buy('2026-09-05', 20_000);
+    await buy('2026-09-06', 30_000);
+    await admin.post(`/api/card-purchases/${first.id}/refund`, { amountCents: 4_000, refundedOn: '2026-09-07' });
+
+    const page = await admin.get(`/api/cards/${s.card.id}/purchases?limit=2`);
+    expect(page).toHaveLength(2);
+    const totals = await admin.get(`/api/cards/${s.card.id}/purchases/totals?limit=2`);
+    expect(totals).toEqual({ count: 4, totalCents: 10_000 + 20_000 + 30_000 - 4_000 });
+    const more = await admin.get(`/api/cards/${s.card.id}/purchases?limit=3`);
+    expect(more.slice(0, 2).map((r: { id: string }) => r.id)).toEqual(page.map((r: { id: string }) => r.id));
+
+    // O filtro vale nos totais: só as compras do dia 5.
+    const day = await admin.get(`/api/cards/${s.card.id}/purchases/totals?from=2026-09-05&to=2026-09-05`);
+    expect(day).toEqual({ count: 2, totalCents: 30_000 });
+    const outsider = client(h, (await userSession(h)).cookie);
+    await outsider.get(`/api/cards/${s.card.id}/purchases/totals`, 404);
   });
 });

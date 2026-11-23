@@ -1,13 +1,13 @@
-import { type AiRequestBodyPart, type AiRequestDetail, buildCurl, formatDateTime, t } from '@moneyflow/shared';
+import { type AiRequestBodyPart, type AiRequestDetail, buildCurl, formatDateTime, isInterruptedRequest, t } from '@moneyflow/shared';
 import { Download, MessageSquare, Radio, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import { useAgents } from '../../agents/AgentsProvider';
+import { useState } from 'react';
+import { useAgentActions } from '../../agents/AgentsProvider';
 import { formatInt } from '../../agents/format';
 import { downloadFile } from '../../lib/download';
 import { useAction, useApi } from '../../lib/hooks';
 import { formatBytes } from '../attachments/AttachmentsPanel';
 import { LoadError } from '../domain';
-import { Badge, Button, CopyButton, cx, Skel, Tabs } from '../ui';
+import { Badge, Button, CopyButton, cx, Skel, Tabs, useEscapeLayer } from '../ui';
 import { JsonViewer } from './JsonViewer';
 import { RequestStatusBadge } from './RequestsTable';
 
@@ -24,15 +24,9 @@ const ms = (value: number | null) => (value === null ? '—' : value < 1000 ? `$
  */
 export function RequestDrawer({ requestId, onClose }: { requestId: string; onClose: () => void }) {
   const { data, error, reload } = useApi<AiRequestDetail>(`/api/admin/ai/requests/${requestId}`);
-  const agents = useAgents();
+  const agents = useAgentActions();
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  useEscapeLayer(true, onClose);
 
   return (
     <aside className="drawer page-drawer request-drawer" aria-label={d.title} data-testid="request-drawer">
@@ -132,7 +126,7 @@ export function RequestDrawer({ requestId, onClose }: { requestId: string; onClo
                 {data.errorMessage && (
                   <>
                     <dt>{d.error}</dt>
-                    <dd className="text-danger">{data.errorMessage}</dd>
+                    <dd className="text-danger">{isInterruptedRequest(data.errorMessage) ? r.interrupted : data.errorMessage}</dd>
                   </>
                 )}
               </dl>

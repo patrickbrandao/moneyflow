@@ -1,5 +1,7 @@
 # 023 — Requisições ao provedor e detalhe do provedor (F9)
 
+> **Conteúdo:** F9: registro de toda requisição ao provedor por um invólucro no `fetch` dos SDKs (metadados sempre; corpo completo, com base64, só com `log_bodies`), tentativas próprias gravadas (`AI_REQUEST_MAX_ATTEMPTS`, retry-after, sem repetir stream iniciado), retenção por `AI_REQUEST_RETENTION_DAYS` com valor no banco (`app_settings`) vencendo, guia "Requisições" e detalhe do provedor.
+
 Registro de tudo o que é enviado ao provedor de IA e recebido dele, as retentativas feitas pelo próprio MoneyFlow e uma tela de detalhe por provedor. Decisões da entrevista de 2026-10-13.
 
 ## O que é registrado
@@ -10,6 +12,7 @@ Registro de tudo o que é enviado ao provedor de IA e recebido dele, as retentat
 - Cada requisição guarda a **operação** (`chat|title|embedding|vision_describe|transcription|speech|test_connection|list_models`) e a **finalidade** (o vocabulário de `ai_usage.purpose`; nula em `test_connection` e `list_models`), além de provedor, agente, usuário, conversa, execução, modelo, método e caminho (sem o host quando é o `base_url` do provedor) e se houve streaming.
 - **Metadados, sempre**, com o registro ligado ou não:
   - status final (`ok|error|canceled`), status HTTP e mensagem de erro segura;
+  - a requisição nasce `running` e é fechada pelo fim da chamada. A que o processo não fechou (queda, OOM, SIGKILL no meio do streaming) a manutenção do worker passa a `error` uma hora depois do início (`ai_requests_close_stale`, em lotes e antes da purga, tarefa 162), com o motivo `interrupted: …`; a tela a mostra como "Interrompida (o processo parou antes do fim)", e ela conta como erro na saúde do provedor. O prazo fica acima do maior tempo de uma chamada (a conversão do PDF do contrato vai até 30 min; o streaming não tem prazo);
   - início, fim, duração e tempo até o primeiro byte;
   - tokens (os mesmos de `ai_usage`, que passa a apontar para a requisição) e o número de tentativas.
 - **Corpos, só com o registro ligado no provedor**: a flag `log_bodies`, desligada por padrão, ao ser ligada abre um aviso de que as requisições levam o conteúdo das conversas e dados financeiros (e de que um segredo digitado no texto da conversa vai junto no corpo). Com ela ligada, ficam gravados:
@@ -31,7 +34,7 @@ Registro de tudo o que é enviado ao provedor de IA e recebido dele, as retentat
 - Cada tentativa é gravada em `ai_request_attempts`:
   - número, início, duração, status HTTP, tipo e mensagem do erro, `retry-after` e cabeçalhos de rate limit da resposta;
   - com `log_bodies`, também o corpo da resposta de erro.
-- **Streaming**: só repete quando a falha veio antes do primeiro byte. Se o stream cai no meio, os deltas já foram ao SSE do console. Nesse caso a requisição termina em erro, e vale a regra de hoje: a execução volta à fila até `max_attempts` ([011](011-agentes-de-ia.md), Execução).
+- **Streaming**: só repete quando a falha veio antes do primeiro byte. Se o stream cai no meio, os deltas já foram ao SSE do console. Nesse caso a requisição termina em erro, e vale a regra da execução: ela volta à fila depois de uma espera, até `max_attempts − 1` vezes seguidas, e então falha ([011](011-agentes-de-ia.md), Execução; tarefa 074). O evento `error` com `code: 'provider_retry'` avisa o console, que descarta o texto parcial da tentativa que caiu (tarefa 151).
 - Esgotadas as tentativas, o erro segue como hoje (`LlmError` com `retryable`).
 - Cada tentativa espera os cabeçalhos da resposta por até 5 min (depois, `timeout` e nova tentativa). `AI_REQUEST_BACKOFF_MS` (padrão 1000) muda a base do backoff; os testes usam poucos milissegundos.
 - Uma chamada HTTP ao provedor = uma linha. Listar modelos com paginação grava uma linha por página; a última recebe o desfecho da chamada.

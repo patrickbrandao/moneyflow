@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d658050
 ---
 
 # Renovar o contrato encurta o fim das obrigações e perde a última ocorrência
@@ -86,4 +86,11 @@ Nada foi executado contra o banco. As datas da tabela saíram das funções pura
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `shiftedEnd` deslocava o fim antigo da série por meses inteiros (`termMonths` arredonda para baixo, `addMonths` prende o dia). A renovação até 15/12 perdia a ocorrência de dezembro, e a de dia 31 perdia a de 31/10.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/contracts.ts`: `shiftedEnd` saiu. Em `planRenewal`, toda série de `renewableRules` (a que acompanhava a vigência) passa a terminar no novo fim da vigência, ou sem fim, no mensal, no anual e no semanal. A prévia mostra o mesmo fim.
+- `docs/020-contratos.md` (renovar e decisões) e `docs/034-contratos-sobre-series.md` (decisões).
+- Testes: em `apps/server/test/contracts.test.ts`, a expectativa do caso "renovar estende a vigência e as obrigações" passou a `2027-10-31`. O caso novo "renovar até o meio do mês ou com vencimento no dia 31 não perde a última ocorrência (tarefa 087)" renova até 15/08/2027 e materializa a de 10/08. Depois renova até 31/10/2027, e a obrigação do dia 31 ganha a de 31/10.
+- Verificação: `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s1 pnpm verify:quick` (nível rápido).

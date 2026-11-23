@@ -43,19 +43,16 @@ function tryDecoder(label: string, bytes: Uint8Array, fatal: boolean): string | 
   }
 }
 
-/**
- * Decodifica um arquivo de extrato (OFX, CSV, XML). Com BOM UTF-8 usa UTF-8.
- * Senão, se os bytes forem UTF-8 válido, usa UTF-8 (há bancos que declaram
- * CHARSET:1252 e mandam UTF-8); caso contrário usa o charset declarado no
- * cabeçalho OFX 1.x (CHARSET/ENCODING) ou no XML (encoding=), e por fim windows-1252.
- */
-export function decodeStatementFile(bytes: Uint8Array): string {
-  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-    return new TextDecoder('utf-8').decode(bytes.subarray(3));
-  }
-  const utf8 = tryDecoder('utf-8', bytes, true);
-  if (utf8 !== null) return utf8;
+const hasUtf8Bom = (bytes: Uint8Array) => bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
 
+/**
+ * A codificação de um arquivo de extrato (OFX, CSV, XML): `utf-8` com BOM UTF-8
+ * ou bytes UTF-8 válidos (há bancos que declaram CHARSET:1252 e mandam UTF-8);
+ * senão o charset declarado no cabeçalho OFX 1.x (CHARSET/ENCODING) ou no XML
+ * (encoding=), e por fim `windows-1252`. Sempre um rótulo que o TextDecoder aceita.
+ */
+export function detectStatementEncoding(bytes: Uint8Array): string {
+  if (hasUtf8Bom(bytes) || tryDecoder('utf-8', bytes, true) !== null) return 'utf-8';
   const head = new TextDecoder('latin1').decode(bytes.subarray(0, 2048));
   let label = 'windows-1252';
   const xmlEncoding = /<\?xml[^>]*encoding\s*=\s*["']([^"']+)["']/i.exec(head);
@@ -64,8 +61,29 @@ export function decodeStatementFile(bytes: Uint8Array): string {
   else if (charset && /^\d+$/.test(charset[1]!)) label = `windows-${charset[1]}`;
   else if (charset && !/^none$/i.test(charset[1]!)) label = charset[1]!;
   if (/^utf-?8$/i.test(label)) label = 'windows-1252';
-  return tryDecoder(label, bytes, false) ?? new TextDecoder('windows-1252').decode(bytes);
+  return tryDecoder(label, new Uint8Array(0), false) === null ? 'windows-1252' : label;
 }
+
+/** Decodifica um arquivo de extrato na codificação de detectStatementEncoding (sem o BOM). */
+export function decodeStatementFile(bytes: Uint8Array): string {
+  if (hasUtf8Bom(bytes)) return new TextDecoder('utf-8').decode(bytes.subarray(3));
+  return new TextDecoder(detectStatementEncoding(bytes)).decode(bytes);
+}
+
+/**
+ * Um CSV na codificação do mapeamento (spec 009). Com BOM UTF-8, sempre UTF-8.
+ * Mapeamento em UTF-8 com bytes que não são UTF-8 válido é lido como
+ * windows-1252 (tarefa 088): o arquivo em Latin-1 nunca entra com "�".
+ */
+export function decodeCsvFile(bytes: Uint8Array, encoding: string): string {
+  if (hasUtf8Bom(bytes)) return new TextDecoder('utf-8').decode(bytes.subarray(3));
+  if (encoding === 'latin1' || encoding === 'windows-1252') return new TextDecoder('windows-1252').decode(bytes);
+  return tryDecoder('utf-8', bytes, true) ?? new TextDecoder('windows-1252').decode(bytes);
+}
+
+/** A codificação do CSV entre as do mapeamento (`utf-8` ou `windows-1252`), para a leitura prévia. */
+export const detectCsvEncoding = (bytes: Uint8Array): 'utf-8' | 'windows-1252' =>
+  detectStatementEncoding(bytes) === 'utf-8' ? 'utf-8' : 'windows-1252';
 
 /**
  * Árvore a partir do corpo OFX (SGML ou XML). Uma tag seguida de texto é

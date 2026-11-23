@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { applyCsvMapping, type CsvMapping, detectDelimiter, parseAmount, parseCsv, parseDateWithFormat } from '../src/parsers/csv';
+import {
+  applyCsvAmountSign,
+  applyCsvMapping,
+  type CsvMapping,
+  csvBankBalance,
+  detectDelimiter,
+  parseAmount,
+  parseCsv,
+  parseDateWithFormat,
+  suggestCsvAmountSign,
+} from '../src/parsers/csv';
 import { fixtureText } from './fixtures';
 
 describe('parseCsv', () => {
@@ -59,7 +69,9 @@ describe('applyCsvMapping', () => {
     };
     const result = applyCsvMapping(parseCsv(fixtureText('extrato-itau.csv'), ';'), mapping);
     expect(result.headers).toEqual(['data', 'lançamento', 'valor', 'saldo']);
-    expect(result.errors).toEqual([{ row: 2, message: 'valor zero' }]);
+    // O "SALDO ANTERIOR 0,00" fica de fora sem contar como problema (tarefa 140).
+    expect(result.errors).toEqual([]);
+    expect(result.zeroRows).toEqual([2]);
     expect(result.lines).toHaveLength(6);
     expect(result.lines.reduce((s, l) => s + l.amountCents, 0)).toBe(7988);
     expect(result.lines[0]).toEqual({
@@ -98,7 +110,11 @@ describe('applyCsvMapping', () => {
       columns: { date: 0, description: 1, amount: 2 },
     });
     expect(result.headers).toBeNull();
-    expect(result.errors.map((e) => e.row)).toEqual([2, 3]);
+    expect(result.errors).toEqual([
+      { row: 2, message: 'data inválida: "xx/10/2026"' },
+      { row: 3, message: 'valor inválido' },
+    ]);
+    expect(result.zeroRows).toEqual([]);
     expect(result.lines).toMatchObject([{ row: 4, amountCents: 200, raw: { '0': '01/10/2026' } }]);
   });
   it('coluna inexistente lança', () => {
@@ -121,5 +137,45 @@ describe('detectDelimiter com preâmbulo', () => {
         'Extrato conta corrente, outubro\nData;Historico;Valor;Saldo\n01/10/2026;PIX;10,00;20,00\n02/10/2026;TED;-5,00;15,00',
       ),
     ).toBe(';');
+  });
+});
+
+describe('csvBankBalance (tarefa 090)', () => {
+  const mapping: CsvMapping = {
+    hasHeader: false,
+    skipRows: 0,
+    dateFormat: 'dd/MM/yyyy',
+    decimalSeparator: ',',
+    columns: { date: 0, description: 1, amount: 2, balance: 3 },
+  };
+  const balanceOf = (text: string) => csvBankBalance(applyCsvMapping(parseCsv(text, ';'), mapping).lines);
+
+  it('arquivo do mais recente para o mais antigo: o saldo final do último dia é o da primeira linha', () => {
+    const text = '20/10/2026;TARIFA;-10,00;1.000,00\n20/10/2026;PIX RECEBIDO;100,00;1.010,00\n19/10/2026;MERCADO;-50,00;910,00\n';
+    expect(balanceOf(text)).toEqual({ amountCents: 100_000, date: '2026-10-20' });
+  });
+  it('arquivo do mais antigo para o mais recente: o da última linha do último dia', () => {
+    const text = '19/10/2026;MERCADO;-50,00;910,00\n20/10/2026;PIX RECEBIDO;100,00;1.010,00\n20/10/2026;TARIFA;-10,00;1.000,00\n';
+    expect(balanceOf(text)).toEqual({ amountCents: 100_000, date: '2026-10-20' });
+  });
+  it('um dia só (sem ordem): a última linha; sem saldo: null', () => {
+    expect(balanceOf('20/10/2026;A;-1,00;99,00\n20/10/2026;B;-1,00;98,00\n')).toEqual({ amountCents: 9800, date: '2026-10-20' });
+    expect(balanceOf('20/10/2026;A;-1,00;\n')).toBeNull();
+  });
+});
+
+describe('sinal dos valores do mapeamento (tarefa 091)', () => {
+  const lines = (...cents: number[]) => cents.map((amountCents) => ({ amountCents }));
+  it('inverte só pelo mapeamento, nunca pela maioria das linhas', () => {
+    // Uma compra e o pagamento da fatura: com "inverter", a compra fica negativa e o pagamento positivo.
+    expect(applyCsvAmountSign(lines(15_000, -15_000), 'invert').map((l) => l.amountCents)).toEqual([-15_000, 15_000]);
+    // Mais créditos que compras, "como vêm": nada muda.
+    expect(applyCsvAmountSign(lines(-5_000, 20_000, 3_000), 'as_is').map((l) => l.amountCents)).toEqual([-5_000, 20_000, 3_000]);
+  });
+  it('a sugestão para a tela pré-marca pela maioria só no cartão', () => {
+    expect(suggestCsvAmountSign(lines(100, 200, -50), true)).toBe('invert');
+    expect(suggestCsvAmountSign(lines(100, -200), true)).toBe('as_is');
+    expect(suggestCsvAmountSign([], true)).toBe('invert');
+    expect(suggestCsvAmountSign(lines(100, 200, 300), false)).toBe('as_is');
   });
 });

@@ -5,6 +5,7 @@ import {
   type CardOverview,
   type CardPurchaseDetail,
   type CardPurchaseRow,
+  type CardPurchaseTotals,
   type cardChargeInput,
   type cardChargeLinkInput,
   cardChargeMatch,
@@ -30,18 +31,19 @@ import {
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
-import { notFound, unprocessable } from '../errors';
+import { AppError, failureReason, notFound, unprocessable } from '../errors';
 import { cardSettings } from './caixas';
 import { chargeTarget, expectedCardOccurrences, toSuggestion } from './card-charges';
 import {
   closeInvoiceTx,
   ensureHorizon,
-  ensureInvoices,
+  firstOpenInvoiceAfter,
   insertInvoiceTitlePair,
   insertPurchase,
   loadCard,
   reopenInvoiceTx,
 } from './card-core';
+import { clearStatementSuggestions } from './reconciliation-guards';
 import { settleInTx } from './settlements';
 import { listTitles } from './titles';
 import { withTx } from './tx';
@@ -108,12 +110,15 @@ export async function cardOverview(ctx: ServiceContext, cardId: string): Promise
  */
 export async function getInvoice(ctx: ServiceContext, id: string, payerFilter?: string): Promise<InvoiceDetail> {
   const invoice = await loadInvoice(ctx, id);
-  let payerCaixaId: string | null = payerFilter ?? null;
+  const payerCaixaId: string | null = payerFilter ?? null;
   if (!ctx.access.canRead(invoice.cardCaixaId)) {
     if (!payerCaixaId || !ctx.access.canRead(payerCaixaId)) throw notFound();
+    // Sem o cartão, só uma pagadora DESTA fatura abre o resumo dela (tarefa 133).
+    const payer = await ctx.db.execute(
+      sql`SELECT 1 FROM card_invoice_payer_totals WHERE card_invoice_id = ${id} AND payer_caixa_id = ${payerCaixaId}`,
+    );
+    if (payer.rows.length === 0) throw notFound();
   }
-  if (payerCaixaId && !ctx.access.canRead(payerCaixaId) && !ctx.access.canRead(invoice.cardCaixaId)) throw notFound();
-  if (!payerCaixaId && !ctx.access.canRead(invoice.cardCaixaId)) payerCaixaId = null;
 
   const [summary, card, payers, lines] = await Promise.all([
     ctx.db.execute(sql`SELECT ${summarySql} FROM card_invoice_summaries s WHERE s.card_invoice_id = ${id}`),
@@ -148,16 +153,10 @@ export async function getInvoice(ctx: ServiceContext, id: string, payerFilter?: 
   const row = summary.rows[0];
   if (!row) throw notFound();
 
-  let invoiceTitles: TitleRow[] = [];
-  const titleIds = await ctx.db.select({ id: titles.id, caixaId: titles.caixaId }).from(titles).where(eq(titles.cardInvoiceId, id));
-  const readable = titleIds.filter((r) => ctx.access.canRead(r.caixaId) && (!payerCaixaId || r.caixaId === payerCaixaId));
-  if (readable.length > 0) {
-    const all = await Promise.all(
-      [...new Set(readable.map((r) => r.caixaId))].map((caixaId) => listTitles(ctx, { caixaId, archived: false, limit: 1000 })),
-    );
-    const wanted = new Set(readable.map((r) => r.id));
-    invoiceTitles = all.flat().filter((tr) => wanted.has(tr.id));
-  }
+  // Só os títulos desta fatura, nas caixas legíveis (e só os da pagadora pedida), numa consulta (tarefa 084).
+  const invoiceTitles: TitleRow[] = (await listTitles(ctx, { archived: false, limit: 1000 }, { cardInvoiceId: id })).filter(
+    (tr) => !payerCaixaId || tr.caixaId === payerCaixaId,
+  );
 
   return {
     ...toSummary(row),
@@ -194,7 +193,19 @@ export async function listPurchases(
   ctx: ServiceContext,
   cardId: string,
   query: z.output<typeof cardPurchaseListQuery>,
+  page: { offset?: number } = {},
 ): Promise<CardPurchaseRow[]> {
+  // O id desempata: a mesma consulta com um limite maior ("Carregar mais") ou a página seguinte das tools
+  // (`offset`) devolve as mesmas primeiras linhas.
+  const result = await ctx.db.execute(
+    sql`${purchaseSql} WHERE ${purchaseListWhere(ctx, cardId, query)} ORDER BY p.purchased_on DESC, p.created_at DESC, p.id DESC
+     LIMIT ${query.limit} OFFSET ${page.offset ?? 0}`,
+  );
+  return result.rows.map((r) => camel<CardPurchaseRow>(r));
+}
+
+/** O filtro das compras do cartão (sobre `p` e `e`), o mesmo na lista e nos totais. */
+function purchaseListWhere(ctx: ServiceContext, cardId: string, query: z.output<typeof cardPurchaseListQuery>) {
   ctx.access.assertRead(cardId);
   const where = [sql`p.card_caixa_id = ${cardId}`];
   if (query.from) where.push(sql`p.purchased_on >= ${query.from}::date`);
@@ -202,10 +213,25 @@ export async function listPurchases(
   if (query.payerCaixaId) where.push(sql`p.payer_caixa_id = ${query.payerCaixaId}`);
   if (query.kind) where.push(sql`p.kind = ${query.kind}`);
   if (query.q) where.push(sql`(p.description ILIKE ${`%${query.q}%`} OR e.name ILIKE ${`%${query.q}%`})`);
-  const result = await ctx.db.execute(
-    sql`${purchaseSql} WHERE ${sql.join(where, sql` AND `)} ORDER BY p.purchased_on DESC, p.created_at DESC LIMIT ${query.limit}`,
-  );
-  return result.rows.map((r) => camel<CardPurchaseRow>(r));
+  return sql.join(where, sql` AND `);
+}
+
+/**
+ * Quantidade e total (estornos negativos, como no rodapé) do filtro inteiro das
+ * compras, sem o limite (tarefa 116).
+ */
+export async function purchaseTotals(
+  ctx: ServiceContext,
+  cardId: string,
+  query: z.output<typeof cardPurchaseListQuery>,
+): Promise<CardPurchaseTotals> {
+  const result = await ctx.db.execute(sql`
+    SELECT count(*)::int AS count,
+           coalesce(sum(CASE WHEN p.kind = 'refund' THEN -p.amount_cents ELSE p.amount_cents END), 0)::bigint AS total_cents
+      FROM card_purchases p
+      JOIN entities e ON e.id = p.entity_id
+     WHERE ${purchaseListWhere(ctx, cardId, query)}`);
+  return camel<CardPurchaseTotals>(result.rows[0]!);
 }
 
 export async function getPurchase(ctx: ServiceContext, id: string): Promise<CardPurchaseDetail> {
@@ -332,10 +358,13 @@ export async function createCharge(ctx: ServiceContext, cardId: string, input: z
   ctx.access.assertWrite(cardId);
   const id = await withTx(ctx, async (tx) => {
     const card = await loadCard(tx, cardId, true);
+    // A pagadora precisa ser legível, como na compra (tarefa 133): nada de empurrar conta para a caixa de terceiros.
+    const payerCaixaId = input.payerCaixaId ?? card.defaultPayerCaixaId;
+    ctx.access.assertRead(payerCaixaId);
     const created = await insertPurchase(tx, card, {
       kind: 'charge',
       chargeKind: input.chargeKind,
-      payerCaixaId: input.payerCaixaId ?? card.defaultPayerCaixaId,
+      payerCaixaId,
       entityId: card.holderEntityId,
       categoryId: input.categoryId,
       purchasedOn: input.chargedOn,
@@ -474,8 +503,13 @@ export async function payInvoice(ctx: ServiceContext, id: string, input: z.outpu
       const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
       const paid = settled + input.amountCents;
       if (paid > 0) await tx.update(titles).set({ amountCents: paid }).where(inArray(titles.id, pair));
-      else await tx.update(titles).set({ status: 'canceled' }).where(inArray(titles.id, pair));
-      const next = await nextOpenInvoice(tx, card, invoice.referenceMonth);
+      else {
+        // Nada pago: o par é cancelado, e a linha sugerida para ele volta a "nova" (tarefa 129).
+        await clearStatementSuggestions(tx, { titleIds: pair });
+        await tx.update(titles).set({ status: 'canceled' }).where(inArray(titles.id, pair));
+      }
+      // O resto rola para a primeira fatura aberta depois desta (a seguinte pode já ter fechado, tarefa 085).
+      const next = await firstOpenInvoiceAfter(tx, card, invoice.referenceMonth);
       await tx.execute(sql`
         INSERT INTO card_invoice_items (card_invoice_id, kind, carried_from_invoice_id, payer_caixa_id, amount_cents, description)
         VALUES (${next.id}, 'carryover', ${id}, ${input.payerCaixaId}, ${rest}, ${`Saldo da fatura ${invoice.referenceMonth.slice(5, 7)}/${invoice.referenceMonth.slice(0, 4)}`})`);
@@ -496,18 +530,6 @@ export async function payInvoice(ctx: ServiceContext, id: string, input: z.outpu
     }
   });
   return getInvoice(ctx, id, ctx.access.canRead(invoice.cardCaixaId) ? undefined : input.payerCaixaId);
-}
-
-async function nextOpenInvoice(tx: Parameters<typeof ensureInvoices>[0], card: Parameters<typeof ensureInvoices>[1], month: string) {
-  const [y, m] = month.split('-').map(Number) as [number, number];
-  const next = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
-  await ensureInvoices(tx, card, next, next);
-  const [row] = await tx
-    .select()
-    .from(cardInvoices)
-    .where(and(eq(cardInvoices.cardCaixaId, card.id), eq(cardInvoices.referenceMonth, next)));
-  if (!row || row.closedAt) throw unprocessable(t.errors.noOpenInvoice, 'no_open_invoice');
-  return row;
 }
 
 /** Pagamento antecipado (fatura aberta): par de títulos já quitado, com as duas pernas e o movimento. */
@@ -536,8 +558,18 @@ export async function advanceInvoice(ctx: ServiceContext, id: string, input: z.o
   return getInvoice(ctx, id, ctx.access.canRead(invoice.cardCaixaId) ? undefined : input.payerCaixaId);
 }
 
-/** Cria as faturas do horizonte de todos os cartões e (opcional) fecha as vencidas. Worker, ator system. */
-export async function cardMaintenance(db: ServiceContext['db'], opts: { autoClose: boolean }) {
+/** Cartão ou fatura que falhou numa passada do worker, com o motivo (tarefa 136). */
+export type CardMaintenanceFailure = ReturnType<typeof failureReason> & { cardId?: string; invoiceId?: string };
+
+/**
+ * Cria as faturas do horizonte de todos os cartões e (opcional) fecha as
+ * vencidas. Worker, ator system. Cada falha vai para `onError` com o id e o
+ * motivo; a fatura que outro worker já fechou não conta como falha.
+ */
+export async function cardMaintenance(
+  db: ServiceContext['db'],
+  opts: { autoClose: boolean; onError?: (failure: CardMaintenanceFailure) => void },
+) {
   const cards = await db.execute<{ id: string }>(sql`SELECT id FROM caixas WHERE kind = 'credit_card' AND archived_at IS NULL`);
   let closed = 0;
   let failed = 0;
@@ -547,8 +579,9 @@ export async function cardMaintenance(db: ServiceContext['db'], opts: { autoClos
         const card = await loadCard(tx, id, true);
         await ensureHorizon(tx, card);
       });
-    } catch {
+    } catch (error) {
       failed += 1;
+      opts.onError?.({ cardId: id, ...failureReason(error) });
     }
   }
   if (opts.autoClose) {
@@ -562,8 +595,10 @@ export async function cardMaintenance(db: ServiceContext['db'], opts: { autoClos
           await closeInvoiceTx(tx, id, { mirrorStatusFor: () => 'accepted' });
         });
         closed += 1;
-      } catch {
+      } catch (error) {
+        if (error instanceof AppError && error.code === 'invoice_closed') continue;
         failed += 1;
+        opts.onError?.({ invoiceId: id, ...failureReason(error) });
       }
     }
   }

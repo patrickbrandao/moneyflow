@@ -52,6 +52,8 @@ type DestRow = {
   isActive: boolean;
   archivedAt: string | null;
   name: string;
+  /** A parte pública do token (antes do `:`): identifica o bot. */
+  botId: string | null;
   chatId: string | null;
   inboundEnabled: boolean;
   inboundAgentId: string | null;
@@ -184,7 +186,7 @@ export async function createDestination(ctx: ServiceContext, input: z.output<typ
  * Edição do destino. "Receber mensagens" (spec 029): ligar grava a entrada e o
  * hash de um segredo novo e chama setWebhook na mesma transação (o Telegram
  * recusou = nada muda); trocar o token com a entrada ligada liga o webhook no
- * bot novo e desliga no antigo. Desligar, ou desativar o destino (o banco
+ * bot novo e desliga no antigo (só se o bot mudou: o mesmo bot só religa). Desligar, ou desativar o destino (o banco
  * exige a entrada desligada junto), desliga no mesmo UPDATE e chama
  * deleteWebhook depois.
  */
@@ -205,6 +207,9 @@ export async function updateDestination(ctx: ServiceContext, id: string, input: 
     sets.push(sql`inbound_agent_id = ${agentId}`);
   }
   const tokenChanged = input.botToken !== undefined;
+  // O webhook é do bot, não do token (tarefa 167): com o mesmo bot (o mesmo token colado de novo ou um
+  // token novo dele), o setWebhook já substitui o anterior, e o deleteWebhook apagaria o recém-criado.
+  const botChanged = tokenChanged && input.botToken!.split(':')[0] !== d.botId;
   // Liga (ou religa no bot novo) o webhook: segredo novo, gravado como hash.
   const enabling = wantInbound && (!d.inboundEnabled || tokenChanged);
   const disabling = d.inboundEnabled && !wantInbound;
@@ -212,8 +217,8 @@ export async function updateDestination(ctx: ServiceContext, id: string, input: 
   if (wantInbound && input.inboundAgentId && input.inboundAgentId !== d.inboundAgentId) await assertInboundAgent(ctx, input.inboundAgentId);
   if (enabling && !d.inboundEnabled) await assertInboundAgent(ctx, agentId!);
 
-  // O webhook antigo sai: ao desligar e ao trocar o bot com a entrada ligada (o token é lido antes da troca).
-  const oldToken = d.inboundEnabled && (disabling || tokenChanged) ? await inboundToken(ctx.db, id) : null;
+  // O webhook antigo sai: ao desligar e ao trocar de bot com a entrada ligada (o token é lido antes da troca).
+  const oldToken = d.inboundEnabled && (disabling || botChanged) ? await inboundToken(ctx.db, id) : null;
 
   if (enabling) {
     const base = await publicBaseUrl(ctx.db, ctx.config);
@@ -233,7 +238,7 @@ export async function updateDestination(ctx: ServiceContext, id: string, input: 
       await withTx(ctx, (tx) => tx.execute(sql`UPDATE message_destinations SET ${sql.join(sets, sql`, `)} WHERE id = ${id}`));
     }
   }
-  if (oldToken && (disabling || tokenChanged)) await dropWebhook(ctx.config, oldToken);
+  if (oldToken && (disabling || botChanged)) await dropWebhook(ctx.config, oldToken);
   return getDestination(ctx, id);
 }
 
@@ -309,24 +314,53 @@ export async function listSubscriptions(ctx: ServiceContext, destinationId: stri
   return result.rows.map((row) => camel<MessageSubscriptionDto>(row));
 }
 
+async function writeSubscription(tx: Executor, destinationId: string, input: z.output<typeof subscriptionInput>) {
+  const result = await tx.execute<{ id: string }>(sql`
+    INSERT INTO message_subscriptions (destination_id, event_kind, params, is_active)
+    VALUES (${destinationId}, ${input.eventKind}, ${JSON.stringify(input.params)}::jsonb, ${input.isActive})
+    ON CONFLICT (destination_id, event_kind) DO UPDATE SET params = EXCLUDED.params, is_active = EXCLUDED.is_active
+    RETURNING id`);
+  const subscriptionId = result.rows[0]!.id;
+  const keep = input.caixaIds.length > 0 ? sql`AND caixa_id <> ALL (${`{${input.caixaIds.join(',')}}`}::uuid[])` : sql``;
+  await tx.execute(sql`DELETE FROM message_subscription_caixas WHERE subscription_id = ${subscriptionId} ${keep}`);
+  if (input.caixaIds.length > 0) {
+    await tx.execute(sql`
+      INSERT INTO message_subscription_caixas (subscription_id, caixa_id)
+      SELECT ${subscriptionId}::uuid, unnest(${`{${input.caixaIds.join(',')}}`}::uuid[])
+      ON CONFLICT (subscription_id, caixa_id) DO NOTHING`);
+  }
+}
+
 export async function upsertSubscription(ctx: ServiceContext, destinationId: string, input: z.output<typeof subscriptionInput>) {
+  return setSubscriptions(ctx, destinationId, { upsert: [input], remove: [] });
+}
+
+/**
+ * Cria/atualiza e remove várias assinaturas de um destino numa transação só
+ * (tarefa 153): tudo é validado antes, e uma falha em qualquer item não deixa
+ * nada gravado. O destino é travado na transação (um arquivamento concorrente
+ * espera ou faz esta gravação falhar inteira).
+ */
+export async function setSubscriptions(
+  ctx: ServiceContext,
+  destinationId: string,
+  input: { upsert: z.output<typeof subscriptionInput>[]; remove: MessageEventKind[] },
+) {
   const d = await manageable(ctx, destinationId);
-  if (d.archivedAt) throw unprocessable(t.errors.destinationArchived);
-  for (const caixaId of input.caixaIds) ctx.access.assertRead(caixaId);
+  if (input.upsert.length > 0 && d.archivedAt) throw unprocessable(t.errors.destinationArchived);
+  for (const sub of input.upsert) for (const caixaId of sub.caixaIds) ctx.access.assertRead(caixaId);
   await withTx(ctx, async (tx) => {
-    const result = await tx.execute<{ id: string }>(sql`
-      INSERT INTO message_subscriptions (destination_id, event_kind, params, is_active)
-      VALUES (${destinationId}, ${input.eventKind}, ${JSON.stringify(input.params)}::jsonb, ${input.isActive})
-      ON CONFLICT (destination_id, event_kind) DO UPDATE SET params = EXCLUDED.params, is_active = EXCLUDED.is_active
-      RETURNING id`);
-    const subscriptionId = result.rows[0]!.id;
-    const keep = input.caixaIds.length > 0 ? sql`AND caixa_id <> ALL (${`{${input.caixaIds.join(',')}}`}::uuid[])` : sql``;
-    await tx.execute(sql`DELETE FROM message_subscription_caixas WHERE subscription_id = ${subscriptionId} ${keep}`);
-    if (input.caixaIds.length > 0) {
+    if (input.upsert.length > 0) {
+      const locked = await tx.execute<{ archived_at: string | null }>(
+        sql`SELECT archived_at FROM message_destinations WHERE id = ${destinationId} FOR UPDATE`,
+      );
+      if (locked.rows[0]?.archived_at) throw unprocessable(t.errors.destinationArchived);
+    }
+    for (const sub of input.upsert) await writeSubscription(tx, destinationId, sub);
+    if (input.remove.length > 0) {
       await tx.execute(sql`
-        INSERT INTO message_subscription_caixas (subscription_id, caixa_id)
-        SELECT ${subscriptionId}::uuid, unnest(${`{${input.caixaIds.join(',')}}`}::uuid[])
-        ON CONFLICT (subscription_id, caixa_id) DO NOTHING`);
+        DELETE FROM message_subscriptions
+         WHERE destination_id = ${destinationId} AND event_kind = ANY (${`{${input.remove.join(',')}}`}::text[])`);
     }
   });
   return listSubscriptions(ctx, destinationId);
@@ -472,15 +506,17 @@ export type ClaimedMessage = { id: string; chatId: string; destinationName: stri
 /**
  * Entrega uma mensagem já reservada (status sending): lê o token pela função
  * do banco, chama a Bot API fora de transação e fecha com mark_sent ou
- * mark_failed (retry_after do 429; 400/401/403/404 = falha permanente; o
- * token indisponível só é permanente com P0002/42501 do banco).
+ * mark_failed (400/401/403/404 = falha permanente; o token indisponível só é
+ * permanente com P0002/42501 do banco). O 429 não gasta tentativa (tarefa
+ * 109): message_outbox_release devolve a mensagem à fila depois do
+ * retry_after, e `retryAfterSec` volta para o worker segurar o destino.
  * Falha definitiva gera a notificação message_failed para o dono do destino.
  */
 export async function deliver(
   db: Executor,
   config: Config,
   message: ClaimedMessage,
-): Promise<{ status: OutboxStatus; error: string | null }> {
+): Promise<{ status: OutboxStatus; error: string | null; retryAfterSec?: number }> {
   let token: string;
   try {
     const result = await db.execute<{ token: string }>(sql`SELECT message_destination_token(${message.id}::uuid) AS token`);
@@ -492,7 +528,8 @@ export async function deliver(
     const permanent = code === '42501' || code === 'P0002';
     const status = await markFailed(db, message.id, 'token unavailable', null, permanent);
     if (status === 'failed') await notifyFailure(db, message.id, 'token unavailable');
-    return { status, error: String((error as Error).message ?? error) };
+    // Texto fixo: a mensagem do erro leva o SQL da função do token (tarefa 070).
+    return { status, error: 'token unavailable' };
   }
   const sent = await sendTelegramMessage(
     { apiBase: config.telegramApiBase, timeoutMs: config.telegramTimeoutMs },
@@ -504,9 +541,27 @@ export async function deliver(
     await db.execute(sql`SELECT message_outbox_mark_sent(${message.id}::uuid, ${sent.messageId || null})`);
     return { status: 'sent', error: null };
   }
-  const status = await markFailed(db, message.id, sent.error, sent.retryAfterSec, sent.permanent);
+  if (sent.retryAfterSec !== null && !sent.permanent) {
+    // 429: adia sem gastar tentativa (no teto de adiamentos do banco, conta e pode virar failed).
+    const status = await releaseMessage(db, message.id, sent.retryAfterSec, sent.error);
+    if (status === 'failed') await notifyFailure(db, message.id, sent.error);
+    return { status, error: sent.error, retryAfterSec: sent.retryAfterSec };
+  }
+  const status = await markFailed(db, message.id, sent.error, null, sent.permanent);
   if (status === 'failed') await notifyFailure(db, message.id, sent.error);
   return { status, error: sent.error };
+}
+
+/**
+ * Devolve à fila uma mensagem reservada sem gastar tentativa (message_outbox_release, tarefa 109): o 429 dela ou de
+ * outra do mesmo destino na mesma passada. Volta depois de `retryAfterSec` (no mínimo 1 s).
+ */
+export async function releaseMessage(db: Executor, id: string, retryAfterSec: number, error: string): Promise<OutboxStatus> {
+  const retry = `${Math.max(1, Math.ceil(retryAfterSec))} seconds`;
+  const result = await db.execute<{ status: OutboxStatus }>(
+    sql`SELECT message_outbox_release(${id}::uuid, ${retry}::interval, ${error}) AS status`,
+  );
+  return result.rows[0]!.status;
 }
 
 async function markFailed(

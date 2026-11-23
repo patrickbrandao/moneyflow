@@ -31,6 +31,10 @@ export const statementsStrings = {
   /* import */
   dropHere: 'Arraste o arquivo OFX ou CSV aqui ou',
   chooseFile: 'escolha um arquivo',
+  changeFile: 'trocar',
+  /** "Saldo do arquivo: R$ 10,00 em 31/10/2026" (o valor fica no componente). */
+  balanceOn: (date: string) => ` em ${date}`,
+  invoiceDue: (date: string) => `venc. ${date}`,
   fileHint: 'OFX ou CSV, até 20 MB. O arquivo original fica guardado como anexo do lote.',
   inspecting: 'Lendo o arquivo…',
   importing: 'Importando…',
@@ -55,6 +59,13 @@ export const statementsStrings = {
   ofxMatchesTarget: 'casa com esta conta',
   ofxNeedsChoice: 'Nenhuma conta do arquivo casa com o banco, a agência e a conta cadastrados: escolha qual importar.',
   ofxLeftOut: (labels: string) => `Ficaram de fora as transações de ${labels}, que vieram no mesmo arquivo.`,
+  /** Tarefa 140: linhas do CSV com data ou valor inválidos. */
+  invalidRows: (total: number, examples: string) => `${total} linha(s) do arquivo não foram lidas (ex.: ${examples}).`,
+  invalidRowExample: (row: number, message: string) => `linha ${row}, ${message}`,
+  /** Tarefa 089: FITID repetido em transações diferentes. */
+  fitidCollisions: (total: number, examples: string) =>
+    `${total} transação(ões) com o FITID de outra transação (data ou valor diferentes) entraram como linhas novas (ex.: ${examples}).`,
+  fitidCollisionExample: (fitid: string, date: string, amount: string) => `FITID ${fitid} em ${date}, ${amount}`,
   ledgerBalance: 'Saldo informado no arquivo',
   sample: 'Primeiras transações',
   bankBalanceOptional: 'Saldo informado pelo banco (opcional)',
@@ -114,6 +125,15 @@ export const statementsStrings = {
   amountMode: 'Valor',
   amountSingle: 'Uma coluna (com sinal)',
   amountSplit: 'Débito e crédito separados',
+  /** Sinal dos valores no mapeamento (tarefa 091). */
+  amountSignInvertCard: 'Compras vêm positivas (inverter o sinal)',
+  amountSignInvertAccount: 'Débitos vêm positivos (inverter o sinal)',
+  amountSignHint: 'No app, saída (compra, débito) é negativa e entrada é positiva. A escolha fica salva no mapeamento.',
+  amountSignLabels: { as_is: 'Como vêm no arquivo', invert: 'Invertidos' } as Record<string, string>,
+  amountSignRow: 'Sinal dos valores',
+  signedPreview: 'Como as linhas vão entrar',
+  signedPreviewIn: (n: number) => `${n} entrada(s)`,
+  signedPreviewOut: (n: number) => `${n} saída(s)`,
   colDate: 'Coluna da data',
   colDescription: 'Coluna da descrição',
   colAmount: 'Coluna do valor',
@@ -125,6 +145,10 @@ export const statementsStrings = {
   column: (index: number, header: string | null) => `${index + 1}${header ? ` · ${header}` : ''}`,
   preview: 'Pré-visualização (linhas cruas do arquivo)',
   previewHint: 'Linhas riscadas são puladas; a linha em destaque é o cabeçalho.',
+  mappingNameRequired: (field: string) => `${field}: obrigatório.`,
+  parsedLines: (n: number) => `${n} linha(s) lidas`,
+  parsedErrors: (n: number, examples: string) => ` · ${n} com problema (ex.: ${examples})`,
+  parsedErrorRow: (row: number, message: string) => `linha ${row}: ${message}`,
   saveAndImport: 'Salvar mapeamento e importar',
   importWithMapping: 'Importar com este mapeamento',
   deleteMapping: 'Excluir mapeamento',
@@ -255,9 +279,15 @@ export const statementsStrings = {
   copyDone: (copied: number, skipped: number) =>
     `${copied} regra(s) copiada(s)${skipped ? `, ${skipped} pulada(s) (já existiam)` : ''}. Use “Aplicar regras” para reclassificar as linhas novas.`,
   copyHint: 'As cópias não reclassificam nada sozinhas: use “Aplicar regras” na conta de destino.',
+  /** O mesmo aviso para o agente (tarefa 152): ele aplica pela tool, não pelo botão. */
+  copyHintAgent:
+    'As cópias não reclassificam nada sozinhas: depois, reaplique as regras na conta de destino com apply_classification_rules.',
   copySkippedReasons: { exists: 'já existe uma regra igual no destino', archived: 'regra arquivada' } as Record<string, string>,
   cardGroup: 'Cartões',
   newRule: 'Nova regra',
+  newRuleIn: (target: string) => `Nova regra em ${target}`,
+  copyRulesFor: (target: string) => `Copiar regras de outra conta (${target})`,
+
   editRule: 'Editar regra',
   noRules: 'Nenhuma regra ainda. Ao lançar ou classificar uma linha, a regra é aprendida.',
   pattern: 'Padrão',

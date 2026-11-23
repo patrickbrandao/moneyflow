@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: 8ed8fd2
 ---
 
 # Senhas e tokens vão em texto claro para o log quando uma consulta falha
@@ -94,4 +94,16 @@ Nada foi executado; o formato do log foi deduzido do código instalado do Drizzl
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código: o tratamento central (`app.ts`) mandava todo erro não traduzido a `request.log.error(error)`, e o `DrizzleQueryError` leva `params` como propriedade e na mensagem ("Failed query: …\nparams: …"), que o serializador do pino copia (mensagem, pilha e propriedades). Reproduzido no teste novo: antes da correção, a linha do log do 500 do login trazia a senha duas vezes (em `err.message`/`stack` e no `msg`, que o pino tira da mensagem do erro). O worker usava `pino` cru, o boot fazia `console.error(error)` e o aviso da assinatura que falhou (`message-worker.ts`) gravava `String(error.message)`.
+
 ## Resolução (executor)
+
+- `apps/server/src/errors.ts`: `loggableError(erro)` devolve um clone sem os valores, mantendo a classe: no `DrizzleQueryError`, a mensagem fica `Failed query: <sql>`, a pilha é reconstruída sem a linha `params:`, `params` sai e `pg` resume o erro do Postgres da causa (código, severidade, mensagem, constraint, tabela, coluna, rotina); no erro do Postgres, sai o `detail` (repete a linha recusada: "Failing row contains (…)", "Key (…)=(…)"); a cadeia de `cause` é saneada. `errorText(erro, max)` é o texto curto (motivo de uma falha): a mensagem do Postgres e o SQL, nunca os parâmetros. `redactQueryParams` tira a linha de qualquer texto.
+- `apps/server/src/log.ts` (novo): `logSerializers.err` e o gancho `logHooks.logMethod`, que troca o erro pelo saneado antes do pino (o `msg` da linha vem da mensagem do erro em `log.error(erro)` e em `log.error({ err })` sem texto). `apiLoggerOptions` (o logger do Fastify; aceita opções próprias, como o `stream` dos testes) e `workerLogger` (o do worker) usam os dois. Todo `log.*(erro)`/`log.*({ err })` da API, do runner, dos laços e do `/mcp` passa por eles.
+- `main.ts`: o worker usa `workerLogger`; a falha do boot imprime `loggableError(erro)` (o `ADMIN_PASSWORD` de um `ensureInitialAdmin` recusado não sai).
+- Textos de erro gravados ou devolvidos: `errorText` no aviso da assinatura que falhou (`message-worker.ts`), no motivo da tarefa agendada e da receita que falharam (`agent-tasks.ts`, `reconcile-recipes.ts`), na falha por linha da conciliação em lote e da troca do provisório (`reconciliation.ts`, `statement-supersede.ts`) e na transcrição (`agents/transcriptions.ts`). O `deliver` devolve "token unavailable" ao "Enviar teste" em vez da mensagem com o SQL.
+- Testes: `apps/server/test/errors.test.ts` (novo): o serializador com um `DrizzleQueryError` real e a causa do Postgres com o segredo no `detail` (sem o segredo, com o SQL e o código), o erro embrulhado como causa e o do Postgres solto, `errorText`, o pino do worker (`log.error(erro)`, `log.error({ err })` e `logMessageTick`) e o 500 do login com o banco falhando (app com `logger: { stream }`): o log tem `auth_login` e o id da requisição, nunca a senha.
+- Spec: `docs/001` ganhou a linha "Logs e erros".
+- Verificação: `pnpm verify:quick` (com `test/errors.test.ts` e `test/security-headers.test.ts`).

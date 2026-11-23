@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 84876e4
 ---
 
 # Falha de escrita do zip do JSON completo vira rejeição sem tratamento e derruba a API
@@ -98,4 +98,12 @@ O ENOSPC real não foi reproduzido. O comportamento foi confirmado com o mesmo p
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: a promise `finished` de `exportFullZip` recebia o `reject` do `error` do arquivo sem handler até o `await` final, depois de toda a leitura; um erro de escrita no meio virava rejeição sem tratamento.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/backup/export.ts`: o `error` do arquivo fica em `writeError`, a promise `finished` é marcada como tratada logo ao nascer (`finished.catch(() => {})`, o `await finished` do fim continua rejeitando) e o `drain()` chamado a cada lote e a cada pedaço de anexo interrompe a leitura assim que a escrita falha; o callback do zip para de escrever depois da falha. A exportação rejeita com o erro, a rota responde `500` e o `sendTempFile` apaga o diretório temporário (ele já apagava quando a produção falhava).
+- Teste em `apps/server/test/backup.test.ts`, "falha de escrita do zip volta como erro da chamada e solta a trava": `exportFullZip` para um diretório inexistente rejeita com `ENOENT` (sem a correção, o vitest acusava a rejeição sem tratamento) e a trava do backup fica livre depois.
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

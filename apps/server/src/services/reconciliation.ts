@@ -4,6 +4,7 @@ import {
   categories,
   classificationRules,
   type Executor,
+  financialAccounts,
   movements,
   settlements,
   statementCsvMappings,
@@ -38,15 +39,15 @@ import {
 import { and, eq, inArray, isNull, ne, type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
-import { notFound, translateDbError, unprocessable } from '../errors';
-import { readableFilter } from './caixas';
+import { errorText, notFound, translateDbError, unprocessable } from '../errors';
+import { assertAccountActive, readableFilter } from './caixas';
 import { insertChargePurchase } from './card-charges';
 import { insertPurchase, loadCard } from './card-core';
 import { assertPurchaseDeletable, deletePurchaseTx } from './cards';
 import { settleFromLine } from './line-settle';
 import { assertNotReconciled, clearStatementSuggestions } from './reconciliation-guards';
 import { uuidArray } from './reports';
-import { candidatesFor, listLines, type RuleTarget, resolveTarget, ruleFor } from './statements';
+import { bumpRuleUsage, candidatesFor, defaultCsvAmountSign, listLines, type RuleTarget, resolveTarget, rulesFor } from './statements';
 import { insertTitlePair } from './title-pair';
 import { resolveMirror } from './titles';
 import { withTx } from './tx';
@@ -158,7 +159,7 @@ async function eachLine<T extends { lineId: string }>(
         });
         done += 1;
       } catch (error) {
-        const message = translateDbError(error)?.message ?? (error instanceof Error ? error.message : String(error));
+        const message = translateDbError(error)?.message ?? errorText(error, 2000);
         failed.push({ lineId: item.lineId, message });
       }
     }
@@ -404,6 +405,11 @@ async function createInTx(ctx: ServiceContext, tx: Tx, line: Line, input: z.outp
   } else {
     if (!line.financialAccountId) throw unprocessable(t.errors.lineAccountOnly);
     if (input.mode === 'adjustment') {
+      const [account] = await tx
+        .select({ archivedAt: financialAccounts.archivedAt })
+        .from(financialAccounts)
+        .where(eq(financialAccounts.id, line.financialAccountId));
+      assertAccountActive(account ?? { archivedAt: null });
       const [movement] = await tx
         .insert(movements)
         .values({
@@ -536,6 +542,7 @@ const toMapping = (row: typeof statementCsvMappings.$inferSelect): CsvMappingRow
   dateFormat: row.dateFormat,
   decimalSeparator: row.decimalSeparator,
   columns: row.columns as Record<string, string | number>,
+  amountSign: row.amountSign as CsvMappingRow['amountSign'],
   isDefault: row.isDefault,
 });
 
@@ -574,6 +581,8 @@ export async function createMapping(ctx: ServiceContext, input: z.output<typeof 
         dateFormat: input.dateFormat,
         decimalSeparator: input.decimalSeparator,
         columns: input.columns,
+        // Sem o sinal, o padrão do alvo (tarefa 091): invertido no cartão, como vem na conta.
+        amountSign: input.amountSign ?? defaultCsvAmountSign(target),
         isDefault: input.isDefault,
       })
       .returning();
@@ -765,13 +774,24 @@ export async function archiveRule(ctx: ServiceContext, id: string) {
   return { deleted: false, archived: true };
 }
 
+/** Uma linha que a reaplicação das regras muda: a regra nova (null = perde a classificação da regra antiga). */
+type RuleChange = { lineId: string; ruleId: string | null; entityId: string | null; categoryId: string | null };
+
+/** O efeito de "Aplicar regras" sem gravar (a prévia da tool, tarefa 152): quantas linhas mudam e por qual regra. */
+export type ApplyRulesPlan = {
+  target: RuleTarget & { caixaId: string };
+  changes: number;
+  byRule: { ruleId: string; lines: number }[];
+  /** Linhas classificadas por uma regra que não vale mais (arquivada ou editada): a classificação sai. */
+  cleared: number;
+};
+
 /**
- * Reaplica as regras do alvo às linhas novas (spec 009), para regras criadas ou
- * editadas depois do import. Só mexe nas sem classificação ou classificadas
- * por regra: a do usuário e a sugestão do agente pendente ficam. Lotes
- * substituídos (spec 031) são somente leitura e ficam de fora.
+ * As linhas novas do alvo e a regra que cada uma ganharia (spec 009), para regras criadas ou editadas depois do
+ * import. Só olha as sem classificação ou classificadas por regra: a do usuário e a sugestão do agente pendente
+ * ficam. Lotes substituídos (spec 031) são somente leitura e ficam de fora. `lock` trava as linhas (a execução).
  */
-async function applyRulesTo(tx: Tx, target: RuleTarget, where: SQL): Promise<number> {
+async function planRuleChanges(tx: Executor, target: RuleTarget, where: SQL, lock: boolean): Promise<RuleChange[]> {
   const lines = await tx.execute<{
     id: string;
     description: string;
@@ -786,40 +806,67 @@ async function applyRulesTo(tx: Tx, target: RuleTarget, where: SQL): Promise<num
      WHERE ${where} AND i.superseded_by_import_id IS NULL
        AND l.status = 'new' AND (l.classification_source IS NULL OR l.classification_source = 'rule')
      ORDER BY l.posted_on, l.line_number
-       FOR UPDATE OF l`);
-  const usage = new Map<string, number>();
-  let updated = 0;
-  for (const line of lines.rows) {
-    const rule = await ruleFor(tx, target, line.description, Number(line.amount_cents));
+       ${lock ? sql`FOR UPDATE OF l` : sql``}`);
+  // As regras de todas as linhas numa consulta (tarefa 139).
+  const rules = await rulesFor(
+    tx,
+    target,
+    lines.rows.map((line) => ({ description: line.description, amountCents: Number(line.amount_cents) })),
+  );
+  const changes: RuleChange[] = [];
+  lines.rows.forEach((line, i) => {
+    const rule = rules[i];
     const next = { entityId: rule?.entityId ?? null, categoryId: rule?.categoryId ?? null, ruleId: rule?.id ?? null };
-    if (next.ruleId === line.classification_rule_id && next.entityId === line.entity_id && next.categoryId === line.category_id) continue;
-    await tx
-      .update(statementLines)
-      .set({
-        entityId: next.entityId,
-        categoryId: next.categoryId,
-        classificationRuleId: next.ruleId,
-        classificationSource: rule ? 'rule' : null,
-      })
-      .where(eq(statementLines.id, line.id));
-    updated += 1;
-    if (rule) usage.set(rule.id, (usage.get(rule.id) ?? 0) + 1);
-  }
-  for (const [ruleId, count] of usage) {
-    await tx.execute(sql`UPDATE classification_rules SET usage_count = usage_count + ${count}, last_used_at = now() WHERE id = ${ruleId}`);
-  }
-  return updated;
+    if (next.ruleId === line.classification_rule_id && next.entityId === line.entity_id && next.categoryId === line.category_id) return;
+    changes.push({ lineId: line.id, ...next });
+  });
+  return changes;
 }
 
-/** "Aplicar regras" no detalhe do lote (conta ou fatura do cartão), com as regras da conta dele. */
-export async function applyRulesToImport(ctx: ServiceContext, importId: string): Promise<ApplyRulesResult> {
+/** Reaplica as regras do alvo às linhas novas (ver planRuleChanges) num UPDATE só e conta o uso de cada regra. */
+async function applyRulesTo(tx: Tx, target: RuleTarget, where: SQL): Promise<number> {
+  const changes = await planRuleChanges(tx, target, where, true);
+  const usage = new Map<string, number>();
+  for (const change of changes) if (change.ruleId) usage.set(change.ruleId, (usage.get(change.ruleId) ?? 0) + 1);
+  if (changes.length > 0) {
+    const rows = changes.map((c) => ({
+      id: c.lineId,
+      entity_id: c.entityId,
+      category_id: c.categoryId,
+      rule_id: c.ruleId,
+      source: c.ruleId ? 'rule' : null,
+    }));
+    await tx.execute(sql`
+      UPDATE statement_lines l
+         SET entity_id = x.entity_id, category_id = x.category_id, classification_rule_id = x.rule_id, classification_source = x.source
+        FROM json_to_recordset(${JSON.stringify(rows)}::json) AS x(id uuid, entity_id uuid, category_id uuid, rule_id uuid, source text)
+       WHERE l.id = x.id`);
+  }
+  await bumpRuleUsage(tx, usage);
+  return changes.length;
+}
+
+/** O alvo das regras de um lote (a conta dele ou o cartão da fatura), com a escrita conferida na caixa. */
+async function importRuleTarget(ctx: ServiceContext, importId: string): Promise<RuleTarget & { caixaId: string }> {
   const result = await ctx.db.execute<{ caixa_id: string; financial_account_id: string | null; card_caixa_id: string | null }>(sql`
     SELECT coalesce(a.caixa_id, i.card_caixa_id) AS caixa_id, i.financial_account_id, i.card_caixa_id
       FROM statement_imports i LEFT JOIN financial_accounts a ON a.id = i.financial_account_id WHERE i.id = ${importId}`);
   const row = result.rows[0];
   if (!row) throw notFound();
   ctx.access.assertWrite(row.caixa_id);
-  const target = { accountId: row.financial_account_id, cardCaixaId: row.financial_account_id ? null : row.card_caixa_id };
+  return {
+    caixaId: row.caixa_id,
+    accountId: row.financial_account_id,
+    cardCaixaId: row.financial_account_id ? null : row.card_caixa_id,
+  };
+}
+
+const targetWhere = (target: RuleTarget) =>
+  target.accountId ? sql`l.financial_account_id = ${target.accountId}` : sql`l.card_caixa_id = ${target.cardCaixaId}`;
+
+/** "Aplicar regras" no detalhe do lote (conta ou fatura do cartão), com as regras da conta dele. */
+export async function applyRulesToImport(ctx: ServiceContext, importId: string): Promise<ApplyRulesResult> {
+  const target = await importRuleTarget(ctx, importId);
   const updated = await withTx(ctx, (tx) => applyRulesTo(tx, target, sql`l.statement_import_id = ${importId}`));
   return { updated };
 }
@@ -830,9 +877,26 @@ export async function applyRulesToAccount(
   ref: { accountId?: string | null; cardCaixaId?: string | null },
 ): Promise<ApplyRulesResult> {
   const target = await resolveRuleTarget(ctx, ref, true);
-  const where = target.accountId ? sql`l.financial_account_id = ${target.accountId}` : sql`l.card_caixa_id = ${target.cardCaixaId}`;
-  const updated = await withTx(ctx, (tx) => applyRulesTo(tx, target, where));
+  const updated = await withTx(ctx, (tx) => applyRulesTo(tx, target, targetWhere(target)));
   return { updated };
+}
+
+/** A prévia de "Aplicar regras" num lote (importId) ou em todos os lotes da conta ou do cartão, sem gravar. */
+export async function planApplyRules(
+  ctx: ServiceContext,
+  ref: { importId?: string; accountId?: string | null; cardCaixaId?: string | null },
+): Promise<ApplyRulesPlan> {
+  const target = ref.importId ? await importRuleTarget(ctx, ref.importId) : await resolveRuleTarget(ctx, ref, true);
+  const where = ref.importId ? sql`l.statement_import_id = ${ref.importId}` : targetWhere(target);
+  const changes = await planRuleChanges(ctx.db, target, where, false);
+  const byRule = new Map<string, number>();
+  for (const change of changes) if (change.ruleId) byRule.set(change.ruleId, (byRule.get(change.ruleId) ?? 0) + 1);
+  return {
+    target: { caixaId: target.caixaId, accountId: target.accountId, cardCaixaId: target.cardCaixaId },
+    changes: changes.length,
+    byRule: [...byRule].map(([ruleId, lines]) => ({ ruleId, lines })),
+    cleared: changes.filter((c) => !c.ruleId).length,
+  };
 }
 
 /* ---------------- copiar regras entre contas (spec 032) ---------------- */

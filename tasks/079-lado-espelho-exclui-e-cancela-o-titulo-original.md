@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 734b618
 ---
 
 # Do lado espelho, excluir, arquivar e "Excluir este e os próximos" mexem no título e na série da outra caixa sem escrita nela
@@ -82,4 +82,18 @@ Nada foi executado. A decisão sobre o cancelamento pelo espelho depende do prod
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `deleteTitle`, `archiveTitle`, `restoreTitle`, `cancelTitle` e `reopenTitle` conferiam só a escrita na caixa do título pedido e operavam no par; `endSeriesFrom` não pegava a trava da série.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/titles.ts`: `assertPairOwner` — pelo lado espelho (`mirrorStatus` não nulo), excluir (avulso, "só esta" e "este e os próximos"), arquivar, restaurar, cancelar e reabrir exigem escrita também na caixa do original (`counterpartyCaixaId` do espelho); sem ela, 403 com `t.errors.mirrorPairOriginal`, que orienta a contestar. `endSeriesFrom` pega `pg_advisory_xact_lock(MATERIALIZE_LOCK, hashtext(regra))` antes de ler a regra.
+- Decisão (item 2): o cancelamento e a reabertura pelo espelho seguem a mesma regra, porque cancelam o título do original; o editor só do espelho aceita, contesta, baixa e edita categoria, descrição e observações do lado dele.
+- `apps/web/src/components/titles/TitleDrawer.tsx`: `ownsPair` esconde Cancelar/Reabrir, Excluir, "Este e os próximos", "Editar série" e "Encerrar série…" no espelho de quem não edita o original.
+- `packages/shared/src/i18n/pt-BR.ts`: `errors.mirrorPairOriginal`. `docs/006-espelhamento-entre-caixas.md`: a regra.
+- Testes: `apps/server/test/titles.test.ts`, "pelo espelho, só quem edita também o original exclui, arquiva, cancela ou encerra a série (tarefa 079)" (avulso e série, 403 e o original intacto; o admin continua podendo); `apps/server/test/agent-tools.test.ts`, no caso "cancelar, arquivar, excluir…", a tool `archive_title` pelo editor só da caixa B.
+- Verificação: `pnpm verify:quick` (nível rápido).
+
+### Complemento (revisão de 2026-11-22, frente P2a)
+
+- As prévias de `cancel_title`, `archive_title` e `delete_title` (`assertPairOwnerPreview` em `apps/server/src/agents/tool-handlers-operation.ts`) recusam pelo lado espelho sem escrita na caixa do original, com o mesmo 403 `t.errors.mirrorPairOriginal` do serviço, antes do cartão.
+- Teste: `apps/server/test/agent-tools.test.ts`, "as prévias recusam antes do cartão…" (as três tools pelo editor só da caixa B, sem prévia, e o original intacto). Verificação: `pnpm verify:quick`.

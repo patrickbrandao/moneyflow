@@ -19,8 +19,8 @@ SELECT is(
           !~ p.proname),
   NULL, 'nenhuma função lê p.api_key sem estar no comentário');
 
-SELECT ok((SELECT prosrc FROM pg_proc WHERE oid = 'audit_row()'::regprocedure) ~ format('''%s''', s),
-          'audit_row tira ' || s || ' do audit_log')
+-- A lista única dos segredos fora do audit_log é audit_secret_columns(), aplicada em audit_write (0065, tarefa 159).
+SELECT ok(s = ANY (audit_secret_columns()), 'audit_write tira ' || s || ' do audit_log')
   FROM unnest(ARRAY['password', 'bot_token', 'api_key', 'secret_headers', 'token_hash', 'webhook_secret_hash',
                     'code_hash']) s;
 

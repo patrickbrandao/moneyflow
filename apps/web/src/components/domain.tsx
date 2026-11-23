@@ -32,6 +32,16 @@ export function Money({ cents, signed, muted, className }: { cents: number; sign
   return <span className={cx('money', tone, className)}>{formatAccounting(cents)}</span>;
 }
 
+/** O que já está lançado com data futura, à parte do saldo de hoje (tarefa 130); nada quando é zero. */
+export function FutureEntries({ cents }: { cents: number }) {
+  if (!cents) return null;
+  return (
+    <span className="row-sub" title={t.caixa.futureEntriesHint}>
+      {t.caixa.futureEntries(formatAccounting(cents))}
+    </span>
+  );
+}
+
 export function TitleStatusBadge({ title }: { title: Pick<TitleRow, 'status' | 'overdue' | 'direction'> }) {
   if (title.status === 'canceled') return <Badge tone="outline">{t.title.statuses.canceled}</Badge>;
   if (title.status === 'paid')
@@ -66,6 +76,38 @@ export function LoadError({ error, onRetry }: { error: ApiError | Error; onRetry
         )
       }
     />
+  );
+}
+
+/**
+ * Aviso de lista cortada no servidor (tarefa 116): "Mostrando N de M" (com o
+ * total do filtro) ou "Mostrando os primeiros N" (sem ele), e "Carregar mais"
+ * até o teto, depois do qual pede para refinar o filtro.
+ */
+export function ListCutNotice({
+  shown,
+  total,
+  canMore,
+  loading,
+  onMore,
+}: {
+  shown: number;
+  total: number | null;
+  canMore: boolean;
+  loading?: boolean;
+  onMore: () => void;
+}) {
+  return (
+    <div className="notice mt-3 flex flex-wrap items-center justify-between gap-2" data-testid="list-cut">
+      <span>
+        {total === null ? t.common.shownFirst(shown) : t.common.shownOf(shown, total)} {canMore ? null : t.common.refineToSeeMore}
+      </span>
+      {canMore && (
+        <Button size="sm" variant="ghost" disabled={loading} onClick={onMore}>
+          {loading ? t.common.loading : t.common.loadMore}
+        </Button>
+      )}
+    </div>
   );
 }
 

@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 382fb0d
 ---
 
 # Rajada para o mesmo chat: cada 429 gasta uma das 5 tentativas e a mensagem vira falha definitiva
@@ -65,4 +65,65 @@ Nada foi executado; a conta de tentativas é uma estimativa. O comportamento exa
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado no `schema.sql`: `message_outbox_claim` soma a tentativa na reserva (`attempts + 1`), e `message_outbox_mark_failed` não distingue o 429. Com o `retry_after`, ela só muda o `next_attempt_at`, e a mensagem vira `failed` quando `attempts >= max_attempts` (5). O banco não tinha como devolver a mensagem à fila sem gastar a tentativa.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+Migration `database/migrations/0071_message_outbox_release.sql`; teste `database/tests/0071_message_outbox_release.sql`.
+
+- Coluna nova `message_outbox.deferrals smallint NOT NULL DEFAULT 0`, de 0 a 100 (`message_outbox_deferrals_check`): quantas vezes a mensagem voltou à fila sem gastar tentativa.
+- Função nova `message_outbox_release(p_message_id uuid, p_retry_after interval DEFAULT NULL, p_error text DEFAULT NULL) RETURNS text`, com `EXECUTE` para a aplicação. Para uma mensagem em `sending`:
+  - grava `status = pending`, `attempts − 1` (desfaz a reserva), `deferrals + 1` e `next_attempt_at` = agora + `p_retry_after`;
+  - o `p_retry_after` é de 30 s por padrão, limitado entre 1 s e 1 dia;
+  - grava `last_error = p_error`, ou mantém o anterior se vier vazio;
+  - devolve o novo status;
+  - fora de `sending`, dá `23514 message_outbox_transition_check`; com `p_retry_after` negativo, `22023`.
+- Decisão: o teto é de 100 adiamentos. No teto, a liberação conta a tentativa como `message_outbox_mark_failed` e vira `failed` quando não sobram tentativas. Assim a mensagem não gira para sempre. 100 cobre com folga a fila de 1000 atrasados de um grupo a 20 por minuto, porque cada mensagem é adiada no máximo uma vez por reserva.
+- A mesma função serve às outras reservadas do mesmo destino, que o worker libera sem enviar depois de um 429.
+- O comentário de `message_outbox_mark_failed` passou a dizer que a tentativa conta e indica a função nova.
+
+Testes:
+- o 429 desfaz a tentativa, conta o adiamento e respeita o `retry_after`;
+- a mensagem não é reservada de novo antes do prazo;
+- a rajada da tarefa: 120 mensagens para um chat que aceita 20 por passada (os 50 do `claim` e o resto liberado), todas `sent` em 6 passadas, nenhuma `failed`, cada uma com uma tentativa só;
+- o teto conta a tentativa e chega a `failed`;
+- a faixa de `deferrals`;
+- a falha comum continua contando a tentativa, com o backoff de 30 s.
+
+Verificação:
+- `make test` com `0071`, `0020` e `0023` passou, com o down da 0071.
+- `docs/016` (Mensagens, outbox) atualizada. `make dump` rodado.
+
+### Pendente na aplicação
+
+1. `pnpm db:pull`, para a coluna nova `message_outbox.deferrals`, que também volta no `SETOF message_outbox` do `message_outbox_claim` e do `claim_one`.
+2. `apps/server/src/services/messages.ts` (`deliver`/`markFailed`): quando `sendTelegramMessage` devolver 429 (o `retryAfterSec` preenchido e não permanente), chamar `SELECT message_outbox_release(${id}::uuid, ${retry}::interval, ${error}) AS status` em vez de `message_outbox_mark_failed`. As outras falhas ficam como estão.
+   - `notifyFailure` só se o status devolvido for `failed`, o que agora só acontece no teto.
+3. `apps/server/src/services/message-worker.ts` (`consumeOutbox`):
+   - ao receber 429 de um destino, guardar até quando ele está bloqueado na passada (`destination_id` → agora + `retry_after`);
+   - liberar as demais mensagens reservadas daquele destino sem enviar, com `message_outbox_release(id, retry_after restante, '429 …')`.
+   - A reserva precisa devolver o `destination_id` (`c.destination_id` no SELECT do `claim`).
+   - Opcional: espaçar os envios ao mesmo chat (cerca de 1 por segundo) dentro da passada.
+4. Teste em `apps/server/test/vision.test.ts`: a Bot API falsa com cota por `chat_id` (429 com `retry_after` depois de 20 por minuto) e várias chamadas de `consumeOutbox`, ajustando `next_attempt_at`, até esvaziar. Nenhuma `failed`, e nenhuma mensagem do destino enviada antes do `retry_after`.
+5. `docs/013` (Mensagens): o 429 adia e não conta como tentativa, com o teto de 100 adiamentos.
+
+### Aplicação (app)
+
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `deliver` mandava o 429 para `message_outbox_mark_failed`, e `consumeOutbox` seguia enviando as outras reservadas do mesmo destino.
+
+1. `pnpm db:pull`: o schema gerado da integração já tinha `message_outbox.deferrals`.
+2. `apps/server/src/services/messages.ts`: no 429 (`retryAfterSec` preenchido e não permanente), `deliver` chama `releaseMessage` (`SELECT message_outbox_release(id, retry, erro)`) em vez de `mark_failed`, e devolve o `retryAfterSec`. `notifyFailure` só com o status `failed`, que agora só vem do teto. As outras falhas seguem pelo `mark_failed` sem mudança.
+3. `apps/server/src/services/message-worker.ts` (`consumeOutbox`): a reserva devolve `c.destination_id`; o 429 guarda até quando o destino espera, na passada, e as demais reservadas dele voltam à fila sem envio por `releaseMessage` com o prazo restante e o motivo `429 rate limited: destination waiting for retry_after (not sent)`.
+   - Decisão: sem espaçar os envios ao mesmo chat (opcional na tarefa); com o 429 segurando o destino, a rajada já escoa sem falhas.
+4. `docs/013` (Mensagens): o 429 adia e não conta como tentativa, as reservadas do destino voltam sem envio e o teto de 100 adiamentos.
+
+Testes (`test/vision.test.ts`; a Bot API do teste ganhou a cota por chat e o modo 500):
+- a rajada da tarefa: 120 mensagens para um chat que aceita 20 por janela, com `consumeOutbox` e o `next_attempt_at` adiantado entre as passadas, terminam todas `sent`, cada uma com uma tentativa, sem `message_failed` no sino, e em cada passada nada vai ao chat depois do primeiro 429 (no máximo 20 aceitas e a recusada);
+- no teto (100 adiamentos e 4 tentativas), o 429 conta a tentativa e a mensagem vira `failed` com 5; um 500 conta a tentativa, sem adiamento, e volta com o backoff de 30 s;
+- o "enviar teste" com 429 agora fica com `attempts` 0 e `deferrals` 1.
+
+Verificação: rápida, `pnpm verify:quick --base HEAD`.

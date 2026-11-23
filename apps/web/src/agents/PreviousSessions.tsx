@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, EmptyState, Modal, useDebounced } from '../components/ui';
 import { api } from '../lib/api';
 import { useUser } from '../lib/auth';
-import { useAgents } from './AgentsProvider';
+import { useAgentActions, useAgentVersions } from './AgentsProvider';
 import { AgentDot } from './ConversationPane';
 import { useConversationActions } from './useConversationActions';
 
@@ -19,7 +19,9 @@ const PAGE = 20;
  */
 export function PreviousSessions({ agentId, userId, onOpen }: { agentId: string; userId?: string; onOpen?: () => void }) {
   const user = useUser();
-  const agents = useAgents();
+  // Só as ações e a versão da lista: não re-renderiza quando as janelas mudam (tarefa 120).
+  const agents = useAgentActions();
+  const { listVersion } = useAgentVersions();
   const own = !userId || userId === user.id;
   const [query, setQuery] = useState('');
   const q = useDebounced(query.trim(), 300);
@@ -52,7 +54,7 @@ export function PreviousSessions({ agentId, userId, onOpen }: { agentId: string;
       .catch(() => {
         if (mine === generation.current) setItems([]);
       });
-  }, [fetchPage, agents.listVersion]);
+  }, [fetchPage, listVersion]);
 
   async function more() {
     if (!items) return;

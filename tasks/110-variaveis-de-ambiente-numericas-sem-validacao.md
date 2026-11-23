@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 13140c3
 ---
 
 # Variáveis de ambiente numéricas vazias ou inválidas viram 0 ou NaN em silêncio
@@ -93,4 +93,14 @@ Só o `AbortSignal.timeout(NaN)` e o `new Date(NaN)` foram executados (Node loca
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado em `apps/server/src/config.ts`: os campos antigos usavam `Number(env.X ?? padrão)` (vazio = 0, `30d` = `NaN`, sem conferência) e os novos `clampInt`, que corrigia calado; só `SESSION_IDLE_HOURS` lançava. O `AGENT_CONCURRENCY` com `Math.max(1, NaN)` dava `NaN`.
+
 ## Resolução (executor)
+
+- `apps/server/src/config.ts`: `intEnv(env, nome, padrão, min, max)` (exportada) para todas as numéricas — vazia ou ausente = o padrão; não inteira (`30d`, `1.5`, `quatro`) ou fora da faixa lança "`X` precisa ser um inteiro entre `min` e `max` (veja .env.example); recebido …", que impede o boot. Saem `clampInt` e `sessionIdleHours`. `NOTIFY_AT` fora de `HH:MM` também lança (vazio = 08:00).
+- Decisão: inválido sempre impede o boot, inclusive nos campos que antes passavam pelo `clampInt` (corrigir calado escondia o erro). Faixas: `PORT` 1–65535, `SESSION_DAYS` 1–3650, `SESSION_IDLE_HOURS` 0–87600 (0 desliga), `WORKER_INTERVAL_MS` e `AGENT_MAINTENANCE_MS` 1 s–24 h, `MESSAGE_INTERVAL_MS` e `AGENT_TASK_INTERVAL_MS` 1 s–1 h, `AGENT_POLL_MS` 100 ms–60 s, `AGENT_CONCURRENCY` 1–64, `LOOKUP_TIMEOUT_MS` 100 ms–120 s, `TELEGRAM_TIMEOUT_MS` 100 ms–300 s, `LOGIN_RATE_LIMIT` ≥ 1, `BACKUP_MAX_UPLOAD_MB` 1–4096, `AI_DOCUMENT_TIMEOUT_MS` 1 s–30 min; as do antigo `clampInt` mantêm a faixa que já tinham.
+- `.env.example`: o comentário da regra no topo da seção Aplicação. Spec: `docs/001`, linha nova "Configuração".
+- Testes: `apps/server/test/config.test.ts` (novo, sem banco): vazio usa o padrão; `AGENT_CONCURRENCY=quatro`/`0`, `SESSION_DAYS=30d`/`0`, `PORT=70000`, `MESSAGE_INTERVAL_MS=0`, `WORKER_INTERVAL_MS=1.5`, `TELEGRAM_TIMEOUT_MS=x`, `LOOKUP_TIMEOUT_MS=NaN`, `LOGIN_RATE_LIMIT=0`, `AGENT_POLL_MS=10`, `AI_RUNS_PER_MINUTE=5000` e outros lançam citando a variável; os valores do `.env.example` e os limites das faixas (0 onde vale) passam. O caso de `SESSION_IDLE_HOURS` em `test/auth.test.ts` segue valendo.
+- Verificação: `pnpm verify:quick`.

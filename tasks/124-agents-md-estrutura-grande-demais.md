@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: c5e748d
 ---
 
 # `AGENTS.md` + `docs/INDEX.md` carregam ~67 mil caracteres em todo contexto de agente; a "Estrutura" é metade disso
@@ -65,4 +65,30 @@ A contagem de tokens é estimativa por caracteres; não medi com o tokenizador. 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código atual da integração (`fe8786d`): o `CLAUDE.md` importa o `AGENTS.md`, que importa o `docs/INDEX.md`; juntos carregavam 71.308 caracteres em todo contexto (`CLAUDE.md` 128 + `AGENTS.md` 46.858 + `INDEX.md` 24.322), mais que na revisão, porque as correções desta rodada acrescentaram frases. A "Estrutura" seguia cronológica, com a linha do `apps/server` em 16.894 caracteres e arquivos repetidos com descrições diferentes (`contracts.ts`, `ai-flows.ts`, `reconciliation.ts`, `statements.ts`).
+
 ## Resolução (executor)
+
+Medida (`wc -m`), o que entra em todo contexto:
+
+| | Antes | Depois |
+|---|---|---|
+| `CLAUDE.md` | 128 | 128 |
+| `AGENTS.md` | 46.858 | 15.423 |
+| `docs/INDEX.md` (importado) | 24.322 | 0 (vira link; o arquivo tem 8.712) |
+| **Total** | **71.308** | **15.551** (−78%) |
+
+Sob demanda, só quando o trabalho chega à pasta: `apps/server/AGENTS.md` 28.565, `apps/web/AGENTS.md` 12.808, `e2e/AGENTS.md` 6.656, `packages/shared/AGENTS.md` 5.928, `packages/db/AGENTS.md` 1.173.
+
+- **`AGENTS.md` da raiz**: ficaram as seções transversais (especificações, banco, tarefas, verificação, comandos, regras da aplicação, configuração) e uma "Estrutura" de nove linhas que aponta para o `AGENTS.md` de cada pacote e manda lê-lo antes de mexer na pasta (o Codex lê só o da raiz quando roda na raiz). Nenhuma regra foi cortada: as duas linhas longas (a da verificação rápida e a dos agentes, 1.680) viraram sub-itens; nenhuma linha passa de 1.000 caracteres. Saíram para o pacote só os detalhes: os falsos e as portas dos e2e (para `e2e/AGENTS.md`) e o modo local dos testes em detalhe (para `apps/server/AGENTS.md`). Ficou em ~15,4 mil, um pouco acima da meta de ~15 mil, para não encurtar regra.
+- **Um `AGENTS.md` por pacote**, no padrão de `database/` (com o `CLAUDE.md` da pasta só com `@AGENTS.md`): `apps/server`, `apps/web`, `packages/shared`, `packages/db` e `e2e`. Organizados por pasta e arquivo, não por fase; no server, cada arquivo com os testes de integração do `test/related.json`; no shared, com o teste unitário; na web e nos e2e, com o spec de `e2e/tests`. Arquivos de mesmo nome em pastas diferentes levam a pasta (`routes/contracts.ts`, `agents/worker.ts`, `integrations/telegram.ts`), e nenhum arquivo aparece duas vezes como item.
+- **Sem perder informação**: um script comparou os 712 identificadores entre crases da "Estrutura" antiga com os arquivos novos; os 5 que não voltam iguais foram reescritos de propósito (a rota da conta agora com os nomes reais, `/caixas/:id/accounts/:accountId/:tab`). Os arquivos que a "Estrutura" não citava (por exemplo `overview.ts`, `title-pair.ts`, `settlements.ts`, `transfers.ts`, `reconciliation-guards.ts`, `backup/lock.ts`, `backup/unzip.ts`, `shutdown.ts`, `log.ts`, os specs `carga`, `sessao`, `respostas`, `teclado` e `cnpj-consulta`) entraram, conferidos no código.
+- **`docs/INDEX.md`** deixou de ser importado (o `AGENTS.md` só o cita). A tabela ficou com uma frase por spec; o texto longo de cada linha foi para a linha **Conteúdo** do topo da própria spec (as 35), sem a marca "(entregue)", e a convenção nova está no INDEX. O estado das fases fica só na 015.
+- **Subagentes** (item 5 da solução): não mexi nas listas de leitura do `app.md` e do `triage.md`, a pedido da sessão principal (só comandos que mudaram). Agora que o INDEX não é importado, a leitura dele que elas pedem passou a ser necessária; a releitura do `AGENTS.md` da raiz continua redundante.
+- `docs/001-stack-e-entrega.md` (Repositório): onde ficam as instruções dos agentes.
+
+Testes: não há teste de código para a reorganização. Conferido: todo link relativo e todo `@` dos 49 arquivos `.md` alterados ou novos aponta para um arquivo que existe (script, 459 links, 0 quebrados).
+
+Verificação: rápida, `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_docs pnpm verify:quick --base fe8786d` (lint, typecheck de todos os pacotes, testes dos scripts e `test/config.test.ts`), e `pnpm lint`. Fica para conferir numa sessão nova: o `/context` inicial e o `apps/server/AGENTS.md` carregado ao abrir um arquivo do server.

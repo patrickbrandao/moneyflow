@@ -5,13 +5,14 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config';
 import { emitAgentEvent } from '../services/message-worker';
 import { isToolFlow, SYNC_FLOW_PURPOSES } from './flows';
-import { loadMessages } from './store';
+import { recentAssistantMessages } from './store';
 
 /*
  * Hub de eventos dos agentes na API: uma conexão dedicada faz LISTEN no canal
  * ai_run_events (NOTIFY do ai_run_event_append, entregue no COMMIT) e acorda
  * os streams SSE abertos daquela execução, que leem do banco os eventos com
- * seq maior que o último enviado.
+ * seq maior que o último enviado. O aviso traz o tipo do evento (e o status
+ * em status/done; tarefa 164).
  *
  * Também decide o aviso "agente concluiu" (spec 011: fechar a janela não
  * interrompe; o sino avisa): quando a execução termina — ou passa a esperar
@@ -46,8 +47,9 @@ export class RunEventsHub {
     client.on('notification', (message) => {
       if (message.channel !== 'ai_run_events' || !message.payload) return;
       try {
-        const { run_id: runId, seq } = JSON.parse(message.payload) as { run_id: string; seq: number };
-        this.dispatch(runId, Number(seq));
+        // O banco manda o tipo e, em status/done, o status (tarefa 164); o aviso de uma versão anterior, só run_id e seq.
+        const notice = JSON.parse(message.payload) as { run_id: string; seq: number; type?: string; status?: string };
+        this.dispatch(notice.run_id, Number(notice.seq), notice.type, notice.status);
       } catch {
         // payload inesperado: ignora
       }
@@ -97,12 +99,15 @@ export class RunEventsHub {
     };
   }
 
-  private dispatch(runId: string, seq: number) {
+  private dispatch(runId: string, seq: number, type?: string, status?: string) {
     const set = this.listeners.get(runId);
     if (set && set.size > 0) {
       for (const listener of set) listener();
       return;
     }
+    // Sem ninguém olhando, só o fim e a espera de confirmação podem avisar: os deltas não consultam o banco (tarefa
+    // 164). O aviso sem `type` (de uma versão anterior, durante o deploy) segue o caminho de antes.
+    if (type !== undefined && type !== 'done' && !(type === 'status' && status === 'awaiting_confirmation')) return;
     void this.notifyIfFinished(runId, seq).catch((error) => this.log.warn({ err: error, runId }, 'agentes: aviso de conclusão falhou'));
   }
 
@@ -127,8 +132,9 @@ export class RunEventsHub {
     if (!done && !awaiting) return;
     // Tarefa agendada e conciliação (spec 029): a espera vira ai_awaiting_approval, avisada pelo worker.
     if (awaiting && isToolFlow(row.purpose)) return;
-    const messages = await loadMessages(this.db, row.conversation_id);
-    const last = [...messages].reverse().find((m) => m.role === 'assistant' && blocksText(m.content).trim());
+    // Só as últimas respostas do agente, não a sessão inteira (tarefa 164).
+    const recent = await recentAssistantMessages(this.db, row.conversation_id, 5);
+    const last = recent.find((m) => blocksText(m.content).trim());
     const text = (status === 'failed' ? (row.payload.error ?? '') : last ? blocksText(last.content) : '') || (row.title ?? '');
     const title = awaiting
       ? t.agents.notifications.awaitingTitle(row.title)

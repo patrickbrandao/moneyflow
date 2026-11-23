@@ -168,6 +168,9 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   settlements_account_immutable_check: 'A conta da baixa só pode ser definida uma vez, enquanto ela estiver ativa.',
   settlements_immutable_check: 'Baixa não se edita: estorne e lance de novo.',
   settlements_reversal_check: 'Informe o motivo do estorno.',
+  /** Data do estorno (tarefa 045): settlement_reversal_set_date. */
+  settlements_reversal_date_check: 'A baixa não está estornada, ou a data do estorno é anterior à da baixa.',
+  settlements_reversal_reconciled_check: 'O estorno está conciliado com uma linha do extrato: desfaça a conciliação antes de mudar a data.',
   settlements_mirror_match_check: 'As duas pernas da baixa do espelho precisam ser iguais.',
   settlements_mirror_title_check: 'As pernas da baixa precisam estar no par de títulos espelhados.',
   // movimentos e transferências
@@ -350,6 +353,8 @@ export const DB_CONSTRAINT_MESSAGES: Record<string, string> = {
   ai_model_prices_audio_values_check: 'Os preços de áudio não podem ser negativos.',
   ai_providers_active_check: 'Um provedor arquivado não pode ficar ativo.',
   ai_model_prices_valid_from_key: 'Já existe um preço desse modelo com a mesma vigência.',
+  ai_usage_price_id_fkey:
+    'Este preço já foi usado em chamadas e não pode ser excluído (o custo delas fica como foi gravado). Cadastre um preço novo com a vigência certa.',
   ai_model_prices_model_check: 'Nome de modelo inválido.',
   ai_agents_name_key: 'Já existe um agente com esse nome.',
   ai_agents_ready_check: 'Para ativar o agente, escolha o provedor e o modelo.',
@@ -487,4 +492,10 @@ export const DB_CODE_MESSAGES: Record<string, string> = {
   '22P02': 'Valor em formato inválido.',
   '42501': 'Permissão negada.',
   '22023': 'Período inválido.',
+  // Concorrência (tarefa 188): a transação foi desfeita inteira e pode ser repetida.
+  '40P01': 'Outra operação mexia nos mesmos registros ao mesmo tempo. Tente de novo.',
+  '40001': 'Outra operação mexia nos mesmos registros ao mesmo tempo. Tente de novo.',
+  // Prazos do pool (tarefa 102): a consulta passou do statement_timeout, ou a espera por um lock do lock_timeout.
+  '57014': 'A operação demorou demais e foi interrompida. Tente de novo; num relatório, um período menor.',
+  '55P03': 'Outra operação está usando os mesmos registros. Tente de novo em instantes.',
 };

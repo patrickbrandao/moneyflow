@@ -1,4 +1,4 @@
-import { type CaixaDetail, formatDate, type TitleRow, t } from '@moneyflow/shared';
+import { type CaixaDetail, formatDate, type TitleRow, type TitleTotals, t } from '@moneyflow/shared';
 import { CircleDollarSign, Paperclip, Plus, Search } from 'lucide-react';
 import { useState } from 'react';
 import '../../styles/attachments.css';
@@ -6,22 +6,24 @@ import { recordDragProps } from '../../agents/records';
 import { api } from '../../lib/api';
 import { useRegisterCommands } from '../../lib/commands';
 import { titlesTable } from '../../lib/export-tables';
-import { useApi } from '../../lib/hooks';
+import { useApi, useListLimit } from '../../lib/hooks';
 import { useParamState, useSetParams } from '../../lib/params';
+import { RowButton } from '../a11y';
 import { DateRangeFilter, useStoredPeriod } from '../DateRangeFilter';
-import { CategoryLabel, LoadError, MirrorBadge, Money, SkelRows, TitleStatusBadge } from '../domain';
+import { CategoryLabel, ListCutNotice, LoadError, MirrorBadge, Money, SkelRows, TitleStatusBadge } from '../domain';
+
 import { ExportMenu } from '../ExportMenu';
-import { Badge, Button, cx, EmptyRow, Tabs, useDebounced } from '../ui';
+import { Badge, Button, cx, EmptyRow, Skel, Tabs, useDebounced } from '../ui';
 import { TitleDrawer } from './TitleDrawer';
 import { TitleFormModal } from './TitleFormModal';
 
 const FILTERS = [
-  { key: 'unpaid', label: 'Em aberto' },
+  { key: 'unpaid', label: t.title.filters.unpaid! },
   { key: 'overdue', label: t.title.statuses.overdue! },
-  { key: 'paid', label: 'Liquidados' },
+  { key: 'paid', label: t.title.filters.paid! },
   { key: 'pending_acceptance', label: t.title.mirrorStatuses.pending! },
   { key: 'pending_account', label: t.title.pendingAccount },
-  { key: 'canceled', label: 'Cancelados' },
+  { key: 'canceled', label: t.title.filters.canceled! },
   { key: 'all', label: t.common.all },
 ] as const;
 
@@ -52,10 +54,17 @@ export function TitlesTab({
   if (from) params.set('from', from);
   if (to) params.set('to', to);
   if (archived) params.set('archived', '1');
-  const { data, error, reload } = useApi<TitleRow[]>(`/api/titles?${params}`);
+  // A lista corta no servidor (tarefa 116): o rodapé vem dos totais do filtro inteiro, e
+  // "Mostrando N de M" com "Carregar mais" avisa quando há mais títulos do que os mostrados.
+  const list = useListLimit(params.toString());
+  const listParams = new URLSearchParams(params);
+  listParams.set('limit', String(list.limit));
+  const { data, error, reload, loading } = useApi<TitleRow[]>(`/api/titles?${listParams}`, { keepPrevious: list.growing });
+  const totals = useApi<TitleTotals>(`/api/titles/totals?${params}`);
 
   const changed = () => {
     void reload();
+    void totals.reload();
     onChanged();
   };
 
@@ -67,10 +76,7 @@ export function TitlesTab({
     [caixa.canWrite, caixa.id, direction],
   );
 
-  const totals = (data ?? []).reduce((acc, row) => ({ amount: acc.amount + row.amountCents, open: acc.open + row.openCents }), {
-    amount: 0,
-    open: 0,
-  });
+  const count = totals.data?.count ?? null;
 
   return (
     <>
@@ -81,11 +87,11 @@ export function TitlesTab({
             className="field"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Descrição ou entidade"
-            aria-label="Buscar títulos"
+            placeholder={t.title.searchPlaceholder}
+            aria-label={t.title.searchAria}
           />
         </label>
-        <DateRangeFilter value={period} onChange={setPeriod} fromLabel="Vencimento de" toLabel="Vencimento até" />
+        <DateRangeFilter value={period} onChange={setPeriod} fromLabel={t.title.dueFrom} toLabel={t.title.dueTo} />
         <label className="check">
           <input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} /> {t.common.showArchived}
         </label>
@@ -124,7 +130,7 @@ export function TitlesTab({
             <thead>
               <tr>
                 <th>{t.title.due}</th>
-                <th>Título</th>
+                <th>{t.title.titleLabel}</th>
                 <th>{t.title.category}</th>
                 <th className="num">{t.title.amount}</th>
                 <th className="num">{t.title.open}</th>
@@ -134,7 +140,7 @@ export function TitlesTab({
             </thead>
             <tbody>
               {!data && <SkelRows cols={7} />}
-              {data && data.length === 0 && <EmptyRow colSpan={7}>Nenhum título com esse filtro.</EmptyRow>}
+              {data && data.length === 0 && <EmptyRow colSpan={7}>{t.title.emptyFiltered}</EmptyRow>}
               {data?.map((row) => (
                 <tr
                   key={row.id}
@@ -148,7 +154,7 @@ export function TitlesTab({
                 >
                   <td className={cx('mono text-xs', row.overdue && 'text-danger')}>{formatDate(row.dueDate)}</td>
                   <td>
-                    <span className="row-title">
+                    <RowButton onClick={() => setTitleId(row.id)}>
                       {row.description}
                       {row.occurrence && (
                         <Badge mono className="ml-2">
@@ -161,7 +167,7 @@ export function TitlesTab({
                           {row.attachmentCount}
                         </span>
                       )}
-                    </span>
+                    </RowButton>
                     <span className="row-sub">
                       {row.entityName}
                       {row.counterpartyCaixaName ? ` · ⇄ ${row.counterpartyCaixaName}` : ''}
@@ -204,21 +210,18 @@ export function TitlesTab({
             {data && data.length > 0 && (
               <tfoot>
                 <tr>
-                  <td colSpan={3}>
-                    {data.length} título{data.length === 1 ? '' : 's'}
-                  </td>
-                  <td className="num">
-                    <Money cents={totals.amount} />
-                  </td>
-                  <td className="num">
-                    <Money cents={totals.open} />
-                  </td>
+                  <td colSpan={3}>{count === null ? <Skel h={14} w={80} /> : t.title.countLabel(count)}</td>
+                  <td className="num">{totals.data ? <Money cents={totals.data.amountCents} /> : <Skel h={14} w={80} />}</td>
+                  <td className="num">{totals.data ? <Money cents={totals.data.openCents} /> : <Skel h={14} w={80} />}</td>
                   <td colSpan={2} />
                 </tr>
               </tfoot>
             )}
           </table>
         </div>
+      )}
+      {data && count !== null && data.length < count && (
+        <ListCutNotice shown={data.length} total={count} canMore={list.canMore} loading={loading} onMore={list.more} />
       )}
 
       {titleId && <TitleDrawer key={titleId} titleId={titleId} onClose={() => setTitleId(null)} onChanged={changed} />}

@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 83af4a3
 ---
 
 # `schema.sql` sem privilégios e sem conferência no CI, e imagens do banco sem versão fixa
@@ -62,4 +62,54 @@ Nada foi executado. A imagem do banco de produção (projeto externo) não foi v
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado:
+- `make dump` usava `--no-privileges`, e nenhum `GRANT`/`REVOKE` aparecia no `schema.sql`;
+- o `Dockerfile` usava `pgvector/pgvector:pg18` e o pgTAP do apt sem versão;
+- o dbmate era `ghcr.io/amacneil/dbmate:2`;
+- o job `database` do CI só roda `make -C database test`.
+
+Os `pg18` e `0.8.7-pg18` do Docker Hub apontam hoje para o mesmo digest, o da imagem em uso: PostgreSQL 18.7, pgvector 0.8.7, Debian bookworm. O `0.8.7-pg18` é republicado a cada versão menor do Postgres. Para isso, a tag sozinha não basta, e o digest também foi fixado.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+- `database/docker/Dockerfile`, com um comentário de como atualizar:
+  - `FROM pgvector/pgvector:0.8.7-pg18-bookworm@sha256:38681dc6eaf55308e2a4c6de392d131652dcfac70e1263e35cd9b5ea3fe39782`;
+  - `postgresql-18-pgtap=1.3.4-1.pgdg12+2` e `libtap-parser-sourcehandler-pgtap-perl=3.37-1.pgdg120+1`. São as versões que já estavam instaladas.
+  - Decisão: fixar também o apt do pgTAP. Quando o PGDG tirar essa versão do repositório, o build falha e a troca vira deliberada. Isso não muda o que roda em produção, porque o pgTAP só serve aos testes.
+- `database/docker-compose.yml`: o serviço `dbmate` usa `ghcr.io/amacneil/dbmate:2.38.2`, a mesma versão que o `:2` resolvia.
+- `make dump`:
+  - continua gravando o `schema.sql` sem os privilégios, para não dobrar o arquivo;
+  - passa a gravar também `database/privileges.sql`, só com as linhas `GRANT`/`REVOKE`/`ALTER DEFAULT PRIVILEGES` do `pg_dump --schema-only --no-owner`, na ordem dele. São 693 linhas hoje, inclusive os `GRANT SELECT(col)` por coluna que blindam `users.password`, `bot_token`, `api_key`, `secret_headers`, `token_hash`, `webhook_secret_hash` e `code_hash`;
+  - os dois comandos rodam com `pipefail`;
+  - rodar `make dump` duas vezes dá o mesmo arquivo.
+- Rebuild: o container `moneyflow-db-postgres-1` foi reconstruído uma única vez, com o volume mantido, para as versões fixas e para o `02-app-role.sh` da tarefa 102.
+  - Conferido depois: PostgreSQL 18.7 (Debian bookworm), pgvector 0.8.7, pgTAP 1.3.4.
+  - O `make test` completo passou: 68 arquivos, 4308 testes.
+- `docs/016` (Motor e imagem, Migrations e testes) e `database/AGENTS.md` (Estrutura, Comandos, Fluxo) registram as versões e o `privileges.sql`.
+
+### Pendente na aplicação
+
+1. `.github/workflows/ci.yml`, no job `database`, depois do `make -C database test`:
+   - `make -C database dump && git diff --exit-code database/schema.sql database/privileges.sql`. Falha se a migration nova veio sem o `make dump`.
+2. No job `check`, com o banco migrado: `pnpm db:pull && git diff --exit-code packages/db/src/generated`. Ele pode subir o banco por `make -C database migrate` e usar a URL do banco de desenvolvimento.
+3. `docker-compose.yml` da raiz: o serviço `migrate` com `ghcr.io/amacneil/dbmate:2.38.2`, no lugar do `:2`. O `lock_timeout` da tarefa 102 também vai na `DATABASE_URL` dele.
+4. `Dockerfile` da raiz: confirmar que o `postgresql-client-18` instalado é da mesma versão principal do servidor (18). Opcional: fixar a versão do apt e registrá-la na `docs/001`.
+5. O deploy de produção (projeto externo) usa a imagem do banco com a mesma tag e o mesmo digest, ou registra as versões dele.
+
+### Aplicação (app)
+
+1. **`schema.sql`/`privileges.sql` no CI**: no job `database` do `ci.yml`, depois do `make -C database test`, `make -C database dump` e `git diff --exit-code database/schema.sql database/privileges.sql`. Conferido à mão: o `pg_dump` do banco modelo desta frente (migrado do zero) bate com os dois arquivos commitados, fora a `schema_migrations`, que lá não existe porque o modelo é migrado sem o dbmate (no CI é o dbmate).
+2. **Schema Drizzle**: decisão de não usar `git diff --exit-code` depois do `pnpm db:pull`. A saída do drizzle-kit muda de ordem conforme o banco de onde sai: tabelas, imports e até as classes de operador dos índices. O `db:pull` do banco de desenvolvimento e o do banco modelo, ambos na 0072, deram arquivos diferentes com o mesmo conteúdo. No lugar dele entrou `apps/server/test/generated-schema.test.ts`, que roda na integração do job `check` e no modo local:
+   - compara pelo catálogo (`pg_class`/`pg_attribute`, que o papel da aplicação lê mesmo sem acesso às colunas de segredo) as tabelas e visões do `public` com as do schema gerado (`getTableConfig`/`getViewConfig`);
+   - nas tabelas, confere colunas, tipo normalizado e `NOT NULL`; nas visões, só as colunas, porque o drizzle-kit perde o `[]` das colunas de array das visões;
+   - falha com a lista legível do que falta.
+   Ele achou o schema gerado defasado desde 2026-10-21, sem `ai_embedding_index_stats.complete_at`, `ai_embedding_indexes.complete_at`, `financial_account_balances.balance_today_cents`, `message_outbox.deferrals`, `statement_csv_mappings.amount_sign` e `statement_import_balances.interval_difference_cents`. O `packages/db/src/generated` foi regenerado pelo `pnpm db:pull` contra o banco modelo migrado. O diff é grande porque a ordem mudou; o typecheck de todos os pacotes passou.
+3. **dbmate da raiz**: `docker-compose.yml`, serviço `migrate`, com `ghcr.io/amacneil/dbmate:2.38.2` e o `lock_timeout` de 10 s da tarefa 102 na `DATABASE_URL`, como no `database/docker-compose.yml`. O `scripts/check-versions.mjs` (tarefa 184) confere que as duas versões batem e são completas.
+4. **Cliente do Postgres da imagem**: o `Dockerfile` instala `postgresql-client-18`, a major do servidor. Decisão: sem fixar a versão menor do apt, porque o PGDG só mantém a mais nova e um pin quebraria o build. A chave do repositório passou a ser conferida pelo sha256 (tarefa 184), e o comentário do `Dockerfile` registra isso.
+5. **Produção**: a `docs/018` (Como publicar → Versões fixas) pede ao projeto externo a imagem do banco com a mesma tag e o mesmo digest de `database/docker/Dockerfile`, ou o registro das versões dele.
+
+Testes: `test/generated-schema.test.ts`, com o caso do banco e um caso da comparação (coluna nova, coluna a menos, tipo trocado). Antes da regeneração, ele falhou com as seis colunas acima; depois, passou no Postgres local. `scripts/check-versions.test.mjs` cobre o dbmate. Verificação: rápida, `pnpm verify:quick --base 290403d` (só o que esta frente mudou; o portão do lint, o typecheck de todos os pacotes e os testes de integração tocados no Postgres local), `pnpm test:scripts` e o build do servidor com o target `node26`.

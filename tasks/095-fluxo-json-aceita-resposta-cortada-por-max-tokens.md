@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d0514fa
 ---
 
 # Os fluxos de documento aceitam como completa a resposta cortada por `max_tokens`
@@ -78,4 +78,13 @@ Nada foi executado. O tamanho a partir do qual o corte acontece depende do model
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: o fluxo JSON tem uma volta e saía com `completed` em qualquer `stopReason` que não fosse `tool_use`/`refusal`; `convertPdfToMarkdown` gravava o texto cortado e a leitura virava campos nulos.
+
 ## Resolução (executor)
+
+- `apps/server/src/agents/runner.ts`: fluxo JSON com `stopReason === 'max_tokens'` termina `failed` com `t.agents.errors.flowTruncated` (o uso da chamada fica gravado). A leitura de documento e a leitura/conversão de contrato já respondem 422 com o erro da execução, e a conversão não grava documento.
+- `e2e/fakes/fake-llm.ts`: opção `stopReason` na resposta enfileirada (no OpenAI vira `finish_reason: length`).
+- Decisão: sem continuação automática da conversão nem o `stopReason` gravado no chat (opcionais); a mensagem manda aumentar o `max_tokens` do agente dos fluxos.
+- Specs: `docs/011` (leitura de documento) e `docs/020` (conversão).
+- Teste: `agents.test.ts` "resposta cortada por max_tokens: a leitura responde 422 com o motivo e a conversão não grava o markdown" (e o caminho normal segue gravando a versão 1).
+- Verificação: `pnpm verify:quick` (rápida), com `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s2`.

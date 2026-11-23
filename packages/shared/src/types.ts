@@ -7,7 +7,10 @@ export type CaixaRole = 'editor' | 'viewer';
 /** Papel efetivo do usuário numa caixa (admin global vê e escreve em todas). */
 export type EffectiveRole = 'admin' | CaixaRole;
 
-export type ApiError = { error: { code: string; message: string; details?: { path: string; message: string }[] } };
+/** Erro da API; `requestId` vem no 500 (o id da requisição no log, tarefa 186). */
+export type ApiError = {
+  error: { code: string; message: string; details?: { path: string; message: string }[]; requestId?: string };
+};
 
 export type Membership = { caixaId: string; caixaName: string; role: CaixaRole };
 
@@ -152,7 +155,10 @@ export type CaixaSummary = {
   /** Cartão: 4 últimos dígitos (null em caixa geral). */
   cardLast4: string | null;
   myRole: EffectiveRole;
+  /** Saldo das contas ativas no fim de hoje (São Paulo), sem o lançado com data futura (tarefa 130). */
   balanceCents: number;
+  /** O que já está lançado com data futura nas contas ativas (fora do `balanceCents`). */
+  futureCents: number;
   payableOpenCents: number;
   receivableOpenCents: number;
   overdueCount: number;
@@ -174,7 +180,10 @@ export type AccountRow = {
   openingBalanceCents: number;
   openingDate: string;
   archivedAt: string | null;
+  /** Saldo no fim de hoje (São Paulo), sem o lançado com data futura (tarefa 130). */
   balanceCents: number;
+  /** O que já está lançado com data futura (inclusive o saldo inicial de conta que abre no futuro). */
+  futureCents: number;
   canWrite: boolean;
   /** "Conciliar com IA ao importar" (spec 029). */
   aiAutoReconcile: boolean;
@@ -259,6 +268,9 @@ export type TitleRow = {
   attachmentCount: number;
 };
 
+/** Quantidade e somas do filtro inteiro da listagem (GET /api/titles/totals, tarefa 116), sem o limite. */
+export type TitleTotals = { count: number; amountCents: number; openCents: number };
+
 export type SettlementRow = {
   id: string;
   titleId: string;
@@ -273,10 +285,43 @@ export type SettlementRow = {
   mirrorSettlementId: string | null;
   transferId: string | null;
   transferOtherAccountName: string | null;
+  /** Quem estorna pode desfazer a transferência: edita as caixas das duas contas (tarefa 081). */
+  transferUndoAllowed: boolean;
   notes: string | null;
   reversedAt: string | null;
   reversalReason: string | null;
+  /** Data do movimento de estorno desta perna (nula sem conta ou sem estorno; tarefa 045). */
+  reversalOn: string | null;
   createdAt: string;
+};
+
+/** Uma perna da baixa estornada e o movimento de estorno dela (tarefa 045). */
+export type SettlementReversalLeg = {
+  settlementId: string;
+  titleId: string;
+  caixaId: string;
+  caixaName: string;
+  financialAccountId: string | null;
+  /** Nula quando quem pergunta não lê a caixa da perna. */
+  accountName: string | null;
+  /** Movimento de estorno: nulo sem conta. */
+  movementId: string | null;
+  occurredOn: string | null;
+  amountCents: number | null;
+  /** Conciliado com uma linha do extrato: a data não muda (desfaça a conciliação antes). */
+  reconciled: boolean;
+  canWrite: boolean;
+};
+
+/** A baixa estornada com as pernas, para corrigir a data do estorno (tarefa 045). */
+export type SettlementReversalInfo = {
+  settlementId: string;
+  titleId: string;
+  settledOn: string;
+  reversedAt: string | null;
+  legs: SettlementReversalLeg[];
+  /** Estornada, com algum movimento a mudar, todos em caixas que quem pergunta edita e nenhum conciliado. */
+  canChange: boolean;
 };
 
 export type RecurrenceRuleDto = {
@@ -446,7 +491,7 @@ export type AccountSummary = {
 };
 
 export type Overview = {
-  totals: { balanceCents: number; payableOpenCents: number; receivableOpenCents: number; overdueCents: number };
+  totals: { balanceCents: number; futureCents: number; payableOpenCents: number; receivableOpenCents: number; overdueCents: number };
   caixas: CaixaSummary[];
   overdue: TitleRow[];
   upcoming: TitleRow[];
@@ -575,6 +620,9 @@ export type CardPurchaseRow = {
   contractId: string | null;
   contractName: string | null;
 };
+
+/** Quantidade e total do filtro inteiro das compras (GET /api/cards/:id/purchases/totals, tarefa 116). */
+export type CardPurchaseTotals = { count: number; totalCents: number };
 
 export type CardPurchaseDetail = CardPurchaseRow & {
   items: {
@@ -731,6 +779,13 @@ export type StatementImportDetail = StatementImportSummary & {
   skippedDuplicates?: number;
   /** Só na resposta do import de um OFX com várias contas: as contas do arquivo que ficaram de fora (spec 009). */
   ofxLeftOut?: string[];
+  /** Só na resposta do import de um CSV (tarefa 140): as linhas que não foram lidas (data ou valor inválidos), até 50, e o total. */
+  invalidRows?: StatementInvalidRows;
+  /**
+   * Só na resposta do import (tarefa 089): linhas novas cujo FITID a conta já tinha com outra data ou valor, ou
+   * repetido no arquivo. Entraram com a chave de reserva; até 50, e o total.
+   */
+  fitidCollisions?: StatementFitidCollisions;
   /** Só na resposta do import: a sugestão do agente dos fluxos enfileirada para as linhas novas (a tela acompanha a execução). */
   aiSuggestion?: { queued: boolean; runId: string | null; lines: number; skippedReason?: string } | null;
   /** Só na resposta do import (spec 031): a troca dos provisórios feita na mesma transação. */
@@ -746,6 +801,15 @@ export type StatementImportDetail = StatementImportSummary & {
     skippedReason?: string;
     recipes?: number;
   } | null;
+};
+
+/** Linhas do CSV que não foram lidas (tarefa 140): o número da linha no arquivo e o motivo. */
+export type StatementInvalidRows = { total: number; rows: { row: number; message: string }[] };
+
+/** Linhas novas com o FITID de outra transação (tarefa 089). */
+export type StatementFitidCollisions = {
+  total: number;
+  lines: { fitid: string; postedOn: string; amountCents: number; description: string }[];
 };
 
 /** Resumo de um extrato do OFX; `position` (1, 2, …) é a ordem no arquivo, o `ofxStatement` do import. */
@@ -825,6 +889,8 @@ export type CsvMappingRow = {
   dateFormat: string;
   decimalSeparator: string;
   columns: Record<string, string | number>;
+  /** Sinal dos valores do arquivo (tarefa 091): como vêm ou invertidos. */
+  amountSign: 'as_is' | 'invert';
   isDefault: boolean;
 };
 
@@ -1291,7 +1357,8 @@ export type NotificationDto = {
   createdAt: string;
 };
 
-export type NotificationList = { unread: number; items: NotificationDto[] };
+/** Não lidas primeiro, depois as mais recentes; `nextCursor` traz a página seguinte (tarefa 169). */
+export type NotificationList = { unread: number; items: NotificationDto[]; nextCursor: string | null };
 
 /* ---------------- contratos (specs 020 e 034) ---------------- */
 
@@ -1626,7 +1693,8 @@ export type TerminationPreview = {
   /** Ocorrências em aberto com competência depois da data: canceladas (com o espelho). */
   canceled: TerminationOccurrence[];
   /** A última ocorrência de cada obrigação (a que cobre a data), com o proporcional sugerido. */
-  last: (TerminationOccurrence & { periodEnd: string; proratedCents: number; settled: boolean })[];
+  /** `closed`: competência em mês fechado (de um dos lados): o valor não muda, como na com baixa. */
+  last: (TerminationOccurrence & { periodEnd: string; proratedCents: number; settled: boolean; closed: boolean })[];
   /** Em mês fechado: não mudam. */
   blockedClosed: TerminationOccurrence[];
   /** Com baixa depois da data: ficam como estão. */

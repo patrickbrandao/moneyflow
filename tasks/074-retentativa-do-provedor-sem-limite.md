@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: d0514fa
 ---
 
 # Erro temporário do provedor devolve a execução à fila para sempre
@@ -98,4 +98,12 @@ Nada foi executado; o comportamento vem da leitura do runner e do trigger. A qua
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado no código: `runner.ts` devolvia a execução à fila com `claimed.attempts < claimed.max_attempts`, e o trigger `ai_runs_validate` zera `attempts` na transição `running → queued`, então a condição era sempre verdadeira; o `.finally` do worker reservava de novo na hora. O teste `agents.test.ts` "erro 500 repetido" usava 400. Resolvido só na aplicação, sem mudar o banco.
+
 ## Resolução (executor)
+
+- `apps/server/src/agents/runner.ts`: as voltas à fila são contadas pelos eventos `error` com `code: 'provider_retry'` gravados depois da última mensagem da execução (`providerRequeues`; a purga só apaga eventos de execuções terminadas). Com `max_attempts − 1` voltas seguidas (2 no padrão: 3 chamadas lógicas), a execução termina `failed` com a mensagem do provedor. Antes de cada volta, uma espera (`requeueDelay`: 4 × `AI_REQUEST_BACKOFF_MS`, dobrando a cada volta, até 60 s) com o heartbeat ligado: o "parar" corta a espera e cancela. A volta grava o `status: queued` na mesma transação do UPDATE.
+- Decisão: o contador zera quando há progresso (uma mensagem gravada), para uma execução longa com muitas voltas de tool não falhar por erros esparsos. `status === null` (rede) continua repetível, agora com o limite.
+- Specs: `docs/011` (Execução) e `docs/023` (Streaming) dizem quantas voltas e a espera.
+- Testes: `ai-requests.test.ts` "5xx persistente: a execução falha depois de max_attempts − 1 voltas à fila, com espera entre elas" (3 requisições de 3 tentativas, a ordem dos eventos e a espera) e "provedor fora do ar (porta fechada, sem status HTTP)"; `agents.test.ts` "falha do provedor: erro 500 repetido" passou a usar 500 (o arquivo sobe com `AI_REQUEST_BACKOFF_MS=5`). O caso "três 5xx e depois 200" continua concluindo.
+- Verificação: `pnpm verify:quick` (rápida), com `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s2`.

@@ -1,4 +1,6 @@
+import { t } from '@moneyflow/shared';
 import { ChevronDown, ExternalLink, MoreVertical, PanelLeftClose } from 'lucide-react';
+
 import { useEffect, useState } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { BRAND } from '../../config/brand';
@@ -85,15 +87,15 @@ export function Sidebar({ open, onClose, onCollapse }: { open: boolean; onClose:
           <button
             type="button"
             className="icon-btn sidebar-collapse"
-            title="Recolher o menu"
-            aria-label="Recolher o menu"
+            title={t.shell.collapseMenu}
+            aria-label={t.shell.collapseMenu}
             onClick={() => (window.matchMedia(NARROW).matches ? onClose() : onCollapse())}
           >
             <PanelLeftClose />
           </button>
         </div>
 
-        <nav className="nav" aria-label="Principal">
+        <nav className="nav" aria-label={t.shell.mainNav}>
           {sections.map((section, index) => (
             <div key={index} className="contents">
               {index > 0 && <div className="nav-sep" />}

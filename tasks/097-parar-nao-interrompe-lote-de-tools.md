@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d0514fa
 ---
 
 # "Parar" e "Finalizar sessão" não interrompem um lote de tools em andamento
@@ -89,4 +89,12 @@ Nada foi executado. O cenário de reserva perdida no meio do lote exige o heartb
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `resolvePending` executava o lote inteiro sem conferir o cancelamento, as tools MCP não recebiam o `signal`, e `insertToolResults`/a mensagem do assistente gravavam sem a cerca do `lock_token`.
+
 ## Resolução (executor)
+
+- `apps/server/src/agents/runner.ts`: `resolvePending` recebe o `checkpoint` e confere o "parar" e a reserva antes de cada tool a partir da segunda. Cancelada no meio do lote, grava numa transação os resultados reais das tools já executadas e "Execução interrompida pelo usuário." nas demais, e encerra `canceled`; reserva perdida, para sem gravar (a retomada trata o `tool_start` como interrompido). As gravações da mensagem do assistente e dos resultados conferem a reserva (`assertLock`, `FOR UPDATE` com o `lock_token`). "Finalizar sessão" segue pelo mesmo caminho (o `stopRun` marca o `cancel_requested_at`).
+- `tool-helpers.ts`/`tools-runtime.ts`/`mcp-client.ts`: o `signal` da execução vai no `ToolCallMeta` e no `callTool` do MCP; abortada, a tool volta "interrompida".
+- Specs: `docs/011` (Parar).
+- Testes: `agents.test.ts` "parar ou finalizar no meio de um lote de tools" (handler registrado no teste: uma execução, 1 resultado real e 4 "interrompido", `canceled` em segundos, nos dois modos) e "o parar aborta a tool MCP em andamento" (tool `slow_lookup` nova em `test/fakes/fake-mcp.ts`, opção `slowMs`).
+- Verificação: `pnpm verify:quick` (rápida), com `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s2`.

@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 49c2aa2
 ---
 
 # E2E: arquivos rodam em paralelo na mesma pilha e o agente ativo de um spec muda o resultado dos outros
@@ -83,4 +83,28 @@ Nada foi executado (e2e fora do escopo desta revisão). O número de vCPUs do ru
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código atual:
+- `playwright.config.ts` sem `workers`;
+- `agentes.spec.ts` e `visao.spec.ts` criam provedor e agente ativos;
+- o agente dos fluxos é o primeiro ativo (`flowAgentId`), e o import chama `suggestImportClassifications(…, { auto: true })`;
+- os remendos de `operacao.spec.ts` (o `if (await swapEntity.isVisible())` e a limpeza das sugestões `agent` antes do "Aplicar regras");
+- o `server.listen` dos dois falsos sem ouvinte de `error`.
+
+O `anotacoes.spec.ts:114` não é vazamento de agente: é o popover do alarme, que o clique no título (fora dele) fecha pelo `useClickOutside`. O `if` escondia esse fechamento, que é determinístico.
+
 ## Resolução (executor)
+
+1. **Um arquivo por vez**: `workers: 1` no `e2e/playwright.config.ts`, com o motivo no comentário. Decisão: a opção mais simples da tarefa, em vez dos dois projetos com `dependencies`. Com 1 worker os arquivos rodam em ordem; o `afterAll` do `agentes.spec.ts` desliga o agente antes dos seguintes, e o `visao.spec.ts` (o último) liga e desliga o dele dentro do próprio teste. O CI do GitHub já rodava com 1 ou 2 workers; o `timeout-minutes` do job `image` (tarefa 184) leva isso em conta.
+2. **Sobras de execução interrompida**: o `e2e/global-setup.ts` desliga, pela API, os agentes e provedores ativos cujo nome começa com `E2E`. Outro agente ativo na pilha (criado à mão) não é tocado, só avisado no console.
+3. **Remendos trocados por esperas do estado certo**:
+   - `operacao.spec.ts`: o diálogo "Lançar a linha" não tem o "Trocar entidade" (`toHaveCount(0)`), e o import da poupança devolve `aiSuggestion` `{ queued: false, runId: null }`. Saíram a espera da execução e a limpeza das sugestões;
+   - `anotacoes.spec.ts`: `await expect(popover).toBeHidden()` e o clique no ícone, no lugar do `if (!(await popover.isVisible()))`.
+4. **Porta ocupada**: `fake-llm.ts` e `fake-telegram.ts` escutam com `once('error')` antes do `listen`. O `EADDRINUSE` rejeita com "a porta N está ocupada (pare o fake-llm manual…)", em vez de virar exceção solta no worker do Playwright.
+
+Testes:
+- `apps/server/test/e2e-fakes.test.ts`: os dois falsos, com a porta já ocupada por outro, rejeitam com a mensagem da porta. Passou no Postgres local.
+- Os specs alterados (`operacao`, `anotacoes`) não rodaram aqui; ficam para o e2e completo da sessão principal. O critério de aceite "três vezes seguidas sem falha" também fica para essa execução.
+
+Verificação: rápida, `pnpm verify:quick --base 290403d` (lint, typecheck do e2e e do servidor, `test/e2e-fakes.test.ts`).

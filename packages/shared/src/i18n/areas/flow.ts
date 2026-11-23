@@ -32,6 +32,7 @@ export const flowStrings = {
   lines: 'Lançamentos',
   linesEmpty: 'Nenhum lançamento nesta ligação no período.',
   linesMore: (n: number) => `Mostrando os ${n} primeiros.`,
+  groupTooLarge: (n: number) => `O grupo passa de ${n} entidades: expanda o grupo ou escolha um período menor para ver os lançamentos.`,
   open: 'Abrir',
   openCaixa: 'Abrir a caixa',
   openEntity: 'Abrir a entidade',

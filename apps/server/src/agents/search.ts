@@ -1,15 +1,16 @@
 import { normalizeDocument, t } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
-import { type EmbeddingCredentials, embeddingSourceTotal, embedQuery, vectorLiteral } from './embeddings';
+import { type EmbeddingCredentials, embedQuery, vectorLiteral } from './embeddings';
 import { inferenceCredentials } from './inferences';
 
 /*
  * Busca por significado da tool semantic_search (spec 024): com o par
  * (provedor, modelo) de embeddings do agente que a chamou,
  * ai_embeddings_search (sempre só com as caixas que o usuário lê, e cada
- * objeto é revalidado). Enquanto o índice do par não está completo, usa o que
- * já existe e completa com trigramas, avisando "índice em construção". Sem
+ * objeto é revalidado). Enquanto o índice do par não está completo (a marca
+ * do worker, tarefa 161), usa o que já existe e completa com trigramas,
+ * avisando "índice em construção". Sem
  * embeddings (agente sem a inferência, ou a busca fora de um agente, como o
  * /mcp), semelhança de texto (pg_trgm) e, nas entidades, o prefixo do
  * documento (CPF/CNPJ, inclusive alfanumérico), que vale pontuação 1 para não
@@ -49,13 +50,15 @@ async function agentEmbeddings(ctx: ServiceContext): Promise<{ agentId: string; 
   };
 }
 
-/** O índice do par está completo: registrado, sem fila e com todos os registros que a busca enxerga. */
+/**
+ * O índice do par está completo (tarefa 161): marcado pelo worker ao fim de uma passada completa e sem vetor na fila.
+ * Não conta as fontes: um registro criado depois da marcação fica fora até a próxima passada da manutenção.
+ */
 async function indexComplete(ctx: ServiceContext, creds: EmbeddingCredentials): Promise<boolean> {
-  const stats = await ctx.db.execute<{ indexed: number; pending: number }>(sql`
-    SELECT indexed, pending FROM ai_embedding_index_stats WHERE provider_id = ${creds.providerId} AND model = ${creds.model}`);
-  const row = stats.rows[0];
-  if (!row || Number(row.pending) > 0) return false;
-  return Number(row.indexed) >= (await embeddingSourceTotal(ctx.db));
+  const result = await ctx.db.execute<{ ready: boolean }>(
+    sql`SELECT ai_embedding_index_ready(${creds.providerId}::uuid, ${creds.model}) AS ready`,
+  );
+  return Boolean(result.rows[0]?.ready);
 }
 
 export async function semanticSearch(ctx: ServiceContext, query: string, types: SearchType[] | null, limit: number) {

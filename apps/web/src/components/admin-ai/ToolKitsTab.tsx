@@ -112,6 +112,7 @@ export function ToolKitsTab() {
                         ? k.noAgents
                         : kit.agents.map((agent) => (agent.archived ? k.archivedAgent(agent.name) : agent.name)).join(', ')}
                     </td>
+                    {/* biome-ignore lint/a11y/useKeyWithClickEvents: só segura o clique da linha; as ações são botões próprios. */}
                     <td className="text-right" onClick={(e) => e.stopPropagation()}>
                       <span className="row-actions">
                         <button

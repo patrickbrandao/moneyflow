@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 7d62132
 ---
 
 # Regravar o token do mesmo bot com a entrada ligada apaga o webhook recém-criado
@@ -81,4 +81,13 @@ Nada foi executado. A Bot API falsa precisa guardar o webhook por bot (não por 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado em `updateDestination` (`apps/server/src/services/messages.ts`): qualquer `botToken` informado contava como troca, e o `deleteWebhook` no token antigo (o mesmo bot) apagava o webhook que o `setWebhook` acabara de criar. A Bot API falsa guarda o webhook por token, o que basta para o teste: o critério é a sequência de chamadas.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/messages.ts`: `DestRow.botId` (já vinha em `DEST_COLUMNS`) e `botChanged` (a parte antes do `:` do token novo difere do `bot_id` do destino). O token antigo só é lido e o `deleteWebhook` só é chamado ao desligar ou quando o bot mudou; com o mesmo bot, o `setWebhook` (segredo novo) substitui o anterior.
+- Spec: `docs/013`, "Entrada (F15)".
+- Testes: `apps/server/test/autonomous.test.ts` ("regravar o token do mesmo bot só religa o webhook…"): o mesmo token dá um `setWebhook` e nenhum `deleteWebhook`, e o webhook continua no destino; o token de outro bot dá `setWebhook` no novo e `deleteWebhook` no antigo; voltar ao primeiro desliga o segundo.
+- Verificação: `pnpm verify:quick`.

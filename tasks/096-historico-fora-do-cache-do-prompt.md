@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d0514fa
 ---
 
 # O histórico da sessão nunca entra no cache do prompt da Anthropic
@@ -92,4 +92,12 @@ Nada foi executado. Os números do Impacto são estimativas com premissas declar
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `anthropic.ts` marcava só a última tool e as partes estável e por usuário do sistema; nenhuma marca no histórico, que ia sem cache em todas as voltas do laço.
+
 ## Resolução (executor)
+
+- `apps/server/src/agents/llm/anthropic.ts`: `markHistoryCache` põe `cache_control` no último bloco elegível da última mensagem (ponto de cache 3), com o cache ligado no provedor. Só nas chamadas com continuação (operação `chat` com tools ou finalidade chat); título, descrição do anexo e fluxos JSON ficam sem a marca, porque pagariam a escrita sem ler. No máximo 4 marcas (última tool, pontos 1 e 2, histórico).
+- Decisão: a lista de UUIDs da receita na parte volátil ficou como está; com o ponto 3 ela entra no prefixo cacheado da execução.
+- Spec: `docs/022` (o ponto de cache 3).
+- Teste: `agent-prompts.test.ts` "ponto de cache 3 no fim do histórico": nas duas voltas, a marca só no último bloco (o `tool_result` na segunda), total = tool + sistema + histórico ≤ 4, e o título sem marca. O caso do cache desligado (`capabilities.test.ts`) continua sem nenhuma marca.
+- Verificação: `pnpm verify:quick` (rápida), com `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s2`.

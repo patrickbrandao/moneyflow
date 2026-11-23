@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # Specs 021 e 027 descrevem tools de contrato e de regra que não existem mais, e um teste confere uma tool removida
@@ -59,4 +59,11 @@ A conferência das specs foi por leitura e `grep`. `test/agents.test.ts` do shar
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: a 027 descrevia o modelo de parcelas (`decide_contract_renewal`, `activate_contract` gerando parcelas, rascunho sempre) e a regra global; a tabela da 021 tinha `decide_contract_renewal` e faltavam as tools da F14 em diante; o teste chamava `.input` de uma tool inexistente e passava pelo `TypeError`.
+
 ## Resolução (executor)
+
+- `docs/027`: o bloco de Contratos com as tools da F20 (obrigações, ligar série, aditivo, rescisão, renovar e as de série) e o de regras sem a regra global, com a cópia e a aplicação.
+- `docs/021`: a tabela das categorias regerada a partir do registro (com as marcas admin, segredo e gera arquivo), e o texto que diz o que entrou depois da F13.
+- `packages/shared/test/agents.test.ts`: `expect(agentTool('decide_contract_renewal')).toBeUndefined()` e `renew_contract` na categoria Contratos; um teste novo lê a tabela da 021 e a confere com `AGENT_TOOL_NAMES` nos dois sentidos, cada tool na sua categoria.
+- Verificação: `pnpm verify:quick` (Biome, typecheck, os testes do shared relacionados e, passados depois de `--`, os de integração `agents`, `agent-tools`, `agent-tools-admin`, `titles`, `cards`, `contracts`, `statements`, `vision`, `reconcile-recipes`, `statement-supersede`, `autonomous` e `budgets` no Postgres local). Não rodei `verify:full` nem o e2e.

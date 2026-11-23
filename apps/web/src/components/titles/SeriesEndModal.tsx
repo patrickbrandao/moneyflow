@@ -25,9 +25,12 @@ export function SeriesEndModal({
   const [endsOn, setEndsOn] = useState(title.dueDate);
   const target = noEnd ? null : endsOn || null;
   const ready = noEnd || Boolean(endsOn);
-  const { data: preview, error } = useApi<SeriesEndPreview>(
-    ready ? `/api/titles/${title.id}/series/end${target ? `?endsOn=${target}` : ''}` : null,
-  );
+  // A prévia é sempre a da data na tela: trocada a data, "Aplicar" desliga até a nova chegar (tarefa 117).
+  const {
+    data: preview,
+    error,
+    loading,
+  } = useApi<SeriesEndPreview>(ready ? `/api/titles/${title.id}/series/end${target ? `?endsOn=${target}` : ''}` : null);
   const { run, busy } = useAction();
 
   async function submit() {
@@ -59,6 +62,7 @@ export function SeriesEndModal({
       )}
       <div className="mt-3 grid gap-2 text-[13px]">
         {error && <div className="alert warn">{error.message}</div>}
+        {ready && loading && !error && <p className="text-faint">{t.common.loading}</p>}
         {preview && preview.toCancel.length > 0 && (
           <div>
             <strong className="text-ink">{t.title.endSeriesCancelCount(preview.toCancel.length)}</strong>

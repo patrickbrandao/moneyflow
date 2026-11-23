@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 14aa8fe
 ---
 
 # Cancelar, arquivar ou rescindir deixa a linha do extrato sugerida para o título cancelado
@@ -75,4 +75,13 @@ Nada foi executado. Os caminhos de cancelamento das faturas de cartão em `reope
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `cancelTitle`, `archiveTitle`, o "só esta" do `deleteTitle`, o `patchOccurrence` com `status: 'canceled'` (rescisão) e o "nada pago" do `payInvoice` não chamavam `clearStatementSuggestions`. Os testes novos falham sem a correção.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/titles.ts`: `clearStatementSuggestions` do par antes de cancelar (`cancelTitle`), de arquivar (`archiveTitle`) e no "Excluir só esta" de uma ocorrência de série.
+- `apps/server/src/services/series.ts`: `patchOccurrence` com `status: 'canceled'` limpa as sugestões do título e do espelho (cobre a rescisão e outros chamadores).
+- `apps/server/src/services/cards.ts`: `payInvoice` com nada pago limpa as sugestões do par antes de cancelá-lo.
+- `docs/009-extratos-e-conciliacao.md`: a regra.
+- Testes: `apps/server/test/statements.test.ts`, `describe('título cancelado deixa de ser sugerido (tarefa 129)')` (cancelar, "Excluir só esta" numa série e pagar 0 na fatura); `apps/server/test/contracts.test.ts`, `describe('rescisão e a sugestão do extrato (tarefa 129)')`.
+- Verificação: `pnpm verify:quick` (nível rápido).

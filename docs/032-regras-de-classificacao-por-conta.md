@@ -1,5 +1,7 @@
 # 032 — Regras de classificação por conta (F18)
 
+> **Conteúdo:** F18: regras de classificação exclusivas de cada conta (`checking`/`savings`) e de cada cartão, sem regra global nem da caixa inteira; migração das regras de caixa e globais copiadas para cada conta (linhas reapontadas, contadores por conta), copiar regras de outra conta (origem `copy`, pula as que já existem) pela tela e pela tool `copy_classification_rules`, o "Aplicar regras" pela tool `apply_classification_rules`, e os agentes lendo as regras de todas as contas legíveis.
+
 As regras de classificação ([009](009-extratos-e-conciliacao.md)) deixam de ser da caixa ou globais e passam a ser **de uma conta**: cada conta que recebe extrato tem as suas, e uma regra só classifica as linhas dos extratos dessa conta. Duas contas da mesma caixa (a corrente e a poupança, por exemplo) não compartilham regra nenhuma. Os agentes de IA leem as regras de todas as contas que o usuário vê para decidir se vale copiar uma regra de outra conta para a conta em que estão trabalhando.
 
 Decisões do usuário (2026-10-20): as regras de caixa já existentes são copiadas para cada conta da caixa; as globais deixam de existir, copiadas para todas as contas; copiar regras entre contas existe nos agentes (tool com prévia) e na tela.
@@ -33,6 +35,7 @@ Toda regra tem exatamente um alvo: a conta ou o cartão. Não existe mais regra 
 - `list_classification_rules`: lista as regras de **todas as contas e cartões que o usuário lê**, cada uma com a conta (ou cartão), a caixa e o contador de uso; filtros opcionais `accountId`, `cardCaixaId`, `caixaId` (todas as contas da caixa) e `archived`. A descrição diz para usar a lista para ver se uma regra de outra conta serve na conta atual e, servindo, propor a cópia.
 - `create_classification_rule`: exige `accountId` ou `cardCaixaId` (um só); sem `caixaId` e sem regra global.
 - `copy_classification_rules` (nova, escrita, categoria `categories`): `ruleIds` (as regras de origem, de uma ou mais contas) e o destino (`accountId` ou `cardCaixaId`). A prévia lista o que entra e o que é pulado (já existe), com conta de origem, padrão, entidade e categoria. Como toda tool nova, não entra sozinha em kit nenhum ([021](021-kit-de-ferramentas.md)); o seed de desenvolvimento a põe em `ask` onde já estão as de regra.
+- `apply_classification_rules` (escrita, categoria `categories`, tarefa 152): o "Aplicar regras" da tela pelo agente, num lote (`importId`) ou em todos os lotes da conta (`accountId`) ou do cartão (`cardCaixaId`), um só. A prévia é o plano do serviço sem gravar (`planApplyRules`: quantas linhas mudam e por qual regra, e as que perdem a classificação de uma regra que não vale mais); a execução conta o uso de cada regra. Recusada numa execução de receita (`RECIPE_DENIED_TOOLS`, age fora das linhas do escopo). A descrição de `copy_classification_rules` e o aviso da prévia dela apontam para ela.
 - O bloco do prompt da conciliação com IA e das receitas que hoje pede para propor `create_classification_rule` passa a dizer também: antes de criar, consulte as regras das outras contas; se uma já resolve, proponha copiá-la.
 
 ## Tela

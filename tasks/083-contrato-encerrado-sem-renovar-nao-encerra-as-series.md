@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d658050
 ---
 
 # Contrato encerrado sem renovar mantém as obrigações sem fim gerando ocorrências
@@ -64,4 +64,12 @@ Nada foi executado. Supõe-se que a obrigação "sem fim" num contrato com fim n
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: no fim da vigência sem renovação, `syncLifecycle` só trocava o status (`UPDATE contracts SET status = 'ended'`); `insertObligation` aceita `endsOn: null` e `linkObligation` liga série sem fim, então o worker seguia materializando ocorrências do contrato encerrado. A rescisão já encerrava todas as séries.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/contracts.ts`: `endObligationsAt`, chamado no ramo `ended` de `syncLifecycle`. Cada série do contrato (sem parcelamento) sem fim ou com fim depois da vigência termina no fim dela (no início da série, se ela começa depois), com o advisory lock das séries. As ocorrências depois do fim com baixa (de um dos lados do par) ou em mês fechado ficam, e a série termina no vencimento da última delas, como na rescisão. As em aberto entre o fim e essa data são canceladas por `patchOccurrence` (o par e a sugestão do extrato), e as seguintes pelo "encerrar série" (`seriesEndPlanOf`/`applySeriesEnd`). Nada é apagado.
+- Decisão: a obrigação "sem fim" num contrato com fim acompanha o contrato. Ao encerrar, ela termina junto. A criação e a ligação não mudaram (continuam aceitando o fim pedido).
+- `apps/server/src/services/contract-worker.ts`: o comentário. `docs/020-contratos.md` (ciclo de vida e decisões) e `docs/034-contratos-sobre-series.md` (decisões, "Encerrar").
+- Teste: `apps/server/test/contracts.test.ts`, "encerrado sem renovar: as obrigações sem fim (ou ligadas depois) terminam no fim; as com baixa ficam (tarefa 083)". Usa uma obrigação `endsOn: null`, outra que já acabava antes e uma série solta sem fim ligada depois, com agosto pago. O ciclo de vida roda pelo helper `lifecycle` (o `syncLifecycle` com o acesso de sistema, só no contrato do teste).
+- Verificação: `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s1 pnpm verify:quick` (nível rápido).

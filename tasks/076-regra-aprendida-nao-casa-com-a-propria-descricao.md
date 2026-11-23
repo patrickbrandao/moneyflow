@@ -1,12 +1,12 @@
 ---
-status: aberta
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: 388a7d2
 ---
 
 # Regra aprendida da correção não casa nem com a descrição de onde nasceu
@@ -88,4 +88,46 @@ Nada foi executado contra o banco; a comparação do banco foi reproduzida em JS
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o dba).
+
+Confirmado: `classification_rule_for` compara o padrão com a descrição crua (`lower`/`strpos`). A regra aprendida guarda `normalizeDescription(descrição)`, sem acentos, pontuação, números de documento nem datas, e por isso não casa com a própria linha.
+
+Decisão: "dba e depois app" (passos 1 e 2 da tarefa), e não a alternativa só da aplicação (passo 3). Com a descrição normalizada como parâmetro, a escolha entre regras que casam pela crua e pela normalizada segue uma ordem só (prioridade, tipo, padrão mais longo), numa consulta por linha. A alternativa dá prioridade às regras que casam com a crua e faz uma consulta a mais por linha sem regra.
+
 ## Resolução (executor)
+
+### Banco (dba)
+
+Migration `database/migrations/0062_classification_rule_normalized.sql`; teste `database/tests/0062_classification_rule_normalized.sql`.
+
+- Nova assinatura: `classification_rule_for(p_financial_account_id uuid, p_card_caixa_id uuid, p_description text, p_amount_cents bigint, p_description_normalized text DEFAULT NULL) RETURNS uuid`. A versão de quatro argumentos saiu (DROP + CREATE), mas a chamada com quatro argumentos resolve para a nova e se comporta como antes.
+- `exact`, `starts_with` e `contains` casam com a crua **ou** com a normalizada, as duas por `lower(btrim(…))`; `regex` só com a crua. A ordem não mudou.
+- Sem migração de dados: as regras `correction` já gravadas passam a valer quando a aplicação passar a normalizada. As linhas antigas são reclassificadas pelo "Aplicar regras".
+- Testes:
+  - a aprendida (`pix recebido cliente omega`) não casa sem a normalizada e casa com ela;
+  - número de documento no meio;
+  - `exact` e `starts_with` pela normalizada;
+  - regra manual com acento ("Farmácia") pela crua, mesmo passando a normalizada;
+  - a prioridade menor vence entre a regex pela crua e a aprendida pela normalizada;
+  - a regex não casa pela normalizada;
+  - a direção filtra;
+  - `22023` sem alvo;
+  - a aplicação chama com cinco e com quatro argumentos.
+- `tests/0014_statements.sql` e `tests/0050_classification_rules_by_account.sql` passaram a esperar a assinatura nova. `docs/016` (Extratos) atualizada. `make dump` rodado.
+
+### Pendente na aplicação
+
+1. `pnpm db:pull`, se o schema gerado lista as funções.
+2. `apps/server/src/services/statements.ts:505` (`ruleFor`): passar o 5º argumento, `classification_rule_for(${target.accountId}::uuid, ${target.cardCaixaId}::uuid, ${description}, ${amountCents}::bigint, ${normalizeDescription(description)})`, com `normalizeDescription` de `packages/shared/src/reconcile.ts`. `ruleFor` é o único caminho até a função: vale para a importação (`statements.ts:441`) e para o "Aplicar regras" (`reconciliation.ts:793`).
+3. Testes em `apps/server/test/statements.test.ts`, no caso "importa OFX, deduplica…":
+   - Depois do `create` da `OFX2-0002` com "Aprender regra", importar um segundo OFX (outro mês, outro FITID) com a mesma descrição e esperar `classificationSource: 'rule'` com o id da regra `correction`.
+   - O mesmo para uma descrição com número de documento no meio e pelo "Aplicar regras".
+
+### Aplicação (app)
+
+- `pnpm db:pull` já estava feito no branch de integração (o schema gerado não lista funções).
+- `apps/server/src/services/statements.ts` (`rulesFor`, que o `ruleFor` usa): a importação em lote (tarefa 139) e o "Aplicar regras" passam `normalizeDescription(descrição)` como 5º argumento de `classification_rule_for`, uma coluna a mais no `json_to_recordset`. É o único caminho até a função no app.
+- `docs/009-extratos-e-conciliacao.md`: a crua ou a normalizada no casamento das regras.
+- Testes: `apps/server/test/statements.test.ts`, no "importa OFX, deduplica…": depois de aprender a regra com o `OFX2-0002`, um OFX do mês seguinte com a mesma descrição e com o número do documento no meio entra com `classificationSource: 'rule'` e o id da regra `correction`; e a correção de uma TED com documento vira regra que, pelo "Aplicar regras", alcança a outra TED com outro documento. Sem o 5º argumento o teste falha (conferido).
+- Verificação: `pnpm verify:quick` (nível rápido).
+

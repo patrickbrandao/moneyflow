@@ -8,6 +8,7 @@ import {
 } from '../contracts';
 import { ptBR } from '../i18n/pt-BR';
 import { FREQUENCIES } from '../recurrence';
+import { SERIES_TERMS_LIMITS } from '../series-terms';
 import { id, isoDate, nonNegativeCents, optionalText, positiveCents, queryBool, requiredText } from './common';
 
 /* Entradas dos contratos (specs 020 e 034) e das séries com conta, cartão e ajustes. */
@@ -30,10 +31,10 @@ function percent(max: number) {
  * conferido no servidor.
  */
 export const seriesTermsFields = {
-  matchWindowDays: z.number().int().min(0).max(45),
-  lateFeePercent: percent(20),
-  interestMonthPercent: percent(10),
-  earlyDiscountPercent: percent(50),
+  matchWindowDays: z.number().int().min(0).max(SERIES_TERMS_LIMITS.matchWindowDays),
+  lateFeePercent: percent(SERIES_TERMS_LIMITS.lateFeePercent),
+  interestMonthPercent: percent(SERIES_TERMS_LIMITS.interestMonthPercent),
+  earlyDiscountPercent: percent(SERIES_TERMS_LIMITS.earlyDiscountPercent),
   toleranceCents: nonNegativeCents,
   autoSettle: z.boolean(),
 };
@@ -260,6 +261,8 @@ export const contractTerminationInput = z.object({
       description: optionalText(300),
       /** Conta prevista da multa (da caixa do contrato). */
       accountId: id.nullish().transform((v) => v ?? null),
+      /** Competência da multa; omitida = a data da rescisão (mês fechado é recusado, tarefa 138). */
+      competenceDate: isoDate.nullish().transform((v) => v ?? null),
     })
     .nullish()
     .transform((v) => v ?? null),
@@ -306,7 +309,15 @@ export const contractDocumentUpdateInput = z
   })
   .partial();
 
-export const contractVersionCreateInput = z.object({ content: markdown, note: optionalText(500) });
+/**
+ * Nova versão do markdown. `baseVersionId`: a versão em que a edição se baseou;
+ * se a atual já é outra, nada é gravado (409 `version_conflict`, tarefa 135).
+ */
+export const contractVersionCreateInput = z.object({
+  content: markdown,
+  note: optionalText(500),
+  baseVersionId: id.nullish().transform((v) => v ?? null),
+});
 
 /** Leitura do PDF por IA: a caixa (o titular define a direção). */
 export const contractReadingQuery = z.object({
