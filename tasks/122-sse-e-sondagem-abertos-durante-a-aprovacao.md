@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -68,4 +68,16 @@ Não sei se a produção usa HTTP/2 no proxy. Nada foi executado.
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: `useConversation` seguia o SSE com `isActiveStatus` (inclui `awaiting_confirmation`), então a conexão ficava aberta durante a espera por aprovação; nenhum `visibilitychange` no `apps/web`; o `RecipesPanel` sondava a cada 4 s com `setInterval` enquanto houvesse execução `started` (inclusive a que espera aprovação) e com a aba oculta. O `ReconcileAiPanel` já excluía a espera. Sem HTTP/2 documentado na produção (a confiança "provável" da tarefa vale).
+
 ## Resolução (executor)
+
+- `agents/stream.ts`: com a aba escondida, o `followRun` fecha a conexão e espera ela aparecer; volta do último id visto (Last-Event-ID), sem contar como queda nem mostrar "reconectando". Vale para todo SSE de execução (conversa, conciliação com IA, sugestões do lote e da troca do provisório). O `onEvent` recebe também o seq do evento.
+- `agents/useConversation.ts`: o SSE só fica aberto com a execução `queued`/`running`; ao chegar o `status: awaiting_confirmation` (o servidor grava a confirmação antes dele, na mesma transação), a conexão fecha e o último seq fica guardado (`seen`); ao decidir, o `runStatus` devolvido reabre o SSE de onde parou (e, se a execução já terminou, relê o detalhe). Na carga com execução em espera, nenhum SSE. Durante a espera, uma consulta `GET /api/runs/:id` a cada 10 s pelo `usePolling` (só com a aba visível) percebe a decisão tomada noutra aba ou no Telegram e relê o detalhe.
+- `components/reconciliation/RecipesPanel.tsx`: sonda pelo `usePolling` (respeita a aba oculta) e só com execução na fila ou rodando; a que espera aprovação não é sondada (o painel da IA avisa ao terminar, pelo `version`).
+
+Decisões: o item 3 (reabrir do seq da última mensagem já na carga) ficou de fora: na primeira conexão o histórico desde o 0 reconstrói o texto parcial da resposta em andamento; a retomada do último evento vale dentro da mesma tela (espera e aba oculta). O item 5 (um SSE multiplexado por aba) não foi feito. Spec 011 atualizada.
+
+Testes: e2e novo (não rodado aqui) em `e2e/tests/agentes.spec.ts` → "SSE (tarefa 122): nada aberto enquanto espera aprovação nem com a aba escondida; aprovar e voltar retomam" (com o cartão na tela, nenhum `/events` pendente; aprovar abre um novo com `Last-Event-ID`; a aba escondida no meio da resposta lenta fecha e, de volta, a resposta termina). Sem e2e das receitas (o caso exigiria uma receita com execução em espera; fica para a sessão principal se quiser). Verificação: `pnpm verify:quick`.

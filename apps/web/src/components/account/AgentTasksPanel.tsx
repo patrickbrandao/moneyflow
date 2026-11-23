@@ -11,7 +11,7 @@ import {
 } from '@moneyflow/shared';
 import { CalendarClock, History, Pencil, Play, Plus, Trash2 } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
-import { useAgents } from '../../agents/AgentsProvider';
+import { useAgentActions } from '../../agents/AgentsProvider';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
 import { LoadError, SkelRows } from '../domain';
@@ -383,7 +383,7 @@ function TaskHistoryModal({
   onRunNow: () => Promise<void>;
 }) {
   const { data, error, reload } = useApi<AgentTaskRunDto[]>(`${base}/${task.id}/runs`);
-  const agents = useAgents();
+  const agents = useAgentActions();
   return (
     <Modal open title={`${k.history}: ${task.name}`} onClose={onClose} wide>
       <div className="modal-body">

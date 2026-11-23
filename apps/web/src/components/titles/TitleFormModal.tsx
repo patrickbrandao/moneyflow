@@ -2,6 +2,8 @@ import {
   FREQUENCIES,
   formatCents,
   type SeriesInput,
+  seriesTermsDraft,
+  seriesTermsFromDraft,
   type TitleCreateInput,
   type TitleDetail,
   type TitleUpdateInput,
@@ -14,15 +16,14 @@ import { useAction } from '../../lib/hooks';
 import { PlannedAccountSelect, useCaixaAccounts } from '../contracts/PlannedAccount';
 import { type EntryPatch, EntrySources } from '../entry/EntrySources';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
+import { SeriesTermsFields } from '../series/SeriesTermsFields';
+import { kindOf } from '../series/series-text';
 import { Button, Field, Modal } from '../ui';
 import { MirrorFields, mirrorPayload, useMirrorChoice } from './MirrorFields';
-import { SeriesTermsFields, termsDraft, termsFromDraft } from './SeriesTermsFields';
 
 type Direction = 'payable' | 'receivable';
 type SeriesKind = 'none' | 'installments' | 'recurrence';
 type Frequency = (typeof FREQUENCIES)[number];
-
-const kindOf = (direction: Direction) => (direction === 'payable' ? 'expense' : 'income');
 
 /**
  * Novo título (com espelho, parcelas e recorrência) ou edição de um existente.
@@ -66,7 +67,7 @@ export function TitleFormModal({
   const [plannedAccountId, setPlannedAccountId] = useState<string | null>(title?.plannedAccountId ?? null);
   const plannedEditable = !title || title.status === 'open' || title.status === 'partial';
   // Ajustes de reconhecimento do pagamento da série (só na criação; depois, em "Editar série").
-  const [terms, setTerms] = useState(termsDraft());
+  const [terms, setTerms] = useState(() => seriesTermsDraft());
 
   const mirror = useMirrorChoice(entity?.id ?? null, caixaId, !editing);
   const [error, setError] = useState<string | null>(null);
@@ -112,8 +113,8 @@ export function TitleFormModal({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!entity) return setError('Escolha a entidade.');
-    if (!categoryId) return setError('Escolha a categoria.');
+    if (!entity) return setError(t.title.form.chooseEntity);
+    if (!categoryId) return setError(t.title.form.chooseCategory);
     if (!amount || amount <= 0) return setError(t.errors.invalidAmount);
     setError(null);
 
@@ -128,7 +129,7 @@ export function TitleFormModal({
         ...(title.mirrorTitleId ? {} : { entityId: entity.id }),
         ...(plannedEditable && plannedAccountId !== title.plannedAccountId ? { plannedAccountId } : {}),
       };
-      const saved = await run(() => api.patch<TitleDetail>(`/api/titles/${title.id}`, body), 'Título atualizado.');
+      const saved = await run(() => api.patch<TitleDetail>(`/api/titles/${title.id}`, body), t.title.form.updated);
       if (saved) onSaved(saved);
       return;
     }
@@ -136,6 +137,13 @@ export function TitleFormModal({
     let series: SeriesInput | null = null;
     if (seriesKind === 'installments') series = { kind: 'installments', count, frequency, intervalCount };
     if (seriesKind === 'recurrence') series = { kind: 'recurrence', frequency, intervalCount, endsOn: endsOn || null };
+    // Os ajustes da série (tarefa 181): percentual inválido para o envio com o erro, em vez de virar "sem".
+    let seriesTerms: TitleCreateInput['seriesTerms'] = null;
+    if (series) {
+      const parsed = seriesTermsFromDraft(terms);
+      if (parsed.error) return setError(parsed.error);
+      seriesTerms = parsed.terms;
+    }
     const body: TitleCreateInput = {
       caixaId,
       direction,
@@ -149,17 +157,17 @@ export function TitleFormModal({
       ...mirrorPayload(mirror),
       series,
       plannedAccountId,
-      seriesTerms: series ? termsFromDraft(terms) : null,
+      seriesTerms,
       boletoBarcode,
       pixPayload,
       nfeDocumentId,
     };
-    const saved = await run(() => api.post<TitleDetail>('/api/titles', body), 'Título criado.');
+    const saved = await run(() => api.post<TitleDetail>('/api/titles', body), t.title.form.created);
     if (saved) onSaved(saved);
   }
 
   const label = direction === 'payable' ? t.title.payee : t.title.payer;
-  const heading = editing ? 'Editar título' : direction === 'payable' ? t.palette.newPayable : t.palette.newReceivable;
+  const heading = editing ? t.title.form.editTitle : direction === 'payable' ? t.palette.newPayable : t.palette.newReceivable;
 
   return (
     <Modal open title={heading} onClose={onClose} wide>
@@ -216,7 +224,7 @@ export function TitleFormModal({
                 }}
               />
             </Field>
-            <Field label={t.title.competence} hint="Mês a que a despesa ou receita pertence.">
+            <Field label={t.title.competence} hint={t.title.form.competenceHint}>
               <input
                 type="date"
                 className="field"
@@ -283,7 +291,7 @@ export function TitleFormModal({
                   />
                 </Field>
                 {seriesKind === 'recurrence' && (
-                  <Field label={t.title.endsOn} hint="Vazio = sem fim (o sistema mantém 12 meses à frente).">
+                  <Field label={t.title.endsOn} hint={t.title.form.endsOnHint}>
                     <input type="date" className="field" value={endsOn} onChange={(e) => setEndsOn(e.target.value)} />
                   </Field>
                 )}
@@ -302,7 +310,11 @@ export function TitleFormModal({
             {!editing && seriesKind !== 'none' && <SeriesTermsFields value={terms} onChange={setTerms} />}
 
             {editing && title?.recurrenceRuleId && (
-              <Field label="Aplicar a" className="span-all" hint={scope === 'following' ? t.title.scopeFollowingHint : undefined}>
+              <Field
+                label={t.title.form.applyTo}
+                className="span-all"
+                hint={scope === 'following' ? t.title.scopeFollowingHint : undefined}
+              >
                 <div className="segmented" role="group">
                   <button type="button" className={scope === 'this' ? 'active' : ''} onClick={() => setScope('this')}>
                     {t.title.scopeThis}

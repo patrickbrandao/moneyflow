@@ -155,7 +155,9 @@ export function buildGraph(
     for (const key of entityKeys) {
       const node = byId.get(key)!;
       const bucket = `${node.mainGroupCategoryId ?? NO_GROUP_ID}|${side(key)}`;
-      buckets.set(bucket, [...(buckets.get(bucket) ?? []), key]);
+      const list = buckets.get(bucket);
+      if (list) list.push(key);
+      else buckets.set(bucket, [key]);
     }
     for (const [bucket, keys] of buckets) {
       const [groupId, s] = bucket.split('|') as [string, 'left' | 'right'];

@@ -6,7 +6,8 @@ import { useNavigate } from 'react-router-dom';
 import { flatLinks, navigationFor } from '../../config/navigation';
 import { SEARCH_SOURCES, type SearchResult } from '../../config/search';
 import { useUser } from '../../lib/auth';
-import { type Command as Cmd, fuzzyScore, GROUP_ORDER, useCommandRegistry } from '../../lib/commands';
+import { type Command as Cmd, type CommandGroup, fuzzyScore, GROUP_ORDER, useCommandRegistry } from '../../lib/commands';
+
 import { Kbd, useDebounced } from '../ui';
 
 /**
@@ -15,6 +16,15 @@ import { Kbd, useDebounced } from '../ui';
  * filtragem é nossa (`fuzzyScore`, `shouldFilter={false}`) porque parte dos
  * itens já chega filtrada da fonte.
  */
+/** O grupo é a chave do registro de comandos; o título exibido vem do `t`. */
+const GROUP_LABEL: Record<CommandGroup, string> = {
+  Criar: t.palette.groupCreate,
+  'Ir para': t.palette.groupGoto,
+  Recurso: t.palette.groupResource,
+  Conta: t.palette.groupAccount,
+  Perigo: t.palette.groupDanger,
+};
+
 export function CommandPalette() {
   const { commands, isOpen, close } = useCommandRegistry();
   const navigate = useNavigate();
@@ -82,7 +92,7 @@ export function CommandPalette() {
       onOpenChange={(next) => {
         if (!next) close();
       }}
-      label="Paleta de comandos"
+      label={t.palette.dialogLabel}
       shouldFilter={false}
       loop
       overlayClassName="overlay"
@@ -90,21 +100,21 @@ export function CommandPalette() {
     >
       <Command.Input value={search} onValueChange={setSearch} placeholder={t.palette.placeholder} autoFocus />
       <div className="trail">
-        <span>Digite para filtrar</span>
+        <span>{t.palette.filter}</span>
         <span className="hint-k">
           <span>
-            <Kbd>↑↓</Kbd> navegar
+            <Kbd>↑↓</Kbd> {t.palette.keyNavigate}
           </span>
           <span>
-            <Kbd>↵</Kbd> abrir
+            <Kbd>↵</Kbd> {t.palette.keyOpen}
           </span>
           <span>
-            <Kbd>esc</Kbd> fechar
+            <Kbd>esc</Kbd> {t.palette.keyClose}
           </span>
         </span>
       </div>
       <Command.List>
-        <Command.Empty>{loading ? 'Buscando…' : 'Nada encontrado.'}</Command.Empty>
+        <Command.Empty>{loading ? t.palette.searching : t.common.noResults}</Command.Empty>
 
         {SEARCH_SOURCES.map((source) => {
           const items = results[source.id] ?? [];
@@ -123,7 +133,7 @@ export function CommandPalette() {
         })}
 
         {grouped.map(({ group, items }) => (
-          <Command.Group key={group} heading={group}>
+          <Command.Group key={group} heading={GROUP_LABEL[group]}>
             {items.map((command) => (
               <Command.Item
                 key={command.id}

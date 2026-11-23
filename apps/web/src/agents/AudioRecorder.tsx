@@ -43,6 +43,11 @@ export function useAudioRecorder(onReady: (file: File, durationMs: number) => vo
   const stream = useRef<MediaStream | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const limitHit = useRef(false);
+  // Montado? Um pedido de permissão pendente pode resolver depois de a janela fechar.
+  const alive = useRef(true);
+  const starting = useRef(false);
+  // A URL da gravação em revisão, revogada também ao desmontar.
+  const reviewUrl = useRef<string | null>(null);
 
   const release = useCallback(() => {
     if (timer.current) clearInterval(timer.current);
@@ -51,12 +56,15 @@ export function useAudioRecorder(onReady: (file: File, durationMs: number) => vo
     stream.current = null;
   }, []);
 
-  const clearReview = useCallback(() => {
-    setPhase((p) => {
-      if (p.kind === 'review') URL.revokeObjectURL(p.url);
-      return { kind: 'idle' };
-    });
+  const revokeReview = useCallback(() => {
+    if (reviewUrl.current) URL.revokeObjectURL(reviewUrl.current);
+    reviewUrl.current = null;
   }, []);
+
+  const clearReview = useCallback(() => {
+    revokeReview();
+    setPhase({ kind: 'idle' });
+  }, [revokeReview]);
 
   const stop = useCallback(() => {
     const rec = recorder.current;
@@ -64,6 +72,7 @@ export function useAudioRecorder(onReady: (file: File, durationMs: number) => vo
   }, []);
 
   const start = useCallback(async () => {
+    if (starting.current) return;
     clearReview();
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
       setPhase({ kind: 'error', message: u.micUnavailable });
@@ -74,6 +83,7 @@ export function useAudioRecorder(onReady: (file: File, durationMs: number) => vo
       return;
     }
     setPhase({ kind: 'starting' });
+    starting.current = true;
     let media: MediaStream;
     try {
       media = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -83,6 +93,13 @@ export function useAudioRecorder(onReady: (file: File, durationMs: number) => vo
         kind: 'error',
         message: name === 'NotAllowedError' || name === 'SecurityError' ? u.micDenied : u.micUnavailable,
       });
+      return;
+    } finally {
+      starting.current = false;
+    }
+    // A janela fechou (minimizou, ancorou) enquanto o navegador pedia a permissão: solta o microfone na hora.
+    if (!alive.current) {
+      for (const track of media.getTracks()) track.stop();
       return;
     }
     stream.current = media;
@@ -97,10 +114,13 @@ export function useAudioRecorder(onReady: (file: File, durationMs: number) => vo
     rec.onstop = () => {
       const durationMs = Math.max(1, Math.round(performance.now() - startedAt));
       release();
+      if (!alive.current) return;
       const type = (rec.mimeType || mime || 'audio/webm').split(';')[0]!.replace('video/', 'audio/');
       const blob = new Blob(chunks, { type });
       const file = new File([blob], `${u.recordingName(stamp())}.${extension(type)}`, { type });
-      setPhase({ kind: 'review', file, url: URL.createObjectURL(blob), durationMs, limit: limitHit.current });
+      const url = URL.createObjectURL(blob);
+      reviewUrl.current = url;
+      setPhase({ kind: 'review', file, url, durationMs, limit: limitHit.current });
     };
     recorder.current = rec;
     rec.start(1000);
@@ -119,22 +139,24 @@ export function useAudioRecorder(onReady: (file: File, durationMs: number) => vo
   const use = useCallback(() => {
     if (phase.kind !== 'review') return;
     onReady(phase.file, phase.durationMs);
-    URL.revokeObjectURL(phase.url);
-    setPhase({ kind: 'idle' });
-  }, [phase, onReady]);
+    clearReview();
+  }, [phase, onReady, clearReview]);
 
-  // Fechar a janela no meio da gravação solta o microfone.
-  useEffect(
-    () => () => {
+  // Fechar a janela no meio da gravação (ou do pedido de permissão) solta o microfone e revoga a gravação em revisão.
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
       const rec = recorder.current;
       if (rec && rec.state !== 'inactive') {
         rec.onstop = null;
         rec.stop();
       }
+      recorder.current = null;
       release();
-    },
-    [release],
-  );
+      revokeReview();
+    };
+  }, [release, revokeReview]);
 
   return { phase, elapsed, start, stop, discard: clearReview, use, dismiss: clearReview };
 }

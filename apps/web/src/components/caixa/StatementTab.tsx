@@ -19,6 +19,8 @@ import { PlannedOccurrences } from './PlannedOccurrences';
  * na tela da conta (`fixedAccountId`), fica nela, sem o seletor, e mostra antes os previstos
  * da conta (spec 034: as ocorrências em aberto das séries com essa conta).
  */
+const S = t.caixa.statementTab;
+
 export function StatementTab({ caixa, fixedAccountId, onChanged }: { caixa: CaixaDetail; fixedAccountId?: string; onChanged: () => void }) {
   const active = caixa.accounts.filter((a) => !a.archivedAt);
   const [accountParam, setAccount] = useParamState('account');
@@ -35,15 +37,13 @@ export function StatementTab({ caixa, fixedAccountId, onChanged }: { caixa: Caix
   const { run } = useAction();
 
   if (!accountId) {
-    return (
-      <EmptyState icon={<FileText />} title="Nenhuma conta nesta caixa" description="Crie uma conta na aba Contas para ver o extrato." />
-    );
+    return <EmptyState icon={<FileText />} title={S.noAccounts} description={S.noAccountsHint} />;
   }
 
   async function removeAdjustment(id: string) {
-    const ok = await confirm({ title: 'Excluir o lançamento avulso?', confirmLabel: t.common.delete, danger: true });
+    const ok = await confirm({ title: S.deleteAdjustment, confirmLabel: t.common.delete, danger: true });
     if (!ok) return;
-    if (await run(() => api.del(`/api/movements/${id}`), 'Lançamento excluído.')) {
+    if (await run(() => api.del(`/api/movements/${id}`), S.adjustmentDeleted)) {
       void reload();
       onChanged();
     }
@@ -100,7 +100,7 @@ export function StatementTab({ caixa, fixedAccountId, onChanged }: { caixa: Caix
             <thead>
               <tr>
                 <th>{t.common.date}</th>
-                <th>Lançamento</th>
+                <th>{S.entry}</th>
                 <th>{t.common.kind}</th>
                 <th className="num">{t.common.amount}</th>
                 <th className="num">{t.common.balance}</th>
@@ -121,7 +121,7 @@ export function StatementTab({ caixa, fixedAccountId, onChanged }: { caixa: Caix
                   <td />
                 </tr>
               )}
-              {data && data.rows.length === 0 && <EmptyRow colSpan={6}>Nenhum movimento no período.</EmptyRow>}
+              {data && data.rows.length === 0 && <EmptyRow colSpan={6}>{S.empty}</EmptyRow>}
               {data?.rows.map((row) => (
                 <tr key={row.id}>
                   <td className="mono text-xs">{formatDate(row.occurredOn)}</td>

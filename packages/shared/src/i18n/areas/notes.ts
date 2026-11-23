@@ -90,6 +90,8 @@ export const notesStrings = {
     nextMonth: 'Próximo mês',
     backToYear: 'Voltar para o ano',
     openMonth: (month: string) => `Abrir ${month}`,
+    monthOfYear: (month: string, year: number) => `${month} de ${year}`,
+
     dayCounts: (date: string, parts: string) => (parts ? `${date}: ${parts}` : date),
     countOf: (n: number, kind: string) => `${kind}: ${n}`,
     selectedDay: (date: string) => `Dia ${date}`,

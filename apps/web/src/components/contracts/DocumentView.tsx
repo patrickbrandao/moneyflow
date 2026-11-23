@@ -2,20 +2,20 @@ import {
   type ContractDocumentDto,
   type ContractDocumentVersionContent,
   type ContractDocumentVersionDto,
-  diffLines,
-  diffStats,
   formatDate,
   formatDateTime,
   t,
 } from '@moneyflow/shared';
-import { Archive, ArrowLeft, Code, Eye, GitCompare, History, PencilLine, RotateCcw, Sparkles } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { Archive, ArrowLeft, Code, Eye, History, PencilLine, Sparkles } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { Markdown } from '../../agents/Markdown';
 import { ApiError, api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
 import { attachmentUrl } from '../../lib/upload';
+import { LineDiff } from '../diff/LineDiff';
+import { VersionCompare, type VersionItem } from '../diff/VersionCompare';
 import { LoadError } from '../domain';
-import { Badge, Button, cx, Tabs, useConfirm } from '../ui';
+import { Badge, Button, Tabs, useConfirm } from '../ui';
 import { PdfViewer } from './PdfViewer';
 
 const D = t.contracts.documents;
@@ -190,7 +190,7 @@ function MarkdownDocument({ doc, canWrite, onSaved }: { doc: ContractDocumentDto
               aria-label={D.views.edit}
               spellCheck
             />
-            <div className="panel contract-md" aria-label={D.preview}>
+            <div className="panel contract-md" role="group" aria-label={D.preview}>
               <Markdown text={draft} />
             </div>
           </div>
@@ -224,85 +224,43 @@ function MarkdownDocument({ doc, canWrite, onSaved }: { doc: ContractDocumentDto
 
 function Versions({ doc, canWrite, onRestored }: { doc: ContractDocumentDto; canWrite: boolean; onRestored: () => void }) {
   const list = useApi<ContractDocumentVersionDto[]>(`/api/contract-documents/${doc.id}/versions`);
-  const versions = list.data ?? [];
-  const [left, setLeft] = useState<string | null>(null);
-  const [right, setRight] = useState<string | null>(null);
-  const [shown, setShown] = useState<string | null>(null);
   const { run } = useAction();
   const confirm = useConfirm();
+  const items: VersionItem[] = (list.data ?? []).map((v) => ({
+    id: v.id,
+    version: v.version,
+    current: v.id === doc.currentVersionId,
+    title: (
+      <>
+        v{v.version} {v.id === doc.currentVersionId && <Badge tone="ok">{D.current}</Badge>}
+      </>
+    ),
+    sub: `${formatDateTime(v.createdAt)} · ${v.authorKind === 'agent' ? D.authorAgent : (v.authorName ?? '—')}${v.note ? ` · ${v.note}` : ''}`,
+  }));
 
-  useEffect(() => {
-    if (versions.length >= 2 && !left && !right) {
-      setLeft(versions[1]!.id);
-      setRight(versions[0]!.id);
-    }
-  }, [versions, left, right]);
-
-  async function restore(version: ContractDocumentVersionDto) {
-    if (!(await confirm({ title: `${D.restoreVersion} (v${version.version})?`, confirmLabel: D.restoreVersion }))) return;
+  async function restore(item: VersionItem): Promise<boolean> {
+    if (!(await confirm({ title: `${D.restoreVersion} (v${item.version})?`, confirmLabel: D.restoreVersion }))) return false;
     const result = await run(
-      () => api.post<{ version: number }>(`/api/contract-documents/${doc.id}/versions/${version.id}/restore`),
-      (r) => D.restoredVersion(version.version, r.version),
+      () => api.post<{ version: number }>(`/api/contract-documents/${doc.id}/versions/${item.id}/restore`),
+      (r) => D.restoredVersion(item.version, r.version),
     );
-    if (result) {
-      await list.reload();
-      onRestored();
-    }
+    if (!result) return false;
+    await list.reload();
+    onRestored();
+    return true;
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
-      <ul className="item-list">
-        {versions.map((v) => (
-          <li key={v.id} className={cx('item', shown === v.id && 'bg-s2')}>
-            <span className="grow min-w-0 cursor-pointer" onClick={() => setShown(v.id)}>
-              <span className="row-title">
-                v{v.version} {v.id === doc.currentVersionId && <Badge tone="ok">{D.current}</Badge>}
-              </span>
-              <span className="row-sub">
-                {formatDateTime(v.createdAt)} · {v.authorKind === 'agent' ? D.authorAgent : (v.authorName ?? '—')}
-                {v.note ? ` · ${v.note}` : ''}
-              </span>
-            </span>
-            <span className="row-actions">
-              <label className="check" title={D.compareWith}>
-                <input type="radio" name="left" checked={left === v.id} onChange={() => setLeft(v.id)} aria-label={`A v${v.version}`} />
-              </label>
-              <label className="check" title={D.compareWith}>
-                <input type="radio" name="right" checked={right === v.id} onChange={() => setRight(v.id)} aria-label={`B v${v.version}`} />
-              </label>
-              {canWrite && v.id !== doc.currentVersionId && (
-                <button
-                  type="button"
-                  className="icon-btn"
-                  title={D.restoreVersion}
-                  aria-label={D.restoreVersion}
-                  onClick={() => void restore(v)}
-                >
-                  <RotateCcw />
-                </button>
-              )}
-            </span>
-          </li>
-        ))}
-      </ul>
-      <div className="min-w-0">
-        {shown ? (
-          <VersionContent documentId={doc.id} versionId={shown} />
-        ) : left && right && left !== right ? (
-          <VersionDiff documentId={doc.id} leftId={left} rightId={right} />
-        ) : (
-          <p className="hint">
-            <GitCompare className="inline size-4" /> {D.compare}
-          </p>
-        )}
-        {shown && (
-          <Button size="sm" variant="ghost" className="mt-2" onClick={() => setShown(null)}>
-            <GitCompare /> {D.compare}
-          </Button>
-        )}
-      </div>
-    </div>
+    <VersionCompare
+      items={items}
+      name={`doc-${doc.id}`}
+      labels={{ compareA: D.compareA, compareB: D.compareB, restore: D.restoreVersion, compare: D.compare, compareHint: D.compare }}
+      canRestore={canWrite}
+      onRestore={restore}
+      renderContent={(id) => <VersionContent documentId={doc.id} versionId={id} />}
+      renderDiff={(left, right) => <VersionDiff documentId={doc.id} leftId={left} rightId={right} />}
+      className="grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]"
+    />
   );
 }
 
@@ -315,29 +273,6 @@ function VersionContent({ documentId, versionId }: { documentId: string; version
 function VersionDiff({ documentId, leftId, rightId }: { documentId: string; leftId: string; rightId: string }) {
   const a = useApi<ContractDocumentVersionContent>(`/api/contract-documents/${documentId}/versions/${leftId}`);
   const b = useApi<ContractDocumentVersionContent>(`/api/contract-documents/${documentId}/versions/${rightId}`);
-  const lines = useMemo(() => (a.data && b.data ? diffLines(a.data.content, b.data.content) : null), [a.data, b.data]);
-  if (!a.data || !b.data || !lines) return <p className="hint">{t.common.loading}</p>;
-  const stats = diffStats(lines);
-  return (
-    <div>
-      <p className="mb-2 text-sm font-medium">
-        {D.diffTitle(a.data.version, b.data.version)} <span className="text-ok">+{stats.added}</span>{' '}
-        <span className="text-danger">−{stats.removed}</span>
-      </p>
-      {stats.added + stats.removed === 0 ? (
-        <p className="hint">{D.noDiff}</p>
-      ) : (
-        <div className="panel diff-view" aria-label={D.diffTitle(a.data.version, b.data.version)}>
-          {lines.map((line, i) => (
-            <div key={`${i}-${line.kind}`} className={cx('diff-line', line.kind)}>
-              <span className="ln">{line.oldLine ?? ''}</span>
-              <span className="ln">{line.newLine ?? ''}</span>
-              <span className="mark">{line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ' '}</span>
-              <span className="txt">{line.text || ' '}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  if (!a.data || !b.data) return <p className="hint">{t.common.loading}</p>;
+  return <LineDiff before={a.data.content} after={b.data.content} title={D.diffTitle(a.data.version, b.data.version)} noDiff={D.noDiff} />;
 }

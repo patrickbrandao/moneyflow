@@ -1,3 +1,4 @@
+import { t } from '@moneyflow/shared';
 import { Compass } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { EmptyState } from '../components/ui';
@@ -7,11 +8,11 @@ export function NotFoundPage() {
     <div className="page">
       <EmptyState
         icon={<Compass />}
-        title="Página não encontrada"
-        description="O endereço pode ter mudado. Use ⌘K para procurar."
+        title={t.shell.notFound}
+        description={t.shell.notFoundHint}
         action={
           <Link to="/" className="btn btn-ghost">
-            Voltar ao início
+            {t.shell.backHome}
           </Link>
         }
       />

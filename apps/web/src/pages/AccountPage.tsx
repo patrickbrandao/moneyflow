@@ -26,8 +26,8 @@ export function AccountPage() {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (next.length < 6) return setError('A nova senha precisa de ao menos 6 caracteres.');
-    if (next !== confirmNext) return setError('A confirmação não confere com a nova senha.');
+    if (next.length < 6) return setError(t.user.passwordTooShort);
+    if (next !== confirmNext) return setError(t.user.passwordMismatch);
     setError(null);
     const ok = await run(() => api.post('/api/auth/password', { currentPassword: current, newPassword: next }), t.user.passwordChanged);
     if (ok) {
@@ -52,7 +52,7 @@ export function AccountPage() {
         </div>
       </div>
       <div className="grid gap-4">
-        <Panel title="Dados da conta" icon={<UserRound />}>
+        <Panel title={t.user.account.details} icon={<UserRound />}>
           <dl className="kv">
             <dt>{t.user.username}</dt>
             <dd className="mono">@{user.username}</dd>
@@ -61,13 +61,13 @@ export function AccountPage() {
             <dt>{t.user.role}</dt>
             <dd>{t.roles[user.role]}</dd>
           </dl>
-          <p className="panel-hint mt-3">Para mudar usuário ou e-mail, peça a um administrador.</p>
+          <p className="panel-hint mt-3">{t.user.account.detailsHint}</p>
         </Panel>
         <Panel title={t.user.memberships} icon={<Wallet />}>
           {user.role === 'admin' ? (
-            <p className="panel-hint">Administradores acessam todas as caixas.</p>
+            <p className="panel-hint">{t.user.account.adminAllCaixas}</p>
           ) : user.memberships.length === 0 ? (
-            <p className="panel-hint">Você ainda não tem acesso a nenhuma caixa.</p>
+            <p className="panel-hint">{t.user.account.noCaixas}</p>
           ) : (
             <div className="item-list">
               {user.memberships.map((m) => (
@@ -83,7 +83,7 @@ export function AccountPage() {
         </Panel>
         <Panel title={t.user.changePassword} icon={<KeyRound />}>
           <form onSubmit={submit} className="form-grid">
-            <p className="panel-hint">Trocar a senha encerra as sessões abertas nos outros aparelhos.</p>
+            <p className="panel-hint">{t.user.account.passwordHint}</p>
             <Field label={t.user.currentPassword}>
               <input
                 type="password"
@@ -105,7 +105,7 @@ export function AccountPage() {
                   autoComplete="new-password"
                 />
               </Field>
-              <Field label="Confirme a nova senha">
+              <Field label={t.user.confirmNewPassword}>
                 <input
                   type="password"
                   className="field"

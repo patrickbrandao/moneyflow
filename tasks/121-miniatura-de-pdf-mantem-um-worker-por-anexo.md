@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -83,9 +83,9 @@ Memória e CPU crescendo com o número de PDFs da sessão (cada worker do pdf.js
 ```
 
 ## Critérios de aceite
-- [ ] Com N miniaturas prontas, no máximo um worker do pdf.js por aba.
-- [ ] Desmontar antes do carregamento não deixa documento nem worker vivos.
-- [ ] Remontar a janela não baixa de novo os PDFs já desenhados.
+- [x] Com N miniaturas prontas, no máximo um worker do pdf.js por aba.
+- [x] Desmontar antes do carregamento não deixa documento nem worker vivos.
+- [x] Remontar a janela não baixa de novo os PDFs já desenhados.
 
 ## Testes recomendados
 `e2e/tests/agentes.spec.ts`, no caso das prévias (linha 1350): anexar três PDFs (`minimalPdf()` de `apps/server/test/helpers.ts` como fonte), esperar as miniaturas e conferir `page.workers().length <= 1`; minimizar a janela e conferir que o número não cresce ao restaurar.
@@ -95,4 +95,16 @@ Nada foi executado; o consumo exato por worker depende do PDF.
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código: o `loadPdf` chamava `getDocument` sem `worker`, então cada documento criava um `new Worker` próprio, vivo até o `destroy`; o `PdfThumb` guardava o documento aberto até desmontar e, desmontado antes de o carregamento terminar, não o destruía (o `destroy` era atribuído no `.then`, depois do cleanup); a miniatura era desenhada mesmo fora da tela e baixada de novo a cada montagem. O `isEvalSupported: false` sugerido não existe mais no `pdfjs-dist` 5.7.284 instalado (nenhuma ocorrência em `build/pdf.mjs` nem nos tipos): o endurecimento fica com a atualização da tarefa 071.
+
 ## Resolução (executor)
+
+`apps/web/src/components/contracts/PdfViewer.tsx`: um só `PDFWorker` por aba, criado na primeira abertura junto com o import dinâmico do pdf.js (`pdfRuntime`, refeito se o download do pdf.js falhar) e passado como `worker` em todo `getDocument`; o `loadPdf` virou `openPdf(url)`, que devolve `{ promise, destroy }`: o `destroy` solta o documento antes ou depois de carregar (o `loadingTask.destroy` não encerra um worker que ele não criou). O `PdfViewer` usa o `destroy` no cleanup.
+
+`apps/web/src/agents/AttachmentPreview.tsx` (`PdfThumb`): a miniatura só é desenhada quando chega perto da tela (`IntersectionObserver`, margem de 200px; sem ele, desenha na hora), num canvas fora do DOM; o documento é solto logo depois de desenhar (`finally`) e também quando a desmontagem interrompe o carregamento; a imagem (`toDataURL`) fica num cache por URL do anexo (até 200 miniaturas), então remontar a janela não baixa o PDF de novo. Enquanto não desenha, um lugar com a proporção A4 (`.agent-pdf-thumb.is-loading` em `styles/agents.css`). O `PdfCard` abre o visualizador no mesmo worker.
+
+Decisão: o `isEvalSupported: false` ficou de fora (a opção não existe no pdf.js 5.x; ver a Análise). Spec 025 (Web, a linha do `PdfViewer`) atualizada.
+
+Testes: e2e novo (não rodado aqui) em `e2e/tests/agentes.spec.ts` → "PDFs (tarefa 121): três miniaturas com um worker só do pdf.js; restaurar a janela não baixa os PDFs de novo" (três PDFs do `minimalPdf`, as três miniaturas como imagem, `page.workers().length <= 1`, minimizar e restaurar sem nenhum `download?inline=1`). O `apps/web` não tem testes unitários e a mudança não tem lógica pura para o shared. Verificação: `pnpm verify:quick`.

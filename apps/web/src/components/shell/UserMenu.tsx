@@ -1,4 +1,6 @@
+import { t } from '@moneyflow/shared';
 import { LogOut, Moon, Sun, UserRound } from 'lucide-react';
+
 import { useAuth, useUser } from '../../lib/auth';
 import { useTheme } from '../../lib/theme';
 import { Menu, MenuHeading, MenuItem, MenuSeparator, type MenuTrigger } from '../ui';
@@ -13,14 +15,14 @@ export function UserMenu({ trigger, up, className }: { trigger: MenuTrigger; up?
     <Menu trigger={trigger} up={up} className={className}>
       <MenuHeading>@{user.username}</MenuHeading>
       <MenuItem to="/account" icon={<UserRound />}>
-        Minha conta
+        {t.nav.account}
       </MenuItem>
       <MenuItem onSelect={toggleTheme} icon={theme === 'dark' ? <Sun /> : <Moon />}>
-        {theme === 'dark' ? 'Tema claro' : 'Tema escuro'}
+        {theme === 'dark' ? t.shell.themeLight : t.shell.themeDark}
       </MenuItem>
       <MenuSeparator />
       <MenuItem onSelect={() => void logout()} icon={<LogOut />}>
-        Sair
+        {t.auth.logout}
       </MenuItem>
     </Menu>
   );

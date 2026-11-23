@@ -262,6 +262,9 @@ export type TitleRow = {
   attachmentCount: number;
 };
 
+/** Quantidade e somas do filtro inteiro da listagem (GET /api/titles/totals, tarefa 116), sem o limite. */
+export type TitleTotals = { count: number; amountCents: number; openCents: number };
+
 export type SettlementRow = {
   id: string;
   titleId: string;
@@ -578,6 +581,9 @@ export type CardPurchaseRow = {
   contractId: string | null;
   contractName: string | null;
 };
+
+/** Quantidade e total do filtro inteiro das compras (GET /api/cards/:id/purchases/totals, tarefa 116). */
+export type CardPurchaseTotals = { count: number; totalCents: number };
 
 export type CardPurchaseDetail = CardPurchaseRow & {
   items: {

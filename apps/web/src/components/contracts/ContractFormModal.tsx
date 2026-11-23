@@ -24,11 +24,11 @@ import { useUser } from '../../lib/auth';
 import { useAction, useApi } from '../../lib/hooks';
 import { upload } from '../../lib/upload';
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
+import { kindOf } from '../series/series-text';
 import { Button, Field, Modal } from '../ui';
-import { newObligationDraft, type ObligationDraft, ObligationsEditor, obligationInputOf, obligationProblem } from './ObligationFormModal';
+import { newObligationDraft, type ObligationDraft, ObligationsEditor, obligationInputOf, obligationProblem } from './ObligationFields';
 
 type Direction = 'receivable' | 'payable';
-const kindOf = (direction: Direction) => (direction === 'payable' ? 'expense' : 'income');
 const F = t.contracts.fields;
 
 /** Primeiro vencimento pelo dia lido do PDF: no mês do início, ou no seguinte se o dia já passou. */

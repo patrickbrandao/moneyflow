@@ -99,7 +99,8 @@ export function CaixaFormModal({
           <div className="form-grid cols-2">
             <Field label={t.card.defaultPayer} hint={t.card.defaultPayerHint} className="span-all">
               <select className="field" value={payerId} onChange={(e) => setPayerId(e.target.value)} required>
-                <option value="">Escolha…</option>
+                <option value="">{t.common.choose}</option>
+
                 {payers.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name}

@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -85,8 +85,8 @@ Microfone aberto sem interface por até 10 min (privacidade e bateria); o áudio
 ```
 
 ## Critérios de aceite
-- [ ] Desmontar o compositor com o pedido de permissão pendente não deixa trilha de áudio ativa depois que a permissão é concedida.
-- [ ] Desmontar na revisão revoga a URL da gravação.
+- [x] Desmontar o compositor com o pedido de permissão pendente não deixa trilha de áudio ativa depois que a permissão é concedida.
+- [x] Desmontar na revisão revoga a URL da gravação.
 
 ## Testes recomendados
 `e2e/tests/agentes.spec.ts`: com `page.addInitScript` envolvendo `navigator.mediaDevices.getUserMedia` (atrasar 1 s e guardar os streams em `window.__streams`), clicar em gravar, minimizar a janela antes de 1 s e conferir depois que todas as trilhas de `window.__streams` estão com `readyState === 'ended'`.
@@ -95,5 +95,9 @@ Microfone aberto sem interface por até 10 min (privacidade e bateria); o áudio
 Nada foi executado.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado no código atual: em `useAudioRecorder` (`apps/web/src/agents/AudioRecorder.tsx`), depois do `await getUserMedia` nada conferia se o componente continuava montado, e o cleanup só parava o recorder e o stream que já existiam; a URL da revisão só era revogada em `clearReview`/`use`. Minimizar a janela tira o `ConversationPane` do DOM (`AgentWindows.tsx`).
 
 ## Resolução (executor)
+`apps/web/src/agents/AudioRecorder.tsx`: o hook guarda `alive` (verdadeiro enquanto montado, falso no cleanup) e, depois do `await getUserMedia`, se a janela já desmontou, para as trilhas na hora e não cria o `MediaRecorder` nem o cronômetro. Um segundo `start` enquanto o primeiro espera a permissão é ignorado (`starting`, liberado no `finally`). O `onstop` que chega depois de desmontar (parar e fechar logo em seguida) só solta as trilhas, sem criar a URL. A URL da gravação em revisão fica num ref e é revogada ao descartar, regravar, anexar e ao desmontar; o cleanup também esquece o recorder.
+
+Testes: e2e novo em `e2e/tests/agentes.spec.ts` → "gravação: minimizar com o pedido de permissão pendente solta o microfone (tarefa 123)": `page.addInitScript` atrasa o `getUserMedia` em 1 s e guarda as trilhas entregues; clicar em gravar, minimizar antes da resposta e conferir que a única trilha entregue termina `ended` (não rodado aqui). O `apps/web` não tem unitários. Verificação: `pnpm verify:quick`.

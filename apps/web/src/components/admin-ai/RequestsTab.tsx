@@ -11,12 +11,12 @@ import {
   type UserRow,
 } from '@moneyflow/shared';
 import { RotateCcw, Save } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, api, withQuery } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
 import { useParamState } from '../../lib/params';
 import { LoadError } from '../domain';
-import { Badge, Button, Field, Panel } from '../ui';
+import { Badge, Button, Field, Panel, useDebounced } from '../ui';
 import { RequestDrawer } from './RequestDrawer';
 import { RequestsTable } from './RequestsTable';
 
@@ -37,26 +37,33 @@ type Filters = {
 
 const EMPTY: Filters = { from: '', to: '', providerId: '', agentId: '', userId: '', operation: '', purpose: '', status: '', model: '' };
 
-/** Lista paginada por cursor (a próxima página entra no fim). */
+/**
+ * Lista paginada por cursor (a próxima página entra no fim). Só a última carga
+ * pedida vale (tarefa 118): a resposta de um filtro anterior, ou a próxima
+ * página pedida antes da troca, é descartada.
+ */
 export function useRequestPages(query: Record<string, string>) {
   const key = JSON.stringify(query);
   const [items, setItems] = useState<AiRequestListItem[] | undefined>(undefined);
   const [next, setNext] = useState<string | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [loading, setLoading] = useState(false);
+  const seq = useRef(0);
 
   const load = useCallback(
     async (cursor: string | null) => {
+      const mine = ++seq.current;
       setLoading(true);
       try {
         const page = await api.get<AiRequestPage>(withQuery('/api/admin/ai/requests', { ...JSON.parse(key), cursor: cursor ?? undefined }));
+        if (mine !== seq.current) return;
         setItems((current) => (cursor ? [...(current ?? []), ...page.items] : page.items));
         setNext(page.nextCursor);
         setError(null);
       } catch (err) {
-        setError(err instanceof ApiError ? err : new ApiError(0, 'unknown', String(err)));
+        if (mine === seq.current) setError(err instanceof ApiError ? err : new ApiError(0, 'unknown', String(err)));
       } finally {
-        setLoading(false);
+        if (mine === seq.current) setLoading(false);
       }
     },
     [key],
@@ -77,7 +84,9 @@ export function RequestsTab() {
   const providers = useApi<AiProviderDto[]>('/api/admin/ai/providers');
   const agents = useApi<AiAgentDto[]>('/api/admin/ai/agents');
   const users = useApi<UserRow[]>('/api/users');
-  const pages = useRequestPages(Object.fromEntries(Object.entries(filters).filter(([, v]) => v)) as Record<string, string>);
+  // O modelo é texto livre: a consulta espera a digitação parar, como as outras buscas.
+  const model = useDebounced(filters.model.trim(), 300);
+  const pages = useRequestPages(Object.fromEntries(Object.entries({ ...filters, model }).filter(([, v]) => v)) as Record<string, string>);
   const set = (key: keyof Filters) => (event: { target: { value: string } }) => setFilters((f) => ({ ...f, [key]: event.target.value }));
 
   return (

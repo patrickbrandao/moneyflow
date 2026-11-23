@@ -110,6 +110,7 @@ export function AgentsTab() {
                       )}
                     </span>
                   </td>
+                  {/* biome-ignore lint/a11y/useKeyWithClickEvents: só segura o clique da linha; as ações são botões próprios. */}
                   <td className="text-right" onClick={(e) => e.stopPropagation()}>
                     <span className="row-actions">
                       <button

@@ -1,4 +1,4 @@
-import { type AiPriceDto, type AiProviderDto, formatDateTime, t } from '@moneyflow/shared';
+import { type AiPriceDto, type AiProviderDto, formatDateTime, instantFromSpLocal, t } from '@moneyflow/shared';
 import { CircleDollarSign, Plus, Trash2 } from 'lucide-react';
 import { type FormEvent, useId, useState } from 'react';
 import { api } from '../../lib/api';
@@ -134,7 +134,8 @@ function PriceFormModal({ providers, onClose, onSaved }: { providers: AiProvider
           cacheReadPricePerMillion: optionalNumber(cacheRead) ?? null,
           audioInputPerMinute: optionalNumber(audioInput) ?? null,
           speechPerMillionChars: optionalNumber(speech) ?? null,
-          ...(validFrom ? { validFrom: new Date(validFrom).toISOString() } : {}),
+          // O datetime-local é horário de São Paulo, como a tabela mostra (não o fuso do navegador).
+          ...(validFrom && instantFromSpLocal(validFrom) ? { validFrom: instantFromSpLocal(validFrom) } : {}),
         }),
       p.created,
     );

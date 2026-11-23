@@ -5,7 +5,7 @@ import { useToast } from '../components/Toast';
 import { Button, Field, Modal, useConfirm } from '../components/ui';
 import { api } from '../lib/api';
 import { useAction } from '../lib/hooks';
-import { useAgents } from './AgentsProvider';
+import { useAgentActions } from './AgentsProvider';
 
 const u = t.agentsUi;
 
@@ -19,7 +19,7 @@ type Target = Pick<ConversationDto, 'id' | 'title'>;
  * Devolve também o modal de renomear, para quem usa renderizar.
  */
 export function useConversationActions(onChanged?: (conversation: ConversationDto | null) => void) {
-  const agents = useAgents();
+  const agents = useAgentActions();
   const confirm = useConfirm();
   const toast = useToast();
   const { run, busy } = useAction();

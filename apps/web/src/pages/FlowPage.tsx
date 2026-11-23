@@ -29,7 +29,9 @@ export function FlowPage() {
 
   const qs = new URLSearchParams({ from, to });
   if (caixaIds.length) qs.set('caixaIds', caixaIds.join(','));
-  const graph = useApi<FlowGraphData>(`/api/flow?${qs}`);
+  // Trocado o período ou as caixas, o palco fica (esmaecido) com o grafo anterior até o novo chegar:
+  // desmontá-lo perderia o enquadramento, os clusters abertos e a seleção.
+  const graph = useApi<FlowGraphData>(`/api/flow?${qs}`, { keepPrevious: true });
   // Destaque por tags e favoritas (spec 014): só do navegador, o grafo continua inteiro.
   const [filter, setFilter] = useEntityFilterParams();
   const tags = useEntityTags();
@@ -89,7 +91,7 @@ export function FlowPage() {
           <Skel h={160} w={280} />
         </div>
       ) : (
-        <MoneyFlowCanvas data={graph.data} mode={mode} onReset={reset} match={match} />
+        <MoneyFlowCanvas data={graph.data} mode={mode} onReset={reset} match={match} stale={graph.stale} />
       )}
     </>
   );

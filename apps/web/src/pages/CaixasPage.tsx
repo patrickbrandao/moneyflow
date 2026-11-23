@@ -2,8 +2,10 @@ import { type CaixaSummary, t } from '@moneyflow/shared';
 import { CreditCard, Plus, Star, Wallet } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { recordDragProps } from '../agents/records';
+import { RowLink } from '../components/a11y';
 import { CaixaFormModal } from '../components/CaixaFormModal';
 import { LoadError, Money, PageHead, RoleBadge, SkelRows } from '../components/domain';
+
 import { Badge, Button, EmptyRow, Tabs } from '../components/ui';
 import { useUser } from '../lib/auth';
 import { useRegisterCommands } from '../lib/commands';
@@ -27,7 +29,7 @@ export function CaixasPage() {
     <div className="page wide">
       <PageHead
         title={t.nav.caixas}
-        sub="Cada caixa é o livro financeiro de um titular: contas, títulos a pagar e a receber."
+        sub={t.caixa.page.sub}
         actions={
           user.canEditRegistry && (
             <Button onClick={() => setNew('1')}>
@@ -40,8 +42,8 @@ export function CaixasPage() {
         value={archived ? 'archived' : 'active'}
         onChange={(key) => setArchived(key === 'archived' ? '1' : null)}
         items={[
-          { key: 'active', label: 'Ativas' },
-          { key: 'archived', label: 'Arquivadas' },
+          { key: 'active', label: t.caixa.page.active },
+          { key: 'archived', label: t.caixa.page.archived },
         ]}
       />
       {error ? (
@@ -51,9 +53,9 @@ export function CaixasPage() {
           <table className="data">
             <thead>
               <tr>
-                <th>Caixa</th>
+                <th>{t.caixa.page.caixa}</th>
                 <th>{t.caixa.holder}</th>
-                <th>Seu papel</th>
+                <th>{t.caixa.page.yourRole}</th>
                 <th className="num">{t.caixa.balance}</th>
                 <th className="num">{t.caixa.receivableOpen}</th>
                 <th className="num">{t.caixa.payableOpen}</th>
@@ -63,11 +65,7 @@ export function CaixasPage() {
               {!data && <SkelRows cols={6} />}
               {data && data.length === 0 && (
                 <EmptyRow colSpan={6}>
-                  {archived
-                    ? 'Nenhuma caixa arquivada.'
-                    : user.canEditRegistry
-                      ? 'Nenhuma caixa ainda: crie a primeira.'
-                      : 'Você ainda não tem acesso a nenhuma caixa.'}
+                  {archived ? t.caixa.page.noArchived : user.canEditRegistry ? t.caixa.page.noneYet : t.caixa.page.noAccess}
                 </EmptyRow>
               )}
               {data?.map((caixa) => (
@@ -84,7 +82,7 @@ export function CaixasPage() {
                       ) : (
                         <Wallet className="size-4 text-muted" />
                       )}
-                      <span className="row-title">{caixa.name}</span>
+                      <RowLink to={`/caixas/${caixa.id}`}>{caixa.name}</RowLink>
                       {caixa.kind === 'credit_card' && <CardEnding last4={caixa.cardLast4} />}
                       {caixa.isPrimary && (
                         <Badge tone="outline" title={t.caixa.isPrimary}>

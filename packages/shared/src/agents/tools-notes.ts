@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { NOTE_KINDS, NOTE_LIST_SCOPES, noteCreateInput, noteUpdateObject } from '../notes';
+import { NOTE_KINDS, NOTE_LIST_SCOPES } from '../notes';
+import { noteCreateInput, noteUpdateObject } from '../notes-input';
 import { id } from '../schemas/common';
 import { date, define, limit } from './tool-def';
 

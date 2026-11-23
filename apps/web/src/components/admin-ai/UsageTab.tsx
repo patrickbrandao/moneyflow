@@ -15,7 +15,7 @@ import {
 } from '@moneyflow/shared';
 import { MessageSquare } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { useAgents } from '../../agents/AgentsProvider';
+import { useAgentActions } from '../../agents/AgentsProvider';
 import { formatInt } from '../../agents/format';
 import { withQuery } from '../../lib/api';
 import { useApi } from '../../lib/hooks';
@@ -380,7 +380,7 @@ function SectionHead({ title, hint, build }: { title: string; hint?: string; bui
 }
 
 function TopSessions({ data, period }: { data: AiUsagePanel | undefined; period: string }) {
-  const agents = useAgents();
+  const agents = useAgentActions();
   const rows = data?.topConversations ?? [];
   const build = (): ExportTable => ({
     fileName: s.csvFile('sessoes'),

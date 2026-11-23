@@ -8,7 +8,7 @@ import {
   t,
 } from '@moneyflow/shared';
 import { Search } from 'lucide-react';
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useRef, useState } from 'react';
 import { api } from '../../lib/api';
 import { useUser } from '../../lib/auth';
 import { useAction } from '../../lib/hooks';
@@ -34,26 +34,34 @@ export function EntityFormModal({
   const [notes, setNotes] = useState(entity?.notes ?? '');
   const [tagIds, setTagIds] = useState<string[]>(entity?.tags.map((tag) => tag.id) ?? []);
   const user = useUser();
-  const [lookup, setLookup] = useState<CnpjLookup | null>(null);
+  const [lookedUp, setLookedUp] = useState<{ document: string; data: CnpjLookup; notice: string } | null>(null);
   const [importLookup, setImportLookup] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [looking, setLooking] = useState(false);
   const { run, busy } = useAction();
 
   const normalized = normalizeDocument(document);
   const docInvalid = normalized !== '' && !isValidDocument(kind, normalized);
+  // A consulta vale só para o CNPJ consultado (tarefa 177): trocado o documento, ou o tipo para
+  // pessoa, o endereço e os contatos dela não entram na entidade nova, e o aviso some.
+  const current = lookedUp && kind === 'company' && lookedUp.document === normalized ? lookedUp : null;
+  const lookup = current?.data ?? null;
+  const notice = current?.notice ?? null;
+  const latestDocument = useRef(normalized);
+  latestDocument.current = normalized;
 
   async function lookupCnpj() {
+    const consulted = normalized;
     setLooking(true);
     setError(null);
-    setNotice(null);
+    setLookedUp(null);
     try {
-      const data = await api.get<CnpjLookup>(`/api/lookup/cnpj/${encodeURIComponent(normalized)}`);
-      setLookup(data);
+      const data = await api.get<CnpjLookup>(`/api/lookup/cnpj/${encodeURIComponent(consulted)}`);
+      // Trocado o documento enquanto a consulta andava: a resposta é de outro CNPJ e não preenche nada.
+      if (latestDocument.current !== consulted) return;
+      setLookedUp({ document: consulted, data, notice: t.entity.lookupFilled(t.entity.lookupSources[data.source] ?? data.source) });
       if (data.name) setName(data.name);
       if (data.tradeName) setTradeName(data.tradeName);
-      setNotice(t.entity.lookupFilled(t.entity.lookupSources[data.source] ?? data.source));
     } catch (err) {
       setError((err as Error).message);
     } finally {

@@ -68,6 +68,16 @@ export const ptBR = {
     seeAll: 'ver todos',
     loadError: 'Não foi possível carregar.',
     noResults: 'Nada encontrado.',
+    /** Lista cortada no servidor (tarefa 116). */
+    shownOf: (shown: number, total: number) => `Mostrando ${shown} de ${total}.`,
+    shownFirst: (shown: number) => `Mostrando os primeiros ${shown}; há mais.`,
+    loadMore: 'Carregar mais',
+    refineToSeeMore: 'Refine o filtro para ver o restante.',
+    /** Controles das linhas das listas, pelo teclado e no leitor de tela (tarefa 114). */
+    openItem: (name: string) => `Abrir ${name}`,
+    expandItem: (name: string) => `Expandir ${name}`,
+    collapseItem: (name: string) => `Recolher ${name}`,
+
     deletedOrArchived: (archived: boolean) => (archived ? 'Registro arquivado (tinha vínculos).' : 'Registro excluído.'),
   },
   period: {
@@ -121,6 +131,48 @@ export const ptBR = {
     newCategory: 'Nova categoria',
     newUser: 'Novo usuário',
     newAccount: 'Nova conta financeira',
+    filter: 'Digite para filtrar',
+    searching: 'Buscando…',
+    dialogLabel: 'Paleta de comandos',
+    keyNavigate: 'navegar',
+    keyOpen: 'abrir',
+    keyClose: 'fechar',
+  },
+
+  /** A casca do console: menu, topo, usuário e a página não encontrada. */
+  shell: {
+    showMenu: 'Exibir o menu',
+    collapseMenu: 'Recolher o menu',
+    search: 'Buscar',
+    searchShortcut: 'Buscar (⌘K)',
+    breadcrumbs: 'Trilha',
+    mainNav: 'Principal',
+    themeLight: 'Tema claro',
+    themeDark: 'Tema escuro',
+    closeEsc: 'Fechar (Esc)',
+    notFound: 'Página não encontrada',
+    notFoundHint: 'O endereço pode ter mudado. Use ⌘K para procurar.',
+    backHome: 'Voltar ao início',
+    /** Tela sob demanda (tarefa 128) que não carregou ou falhou ao abrir. */
+    pageError: 'Não foi possível abrir esta tela.',
+    pageErrorHint: 'Pode ser uma versão nova do MoneyFlow no ar. Recarregue a página.',
+    reload: 'Recarregar',
+  },
+
+  /** Visão geral (página inicial). */
+  overview: {
+    greeting: (name: string) => `Olá, ${name}`,
+    sub: 'Saldos das suas caixas e o que vence agora.',
+    searchTrigger: 'Procurar…',
+    noCaixas: 'Nenhuma caixa ainda',
+    noCaixasCreate: 'Crie a primeira caixa para lançar contas a pagar e a receber.',
+    noCaixasAsk: 'Peça a um administrador acesso a uma caixa.',
+    caixa: 'Caixa',
+    overdue: 'Vencidos',
+    awaiting: 'Aguardando você',
+    awaitingHint: 'Espelhos que outra caixa lançou contra as suas e baixas com a conta a definir.',
+    noOverdue: 'Nada vencido.',
+    noUpcoming: 'Nada vence nos próximos 30 dias.',
   },
 
   auth: {
@@ -133,6 +185,12 @@ export const ptBR = {
     invalid: 'Usuário ou senha incorretos, ou usuário desativado.',
     required: 'Informe usuário e senha.',
     sessionExpired: 'Sua sessão terminou. Entre de novo.',
+    /** A janela de login por cima do console quando a sessão cai (tarefa 119). */
+    expiredDialog: {
+      title: 'Sua sessão terminou',
+      description:
+        'Entre de novo para continuar. O que você estava fazendo continua na tela, e o que ficou pendente é enviado depois do login.',
+    },
     forgot: 'Esqueceu a senha? Peça a um administrador.',
     logout: 'Sair',
     unauthenticated: 'Faça login para continuar.',
@@ -338,6 +396,61 @@ export const ptBR = {
     accountNumber: 'Conta',
     holderName: 'Titular da conta',
     primaryPix: 'PIX principal',
+    /** Lista das entidades. */
+    list: {
+      sub: 'Pessoas e empresas, cadastradas uma vez e usadas por todas as caixas.',
+      searchPlaceholder: 'Nome, fantasia ou CPF/CNPJ',
+      searchLabel: 'Buscar entidades',
+      caixasColumn: 'Caixas',
+      empty: 'Nenhuma entidade cadastrada.',
+    },
+    /** Tela da entidade. */
+    page: {
+      editCommand: (name: string) => `Editar ${name}`,
+      newPixCommand: (name: string) => `Nova chave PIX para ${name}`,
+      removeTitle: (what: string) => `Remover ${what}?`,
+      removed: 'Removido.',
+      deleteTitle: (name: string) => `Excluir ${name}?`,
+      deleteBody: 'Sem vínculos ela é excluída; usada em títulos ou caixas, é arquivada.',
+      restored: 'Entidade restaurada.',
+      noDocument: 'sem documento',
+      /** O que se remove, no "Remover …?". */
+      childNames: {
+        pix: 'a chave PIX',
+        contact: 'o contato',
+        address: 'o endereço',
+        bank: 'o dado bancário',
+        link: 'o vínculo',
+      },
+      noPixKeys: 'Nenhuma chave PIX.',
+      noContacts: 'Nenhum contato.',
+      noAddresses: 'Nenhum endereço.',
+      noBankAccounts: 'Nenhum dado bancário.',
+      noLinks: 'Nenhum vínculo.',
+      noCaixas: 'Não é titular de nenhuma caixa.',
+      caixaNoAccess: 'Você não tem acesso a esta caixa',
+    },
+    /** Janelas dos itens da entidade (PIX, contato, endereço, dados bancários, vínculo). */
+    child: {
+      saved: 'Salvo.',
+      editPix: 'Editar chave PIX',
+      newPix: 'Nova chave PIX',
+      pixKey: 'Chave',
+      editContact: 'Editar contato',
+      newContact: 'Novo contato',
+      phoneNumber: 'Número',
+      contactValue: 'Valor',
+      contactLabelPlaceholder: 'financeiro, celular…',
+      editAddress: 'Editar endereço',
+      newAddress: 'Novo endereço',
+      addressLabelPlaceholder: 'sede, residência…',
+      editBank: 'Editar dado bancário',
+      newBank: 'Novo dado bancário',
+      newLink: 'Novo vínculo',
+      chooseOther: 'Escolha a outra entidade.',
+      linkKind: 'Esta entidade é…',
+      otherEntity: 'Outra entidade',
+    },
   },
 
   caixa: {
@@ -404,6 +517,56 @@ export const ptBR = {
       accountsStrip: 'Contas desta caixa',
       notFound: 'Conta não encontrada nesta caixa.',
     },
+    /** Lista de caixas. */
+    page: {
+      sub: 'Cada caixa é o livro financeiro de um titular: contas, títulos a pagar e a receber.',
+      active: 'Ativas',
+      archived: 'Arquivadas',
+      caixa: 'Caixa',
+      yourRole: 'Seu papel',
+      noArchived: 'Nenhuma caixa arquivada.',
+      noneYet: 'Nenhuma caixa ainda: crie a primeira.',
+      noAccess: 'Você ainda não tem acesso a nenhuma caixa.',
+    },
+    /** Aba Contas da caixa e o lançamento avulso. */
+    accountsTab: {
+      account: 'Conta',
+      bank: 'Banco',
+      empty: 'Nenhuma conta nesta caixa.',
+      deleteTitle: (name: string) => `Excluir a conta ${name}?`,
+      deleteBody:
+        'Sem movimentos ela é excluída; com histórico, é arquivada (some das listas e do saldo da caixa, continua nos relatórios) e, para isso, o saldo precisa estar zerado.',
+      restored: 'Conta restaurada.',
+      created: 'Conta criada.',
+      updated: 'Conta atualizada.',
+      editTitle: 'Editar conta',
+      adjustmentSaved: 'Lançamento registrado.',
+      inflow: 'Entrada',
+      outflow: 'Saída',
+      adjustmentPlaceholder: 'Rendimento, tarifa, ajuste de contagem…',
+    },
+    /** Extrato da caixa. */
+    statementTab: {
+      noAccounts: 'Nenhuma conta nesta caixa',
+      noAccountsHint: 'Crie uma conta na aba Contas para ver o extrato.',
+      deleteAdjustment: 'Excluir o lançamento avulso?',
+      adjustmentDeleted: 'Lançamento excluído.',
+      entry: 'Lançamento',
+      empty: 'Nenhum movimento no período.',
+    },
+    /** Aba Membros da caixa. */
+    membersTab: {
+      adminsHint: 'Administradores enxergam todas as caixas e não aparecem aqui.',
+      add: 'Adicionar membro',
+      added: 'Membro adicionado.',
+      role: 'Papel na caixa',
+      roleShort: 'Papel',
+      roleHint: 'Editor lança e altera; leitor só consulta.',
+      roleSaved: 'Papel atualizado.',
+      removeTitle: (username: string) => `Remover @${username} da caixa?`,
+      removed: 'Membro removido.',
+      empty: 'Nenhum membro.',
+    },
   },
 
   category: {
@@ -413,6 +576,31 @@ export const ptBR = {
     color: 'Cor',
     icon: 'Ícone (lucide)',
     hidden: 'Oculta nesta caixa',
+    /** Tela Categorias. */
+    page: {
+      sub: 'Plano único para todas as caixas, em dois níveis. Cada caixa pode ocultar o que não usa.',
+      caixa: 'Caixa',
+      allCaixas: 'Todas as caixas (plano global)',
+      hiddenIn: (caixa: string) => `Ocultas em: ${caixa}`,
+      expenses: 'Despesas',
+      incomes: 'Receitas',
+      empty: 'Nenhuma categoria.',
+      newOfKind: (newCategory: string, kind: string) => `${newCategory} de ${kind.toLowerCase()}`,
+      newSubcategory: (subcategory: string) => `Nova ${subcategory.toLowerCase()}`,
+      show: 'Mostrar nesta caixa',
+      hide: 'Ocultar nesta caixa',
+      deleteTitle: (name: string) => `Excluir a categoria ${name}?`,
+      deleteBody: 'Sem uso ela é excluída; usada em títulos, é arquivada (com as subcategorias).',
+      restored: 'Categoria restaurada.',
+      created: 'Categoria criada.',
+      updated: 'Categoria atualizada.',
+      editTitle: 'Editar categoria',
+      groupHasChildren: 'Um grupo com subcategorias não vira subcategoria.',
+      isGroup: '— é um grupo —',
+      noColor: 'Sem cor',
+      colorN: (slot: number) => `Cor ${slot}`,
+      iconHint: 'Nome lucide em kebab-case, ex.: shopping-cart.',
+    },
   },
 
   title: {
@@ -476,6 +664,49 @@ export const ptBR = {
     newPayable: 'Novo a pagar',
     newReceivable: 'Novo a receber',
     pendingAccount: 'Conta a definir',
+    /** Título como coluna e rótulo (listas, gaveta). */
+    titleLabel: 'Título',
+    origin: 'Origem',
+    caixa: 'Caixa',
+    countLabel: (n: number) => (n === 1 ? '1 título' : `${n} títulos`),
+    /** Filtros da lista de títulos da caixa. */
+    filters: { unpaid: 'Em aberto', paid: 'Liquidados', canceled: 'Cancelados' } as Record<string, string>,
+    searchPlaceholder: 'Descrição ou entidade',
+    searchAria: 'Buscar títulos',
+    dueFrom: 'Vencimento de',
+    dueTo: 'Vencimento até',
+    emptyFiltered: 'Nenhum título com esse filtro.',
+    /** Gaveta do título. */
+    drawer: {
+      editCommand: (description: string) => `Editar: ${description}`,
+      cancelTitle: 'Cancelar o título?',
+      cancelMirrorBody: 'O espelho na outra caixa também é cancelado.',
+      cancelBody: 'Ele deixa de contar como em aberto.',
+      canceled: 'Título cancelado.',
+      reopened: 'Título reaberto.',
+      deleteFollowingTitle: 'Excluir este e os próximos?',
+      deleteTitle: 'Excluir o título?',
+      deleteFollowingBody: 'A série termina antes desta ocorrência; as seguintes somem.',
+      deleteBody: 'Sem baixas, o título (e o espelho) é excluído; com histórico, é arquivado.',
+      mirrorPending: 'Lançado por outra caixa e aguardando o seu aceite.',
+      mirrorDisputed: 'Você contestou este lançamento.',
+      mirrorDecide: 'Aceite (podendo ajustar a categoria) ou conteste.',
+      noSettlements: 'Nenhuma baixa.',
+      mirrorAccepted: 'Espelho aceito.',
+      mirrorDisputedToast: 'Espelho contestado.',
+      disputeReason: 'Motivo',
+    },
+    /** Formulário do título. */
+    form: {
+      chooseEntity: 'Escolha a entidade.',
+      chooseCategory: 'Escolha a categoria.',
+      created: 'Título criado.',
+      updated: 'Título atualizado.',
+      editTitle: 'Editar título',
+      competenceHint: 'Mês a que a despesa ou receita pertence.',
+      endsOnHint: 'Vazio = sem fim (o sistema mantém 12 meses à frente).',
+      applyTo: 'Aplicar a',
+    },
   },
 
   settlement: {
@@ -499,6 +730,17 @@ export const ptBR = {
     setAccount: 'Definir conta',
     undoTransfer: 'Desfazer também a transferência gerada',
     history: 'Baixas',
+    /** Formulários de baixa, estorno e conta a definir. */
+    principalTooHigh: (open: string) => `O principal não pode passar do saldo em aberto (${open}).`,
+    principalHint: 'Menor que o saldo em aberto = baixa parcial.',
+    chooseOtherAccount: 'Escolha a conta da outra caixa.',
+    payWithOther: 'Pagar com a conta de outra caixa (gera transferência)',
+    receiveInOther: 'Receber na conta de outra caixa (gera transferência)',
+    mirrorNoPermission: 'Sem permissão na outra caixa: aquele lado fica baixado com a conta a definir.',
+    registered: 'Baixa registrada.',
+    reversedToast: 'Baixa estornada.',
+    reverseHint: 'O estorno lança o movimento oposto na conta (o histórico fica) e reabre o saldo do título.',
+    accountSet: 'Conta definida.',
   },
 
   transfer: {
@@ -506,6 +748,18 @@ export const ptBR = {
     to: 'Conta de destino',
     date: 'Data',
     fromSettlement: 'gerada por baixa',
+    /** Tela Transferências. */
+    page: {
+      sub: 'Dinheiro que muda de conta, dentro da mesma caixa ou entre caixas.',
+      caixa: 'Caixa',
+      allCaixas: 'Todas as caixas',
+      empty: 'Nenhuma transferência.',
+      deleteTitle: 'Excluir a transferência?',
+      deleteBody: (amount: string, from: string, to: string) => `${amount} de ${from} para ${to}. Os dois movimentos saem dos extratos.`,
+      deleted: 'Transferência excluída.',
+      sameAccount: 'Escolha contas diferentes.',
+      created: 'Transferência registrada.',
+    },
   },
 
   statement: {
@@ -530,7 +784,46 @@ export const ptBR = {
     currentPassword: 'Senha atual',
     newPassword: 'Nova senha',
     passwordChanged: 'Senha alterada. As outras sessões foram encerradas.',
+    /** A mesma regra de senha do cadastro e da troca (schema: mínimo de 6). */
+    passwordTooShort: 'A senha precisa de ao menos 6 caracteres.',
+    passwordMismatch: 'A confirmação não confere com a nova senha.',
+    confirmNewPassword: 'Confirme a nova senha',
+    /** Tela Usuários (admin). */
+    page: {
+      sub: 'Quem acessa o MoneyFlow, o papel global e o papel em cada caixa.',
+      empty: 'Nenhum usuário.',
+      allCaixas: 'todas',
+      activate: 'Ativar',
+      deactivate: 'Desativar',
+      deactivateTitle: (username: string) => `Desativar @${username}?`,
+      deactivateBody: 'As sessões abertas dele terminam na hora.',
+      activated: 'Usuário ativado.',
+      deactivated: 'Usuário desativado.',
+      deleteTitle: (username: string) => `Excluir @${username}?`,
+      deleteBody: 'Prefira desativar: a exclusão é definitiva.',
+      deleted: 'Usuário excluído.',
+      created: 'Usuário criado.',
+      updated: 'Usuário atualizado.',
+      editTitle: (username: string) => `Editar @${username}`,
+      usernameHint: 'Sem espaços nem @.',
+      passwordHint: 'Trocar a senha encerra as sessões dele.',
+      rolesSaved: 'Papéis atualizados.',
+      rolesHint: 'Editor lança e altera; leitor só consulta. Sem papel, a caixa não aparece para ele.',
+      caixa: 'Caixa',
+      caixaRole: 'Papel',
+      caixaRoleOf: (caixa: string) => `Papel em ${caixa}`,
+      noAccess: 'Sem acesso',
+    },
+    /** Minha conta. */
+    account: {
+      details: 'Dados da conta',
+      detailsHint: 'Para mudar usuário ou e-mail, peça a um administrador.',
+      adminAllCaixas: 'Administradores acessam todas as caixas.',
+      noCaixas: 'Você ainda não tem acesso a nenhuma caixa.',
+      passwordHint: 'Trocar a senha encerra as sessões abertas nos outros aparelhos.',
+    },
   },
+
   // Fase 2: cada área tem o próprio arquivo em ./areas.
   card: cardStrings,
   statements: statementsStrings,

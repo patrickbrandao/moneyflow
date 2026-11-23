@@ -1,4 +1,5 @@
-import { formatAccounting, formatMonth } from '@moneyflow/shared';
+import { formatAccounting, formatMonth, t } from '@moneyflow/shared';
+
 import { useState } from 'react';
 import { Legend, niceTicks, TipRow, Tooltip, topRounded, useKeyboardIndex, useWidth } from '../admin-ai/usage-charts';
 
@@ -242,6 +243,7 @@ export function Donut<S extends DonutSlice>({
             const gap = visible.length > 1 ? Math.min(2, length / 2) : 0;
             const dash = `${Math.max(0, length - gap)} ${circumference}`;
             const el = (
+              // biome-ignore lint/a11y/noStaticElementInteractions: atalho do mouse; pelo teclado, a legenda tem um botão por fatia com a mesma ação.
               <circle
                 key={s.key}
                 cx={size / 2}
@@ -265,7 +267,7 @@ export function Donut<S extends DonutSlice>({
           })}
         </g>
         <text x={size / 2} y={size / 2 - 6} textAnchor="middle" className="acc-donut-k">
-          {focused ? share(focused.value) : 'Total'}
+          {focused ? share(focused.value) : t.common.total}
         </text>
         <text x={size / 2} y={size / 2 + 14} textAnchor="middle" className="acc-donut-v">
           {compact.format((focused ? focused.value : total) / 100)}

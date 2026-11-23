@@ -20,6 +20,7 @@ import {
   type TitleDetail,
   type TitleRow,
   type TitleStatus,
+  type TitleTotals,
   type titleCreateInput,
   type titleListQuery,
   type titleUpdateInput,
@@ -81,15 +82,14 @@ function toRow(row: Record<string, unknown>): TitleRow {
   return { ...r, archivedAt: r.archivedAt ? new Date(r.archivedAt).toISOString() : null };
 }
 
-export async function listTitles(
+/** O filtro da listagem de títulos (sobre `fromSql`), o mesmo na lista e nos totais. */
+function titleListWhere(
   ctx: ServiceContext,
   query: z.output<typeof titleListQuery>,
-  /** `cardInvoiceId`: só os títulos dessa fatura (o detalhe da fatura, tarefa 084). `offset`: a página das tools
-   * dos agentes (tarefa 101); a ordem tem o id no fim para a página ser estável. */
-  opts: { writableOnly?: boolean; cardInvoiceId?: string; offset?: number } = {},
-): Promise<TitleRow[]> {
+  today: string,
+  opts: { writableOnly?: boolean; cardInvoiceId?: string },
+) {
   if (query.caixaId) ctx.access.assertRead(query.caixaId);
-  const today = todayIso();
   const where = [readableFilter(ctx.access, sql`t.caixa_id`)];
   if (opts.cardInvoiceId) where.push(sql`t.card_invoice_id = ${opts.cardInvoiceId}`);
   if (opts.writableOnly && !ctx.access.isAdmin) {
@@ -133,12 +133,39 @@ export async function listTitles(
         AND s.amount_cents + s.interest_cents + s.fine_cents - s.discount_cents <> 0)`);
       break;
   }
+  return sql.join(where, sql` AND `);
+}
+
+export async function listTitles(
+  ctx: ServiceContext,
+  query: z.output<typeof titleListQuery>,
+  /** `cardInvoiceId`: só os títulos dessa fatura (o detalhe da fatura, tarefa 084). `offset`: a página das tools
+   * dos agentes (tarefa 101); a ordem tem o id no fim para a página ser estável. */
+  opts: { writableOnly?: boolean; cardInvoiceId?: string; offset?: number } = {},
+): Promise<TitleRow[]> {
+  const today = todayIso();
+  // O id desempata: a mesma consulta com um limite maior ("Carregar mais") ou a página seguinte das tools
+  // (`offset`) devolve as mesmas primeiras linhas.
   const result = await ctx.db.execute(sql`
     SELECT ${rowSelect(today)} ${fromSql}
-     WHERE ${sql.join(where, sql` AND `)}
+     WHERE ${titleListWhere(ctx, query, today, opts)}
      ORDER BY t.due_date, t.created_at, t.id
      LIMIT ${query.limit} OFFSET ${opts.offset ?? 0}`);
   return result.rows.map(toRow);
+}
+
+/**
+ * Quantidade e somas do filtro inteiro da listagem (tarefa 116), sem o limite:
+ * o rodapé da aba mostra o total real, e "Mostrando N de M" quando a lista corta.
+ */
+export async function titleTotals(ctx: ServiceContext, query: z.output<typeof titleListQuery>): Promise<TitleTotals> {
+  const today = todayIso();
+  const result = await ctx.db.execute(sql`
+    SELECT count(*)::int AS count, coalesce(sum(t.amount_cents), 0)::bigint AS amount_cents,
+           coalesce(sum(tb.open_cents), 0)::bigint AS open_cents
+      ${fromSql}
+     WHERE ${titleListWhere(ctx, query, today, {})}`);
+  return camel<TitleTotals>(result.rows[0]!);
 }
 
 async function loadTitle(db: Executor, id: string, lock = false) {

@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -109,5 +109,9 @@ O admin pode tirar conclusões erradas do log de auditoria ("ninguém mexeu nest
 Nada foi executado. A diferença de latência entre os filtros da auditoria foi inferida do formato da consulta, sem medir.
 
 ## Análise (triagem)
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado nos cinco pontos: `HistoryTab` e `AuditPage` (`load(before)` sem geração), `useRequestPages` (sem geração e o filtro "Modelo" sem debounce), o `pick` do `ImportModal` e o `CsvMapper`, que recarregava o mapeamento padrão a cada recarga da lista.
 
 ## Resolução (executor)
+`HistoryTab` e `AuditPage`: um contador por carga (`seq`); só a última pedida aplica as linhas, o "acabou" e o erro, então a resposta lenta de um filtro anterior e o "Carregar mais" pedido antes da troca são descartados; o "Carregar mais" do histórico desliga durante a carga, como na auditoria. `useRequestPages` (`RequestsTab.tsx`): o mesmo contador, e o filtro "Modelo" espera 300 ms (`useDebounced`). `ImportModal`: `pick` numera a escolha e só aplica a inspeção e o conteúdo do último arquivo (e zera o conteúdo do anterior). `CsvMapper`: carrega o mapeamento padrão só na primeira chegada da lista; salvar ou excluir não troca o formulário. O `useApi` (tarefa 117) também passou a descartar a recarga mais antiga do mesmo caminho. O `useCursorList` comum (item 5, opcional) ficou de fora para não reorganizar as quatro telas.
+
+Testes: e2e novo em `e2e/tests/respostas.spec.ts` → "auditoria: a resposta lenta sem filtro não substitui a do filtro escolhido" (a primeira chamada atrasada com `page.route`; não rodado aqui). Verificação: `pnpm verify:quick`.

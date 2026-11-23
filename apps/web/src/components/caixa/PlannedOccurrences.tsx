@@ -3,9 +3,9 @@ import { CalendarClock, CircleDollarSign, Handshake } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
-import { useAction, useApi } from '../../lib/hooks';
+import { useAction, useApi, useListLimit } from '../../lib/hooks';
 import { titleLink } from '../../lib/links';
-import { LoadError, Money, TitleStatusBadge } from '../domain';
+import { ListCutNotice, LoadError, Money, TitleStatusBadge } from '../domain';
 import { SettlementModal } from '../titles/SettlementModal';
 import { Badge, Button, Panel } from '../ui';
 
@@ -28,10 +28,16 @@ export function PlannedOccurrences({
   canWrite: boolean;
   onChanged: () => void;
 }) {
-  const { data, error, reload } = useApi<TitleRow[]>(`/api/titles?plannedAccountId=${accountId}&status=unpaid&limit=100`);
+  // O servidor já ordena pelo vencimento; pede uma linha a mais para avisar do corte (tarefa 116).
+  const list = useListLimit(accountId);
+  const { data, error, reload, loading } = useApi<TitleRow[]>(
+    `/api/titles?plannedAccountId=${accountId}&status=unpaid&limit=${list.limit + 1}`,
+    { keepPrevious: list.growing },
+  );
   const [settling, setSettling] = useState<TitleDetail | null>(null);
   const { run, busy } = useAction();
-  const rows = [...(data ?? [])].sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const cut = Boolean(data && data.length > list.limit);
+  const rows = data && cut ? data.slice(0, list.limit) : (data ?? []);
 
   async function openSettle(id: string) {
     const detail = await run(() => api.get<TitleDetail>(`/api/titles/${id}`));
@@ -103,6 +109,7 @@ export function PlannedOccurrences({
             </table>
           </div>
         )}
+        {cut && <ListCutNotice shown={rows.length} total={null} canMore={list.canMore} loading={loading} onMore={list.more} />}
       </section>
       {settling && (
         <SettlementModal

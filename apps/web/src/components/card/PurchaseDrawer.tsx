@@ -1,13 +1,15 @@
 import { type CardPurchaseDetail, contractLink, formatAccounting, formatDate, t, todayIso } from '@moneyflow/shared';
 import { Handshake, Link2, Pencil, Trash2, Undo2, Unlink, X } from 'lucide-react';
-import { type FormEvent, useEffect, useState } from 'react';
+import { type FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
 import { entityLink, invoiceLink } from '../../lib/links';
+import { useDrawerFocus } from '../a11y';
 import { CategoryLabel, LoadError, Money } from '../domain';
+
 import { CategorySelect, type EntityOption, EntityPicker, FormError, ModalActions, MoneyInput } from '../forms';
-import { Badge, Button, Field, Modal, Skel, useConfirm } from '../ui';
+import { Badge, Button, Field, Modal, Skel, useConfirm, useEscapeLayer } from '../ui';
 import { ChargeLinkModal } from './ChargeLink';
 import { PayerSelect } from './PurchaseFormModal';
 import { monthLabel } from './shared';
@@ -15,17 +17,13 @@ import { monthLabel } from './shared';
 /** Gaveta da compra: parcelas por fatura, estornos, editar, excluir e estornar. */
 export function PurchaseDrawer({ purchaseId, onClose, onChanged }: { purchaseId: string; onClose: () => void; onChanged: () => void }) {
   const { data: p, error, reload, setData } = useApi<CardPurchaseDetail>(`/api/card-purchases/${purchaseId}`);
+  // Foco no título da gaveta ao abrir; ao fechar, de volta à linha (tarefa 114).
+  const heading = useDrawerFocus<HTMLSpanElement>(purchaseId);
   const [modal, setModal] = useState<null | 'edit' | 'refund' | 'charge'>(null);
   const confirm = useConfirm();
   const { run } = useAction();
 
-  useEffect(() => {
-    const down = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !modal) onClose();
-    };
-    document.addEventListener('keydown', down);
-    return () => document.removeEventListener('keydown', down);
-  }, [onClose, modal]);
+  useEscapeLayer(true, onClose);
 
   const saved = (next: CardPurchaseDetail) => {
     setData(next);
@@ -63,8 +61,10 @@ export function PurchaseDrawer({ purchaseId, onClose, onChanged }: { purchaseId:
   return (
     <aside className="drawer page-drawer" aria-label={p?.description ?? t.card.purchase}>
       <div className="dh">
-        <span className="t">{p?.description ?? t.common.loading}</span>
-        <button type="button" className="icon-btn" onClick={onClose} title="Fechar (Esc)" aria-label={t.common.close}>
+        <span className="t" ref={heading} tabIndex={-1}>
+          {p?.description ?? t.common.loading}
+        </span>
+        <button type="button" className="icon-btn" onClick={onClose} title={t.shell.closeEsc} aria-label={t.common.close}>
           <X />
         </button>
       </div>

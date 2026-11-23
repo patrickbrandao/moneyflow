@@ -1,4 +1,4 @@
-import { t } from '@moneyflow/shared';
+import { formatDate, localDateOf, t } from '@moneyflow/shared';
 import { CircleCheckBig, Copy, GitBranch, Headphones, History, Minus, MoreHorizontal, PanelRight, Pencil, Trash2, X } from 'lucide-react';
 import { type ReactNode, type PointerEvent as ReactPointerEvent, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -9,6 +9,7 @@ import { AgentDot, ConversationPane, type PaneHeaderInfo } from './ConversationP
 import { PreviousSessionsModal } from './PreviousSessions';
 import type { PaneTarget } from './useConversation';
 import { useConversationActions } from './useConversationActions';
+import { WindowFocus } from './WindowFocus';
 
 const u = t.agentsUi;
 export const NARROW_QUERY = '(max-width: 900px)';
@@ -81,7 +82,7 @@ export function PaneHeader({
         <span className="s">
           {agentName}
           {readOnly && conversation ? ` · @${conversation.username}` : ''}
-          {finished ? ` · ${u.list.finishedOn(new Date(conversation!.archivedAt!).toLocaleDateString('pt-BR'))}` : ''}
+          {finished ? ` · ${u.list.finishedOn(formatDate(localDateOf(conversation!.archivedAt!)))}` : ''}
         </span>
       </div>
       {conversation && (
@@ -219,9 +220,12 @@ function FloatingWindow({ win, layer }: { win: AgentWindow; layer: number }) {
       data-agent-id={win.agentId}
       data-conversation-id={win.conversationId ?? ''}
       aria-label={win.kind === 'agent' ? win.agentName : (win.title ?? u.list.untitled)}
+      tabIndex={-1}
     >
+      <WindowFocus id={win.id} />
       <ConversationPane
         target={paneTarget(win)}
+        audioMode={Boolean(win.audioMode)}
         header={(info) => (
           <PaneHeader
             win={win}

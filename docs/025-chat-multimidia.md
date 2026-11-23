@@ -15,7 +15,7 @@ O chat dos agentes passa a mostrar e tocar o que é anexado, a gravar áudio e a
 ## Prévia na conversa
 - **Imagem**: miniatura na mensagem; clicar abre ampliada, com navegação entre as imagens da conversa e "baixar".
 - **PDF**: cartão com a miniatura da 1ª página, o nome e o número de páginas; clicar abre o visualizador pdf.js, o mesmo dos contratos e carregado sob demanda.
-- **Markdown**: cartão com o início do texto; abrir mostra o conteúdo renderizado (o renderizador seguro do chat), com a alternância **renderizado / bruto** e "baixar". As respostas do agente já são markdown e não mudam.
+- **Markdown**: cartão com o início do texto; abrir mostra o conteúdo renderizado (o renderizador seguro do chat, sem HTML cru), com a alternância **renderizado / bruto** e "baixar". As respostas do agente já são markdown e não mudam.
 - **Áudio**: o player descrito abaixo, com a transcrição embaixo.
 - **Outros**: chip de download, como hoje.
 - O admin lendo a conversa de outro usuário vê e toca tudo, em somente leitura.
@@ -84,7 +84,7 @@ O chat dos agentes passa a mostrar e tocar o que é anexado, a gravar áudio e a
 - **Web** (`apps/web/src/agents/`):
   - `AudioPlayer` (velocidade compartilhada entre os players e um tocando por vez), `AudioRecorder` (`useAudioRecorder`, o botão e a faixa de revisão), `ImageLightbox` (e a camada `MediaDialog` das prévias) e `AttachmentPreview` (as prévias, a transcrição acompanhada enquanto está na fila e o play do modo áudio);
   - `MarkdownDocument` em `Markdown.tsx` (renderizado / bruto);
-  - o `PdfViewer` (e o `loadPdf`, também da miniatura) vem dos contratos;
+  - o `PdfViewer` (e o `openPdf`, também da miniatura) vem dos contratos: um só worker do pdf.js por aba, a miniatura desenhada quando chega perto da tela, o documento solto logo depois de desenhar e a imagem guardada por anexo (remontar a janela não baixa o PDF de novo);
   - o modo áudio fica em `audioMode` da janela, no estado da UI dos agentes (`localStorage`);
   - textos em `i18n/areas/agents-ui.ts` (`media`).
 

@@ -16,7 +16,7 @@ Anotações funcionam como notas, post-its e lembretes presos a um objeto do sis
   As cores passam no contraste AA e ficam fora da faixa roxa, como o resto da interface.
 - **Conteúdo**:
   - título curto (obrigatório, até 120 caracteres): aparece na tabela, no alarme, no sino e no Telegram;
-  - corpo em markdown (opcional), exibido pelo renderizador seguro que já existe (`Markdown`), com as abas bruto/renderizado.
+  - corpo em markdown (opcional), exibido pelo renderizador seguro que já existe (`Markdown`, sem HTML cru: o HTML do texto aparece escapado e só as tags e atributos do próprio markdown passam), com as abas bruto/renderizado.
 - **Data**: o campo "Data" (`YYYY-MM-DD`, fuso de São Paulo) vem com hoje e pode ser editado, o que permite registrar fatos passados. É a data em que a nota aparece no calendário. No lembrete, quem manda são as ocorrências (veja abaixo).
 - **Vínculo**: toda anotação pertence a **exatamente um objeto**, guardado como `object_type` + `object_id`.
   - Hoje `object_type` só aceita `entity`. Um objeto novo depois é um valor a mais no tipo, uma checagem de existência a mais e a aba na tela dele.
@@ -105,7 +105,7 @@ Anotações funcionam como notas, post-its e lembretes presos a um objeto do sis
 - O agente cita as notas de uma entidade ao falar dela consultando as tools (`list_notes` com a entidade); nada é injetado no prompt.
 
 ## API
-Entradas, DTOs e textos em `packages/shared/src/notes.ts` e `t.notes`; serviço `apps/server/src/services/notes.ts`.
+DTOs, constantes e textos em `packages/shared/src/notes.ts` e `t.notes`, as entradas Zod em `notes-input.ts` (fora do arquivo principal do console); serviço `apps/server/src/services/notes.ts`.
 - `GET /api/notes` — a tabela: `from`/`to` (juntos; com período, uma linha por ocorrência, o lembrete em cada dia em que ocorre; sem período, uma linha por anotação na data dela), `kinds` (separados por vírgula), `entityId`, `scope` (`all`, `mine` = as minhas, `global` = as globais), `authorId` (só admin), `q` (título e corpo), `archived` (só as arquivadas), `order` (`desc` padrão), `cursor` e `limit` (até 500). Devolve `{ items, nextCursor }`; cada item é a anotação sem o corpo, com `occursOn` e `bodyExcerpt`.
 - `POST /api/notes`, `GET/PATCH /api/notes/:id`, `POST /api/notes/:id/archive` e `POST /api/notes/:id/unarchive`. O lembrete vai no campo `reminder` da nota; na edição, só os campos que mudam. Trocar o tipo para lembrete cria o lembrete (com os padrões); trocar para outro tipo o remove.
 - `GET /api/notes/calendar?from&to&entityId&kinds` — `[{ day, counts: { tipo: n } }]`, pelo `note_calendar`, com as recorrências expandidas.

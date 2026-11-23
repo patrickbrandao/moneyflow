@@ -2,20 +2,20 @@ import {
   type AgentPromptPreviewDto,
   type AgentPromptVersionDto,
   type AiAgentDto,
-  diffLines,
-  diffStats,
   formatDateTime,
   PROMPT_VARIABLES,
   t,
   type UserRow,
 } from '@moneyflow/shared';
-import { ArrowLeft, Eye, GitCompare, RotateCcw } from 'lucide-react';
+import { ArrowLeft, Eye } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';
+import { LineDiff } from '../diff/LineDiff';
+import { VersionCompare, type VersionItem } from '../diff/VersionCompare';
 import { LoadError } from '../domain';
 import { ModalActions } from '../forms';
-import { Badge, Button, cx, Field, useConfirm } from '../ui';
+import { Badge, Button, Field, useConfirm } from '../ui';
 
 /*
  * Prompt do agente (spec 022): a lista de variáveis (clicar insere), o
@@ -61,90 +61,70 @@ export function PromptHistory({
   onRestored: (agent: AiAgentDto) => void;
 }) {
   const { data, error, reload } = useApi<AgentPromptVersionDto[]>(`/api/admin/ai/agents/${agent.id}/prompt-versions`);
-  const [left, setLeft] = useState<string | null>(null);
-  const [right, setRight] = useState<string | null>(null);
-  const [shown, setShown] = useState<string | null>(null);
   const confirm = useConfirm();
   const { run } = useAction();
   const current = data?.[0]?.id ?? null;
   const byId = useMemo(() => new Map((data ?? []).map((v) => [v.id, v])), [data]);
+  const items: VersionItem[] = (data ?? []).map((v) => ({
+    id: v.id,
+    version: v.version,
+    current: v.id === current,
+    testId: `prompt-version-${v.version}`,
+    title: (
+      <>
+        {g.promptVersion(v.version)} {v.id === current && <Badge tone="ok">{p.current}</Badge>}
+      </>
+    ),
+    sub: `${formatDateTime(v.createdAt)} · ${v.createdByUsername ? `@${v.createdByUsername}` : p.unknownAuthor}${v.note ? ` · ${v.note}` : ''}`,
+  }));
 
-  async function restore(version: AgentPromptVersionDto) {
-    const ok = await confirm({ title: p.restoreConfirm(version.version), description: p.restoreDescription, confirmLabel: p.restore });
-    if (!ok) return;
+  async function restore(item: VersionItem): Promise<boolean> {
+    const ok = await confirm({ title: p.restoreConfirm(item.version), description: p.restoreDescription, confirmLabel: p.restore });
+    if (!ok) return false;
     const saved = await run(
-      () => api.post<AiAgentDto>(`/api/admin/ai/agents/${agent.id}/prompt-versions/${version.id}/restore`),
-      p.restored(version.version),
+      () => api.post<AiAgentDto>(`/api/admin/ai/agents/${agent.id}/prompt-versions/${item.id}/restore`),
+      p.restored(item.version),
     );
-    if (!saved) return;
-    setShown(null);
-    setLeft(null);
-    setRight(null);
+    if (!saved) return false;
     await reload();
     onRestored(saved);
+    return true;
   }
 
-  const a = left ? byId.get(left) : undefined;
-  const b = right ? byId.get(right) : undefined;
-  const view = shown ? byId.get(shown) : undefined;
   return (
     <>
       <div className="modal-body form-grid">
         {error && <LoadError error={error} onRetry={() => void reload()} />}
         {data && data.length === 0 && <p className="hint">{p.versionsEmpty}</p>}
-        <ul className="item-list max-h-[38vh] overflow-auto" data-testid="prompt-versions">
-          {(data ?? []).map((v) => (
-            <li key={v.id} className={cx('item', shown === v.id && 'bg-s2')} data-testid={`prompt-version-${v.version}`}>
-              <button type="button" className="grow min-w-0 text-left" onClick={() => setShown(shown === v.id ? null : v.id)}>
-                <span className="row-title">
-                  {g.promptVersion(v.version)} {v.id === current && <Badge tone="ok">{p.current}</Badge>}
-                </span>
-                <span className="row-sub">
-                  {formatDateTime(v.createdAt)} · {v.createdByUsername ? `@${v.createdByUsername}` : p.unknownAuthor}
-                  {v.note ? ` · ${v.note}` : ''}
-                </span>
-              </button>
-              <span className="row-actions">
-                <label className="check" title={p.compareA(v.version)}>
-                  <input
-                    type="radio"
-                    name="prompt-a"
-                    checked={left === v.id}
-                    onChange={() => setLeft(v.id)}
-                    aria-label={p.compareA(v.version)}
-                  />{' '}
-                  A
-                </label>
-                <label className="check" title={p.compareB(v.version)}>
-                  <input
-                    type="radio"
-                    name="prompt-b"
-                    checked={right === v.id}
-                    onChange={() => setRight(v.id)}
-                    aria-label={p.compareB(v.version)}
-                  />{' '}
-                  B
-                </label>
-                {v.id !== current && (
-                  <button type="button" className="row-action" title={p.restore} aria-label={p.restore} onClick={() => void restore(v)}>
-                    <RotateCcw />
-                  </button>
-                )}
-              </span>
-            </li>
-          ))}
-        </ul>
-        {view ? (
-          <pre className="panel contract-raw" data-testid="prompt-version-content">
-            {view.content || p.emptyPrompt}
-          </pre>
-        ) : a && b && a.id !== b.id ? (
-          <PromptDiff before={a} after={b} />
-        ) : (
-          <p className="hint">
-            <GitCompare className="inline size-4" /> {p.compare}
-          </p>
-        )}
+        <VersionCompare
+          items={items}
+          name="prompt"
+          labels={{ compareA: p.compareA, compareB: p.compareB, restore: p.restore, compare: p.showDiff, compareHint: p.compare }}
+          canRestore
+          onRestore={restore}
+          renderContent={(id) => (
+            <pre className="panel contract-raw" data-testid="prompt-version-content">
+              {byId.get(id)?.content || p.emptyPrompt}
+            </pre>
+          )}
+          renderDiff={(left, right) => {
+            const before = byId.get(left);
+            const after = byId.get(right);
+            if (!before || !after) return null;
+            return (
+              <LineDiff
+                before={before.content}
+                after={after.content}
+                title={p.diffTitle(before.version, after.version)}
+                noDiff={p.noDiff}
+                testId="prompt-diff"
+              />
+            );
+          }}
+          className="grid gap-3"
+          listClassName="max-h-[38vh] overflow-auto"
+          listTestId="prompt-versions"
+        />
       </div>
       <ModalActions>
         <Button variant="ghost" onClick={onBack}>
@@ -152,33 +132,6 @@ export function PromptHistory({
         </Button>
       </ModalActions>
     </>
-  );
-}
-
-function PromptDiff({ before, after }: { before: AgentPromptVersionDto; after: AgentPromptVersionDto }) {
-  const lines = useMemo(() => diffLines(before.content, after.content), [before, after]);
-  const stats = diffStats(lines);
-  const title = p.diffTitle(before.version, after.version);
-  return (
-    <div>
-      <p className="mb-2 text-sm font-medium">
-        {title} <span className="text-ok">+{stats.added}</span> <span className="text-danger">−{stats.removed}</span>
-      </p>
-      {stats.added + stats.removed === 0 ? (
-        <p className="hint">{p.noDiff}</p>
-      ) : (
-        <div className="panel diff-view" aria-label={title} data-testid="prompt-diff">
-          {lines.map((line, i) => (
-            <div key={`${i}-${line.kind}`} className={cx('diff-line', line.kind)}>
-              <span className="ln">{line.oldLine ?? ''}</span>
-              <span className="ln">{line.newLine ?? ''}</span>
-              <span className="mark">{line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ' '}</span>
-              <span className="txt">{line.text || ' '}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
   );
 }
 

@@ -1,27 +1,15 @@
 import {
-  type ExportTable,
-  exportFileName,
   formatAccounting,
   formatDate,
+  PROJECTION_METRICS,
   type ProjectionLine,
   type ProjectionReportData,
+  projectionValue,
   t,
 } from '@moneyflow/shared';
 import { Landmark, Wallet } from 'lucide-react';
 import { Fragment } from 'react';
 import { cx, EmptyState } from '../ui';
-
-type Metric = { key: keyof ProjectionLine; label: string; sign?: 1 | -1; bold?: boolean };
-
-const METRICS: Metric[] = [
-  { key: 'balanceTodayCents', label: t.reports.balanceToday },
-  { key: 'scheduledMovementsCents', label: t.reports.scheduled },
-  { key: 'receivableCents', label: t.reports.receivable },
-  { key: 'payableCents', label: t.reports.payable, sign: -1 },
-  { key: 'overdueReceivableCents', label: t.reports.overdueReceivable },
-  { key: 'overduePayableCents', label: t.reports.overduePayable, sign: -1 },
-  { key: 'projectedCents', label: t.reports.projected, bold: true },
-];
 
 type CaixaBlock = { caixaId: string; caixaName: string; rows: ProjectionLine[]; accounts: Map<string, ProjectionLine[]> };
 
@@ -70,13 +58,12 @@ export function ProjectionReport({ data }: { data: ProjectionReportData }) {
               </tr>
             </thead>
             <tbody>
-              {METRICS.map((m) => (
+              {PROJECTION_METRICS.map((m) => (
                 <tr key={m.key} className={cx(m.bold && 'report-total')}>
                   <td>{m.label}</td>
                   {data.horizons.map((h) => {
-                    const raw = Number(at(block.rows, h)?.[m.key] ?? 0);
                     // saída (sign −1) vem positiva da API e aparece negativa, entre parênteses
-                    const value = m.sign === -1 ? -raw : raw;
+                    const value = projectionValue(at(block.rows, h), m);
                     return (
                       <td key={h} className={cx('num money', value === 0 && !m.bold && 'muted', value < 0 && 'neg')}>
                         {formatAccounting(value)}
@@ -110,27 +97,4 @@ export function ProjectionReport({ data }: { data: ProjectionReportData }) {
       ))}
     </div>
   );
-}
-
-export function projectionExport(data: ProjectionReportData, subtitle: string[]): ExportTable {
-  return {
-    fileName: exportFileName('fluxo-projetado', data.today),
-    title: t.reports.tabs.projection!,
-    subtitle,
-    columns: [
-      { key: 'caixa', label: t.reports.caixas },
-      { key: 'account', label: t.reports.account },
-      { key: 'horizon', label: t.reports.horizonDays, type: 'int' },
-      { key: 'until', label: t.reports.until, type: 'date' },
-      ...METRICS.map((m) => ({ key: m.key, label: m.label, type: 'money' as const })),
-    ],
-    rows: data.lines.map((l) => ({
-      caixa: l.caixaName,
-      account: l.accountName ?? '',
-      horizon: l.horizonDays,
-      until: l.until,
-      ...Object.fromEntries(METRICS.map((m) => [m.key, Number(l[m.key] ?? 0)])),
-    })),
-    boldRows: data.lines.flatMap((l, i) => (l.financialAccountId ? [] : [i])),
-  };
 }

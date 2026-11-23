@@ -1,5 +1,5 @@
 import { t } from '@moneyflow/shared';
-import { ApiError, apiErrorFrom } from './api';
+import { ApiError, apiErrorFrom, recoverSession, sessionExpiredError } from './api';
 
 /** Nome do arquivo no Content-Disposition (filename* em UTF-8 tem prioridade). */
 function fileNameOf(header: string | null, fallback: string) {
@@ -21,6 +21,10 @@ export async function downloadFile(path: string, fallbackName: string): Promise<
     throw new ApiError(0, 'network', t.errors.network);
   }
   if (!response.ok) {
+    if (response.status === 401) {
+      if (await recoverSession(path)) return downloadFile(path, fallbackName);
+      throw sessionExpiredError();
+    }
     const data = response.headers.get('content-type')?.includes('json') ? await response.json().catch(() => null) : null;
     throw apiErrorFrom(response.status, data);
   }

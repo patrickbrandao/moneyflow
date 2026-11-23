@@ -24,6 +24,8 @@ import { useParamState } from '../lib/params';
  * Usuários (só admin, spec 002): criar, editar, ativar/desativar, revelar a
  * senha (única exibição permitida) e papéis por caixa.
  */
+const P = t.user.page;
+
 export function UsersPage() {
   const me = useUser();
   const [isNew, setNew] = useParamState('new');
@@ -42,30 +44,25 @@ export function UsersPage() {
   async function toggleActive(user: UserRow) {
     if (user.isActive) {
       const ok = await confirm({
-        title: `Desativar @${user.username}?`,
-        description: 'As sessões abertas dele terminam na hora.',
-        confirmLabel: 'Desativar',
+        title: P.deactivateTitle(user.username),
+        description: P.deactivateBody,
+        confirmLabel: P.deactivate,
         danger: true,
       });
       if (!ok) return;
     }
-    if (
-      await run(
-        () => api.patch(`/api/users/${user.id}`, { isActive: !user.isActive }),
-        user.isActive ? 'Usuário desativado.' : 'Usuário ativado.',
-      )
-    )
+    if (await run(() => api.patch(`/api/users/${user.id}`, { isActive: !user.isActive }), user.isActive ? P.deactivated : P.activated))
       void reload();
   }
 
   async function remove(user: UserRow) {
     const ok = await confirm({
-      title: `Excluir @${user.username}?`,
-      description: 'Prefira desativar: a exclusão é definitiva.',
+      title: P.deleteTitle(user.username),
+      description: P.deleteBody,
       confirmLabel: t.common.delete,
       danger: true,
     });
-    if (ok && (await run(() => api.del(`/api/users/${user.id}`), 'Usuário excluído.'))) void reload();
+    if (ok && (await run(() => api.del(`/api/users/${user.id}`), P.deleted))) void reload();
   }
 
   async function reveal(user: UserRow) {
@@ -81,7 +78,7 @@ export function UsersPage() {
     <div className="page wide">
       <PageHead
         title={t.nav.users}
-        sub="Quem acessa o MoneyFlow, o papel global e o papel em cada caixa."
+        sub={P.sub}
         actions={
           <Button onClick={() => setNew('1')}>
             <Plus /> {t.palette.newUser}
@@ -106,7 +103,7 @@ export function UsersPage() {
             </thead>
             <tbody>
               {!data && <SkelRows cols={7} />}
-              {data && data.length === 0 && <EmptyRow colSpan={7}>Nenhum usuário.</EmptyRow>}
+              {data && data.length === 0 && <EmptyRow colSpan={7}>{P.empty}</EmptyRow>}
               {data?.map((user) => (
                 <tr key={user.id} className={user.isActive ? '' : 'is-off'}>
                   <td>
@@ -123,7 +120,7 @@ export function UsersPage() {
                   </td>
                   <td className="text-[12.5px] text-dim">
                     {user.role === 'admin'
-                      ? 'todas'
+                      ? P.allCaixas
                       : user.memberships.length === 0
                         ? '—'
                         : user.memberships.map((m) => `${m.caixaName} (${t.roles[m.role]?.toLowerCase()})`).join(', ')}
@@ -168,7 +165,7 @@ export function UsersPage() {
                           <button
                             type="button"
                             className="row-action"
-                            title={user.isActive ? 'Desativar' : 'Ativar'}
+                            title={user.isActive ? P.deactivate : P.activate}
                             onClick={() => void toggleActive(user)}
                           >
                             {user.isActive ? <UserX /> : <UserCheck />}
@@ -258,29 +255,26 @@ function UserModal({ user, onClose, onSaved }: { user: UserRow | null; onClose: 
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!user && password.length < 6) return setError('A senha precisa de ao menos 6 caracteres.');
+    if (!user && password.length < 6) return setError(t.user.passwordTooShort);
     setError(null);
     const body = { username, email, role, ...(password ? { password } : {}) };
     const ok = await run(
       () => (user ? api.patch(`/api/users/${user.id}`, body) : api.post('/api/users', body)),
-      user ? 'Usuário atualizado.' : 'Usuário criado.',
+      user ? P.updated : P.created,
     );
     if (ok) onSaved();
   }
 
   return (
-    <Modal open title={user ? `Editar @${user.username}` : t.palette.newUser} onClose={onClose}>
+    <Modal open title={user ? P.editTitle(user.username) : t.palette.newUser} onClose={onClose}>
       <form onSubmit={submit} className="form-grid">
-        <Field label={t.user.username} hint="Sem espaços nem @.">
+        <Field label={t.user.username} hint={P.usernameHint}>
           <input className="field" value={username} onChange={(e) => setUsername(e.target.value)} required autoFocus autoComplete="off" />
         </Field>
         <Field label={t.user.email}>
           <input type="email" className="field" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="off" />
         </Field>
-        <Field
-          label={user ? `${t.user.newPassword} (${t.common.optional})` : t.user.password}
-          hint={user ? 'Trocar a senha encerra as sessões dele.' : undefined}
-        >
+        <Field label={user ? `${t.user.newPassword} (${t.common.optional})` : t.user.password} hint={user ? P.passwordHint : undefined}>
           <input
             type="text"
             className="field field-mono"
@@ -323,19 +317,19 @@ function MembershipsModal({ user, onClose, onSaved }: { user: UserRow; onClose: 
     const memberships = Object.entries(roles)
       .filter(([, role]) => role)
       .map(([caixaId, role]) => ({ caixaId, role }));
-    if (await run(() => api.put(`/api/users/${user.id}/memberships`, { memberships }), 'Papéis atualizados.')) onSaved();
+    if (await run(() => api.put(`/api/users/${user.id}/memberships`, { memberships }), P.rolesSaved)) onSaved();
   }
 
   return (
     <Modal open title={`${t.user.memberships} · @${user.username}`} onClose={onClose} wide>
       <div className="modal-body">
-        <p className="d mb-3">Editor lança e altera; leitor só consulta. Sem papel, a caixa não aparece para ele.</p>
+        <p className="d mb-3">{P.rolesHint}</p>
         <div className="table-wrap">
           <table className="data">
             <thead>
               <tr>
-                <th>Caixa</th>
-                <th>Papel</th>
+                <th>{P.caixa}</th>
+                <th>{P.caixaRole}</th>
               </tr>
             </thead>
             <tbody>
@@ -351,9 +345,9 @@ function MembershipsModal({ user, onClose, onSaved }: { user: UserRow; onClose: 
                       className="field field-sm field-auto"
                       value={roles[caixa.id] ?? ''}
                       onChange={(e) => setRoles((r) => ({ ...r, [caixa.id]: e.target.value as Membership['role'] | '' }))}
-                      aria-label={`Papel em ${caixa.name}`}
+                      aria-label={P.caixaRoleOf(caixa.name)}
                     >
-                      <option value="">Sem acesso</option>
+                      <option value="">{P.noAccess}</option>
                       {CAIXA_ROLES.map((role) => (
                         <option key={role} value={role}>
                           {t.roles[role]}

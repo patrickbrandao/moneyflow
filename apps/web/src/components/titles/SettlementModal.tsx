@@ -53,10 +53,9 @@ export function SettlementModal({
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!principal || principal <= 0) return setError(t.errors.invalidAmount);
-    if (principal > title.openCents)
-      return setError(`O principal não pode passar do saldo em aberto (${formatAccounting(title.openCents)}).`);
+    if (principal > title.openCents) return setError(t.settlement.principalTooHigh(formatAccounting(title.openCents)));
     if (cash < 0) return setError(t.errors.invalidAmount);
-    if (useOther && !sourceId) return setError('Escolha a conta da outra caixa.');
+    if (useOther && !sourceId) return setError(t.settlement.chooseOtherAccount);
     if (useOther && ownAccount === LATER) return setError(t.errors.accountRequiredForTransfer);
     setError(null);
     const body: SettlementCreateInput = {
@@ -70,7 +69,7 @@ export function SettlementModal({
       mirrorAccountId: title.mirror && mirrorWritable && mirrorAccountId !== LATER ? mirrorAccountId : null,
       notes,
     };
-    const saved = await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/settlements`, body), 'Baixa registrada.');
+    const saved = await run(() => api.post<TitleDetail>(`/api/titles/${title.id}/settlements`, body), t.settlement.registered);
     if (saved) onSaved(saved);
   }
 
@@ -85,7 +84,7 @@ export function SettlementModal({
             <Field label={t.settlement.settledOn}>
               <input type="date" className="field" value={settledOn} onChange={(e) => setSettledOn(e.target.value)} required />
             </Field>
-            <Field label={t.settlement.principal} hint="Menor que o saldo em aberto = baixa parcial.">
+            <Field label={t.settlement.principal} hint={t.settlement.principalHint}>
               <MoneyInput value={principal} onChange={setPrincipal} ariaLabel={t.settlement.principal} />
             </Field>
             <Field label={t.settlement.interest}>
@@ -118,7 +117,7 @@ export function SettlementModal({
             {others.length > 0 && (
               <label className="check span-all">
                 <input type="checkbox" checked={useOther} onChange={(e) => setUseOther(e.target.checked)} />
-                {payable ? 'Pagar com a conta de outra caixa (gera transferência)' : 'Receber na conta de outra caixa (gera transferência)'}
+                {payable ? t.settlement.payWithOther : t.settlement.receiveInOther}
               </label>
             )}
             {useOther && (
@@ -129,7 +128,7 @@ export function SettlementModal({
                   onChange={(e) => setSourceId(e.target.value)}
                   aria-label={t.settlement.otherCaixaAccount}
                 >
-                  <option value="">Escolha…</option>
+                  <option value="">{t.common.choose}</option>
                   {others.map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.caixaName} › {a.name} · {formatAccounting(a.balanceCents)}
@@ -143,7 +142,7 @@ export function SettlementModal({
               <Field
                 label={`${t.settlement.mirrorAccount} (${title.mirror.caixaName})`}
                 className="span-all"
-                hint={mirrorWritable ? undefined : 'Sem permissão na outra caixa: aquele lado fica baixado com a conta a definir.'}
+                hint={mirrorWritable ? undefined : t.settlement.mirrorNoPermission}
               >
                 <select
                   className="field"
@@ -201,14 +200,14 @@ export function ReverseModal({
     event.preventDefault();
     const saved = await run(
       () => api.post<TitleDetail>(`/api/settlements/${settlementId}/reverse`, { reason, reversedOn, undoTransfer }),
-      'Baixa estornada.',
+      t.settlement.reversedToast,
     );
     if (saved) onSaved(saved);
   }
   return (
     <Modal open title={t.settlement.reverse} onClose={onClose}>
       <form onSubmit={submit} className="form-grid">
-        <p className="d">O estorno lança o movimento oposto na conta (o histórico fica) e reabre o saldo do título.</p>
+        <p className="d">{t.settlement.reverseHint}</p>
         <Field label={t.settlement.reverseReason}>
           <input className="field" value={reason} onChange={(e) => setReason(e.target.value)} required autoFocus />
         </Field>
@@ -252,7 +251,7 @@ export function SetAccountModal({
     event.preventDefault();
     const saved = await run(
       () => api.post<TitleDetail>(`/api/settlements/${settlementId}/account`, { financialAccountId: accountId }),
-      'Conta definida.',
+      t.settlement.accountSet,
     );
     if (saved) onSaved(saved);
   }
@@ -261,7 +260,7 @@ export function SetAccountModal({
       <form onSubmit={submit} className="form-grid">
         <Field label={t.settlement.account}>
           <select className="field" value={accountId} onChange={(e) => setAccountId(e.target.value)} required autoFocus>
-            <option value="">Escolha…</option>
+            <option value="">{t.common.choose}</option>
             {(accounts.data ?? []).map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}

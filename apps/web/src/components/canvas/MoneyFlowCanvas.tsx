@@ -1,5 +1,5 @@
 import type { CanvasPosition, FlowGraphData, FlowNodeDto } from '@moneyflow/shared';
-import { t } from '@moneyflow/shared';
+import { createViewCache, t } from '@moneyflow/shared';
 import { type NodeChange, ReactFlow, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow } from '@xyflow/react';
 import { LayoutTemplate, Maximize, Minus, Plus, Waypoints } from 'lucide-react';
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -7,7 +7,7 @@ import { api } from '../../lib/api';
 import { isChordKey, isTypingTarget, useRegisterCommands } from '../../lib/commands';
 import { useTheme } from '../../lib/theme';
 import { useToast } from '../Toast';
-import { EmptyState, useConfirm } from '../ui';
+import { EmptyState, useConfirm, useEscapeLayer } from '../ui';
 import { EdgeHoverContext, flowEdgeTypes } from './edges';
 import { FlowDrawer, type FlowSelection } from './FlowDrawer';
 import { buildGraph, EDGE_COLOR, EDGE_KINDS, type FlowMode, type FlowNode, GRID, highlightIds, type MoneyEdge, positionRef } from './graph';
@@ -24,6 +24,8 @@ type Props = {
   onReset: () => void;
   /** Filtro de entidades (tags e favoritas): destaca sem esconder; null = sem filtro. */
   match?: ((node: FlowNodeDto) => boolean) | null;
+  /** O grafo ainda é o do filtro anterior e o novo está a caminho: esmaecido, sem desmontar o palco. */
+  stale?: boolean;
 };
 
 /**
@@ -40,7 +42,7 @@ export function MoneyFlowCanvas(props: Props) {
   );
 }
 
-function Canvas({ data, mode, onReset, match = null }: Props) {
+function Canvas({ data, mode, onReset, match = null, stale = false }: Props) {
   const toast = useToast();
   const confirm = useConfirm();
   const [theme] = useTheme();
@@ -121,7 +123,8 @@ function Canvas({ data, mode, onReset, match = null }: Props) {
   );
 
   // ------------------------------------------------------------ destaque --
-  const highlight = useMemo(() => highlightIds(data, nodes, edges, match), [data, nodes, edges, match]);
+  // Pelo grafo montado (ids e tipos), não pelo estado dos nós: a posição não muda o destaque (tarefa 176).
+  const highlight = useMemo(() => highlightIds(data, built.nodes, built.edges, match), [data, built, match]);
   const matchedNames = useCallback(
     (entityIds: string[]) =>
       match ? data.nodes.filter((n) => n.kind === 'entity' && entityIds.includes(n.id) && match(n)).map((n) => n.name) : undefined,
@@ -129,66 +132,83 @@ function Canvas({ data, mode, onReset, match = null }: Props) {
   );
 
   // ------------------------------------------------------------- seleção --
+  // O nó selecionado muda de objeto só quando ele mesmo se move; os nomes vêm do grafo montado.
+  const selectedNode = selection?.type === 'node' ? nodes.find((n) => n.id === selection.id) : undefined;
   const selected = useMemo<FlowSelection | null>(() => {
     if (!selection) return null;
     if (selection.type === 'node') {
-      const node = nodes.find((n) => n.id === selection.id);
+      const node = selectedNode;
       if (node?.type === 'cluster')
         return { type: 'node', node: { ...node, data: { ...node.data, matchedNames: matchedNames(node.data.entityIds) } } };
       return node ? { type: 'node', node } : null;
     }
     const edge = edges.find((e) => e.id === selection.id || `${e.id}:forecast` === selection.id);
     if (!edge) return null;
-    const name = (id: string) => nodes.find((n) => n.id === id)?.data.name ?? '';
+    const name = (id: string) => built.nodes.find((n) => n.id === id)?.data.name ?? '';
     return { type: 'edge', edge, sourceName: name(edge.source), targetName: name(edge.target) };
-  }, [selection, nodes, edges]);
+  }, [selection, selectedNode, edges, built, matchedNames]);
 
-  // Realce: o selecionado e os vizinhos; o resto esmaece.
+  // Realce: o selecionado e os vizinhos; o resto esmaece. Depende só da seleção e das arestas (não das posições).
   const focusIds = useMemo(() => {
-    if (!selected) return null;
-    if (selected.type === 'edge') return new Set([selected.edge.source, selected.edge.target, selected.edge.id]);
-    const ids = new Set([selected.node.id]);
+    if (!selection) return null;
+    if (selection.type === 'edge') {
+      const edge = edges.find((e) => e.id === selection.id || `${e.id}:forecast` === selection.id);
+      return edge ? new Set([edge.source, edge.target, edge.id]) : null;
+    }
+    // O nó sumiu do grafo (outro período, outro modo): nada esmaece, como sem seleção.
+    if (!built.nodes.some((n) => n.id === selection.id)) return null;
+    const ids = new Set([selection.id]);
     for (const e of edges) {
-      if (e.source === selected.node.id || e.target === selected.node.id) {
+      if (e.source === selection.id || e.target === selection.id) {
         ids.add(e.id);
         ids.add(e.source);
         ids.add(e.target);
       }
     }
     return ids;
-  }, [selected, edges]);
+  }, [selection, edges, built]);
 
-  const viewNodes = useMemo(
-    () =>
-      nodes.map((n) => ({
-        ...n,
-        selected: selection?.type === 'node' && selection.id === n.id,
-        data: { ...n.data, dim: (focusIds !== null && !focusIds.has(n.id)) || (highlight !== null && !highlight.has(n.id)) },
-      })) as FlowNode[],
-    [nodes, focusIds, highlight, selection],
+  // Visões dos nós e das arestas reaproveitadas por item (tarefa 176): no arrasto, só o nó arrastado (e as
+  // arestas cujas alças mudam) ganha objeto novo, e o `memo` dos demais segura o render.
+  const nodeViews = useMemo(() => createViewCache<FlowNode, FlowNode>(), []);
+  const edgeViews = useMemo(() => createViewCache<MoneyEdge, MoneyEdge>(), []);
+  const dimmed = useCallback(
+    (id: string) => (focusIds !== null && !focusIds.has(id)) || (highlight !== null && !highlight.has(id)),
+    [focusIds, highlight],
   );
+  const viewNodes = useMemo(() => {
+    const isSelected = (n: FlowNode) => selection?.type === 'node' && selection.id === n.id;
+    return nodeViews(
+      nodes,
+      (n) => `${isSelected(n)}|${dimmed(n.id)}`,
+      (n) => ({ ...n, selected: isSelected(n), data: { ...n.data, dim: dimmed(n.id) } }) as FlowNode,
+    );
+  }, [nodes, dimmed, selection, nodeViews]);
   const viewEdges = useMemo(() => {
     const pos = new Map(nodes.map((n) => [n.id, n]));
-    return edges.map((e) => {
-      // Caixa → caixa na mesma coluna: por baixo/cima, em vez de dar a volta pela lateral.
+    // Caixa → caixa na mesma coluna: por baixo/cima, em vez de dar a volta pela lateral.
+    const handlesOf = (e: MoneyEdge) => {
       const a = pos.get(e.source);
       const b = pos.get(e.target);
       const vertical = a?.type === 'caixa' && b?.type === 'caixa' && Math.abs(a.position.x - b.position.x) < 200;
-      const handles = vertical
+      return vertical
         ? a.position.y <= b.position.y
           ? { sourceHandle: 'out-b', targetHandle: 'in-t' }
           : { sourceHandle: 'out-t', targetHandle: 'in-b' }
         : { sourceHandle: 'out', targetHandle: 'in' };
-      return {
+    };
+    const isSelected = (e: MoneyEdge) => selection?.type === 'edge' && (selection.id === e.id || selection.id === `${e.id}:forecast`);
+    return edgeViews(
+      edges,
+      (e) => `${handlesOf(e).sourceHandle}|${isSelected(e)}|${dimmed(e.id)}`,
+      (e) => ({
         ...e,
-        ...handles,
-        selected: selection?.type === 'edge' && (selection.id === e.id || selection.id === `${e.id}:forecast`),
-        data: e.data
-          ? { ...e.data, dim: (focusIds !== null && !focusIds.has(e.id)) || (highlight !== null && !highlight.has(e.id)) }
-          : e.data,
-      };
-    });
-  }, [edges, nodes, focusIds, highlight, selection]);
+        ...handlesOf(e),
+        selected: isSelected(e),
+        data: e.data ? { ...e.data, dim: dimmed(e.id) } : e.data,
+      }),
+    );
+  }, [edges, nodes, dimmed, selection, edgeViews]);
 
   const focusNode = useCallback(
     (id: string) => {
@@ -231,10 +251,6 @@ function Canvas({ data, mode, onReset, match = null }: Props) {
 
   useEffect(() => {
     const down = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setSelection(null);
-        return;
-      }
       if (isTypingTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey || isChordKey(event)) return;
       if (event.key === 'f') {
         event.preventDefault();
@@ -245,12 +261,15 @@ function Canvas({ data, mode, onReset, match = null }: Props) {
     return () => document.removeEventListener('keydown', down);
   }, [fitView]);
 
+  // Esc solta a seleção (e fecha a gaveta das linhas) quando ela é a camada de cima.
+  useEscapeLayer(selection !== null, () => setSelection(null));
+
   const hoverValue = useMemo(() => ({ hovered }), [hovered]);
   const empty = built.edges.length === 0;
 
   return (
     <EdgeHoverContext.Provider value={hoverValue}>
-      <div className="stage-wrap">
+      <div className="stage-wrap" aria-busy={stale || undefined} style={stale ? { opacity: 0.6 } : undefined}>
         <ReactFlow<FlowNode, MoneyEdge>
           nodes={viewNodes}
           edges={viewEdges}

@@ -3,6 +3,7 @@ import {
   formatAccounting,
   formatDate,
   formatDocument,
+  localDateOf,
   type NfeEntryResult,
   type PixEntryResult,
   parseBoleto,
@@ -308,7 +309,7 @@ function NfeSource({ direction, onApply }: { direction: 'payable' | 'receivable'
       nfeDocumentId: result.nfeDocumentId,
       entity: counterpart,
       amountCents: result.totalCents,
-      competenceDate: result.issuedAt.slice(0, 10),
+      competenceDate: localDateOf(result.issuedAt) || result.issuedAt.slice(0, 10),
       ...(firstDue ? { dueDate: firstDue } : {}),
       description: t.entry.nfeDescription(result.number),
     });
@@ -362,7 +363,8 @@ function NfeSource({ direction, onApply }: { direction: 'payable' | 'receivable'
               )}
             </dd>
             <dt>{t.entry.nfeIssued}</dt>
-            <dd className="mono">{formatDate(nfe.issuedAt.slice(0, 10))}</dd>
+            <dd className="mono">{formatDate(localDateOf(nfe.issuedAt))}</dd>
+
             <dt>{t.entry.nfeTotal}</dt>
             <dd className="mono">{formatAccounting(nfe.totalCents)}</dd>
             {dups.length > 0 && (

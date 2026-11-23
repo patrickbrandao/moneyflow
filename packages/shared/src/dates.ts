@@ -86,6 +86,61 @@ export function parseDateBR(value: string): string | null {
   return isIsoDate(iso) ? iso : null;
 }
 
+/**
+ * Instante (ISO com hora, como um timestamptz que a API devolve em UTC) → a
+ * data 'YYYY-MM-DD' dele em São Paulo; '' se inválido. Cortar o ISO em UTC
+ * (`slice(0, 10)`) põe o que aconteceu depois das 21h no dia seguinte (tarefa 178).
+ * Uma data sem hora ('YYYY-MM-DD', como o `dEmi` da NF-e antiga) já é a de negócio e volta igual.
+ */
+export function localDateOf(value: string | Date): string {
+  if (typeof value === 'string' && isIsoDate(value.trim())) return value.trim();
+  const date = typeof value === 'string' ? new Date(value) : value;
+
+  return Number.isNaN(date.getTime()) ? '' : todayIso(date);
+}
+
+/** Diferença (ms) entre o relógio de São Paulo e o UTC no instante dado. */
+function offsetAt(instant: number): number {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: TIME_ZONE,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+      .formatToParts(new Date(instant))
+      .map((part) => [part.type, part.value]),
+  );
+  const wall = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour), Number(p.minute), Number(p.second));
+  return wall - Math.floor(instant / 1000) * 1000;
+}
+
+/**
+ * Horário de parede de São Paulo ('YYYY-MM-DDTHH:MM', o valor de um
+ * `<input type="datetime-local">`) → instante ISO em UTC; null se inválido.
+ * O navegador interpretaria o mesmo texto no fuso dele (tarefa 180).
+ */
+export function instantFromSpLocal(value: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value.trim());
+  if (!m || !isIsoDate(`${m[1]}-${m[2]}-${m[3]}`) || Number(m[4]) > 23 || Number(m[5]) > 59) return null;
+  const wall = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0));
+  let instant = wall - offsetAt(wall);
+  // Uma segunda passada acerta o horário perto de uma troca de fuso (o horário de verão antigo).
+  instant = wall - offsetAt(instant);
+  return new Date(instant).toISOString();
+}
+
+/** Instante → 'YYYY-MM-DDTHH:MM' no relógio de São Paulo (para o `datetime-local`); '' se inválido. */
+export function spLocalOf(value: string | Date): string {
+  const date = typeof value === 'string' ? new Date(value) : value;
+  if (Number.isNaN(date.getTime())) return '';
+  return new Date(date.getTime() + offsetAt(date.getTime())).toISOString().slice(0, 16);
+}
+
 /** Instante (ISO com hora) → 'dd/mm/aaaa hh:mm' em São Paulo. */
 export function formatDateTime(value: string | Date | null | undefined): string {
   if (!value) return '';

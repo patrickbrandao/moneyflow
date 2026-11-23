@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { cx, EmptyState, useClickOutside, useDebounced } from '../components/ui';
 import { api } from '../lib/api';
 import { useUser } from '../lib/auth';
-import { useAgents } from './AgentsProvider';
+import { useAgentActions, useAgentVersions } from './AgentsProvider';
 import { AgentDot } from './ConversationPane';
 import { isActiveStatus } from './format';
 import { PreviousSessions } from './PreviousSessions';
@@ -21,7 +21,9 @@ const u = t.agentsUi;
 export function AgentsMenu() {
   const user = useUser();
   const isAdmin = user.role === 'admin';
-  const agents = useAgents();
+  // Só as ações e a versão da lista: não re-renderiza quando as janelas mudam (tarefa 120).
+  const agents = useAgentActions();
+  const { listVersion } = useAgentVersions();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const q = useDebounced(query.trim(), 300);
@@ -43,7 +45,7 @@ export function AgentsMenu() {
   // A contagem do ícone (execuções em andamento) vale também com a lista fechada.
   useEffect(() => {
     void loadThreads();
-  }, [loadThreads, agents.listVersion, open]);
+  }, [loadThreads, listVersion, open]);
 
   useEffect(() => {
     if (!open || !q) {
@@ -59,7 +61,7 @@ export function AgentsMenu() {
     return () => {
       alive = false;
     };
-  }, [open, q, others, agents.listVersion]);
+  }, [open, q, others, listVersion]);
 
   useEffect(() => {
     if (!open) setPrevious(null);

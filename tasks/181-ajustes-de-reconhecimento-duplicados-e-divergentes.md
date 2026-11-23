@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -63,4 +63,16 @@ Nada foi executado.
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código: `TermsFields`/`termsDraftOf`/`termsBody`/`termsText` em `ObligationFormModal.tsx` (obrigação nova e `SeriesEditModal`) e `SeriesTermsFields`/`termsDraft`/`termsFromDraft`/`termsSummary` em `components/titles/SeriesTermsFields.tsx` (série nova do título e gaveta). No contrato, `pctOf("2%")` dava `NaN` → `null` (a multa sumia sem aviso) e a janela ia sem o teto; os resumos saíam diferentes ("Multa por atraso (%): 2 · janela 15 d" × "multa 2% · janela 15 d"). O `pctOf` do reajuste do aditivo (`ContractActionModals.tsx`) tinha o mesmo descarte.
+
 ## Resolução (executor)
+
+**Um só módulo.** A lógica foi para o shared, com teste: `packages/shared/src/series-terms.ts` — `SERIES_TERMS_LIMITS` (os tetos 45/20/10/50, agora também usados pelo `seriesTermsFields` do schema), `SeriesTermsDraft`, `seriesTermsDraft`, `parsePercent` (aceita "2", "2,5", "2.5", "2%" e espaços; vazio ou zero = sem; não número ou fora da faixa devolve o erro), `seriesTermsFieldError`, `seriesTermsFromDraft` (os ajustes ou o primeiro erro com o nome do campo), `seriesTermsTouched` e `seriesTermsSummary` (o resumo único, percentual com vírgula). O editor único é `apps/web/src/components/series/SeriesTermsFields.tsx` (botão "Ajustes de reconhecimento" com `aria-expanded`, aberto quando a série já tem ajuste; janela `type="number"` com o teto; percentuais como texto com `inputMode="decimal"`, `aria-invalid` e o erro no campo), usado na obrigação nova (`ObligationFields`, `data-testid="obligation-terms"`), no `SeriesEditModal` e no `TitleFormModal`. Os dois antigos foram apagados (`components/titles/SeriesTermsFields.tsx` e os `Terms*` do `ObligationFormModal`), e o resumo único vale na guia Obrigações (`ContractObligations`) e na gaveta do título.
+
+**Erro em vez de "sem".** `obligationProblem` devolve o erro dos ajustes (o cadastro do contrato e o "Adicionar obrigação" não enviam), e o `SeriesEditModal` e o `TitleFormModal` param no `seriesTermsFromDraft` com a mensagem ("Multa por atraso (%): informe um número (ex.: 2 ou 2,5)."). O reajuste do aditivo (`AmendmentModal.tsx`) usa o mesmo `parsePercent` com a faixa do schema (−100 a 1000) e mostra o erro no campo.
+
+**Decisão.** Os percentuais ficaram como texto (e não `type="number"`, como sugeria a tarefa): o `type="number"` recusa o "%" no Chrome e, no Firefox, devolve o valor vazio, o mesmo descarte calado; o texto com o leitor tolerante e o erro visível atende aos dois critérios. Textos: `t.contracts.payment.percentInvalid`/`percentMax`/`percentRange`/`windowMax`; saíram as chaves duplicadas `obligation.adjustments`, `adjustmentsHint`, `termsDefault`, `termsWindow`, `termsTolerance` e `termsAuto` (o editor usa `planned.terms`/`termsHint`). Spec 033 (seção dos ajustes) com a frase do editor e do resumo únicos.
+
+Testes: `packages/shared/test/contracts.test.ts` → `describe('ajustes de reconhecimento da série: um editor e um resumo (tarefa 181)')` (o "2%" e a vírgula, o inválido e o acima do teto como erro, o negativo do reajuste, o rascunho de ida e volta com o erro do campo, e o resumo). E2e ajustado (não rodado aqui): `e2e/tests/contratos-pagamentos.spec.ts` digita "dois" (campo inválido), depois "2%", e confere o resumo "multa 2% · juros 1% a.m. · janela 15 d" igual na obrigação e na gaveta do título. Verificação: `pnpm verify:quick`.

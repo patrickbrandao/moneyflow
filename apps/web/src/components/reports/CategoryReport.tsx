@@ -12,7 +12,9 @@ import {
 } from '@moneyflow/shared';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { Fragment, useMemo, useState } from 'react';
+import { ExpandToggle } from '../a11y';
 import { CategoryLabel, negClass } from '../domain';
+
 import { Badge, cx, EmptyState, Panel } from '../ui';
 import { RankBars, type Series, StackedBars } from './charts';
 
@@ -158,7 +160,7 @@ function Row({
     <tr className={cx(level === 0 ? 'report-group' : 'report-child', onToggle && 'cursor-pointer')} onClick={onToggle}>
       <td>
         <span className="inline-flex items-center gap-1" style={{ paddingLeft: level * 22 }}>
-          {onToggle && <span className="report-caret">{open ? <ChevronDown /> : <ChevronRight />}</span>}
+          {onToggle && <ExpandToggle open={Boolean(open)} label={row.name ?? t.reports.noCategory} onToggle={onToggle} />}
           <CategoryLabel name={row.name ?? t.reports.noCategory} slot={row.colorSlot} />
           {level === 0 && row.children.length > 1 && <Badge tone="outline">{row.children.length}</Badge>}
         </span>
