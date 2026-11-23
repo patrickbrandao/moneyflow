@@ -14,7 +14,7 @@ import {
 import { AlertTriangle, Download, FileText, Loader2, Paperclip, Play, RotateCcw } from 'lucide-react';
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { formatBytes } from '../components/attachments/AttachmentsPanel';
-import { loadPdf, PdfViewer } from '../components/contracts/PdfViewer';
+import { openPdf, PdfViewer } from '../components/contracts/PdfViewer';
 import { useToast } from '../components/Toast';
 import { cx } from '../components/ui';
 import { api } from '../lib/api';
@@ -248,35 +248,79 @@ function ImageThumb({ id, name }: { id: string; name: string }) {
   );
 }
 
-/** Miniatura da 1ª página (pdf.js sob demanda). */
+/** Miniaturas já desenhadas (por URL do anexo): remontar a janela não baixa o PDF de novo (tarefa 121). */
+const thumbs = new Map<string, string>();
+const THUMBS_MAX = 200;
+
+function rememberThumb(url: string, data: string) {
+  thumbs.delete(url);
+  thumbs.set(url, data);
+  const oldest = thumbs.keys().next().value;
+  if (thumbs.size > THUMBS_MAX && oldest !== undefined) thumbs.delete(oldest);
+}
+
+/**
+ * Miniatura da 1ª página (pdf.js sob demanda), desenhada quando chega perto da
+ * tela: o documento é solto logo depois de desenhar (fica só a imagem, no
+ * cache) e também quando a desmontagem interrompe o carregamento (tarefa 121).
+ */
 function PdfThumb({ url }: { url: string }) {
-  const canvas = useRef<HTMLCanvasElement>(null);
+  const [src, setSrc] = useState(() => thumbs.get(url) ?? null);
   const [failed, setFailed] = useState(false);
+  const [near, setNear] = useState(false);
+  const holder = useRef<HTMLSpanElement>(null);
+
   useEffect(() => {
+    if (src || near) return;
+    const el = holder.current;
+    if (!el || typeof IntersectionObserver === 'undefined') {
+      setNear(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        setNear(true);
+        observer.disconnect();
+      },
+      { rootMargin: '200px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [src, near]);
+
+  useEffect(() => {
+    if (src || !near) return;
     let cancelled = false;
-    let destroy: (() => Promise<void>) | null = null;
-    loadPdf(url)
+    const load = openPdf(url);
+    load.promise
       .then(async (doc) => {
-        destroy = () => doc.destroy();
-        if (cancelled || !canvas.current) return;
+        if (cancelled) return;
         const page = await doc.getPage(1);
         const base = page.getViewport({ scale: 1 });
         const ratio = window.devicePixelRatio || 1;
         const viewport = page.getViewport({ scale: (72 / base.width) * ratio });
-        const el = canvas.current;
-        if (!el) return;
+        const el = document.createElement('canvas');
         el.width = viewport.width;
         el.height = viewport.height;
         const context = el.getContext('2d');
-        if (context) await page.render({ canvasContext: context, viewport, canvas: el }).promise;
+        if (!context) throw new Error('canvas');
+        await page.render({ canvasContext: context, viewport, canvas: el }).promise;
+        const data = el.toDataURL('image/png');
+        rememberThumb(url, data);
+        if (!cancelled) setSrc(data);
       })
-      .catch(() => !cancelled && setFailed(true));
+      .catch(() => !cancelled && setFailed(true))
+      .finally(() => void load.destroy());
     return () => {
       cancelled = true;
-      void destroy?.();
+      void load.destroy();
     };
-  }, [url]);
-  return failed ? <FileText className="agent-doc-icon" /> : <canvas ref={canvas} className="agent-pdf-thumb" aria-hidden />;
+  }, [url, src, near]);
+
+  if (failed) return <FileText className="agent-doc-icon" />;
+  if (src) return <img src={src} className="agent-pdf-thumb" alt="" aria-hidden />;
+  return <span ref={holder} className="agent-pdf-thumb is-loading" aria-hidden />;
 }
 
 function PdfCard({ meta }: { meta: { id: string; fileName: string; pageCount: number | null; sizeBytes?: number } }) {

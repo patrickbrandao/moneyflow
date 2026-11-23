@@ -84,7 +84,7 @@ O chat dos agentes passa a mostrar e tocar o que é anexado, a gravar áudio e a
 - **Web** (`apps/web/src/agents/`):
   - `AudioPlayer` (velocidade compartilhada entre os players e um tocando por vez), `AudioRecorder` (`useAudioRecorder`, o botão e a faixa de revisão), `ImageLightbox` (e a camada `MediaDialog` das prévias) e `AttachmentPreview` (as prévias, a transcrição acompanhada enquanto está na fila e o play do modo áudio);
   - `MarkdownDocument` em `Markdown.tsx` (renderizado / bruto);
-  - o `PdfViewer` (e o `loadPdf`, também da miniatura) vem dos contratos;
+  - o `PdfViewer` (e o `openPdf`, também da miniatura) vem dos contratos: um só worker do pdf.js por aba, a miniatura desenhada quando chega perto da tela, o documento solto logo depois de desenhar e a imagem guardada por anexo (remontar a janela não baixa o PDF de novo);
   - o modo áudio fica em `audioMode` da janela, no estado da UI dos agentes (`localStorage`);
   - textos em `i18n/areas/agents-ui.ts` (`media`).
 

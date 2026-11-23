@@ -1525,6 +1525,39 @@ test.describe('chat multimídia (spec 025)', () => {
     await expect(doc).toHaveCount(0);
   });
 
+  test('PDFs (tarefa 121): três miniaturas com um worker só do pdf.js; restaurar a janela não baixa os PDFs de novo', async ({ page }) => {
+    await enter(page);
+    const win = await freshSession(page, mediaAgent.name);
+    await win.locator('input[type="file"]').setInputFiles(
+      ['um', 'dois', 'tres'].map((name) => ({
+        name: `pdf-${name}.pdf`,
+        mimeType: 'application/pdf',
+        buffer: minimalPdf([`Documento ${name}`]),
+      })),
+    );
+    await expect(win.getByTestId('composer-attachment')).toHaveCount(3);
+    await say(win, 'veja os PDFs');
+    await expect(win.getByTestId('agent-message-assistant').last()).toBeVisible({ timeout: 30_000 });
+    await expect(win.getByTestId('pdf-card')).toHaveCount(3);
+    await expect(win.locator('[data-testid="pdf-card"] img.agent-pdf-thumb')).toHaveCount(3, { timeout: 15_000 });
+    // Um worker do pdf.js para a aba inteira, não um por documento.
+    expect(page.workers().length).toBeLessThanOrEqual(1);
+
+    // Minimizar e restaurar: as miniaturas voltam do cache, sem baixar os PDFs.
+    const downloads: string[] = [];
+    page.on('request', (req) => {
+      if (/\/api\/attachments\/[^/]+\/download\?inline=1/.test(req.url())) downloads.push(req.url());
+    });
+    const conversationId = await win.getAttribute('data-conversation-id');
+    expect(conversationId).toBeTruthy();
+    await win.getByTestId('agent-minimize').click();
+    await page.locator(`[data-testid="agent-dock-item"][data-conversation-id="${conversationId}"]`).click();
+    const restored = page.locator(`[data-testid="agent-window"][data-conversation-id="${conversationId}"]`);
+    await expect(restored.locator('[data-testid="pdf-card"] img.agent-pdf-thumb')).toHaveCount(3);
+    expect(downloads).toHaveLength(0);
+    expect(page.workers().length).toBeLessThanOrEqual(1);
+  });
+
   test('gravação pelo microfone (fake media stream): ouvir, descartar, regravar e anexar com transcrição', async ({ page }) => {
     await enter(page);
     const win = await freshSession(page, mediaAgent.name);

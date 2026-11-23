@@ -1633,6 +1633,11 @@ body.agent-resizing .agent-side-grip {
   border: 1px solid var(--border-strong);
   background: var(--on-accent);
 }
+/* miniatura ainda não desenhada (tarefa 121): o lugar de uma página A4 */
+.agent-pdf-thumb.is-loading {
+  display: block;
+  aspect-ratio: 210 / 297;
+}
 .agent-doc-icon {
   flex: none;
   width: 28px;
