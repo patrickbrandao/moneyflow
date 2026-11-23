@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
@@ -117,3 +117,21 @@ Verificação:
    - um cliente `pg` com `LISTEN ai_run_events` recebe `type` (e `status` no `done`);
    - o número de chamadas a `getRun` no SSE e de consultas do hub sem stream não cresce com os deltas;
    - o aviso de conclusão e o de espera de confirmação continuam saindo, inclusive com `Last-Event-ID`.
+
+### Aplicação (app)
+
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: o hub consultava o banco a cada aviso sem stream aberto, o `pump` do SSE chamava `getRun` depois de cada leitura e o aviso de conclusão lia a sessão inteira. Conferido o lado do web (tarefas 120 e 122): o console já fecha o SSE na espera de aprovação e com a aba escondida e volta pelo `Last-Event-ID`; nada a mudar lá.
+
+1. `pnpm db:pull`: nada a gerar (só função).
+2. `apps/server/src/agents/events-hub.ts`: o `notification` lê `{ run_id, seq, type?, status? }`; sem listener, `dispatch` só chama `notifyIfFinished` com `type` `done` ou `status` + `awaiting_confirmation`; aviso sem `type` (versão anterior, no deploy) segue o caminho de antes.
+3. `notifyIfFinished`: `recentAssistantMessages(db, conversa, 5)` (novo em `agents/store.ts`, `MESSAGE_COLUMNS`, `role = 'assistant'`, `ORDER BY seq DESC LIMIT`) no lugar do `loadMessages`.
+4. `apps/server/src/routes/agents.ts` (`pump`): `getRun` só quando a leitura de `runEvents` vem vazia ou na volta do timer de 5 s (`pump(true)` marca `checkRun`, que sobrevive à volta que chega com o `pump` rodando); nunca logo depois de enviar eventos.
+5. Spec 011 (SSE): o aviso com o tipo e as consultas do stream e do hub.
+
+Testes (`test/agents.test.ts`, "eventos dos agentes sem consulta por delta"):
+- um cliente `pg` com `LISTEN ai_run_events` recebe `type` e, no `done`, `status`, sem o erro do payload;
+- um `RunEventsHub` com o `db` espiado, sem stream aberto: 30 deltas e um `status running` não geram consulta; a espera de confirmação e o `done` consultam uma vez cada; o aviso no sino sai com a última resposta do agente, e a leitura das mensagens é a das últimas (`ORDER BY m.seq DESC LIMIT`); o aviso sem `type` consulta como antes;
+- o SSE com o `db` espiado: 20 deltas entregues e o `done` fechando o stream, com no máximo uma leitura da execução durante os deltas (conferido à mão: sem a mudança no `pump`, eram 20);
+- o teste existente do SSE com `Last-Event-ID` segue passando.
+
+Verificação: rápida, `pnpm verify:quick --base HEAD`.

@@ -2,15 +2,17 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { userColumns, users } from '@moneyflow/db';
+import { type Database, pg, userColumns, users } from '@moneyflow/db';
 import { AGENT_TOOLS, formatBRL, SseParser } from '@moneyflow/shared';
-import { eq, sql } from 'drizzle-orm';
+import { eq, type SQL, sql } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type IndexState, indexEmbeddings } from '../src/agents/embeddings';
+import { RunEventsHub } from '../src/agents/events-hub';
 import { mcpExposedName } from '../src/agents/mcp-client';
 import { type ClaimedRun, callModel, processRun } from '../src/agents/runner';
 import { appendEvent } from '../src/agents/store';
@@ -1199,6 +1201,137 @@ describe('MCP', () => {
     // Usuário desativado não recebe chave.
     await admin.patch(`/api/users/${viewerSess.id}`, { isActive: false });
     await admin.post('/api/admin/api-tokens', { userId: viewerSess.id, name: 'Inativo' }, 422);
+  });
+});
+
+describe('eventos dos agentes sem consulta por delta (tarefa 164)', () => {
+  /** O banco de verdade, guardando o SQL de cada `execute` (fora das transações). */
+  function spyDb() {
+    const dialect = new PgDialect();
+    const seen: string[] = [];
+    const db = new Proxy(h.db, {
+      get(target, prop) {
+        if (prop === 'execute') {
+          return (query: SQL) => {
+            seen.push(dialect.sqlToQuery(query).sql);
+            return target.execute(query);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as Database;
+    return { db, seen };
+  }
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const append = (runId: string, type: string, payload: object) =>
+    h.db.execute<{ seq: number }>(sql`SELECT ai_run_event_append(${runId}::uuid, ${type}, ${JSON.stringify(payload)}::jsonb) AS seq`);
+  async function until(check: () => boolean | Promise<boolean>, ms = 5000) {
+    const deadline = Date.now() + ms;
+    while (!(await check()) && Date.now() < deadline) await sleep(25);
+    return check();
+  }
+
+  it('o aviso do LISTEN traz o tipo do evento e, no done, o status', async () => {
+    const conversation = await newSession(admin, agent.id);
+    const sent = await chat(admin, conversation.id, 'aviso com tipo');
+    const listener = new pg.Client({ connectionString: h.config.databaseUrl });
+    const notices: Record<string, unknown>[] = [];
+    listener.on('notification', (message) => {
+      const notice = JSON.parse(message.payload ?? '{}');
+      if (notice.run_id === sent.run.id) notices.push(notice);
+    });
+    await listener.connect();
+    try {
+      await listener.query('LISTEN ai_run_events');
+      await append(sent.run.id, 'text_delta', { text: 'oi' });
+      await append(sent.run.id, 'done', { status: 'canceled', error: 'detalhe que não vai no aviso' });
+      expect(await until(() => notices.length >= 2)).toBe(true);
+      expect(notices.map(({ type, status }) => ({ type, status }))).toEqual([
+        { type: 'text_delta', status: undefined },
+        { type: 'done', status: 'canceled' },
+      ]);
+      expect(JSON.stringify(notices)).not.toContain('detalhe');
+    } finally {
+      await listener.end();
+      await admin.post(`/api/runs/${sent.run.id}/cancel`);
+    }
+  });
+
+  it('sem stream aberto, os deltas não consultam o banco; o done e a espera de confirmação avisam, com a última resposta', async () => {
+    const conversation = await newSession(admin, agent.id);
+    llm.queue = [{ text: 'Primeira resposta.' }];
+    const first = await chat(admin, conversation.id, 'primeira');
+    await drain();
+    llm.queue = [{ text: 'Última resposta do agente.' }];
+    const second = await chat(admin, conversation.id, 'segunda');
+    await drain();
+    expect((await runStatus(second.run.id)).status).toBe('completed');
+    void first;
+
+    const spy = spyDb();
+    const hub = new RunEventsHub(spy.db, h.config, log);
+    await hub.start();
+    const eventQueries = () => spy.seen.filter((q) => q.includes('FROM ai_run_events e')).length;
+    try {
+      for (let i = 0; i < 30; i += 1) await append(second.run.id, i % 2 ? 'thinking_delta' : 'text_delta', { text: `parte ${i}` });
+      await append(second.run.id, 'status', { status: 'running' });
+      // Os avisos chegam (o próprio app também ouve): o hub deste teste não consultou nada por eles.
+      await sleep(400);
+      expect(spy.seen).toEqual([]);
+
+      // A espera de confirmação consulta (e avisa); o done também, lendo só as últimas respostas.
+      await append(second.run.id, 'status', { status: 'awaiting_confirmation' });
+      expect(await until(() => eventQueries() === 1)).toBe(true);
+      const done = await append(second.run.id, 'done', { status: 'completed' });
+      expect(await until(() => eventQueries() === 2)).toBe(true);
+      const seq = Number(done.rows[0]!.seq);
+      const bell = async () =>
+        (
+          await h.db.execute<{ body: string }>(sql`
+            SELECT body FROM notifications WHERE user_id = ${adminSession.id} AND dedup_key = ${`agent_completed:run:${second.run.id}:seq:${seq}`}`)
+        ).rows;
+      expect(await until(async () => (await bell()).length === 1)).toBe(true);
+      expect((await bell())[0]!.body).toBe('Última resposta do agente.');
+      const messageQueries = spy.seen.filter((q) => q.includes('FROM ai_messages m'));
+      expect(messageQueries.length).toBeGreaterThanOrEqual(1);
+      for (const q of messageQueries) expect(q).toMatch(/ORDER BY m\.seq DESC LIMIT/);
+
+      // O aviso sem tipo (de uma versão anterior, durante o deploy) segue o caminho de antes: consulta.
+      await h.db.execute(sql`SELECT pg_notify('ai_run_events', json_build_object('run_id', ${second.run.id}::uuid, 'seq', 1)::text)`);
+      expect(await until(() => eventQueries() === 3)).toBe(true);
+    } finally {
+      await hub.stop();
+    }
+  });
+
+  it('SSE: a leitura do estado da execução não cresce com os deltas; o stream entrega tudo e fecha no done', async () => {
+    const conversation = await newSession(admin, agent.id);
+    const sent = await chat(admin, conversation.id, 'stream sem consulta por delta');
+    const spy = spyDb();
+    const app = await buildApp({ db: spy.db, config: h.config, logger: false });
+    await app.ready();
+    try {
+      const stream = app.inject({ method: 'GET', url: `/api/runs/${sent.run.id}/events`, headers: { cookie: adminSession.cookie } });
+      // O stream abriu e já leu o que havia.
+      await sleep(300);
+      const runReads = () => spy.seen.filter((q) => q.includes('FROM ai_runs r WHERE r.id')).length;
+      const before = runReads();
+      for (let i = 0; i < 20; i += 1) {
+        await append(sent.run.id, 'text_delta', { text: `p${i} ` });
+        await sleep(15);
+      }
+      await append(sent.run.id, 'done', { status: 'completed' });
+      const res = await stream;
+      const events = new SseParser().push(res.body).map((e) => e.event);
+      expect(events.filter((e) => e === 'text_delta')).toHaveLength(20);
+      expect(events.at(-1)).toBe('done');
+      // Antes, cada aviso relia a execução e a conversa (uma vez por delta).
+      expect(runReads() - before).toBeLessThanOrEqual(1);
+    } finally {
+      await app.close();
+      await admin.post(`/api/runs/${sent.run.id}/cancel`);
+    }
   });
 });
 
