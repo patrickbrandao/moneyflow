@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -68,4 +68,15 @@ Não executado. O comportamento de locks entre `DROP` e a transação da importa
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: o dump e a restauração usavam a flag `busy` em memória do processo (`dump.ts`), a importação a trava consultiva de transação no banco, e o JSON completo nenhuma das duas.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/backup/lock.ts` (novo): `withBackupLock(db, fn)` pega `pg_try_advisory_lock(hashtext('moneyflow:backup'))` numa conexão própria do pool (o `$client` do Drizzle), segura até o fim e solta no `finally` (sem conseguir soltar, a conexão é descartada); sem a trava, `409 backup_busy`. Vale entre réplicas.
+- `dump.ts`: `createDumpZip` e `restoreDump` usam a trava antes de tudo (antes da checagem do pg_dump e da extração do upload), no lugar da flag `busy`, que saiu. `export.ts`: `exportFullZip` também. `import.ts`: a importação continua com `pg_try_advisory_xact_lock` sobre a mesma chave (`BACKUP_LOCK_KEY`), que conflita com a de sessão. O psql da restauração não pega a chave.
+- A exportação de um recurso (pequena) segue sem a trava.
+- Spec 019 (Operação).
+- Teste em `apps/server/test/backup.test.ts`, "uma operação de backup por vez…": com a trava de sessão segura noutra conexão, `GET /api/backup/full`, `GET /api/backup/dump`, `POST /api/backup/import/full` e `POST /api/backup/restore-dump` respondem `409 backup_busy`; com a trava de transação (uma importação em andamento), as quatro também; solta a trava, a importação volta a rodar.
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

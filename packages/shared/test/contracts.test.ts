@@ -4,8 +4,11 @@ import {
   contractCreateInput,
   cycleEnd,
   DEFAULT_SERIES_TERMS,
+  DIFF_MAX_EDITS,
+  type DiffLine,
   diffLines,
   diffStats,
+  diffText,
   occurrencePeriodEnd,
   parsePercent,
   periodicityCalendar,
@@ -130,6 +133,86 @@ describe('diff de versões do markdown', () => {
     expect(diffLines('', 'x').map((l) => l.kind)).toEqual(['add']);
     expect(diffLines('x', '').map((l) => l.kind)).toEqual(['del']);
     expect(diffLines('x\ny', 'x\ny').every((l) => l.kind === 'same')).toBe(true);
+  });
+
+  // Os dois lados saem do diff, com os números de linha em sequência.
+  const rebuild = (lines: DiffLine[]) => {
+    const before = lines.filter((l) => l.kind !== 'add');
+    const after = lines.filter((l) => l.kind !== 'del');
+    expect(before.map((l) => l.oldLine)).toEqual(before.map((_, i) => i + 1));
+    expect(after.map((l) => l.newLine)).toEqual(after.map((_, i) => i + 1));
+    return { before: before.map((l) => l.text), after: after.map((l) => l.text) };
+  };
+  const lcs = (a: string[], b: string[]) => {
+    const row = new Array<number>(b.length + 1).fill(0);
+    for (let i = 1; i <= a.length; i += 1) {
+      let diag = 0;
+      for (let j = 1; j <= b.length; j += 1) {
+        const up = row[j]!;
+        row[j] = a[i - 1] === b[j - 1] ? diag + 1 : Math.max(row[j]!, row[j - 1]!);
+        diag = up;
+      }
+    }
+    return row[b.length]!;
+  };
+
+  it('textos aleatórios: o diff reconstrói os dois lados e é o menor (tarefa 112)', () => {
+    let seed = 112;
+    const rand = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    for (let round = 0; round < 500; round += 1) {
+      const a = Array.from({ length: rand(12) }, () => 'abcd'[rand(4)]!);
+      const b = Array.from({ length: rand(12) }, () => 'abcd'[rand(4)]!);
+      const lines = diffLines(a.join('\n'), b.join('\n'));
+      const sides = rebuild(lines);
+      expect(sides.before).toEqual(a);
+      expect(sides.after).toEqual(b);
+      const { added, removed } = diffStats(lines);
+      expect(added + removed).toBe(a.length + b.length - 2 * lcs(a, b));
+    }
+  });
+
+  it('documento grande com uma linha trocada no meio dá 1 inclusão e 1 remoção', () => {
+    const before = Array.from({ length: 10_000 }, (_, i) => `linha ${i}`);
+    const after = [...before];
+    after[5_000] = 'linha trocada';
+    const result = diffText(before.join('\n'), after.join('\n'));
+    expect(result.truncated).toBe(false);
+    expect(diffStats(result.lines)).toEqual({ added: 1, removed: 1 });
+    expect(result.lines.filter((l) => l.kind !== 'same')).toEqual([
+      { kind: 'del', text: 'linha 5000', oldLine: 5001, newLine: null },
+      { kind: 'add', text: 'linha trocada', oldLine: null, newLine: 5001 },
+    ]);
+  });
+
+  it('8.000 × 8.000 linhas diferentes: o miolo sai resumido, rápido e válido', () => {
+    const before = Array.from({ length: 8_000 }, (_, i) => `linha antiga ${i}`).join('\n');
+    const after = Array.from({ length: 8_000 }, (_, i) => `linha nova ${i}`).join('\n');
+    const started = performance.now();
+    const result = diffText(before, after);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(result.truncated).toBe(true);
+    expect(diffStats(result.lines)).toEqual({ added: 8_000, removed: 8_000 });
+    const sides = rebuild(result.lines);
+    expect(sides.before.join('\n')).toBe(before);
+    expect(sides.after.join('\n')).toBe(after);
+    // Prefixo e sufixo comuns continuam iguais em volta do miolo resumido.
+    const wrapped = diffText(`topo\n${before}\nfim`, `topo\n${after}\nfim`);
+    expect(wrapped.truncated).toBe(true);
+    expect(wrapped.lines[0]).toEqual({ kind: 'same', text: 'topo', oldLine: 1, newLine: 1 });
+    expect(wrapped.lines.at(-1)).toEqual({ kind: 'same', text: 'fim', oldLine: 8_002, newLine: 8_002 });
+  });
+
+  it('até o teto de linhas diferentes, o diff é exato', () => {
+    const half = DIFF_MAX_EDITS / 2;
+    const before = Array.from({ length: half }, (_, i) => `antiga ${i}`).join('\n');
+    const after = Array.from({ length: half }, (_, i) => `nova ${i}`).join('\n');
+    const exact = diffText(before, after);
+    expect(exact.truncated).toBe(false);
+    expect(diffStats(exact.lines)).toEqual({ added: half, removed: half });
+    expect(diffText(`${before}\nx`, after).truncated).toBe(true);
   });
 
   it('troca de linha vira remoção + inclusão, com os números de linha', () => {

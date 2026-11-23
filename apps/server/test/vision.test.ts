@@ -194,6 +194,54 @@ describe('relatórios (spec 014)', () => {
     await viewer.get(`/api/reports/categories?from=${year}-02-01&to=${year}-01-01`, 400);
   });
 
+  it('compra de cartão conta na pagadora: a de outra pagadora só com o cartão pedido (tarefa 111)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await visionScenario(admin);
+    const other = await admin.post('/api/entities', { kind: 'company', name: `Loja B ${s.tag}` });
+    await admin.post(`/api/cards/${s.card.id}/purchases`, {
+      entityId: other.id,
+      categoryId: s.expense.id,
+      payerCaixaId: s.caixaB.id,
+      purchasedOn: todayIso(),
+      description: 'Compra da B',
+      amountCents: 10_000,
+    });
+    const fromB = (lines: any[]) => lines.filter((l) => l.source === 'card_purchase' && l.caixaId === s.caixaB.id);
+
+    // Só A (o cartão entra pela pagadora padrão): a compra da B fica de fora, nas categorias e nas entidades.
+    const onlyA = await admin.get(`/api/reports/categories?${period}&caixaIds=${s.caixaA.id}`);
+    expect(onlyA.caixas.map((c: { id: string }) => c.id)).toContain(s.card.id);
+    expect(onlyA.lines.every((l: any) => l.caixaId === s.caixaA.id)).toBe(true);
+    expect(onlyA.lines.find((l: any) => l.source === 'card_purchase')).toMatchObject({ caixaId: s.caixaA.id, amountCents: 85_000 });
+    const entitiesA = await admin.get(`/api/reports/entities?${period}&caixaIds=${s.caixaA.id}`);
+    expect(entitiesA.lines.some((l: any) => l.entityId === other.id)).toBe(false);
+    expect(entitiesA.lines.every((l: any) => l.caixaId === s.caixaA.id)).toBe(true);
+
+    // A e B: a compra conta na B.
+    const both = await admin.get(`/api/reports/categories?${period}&caixaIds=${s.caixaA.id},${s.caixaB.id}`);
+    expect(fromB(both.lines)).toMatchObject([{ amountCents: 10_000, cardCaixaId: s.card.id }]);
+
+    // O cartão pedido sozinho mostra as compras de todas as pagadoras.
+    const card = await admin.get(`/api/reports/categories?${period}&caixaIds=${s.card.id}`);
+    const purchases = card.lines.filter((l: any) => l.source === 'card_purchase');
+    expect(purchases.map((l: any) => [l.caixaId, l.amountCents]).sort()).toEqual(
+      [
+        [s.caixaA.id, 85_000],
+        [s.caixaB.id, 10_000],
+      ].sort(),
+    );
+    const entitiesCard = await admin.get(`/api/reports/entities?${period}&caixaIds=${s.card.id}`);
+    expect(entitiesCard.lines.find((l: any) => l.entityId === other.id)).toMatchObject({ caixaId: s.caixaB.id, outflowCents: 10_000 });
+
+    // O leitor só de A (lê o cartão pela pagadora padrão) não vê a compra nem o nome da B.
+    const viewerUser = await userSession(h);
+    await admin.post(`/api/caixas/${s.caixaA.id}/members`, { userId: viewerUser.id, role: 'viewer' });
+    const viewer = client(h, viewerUser.cookie);
+    expect(fromB((await viewer.get(`/api/reports/categories?${period}`)).lines)).toEqual([]);
+    const viewerEntities = await viewer.get(`/api/reports/entities?${period}`);
+    expect(viewerEntities.lines.some((l: any) => l.caixaId === s.caixaB.id)).toBe(false);
+  });
+
   it('por entidade rastreia o recebedor final pelo cartão; projeção 30/60/90 por caixa e conta', async () => {
     const admin = client(h, (await userSession(h, 'admin')).cookie);
     const s = await visionScenario(admin);
@@ -247,6 +295,24 @@ describe('canvas de fluxo (spec 014)', () => {
     expect(lines[0].link).toBe(`/caixas/${s.caixaA.id}/payables?title=${s.external.id}`);
     const storeLines = await admin.get(`/api/flow/lines?${period}&caixaIds=${s.caixaA.id}&nodeKind=entity&nodeId=${s.store.id}`);
     expect(storeLines[0].link).toBe(`/caixas/${s.card.id}/purchases?purchase=${s.purchase.id}`);
+
+    // Grupo grande (tarefa 171): os ids vão no corpo do POST, acima do que a URL aguenta.
+    const [from, to] = [`${year}-01-01`, `${year}-12-31`];
+    const crowd = [s.supplier.id, s.store.id, ...Array.from({ length: 598 }, () => randomUUID())];
+    const group = await admin.post('/api/flow/lines', { from, to, caixaIds: [s.caixaA.id, s.caixaB.id], entityIds: crowd });
+    expect(group.map((l: any) => l.description).sort()).toEqual(['Energia', 'Supermercado']);
+    const groupEdge = await admin.post('/api/flow/lines', {
+      from,
+      to,
+      caixaIds: [s.caixaA.id],
+      edgeKind: 'payment',
+      sourceKind: 'caixa',
+      sourceId: s.caixaA.id,
+      entityIds: crowd,
+    });
+    expect(groupEdge).toMatchObject([{ refKind: 'settlement', description: 'Energia' }]);
+    await admin.post('/api/flow/lines', { from, to, entityIds: Array.from({ length: 5_001 }, () => randomUUID()) }, 400);
+    await admin.post('/api/flow/lines', { from: to, to: from }, 400);
 
     await admin.put('/api/flow/positions', {
       positions: [

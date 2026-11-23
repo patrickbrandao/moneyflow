@@ -11,7 +11,7 @@ import {
   spLocalOf,
   todayIso,
 } from '../src/dates';
-import { formatAccounting, formatBRL, formatSignedBRL, parseBRL } from '../src/money';
+import { formatAccounting, formatBRL, formatCents, formatSignedBRL, parseBRL } from '../src/money';
 import { occurrenceCompetenceDate, occurrenceDueDate, pendingOccurrences, type RecurrenceRule } from '../src/recurrence';
 
 const nbsp = (s: string) => s.replace(/ /g, ' ');
@@ -26,6 +26,14 @@ describe('dinheiro', () => {
     expect(nbsp(formatAccounting(-123456))).toBe('(R$ 1.234,56)');
     expect(nbsp(formatAccounting(0))).toBe('R$ 0,00');
     expect(nbsp(formatAccounting(500))).toBe('R$ 5,00');
+  });
+  it('o zero negativo sai sem sinal (tarefa 174)', () => {
+    expect(nbsp(formatAccounting(-0))).toBe('R$ 0,00');
+    expect(nbsp(formatBRL(-0))).toBe('R$ 0,00');
+    expect(formatCents(-0)).toBe('0,00');
+    expect(nbsp(formatSignedBRL(-0))).toBe('R$ 0,00');
+    expect(Object.is(parseBRL('-0'), 0)).toBe(true);
+    expect(Object.is(parseBRL('-0,00'), 0)).toBe(true);
   });
   it('lê valores digitados', () => {
     expect(parseBRL('1.234,56')).toBe(123456);
@@ -109,6 +117,19 @@ describe('recorrência', () => {
   });
   it('competência acompanha o calendário a partir do modelo', () => {
     expect(occurrenceCompetenceDate(monthly, { occurrence: 2, competenceDate: '2026-02-01' }, 5)).toBe('2026-05-01');
+  });
+  it('competência no dia 31 não fica presa no 28 depois de fevereiro (tarefa 170)', () => {
+    const m31: RecurrenceRule = { frequency: 'monthly', intervalCount: 1, anchorDay: 31, startsOn: '2026-01-31' };
+    // Sem a âncora, o modelo de fevereiro prende o dia 28.
+    expect(occurrenceCompetenceDate(m31, { occurrence: 2, competenceDate: '2026-02-28' }, 3)).toBe('2026-03-28');
+    expect(occurrenceCompetenceDate(m31, { occurrence: 2, competenceDate: '2026-02-28' }, 3, 31)).toBe('2026-03-31');
+    expect(occurrenceCompetenceDate(m31, { occurrence: 2, competenceDate: '2026-02-28' }, 4, 31)).toBe('2026-04-30');
+    expect(occurrenceCompetenceDate(m31, { occurrence: 1, competenceDate: '2026-01-31' }, 2, 31)).toBe('2026-02-28');
+    // Dia 1 e 15 não mudam.
+    expect(occurrenceCompetenceDate(monthly, { occurrence: 2, competenceDate: '2026-02-01' }, 5, 1)).toBe('2026-05-01');
+    expect(occurrenceCompetenceDate(monthly, { occurrence: 2, competenceDate: '2026-02-15' }, 5, 15)).toBe('2026-05-15');
+    const yearly: RecurrenceRule = { frequency: 'yearly', intervalCount: 1, anchorDay: 29, startsOn: '2028-02-29' };
+    expect(occurrenceCompetenceDate(yearly, { occurrence: 2, competenceDate: '2029-02-28' }, 5, 29)).toBe('2032-02-29');
   });
   it('pendências respeitam parcelas, fim e horizonte', () => {
     expect(pendingOccurrences({ ...monthly, installmentsTotal: 3 }, 1, '2030-01-01')).toEqual([2, 3]);

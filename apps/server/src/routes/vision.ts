@@ -2,6 +2,7 @@ import {
   canvasPositionsInput,
   destinationCreateInput,
   destinationUpdateInput,
+  flowLinesBody,
   flowLinesQuery,
   flowQuery,
   MESSAGE_EVENT_KINDS,
@@ -31,6 +32,8 @@ export async function visionRoutes(app: FastifyInstance) {
 
   app.get('/api/flow', (r: Req) => flow.flowGraph(r.ctx, parse(flowQuery, r.query)));
   app.get('/api/flow/lines', (r: Req) => flow.flowLines(r.ctx, parse(flowLinesQuery, r.query)));
+  // Só leitura: o grupo grande do canvas manda os ids no corpo (tarefa 171).
+  app.post('/api/flow/lines', (r: Req) => flow.flowLines(r.ctx, parse(flowLinesBody, r.body)));
   app.put('/api/flow/positions', (r: Req) => flow.savePositions(r.ctx, parse(canvasPositionsInput, r.body)));
   app.delete('/api/flow/positions', (r: Req) => flow.resetPositions(r.ctx));
 

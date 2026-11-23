@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: alta
 criada: 2026-11-21
 commit:
@@ -79,4 +79,17 @@ Os números de memória da exportação são estimados pelo código: o node-post
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código: `exportFullZip` lia `attachments` em lotes de 500 linhas com `content` (bytea em hex, até 20 MiB cada) numa consulta só, e `parseBackupUpload` descompactava o JSON inteiro e chamava `strFromU8` fora do `try` (acima de `buffer.constants.MAX_STRING_LENGTH` vira `ERR_STRING_TOO_LONG` e `500`).
+
 ## Resolução (executor)
+
+- Formato 2 do JSON completo (`BACKUP_FORMAT_VERSION = 2` em `packages/shared/src/backup.ts`; a importação aceita o 1, e uma versão anterior do MoneyFlow recusa o 2 com "versão mais nova"):
+  - `apps/server/src/services/backup/export.ts`: a linha de `attachments` sai sem `content` e com `content_entry: 'attachments/<id>'`; depois do `moneyflow.json`, no mesmo retrato `REPEATABLE READ`, cada anexo é lido sozinho (`SELECT content … WHERE id`) e escrito numa entrada `ZipPassThrough` própria, em pedaços de 1 MB. As tabelas saem por `tableBatches`: até 500 linhas por consulta, começando com 50 e ajustando o lote ao tamanho médio das linhas para ficar perto de 16 MB de texto (um documento de 1 MB não lê 500 de uma vez). O disco dita o ritmo (`writableNeedDrain`/`drain`).
+  - `apps/server/src/services/backup/unzip.ts`: o diretório central e a extração de uma entrada viraram funções próprias (`unzipLimited` usa as duas, sem mudar o comportamento da tarefa 055) e `zipEntryReader`, um leitor sob demanda (a entrada sem compressão sai como fatia do upload, sem cópia; até 20 MB por entrada).
+  - `apps/server/src/services/backup/import.ts`: `parseBackupUpload` devolve `LoadedBackup` com o leitor `blobs`; o `insertRow` de `attachments` com `content_entry` busca a entrada só na hora do INSERT e passa o conteúdo como `bytea`; sem a entrada, o anexo não entra, com o motivo (`attachmentEntryMissing`). `backupText`: acima de `MAX_STRING_LENGTH`, ou com `ERR_STRING_TOO_LONG`, `413 backup_json_too_large` com a recomendação do dump (`jsonTooLarge`), e o `strFromU8` dentro do `try`.
+- Spec 019 (JSON completo, importação e o formato 2) e a linha dela no `docs/INDEX.md`.
+- Testes em `apps/server/test/backup.test.ts`: o JSON completo num sistema novo confere que cada anexo vem como entrada do zip (sem `content` no JSON) e que o `sha256` de cada um chega igual depois da importação; "arquivo antigo, com o conteúdo do anexo em hex no JSON, continua importando" (e o formato novo sem a entrada volta com o motivo); "JSON acima do limite de string recebe 413". A medição de memória com 300 anexos de 2 MB não virou teste (o pico agora é um anexo por vez, mais o lote de até ~16 MB de texto).
+- Achado no caminho, corrigido junto (mesmo laço da importação): com os dados do `statement-supersede.test.ts` no banco, o JSON completo não importava 7 registros por "dependência circular": a regra aprendida de uma linha do lote provisório (`created_from_line_id`) classifica a linha que a substituiu (`classification_rule_id`), e a provisória aponta para a substituta (`superseded_by_line_id`). Em `import.ts`, quando sobra ciclo na ordenação, as referências opcionais (FK `ON DELETE SET NULL`) dos registros do ciclo saem da ordem, o registro entra com elas nulas e elas voltam no fim (`softLater`, num savepoint). Spec 019 (regras do merge). Teste: o "lote provisório substituído (spec 031) num sistema novo" ganhou o par FARMACIA/FARMACIA POPULAR que fecha esse ciclo e confere a regra, a linha e a substituta iguais no sistema novo (sem a correção, falha com os 3 registros em ciclo).
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

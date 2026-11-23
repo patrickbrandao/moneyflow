@@ -10,7 +10,15 @@ import { type SQL, sql } from 'drizzle-orm';
  * de configuração abaixo.
  */
 
-export type ColumnMeta = { name: string; generated: boolean; notNull: boolean; canSelect: boolean; canInsert: boolean };
+export type ColumnMeta = {
+  name: string;
+  /** O tipo como o banco o escreve (`format_type`): o cast da continuação da paginação (tarefa 173). */
+  type: string;
+  generated: boolean;
+  notNull: boolean;
+  canSelect: boolean;
+  canInsert: boolean;
+};
 
 export type ForeignKeyMeta = {
   table: string;
@@ -233,12 +241,14 @@ export async function loadCatalog(db: Executor): Promise<Catalog> {
   const columns = await db.execute<{
     table_name: string;
     column_name: string;
+    column_type: string;
     generated: boolean;
     not_null: boolean;
     can_select: boolean;
     can_insert: boolean;
   }>(sql`
-    SELECT c.relname AS table_name, a.attname AS column_name, a.attgenerated <> '' AS generated, a.attnotnull AS not_null,
+    SELECT c.relname AS table_name, a.attname AS column_name, format_type(a.atttypid, a.atttypmod) AS column_type,
+           a.attgenerated <> '' AS generated, a.attnotnull AS not_null,
            has_column_privilege(c.oid, a.attnum, 'SELECT') AS can_select,
            has_column_privilege(c.oid, a.attnum, 'INSERT') AS can_insert
       FROM pg_class c
@@ -271,6 +281,7 @@ export async function loadCatalog(db: Executor): Promise<Catalog> {
     }
     table.columns.push({
       name: row.column_name,
+      type: row.column_type,
       generated: row.generated,
       notNull: row.not_null,
       canSelect: row.can_select,

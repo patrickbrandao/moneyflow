@@ -1,8 +1,16 @@
-import { entityLink, type FlowLineDto, formatAccounting, formatDate, t } from '@moneyflow/shared';
+import {
+  entityLink,
+  FLOW_LINES_MAX_ENTITIES,
+  type FlowLineDto,
+  type FlowLinesBody,
+  formatAccounting,
+  formatDate,
+  t,
+} from '@moneyflow/shared';
 import { ArrowRight, Building2, CreditCard, Crosshair, ExternalLink, Layers, Ungroup, UserRound, Wallet, X } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useApi } from '../../lib/hooks';
+import { ApiError, api } from '../../lib/api';
 import { CategoryDot, LoadError, negClass } from '../domain';
 import { Badge, Button, ButtonLink, cx, Skel } from '../ui';
 import { EDGE_COLOR, type EndRef, type FlowNode, type MoneyEdge } from './graph';
@@ -16,32 +24,51 @@ export type FlowSelection = { type: 'node'; node: FlowNode } | { type: 'edge'; e
 
 const LINES_LIMIT = 300;
 
-function endParams(prefix: 'source' | 'target', end: EndRef, params: URLSearchParams) {
-  if (end.kind === 'cluster') params.set('entityIds', end.entityIds.join(','));
-  else {
-    params.set(`${prefix}Kind`, end.kind);
-    params.set(`${prefix}Id`, end.id);
-  }
+function endFields(prefix: 'source' | 'target', end: EndRef, body: FlowLinesBody) {
+  if (end.kind === 'cluster') body.entityIds = end.entityIds;
+  else if (prefix === 'source') Object.assign(body, { sourceKind: end.kind, sourceId: end.id });
+  else Object.assign(body, { targetKind: end.kind, targetId: end.id });
 }
 
-/** Caminho da API com as linhas da seleção. */
-function linesPath(selection: FlowSelection, base: { from: string; to: string; caixaIds: string[] }) {
-  const params = new URLSearchParams({ from: base.from, to: base.to, limit: String(LINES_LIMIT) });
-  if (base.caixaIds.length) params.set('caixaIds', base.caixaIds.join(','));
+/** Corpo do `POST /api/flow/lines` com as linhas da seleção: os ids de um grupo vão no JSON, não na URL (tarefa 171). */
+function linesBody(selection: FlowSelection, base: { from: string; to: string; caixaIds: string[] }): FlowLinesBody {
+  const body: FlowLinesBody = { from: base.from, to: base.to, caixaIds: base.caixaIds, limit: LINES_LIMIT };
   if (selection.type === 'node') {
     const node = selection.node;
-    if (node.type === 'cluster') params.set('entityIds', node.data.entityIds.join(','));
-    else {
-      params.set('nodeKind', node.type === 'caixa' ? 'caixa' : 'entity');
-      params.set('nodeId', node.data.ref.id);
-    }
+    if (node.type === 'cluster') body.entityIds = node.data.entityIds;
+    else Object.assign(body, { nodeKind: node.type === 'caixa' ? 'caixa' : 'entity', nodeId: node.data.ref.id });
   } else {
     const data = selection.edge.data!;
-    params.set('edgeKind', data.kind);
-    endParams('source', data.source, params);
-    endParams('target', data.target, params);
+    body.edgeKind = data.kind;
+    endFields('source', data.source, body);
+    endFields('target', data.target, body);
   }
-  return `/api/flow/lines?${params}`;
+  return body;
+}
+
+/** As linhas da seleção (null = nada a buscar); a resposta de uma seleção antiga não pinta a atual. */
+function useFlowLines(body: FlowLinesBody | null) {
+  const key = body ? JSON.stringify(body) : null;
+  const [data, setData] = useState<FlowLineDto[] | undefined>(undefined);
+  const [error, setError] = useState<ApiError | null>(null);
+  const latest = useRef(key);
+  latest.current = key;
+  const load = useCallback(async () => {
+    if (!key) return;
+    try {
+      const value = await api.post<FlowLineDto[]>('/api/flow/lines', JSON.parse(key));
+      if (latest.current === key) {
+        setData(value);
+        setError(null);
+      }
+    } catch (err) {
+      if (latest.current === key) setError(err instanceof ApiError ? err : new ApiError(0, 'unknown', String(err)));
+    }
+  }, [key]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  return { data, error, reload: load };
 }
 
 export function FlowDrawer({
@@ -57,7 +84,10 @@ export function FlowDrawer({
   onFocus: (nodeId: string) => void;
   onExpand: (groupId: string) => void;
 }) {
-  const lines = useApi<FlowLineDto[]>(selection ? linesPath(selection, base) : null);
+  const request = selection ? linesBody(selection, base) : null;
+  // Grupo acima do teto da API: a gaveta avisa em vez de pedir (tarefa 171).
+  const tooLarge = (request?.entityIds?.length ?? 0) > FLOW_LINES_MAX_ENTITIES;
+  const lines = useFlowLines(tooLarge ? null : request);
   if (!selection) return null;
 
   const head = (icon: ReactNode, title: string) => (
@@ -203,7 +233,9 @@ export function FlowDrawer({
         {body}
         <div className="sec">
           <p className="eyebrow">{t.flow.lines}</p>
-          {lines.error ? (
+          {tooLarge ? (
+            <p className="hint">{t.flow.groupTooLarge(FLOW_LINES_MAX_ENTITIES)}</p>
+          ) : lines.error ? (
             <LoadError error={lines.error} onRetry={() => void lines.reload()} />
           ) : !lines.data ? (
             <div className="grid gap-2">
@@ -220,7 +252,7 @@ export function FlowDrawer({
               ))}
             </ul>
           )}
-          {lines.data && lines.data.length >= LINES_LIMIT && <p className="hint">{t.flow.linesMore(LINES_LIMIT)}</p>}
+          {!tooLarge && lines.data && lines.data.length >= LINES_LIMIT && <p className="hint">{t.flow.linesMore(LINES_LIMIT)}</p>}
         </div>
       </div>
     </aside>

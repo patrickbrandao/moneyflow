@@ -37,16 +37,20 @@ const u64 = (buf: Buffer, at: number) => {
   return Number(value);
 };
 
-/** Extrai as entradas cujo nome passa no filtro, com a soma limitada a `maxBytes`. */
-export function unzipLimited(body: Buffer, accept: (name: string) => boolean, maxBytes: number): Record<string, Uint8Array> {
-  const read = <T>(fn: () => T): T => {
-    try {
-      return fn();
-    } catch (error) {
-      if (error instanceof UnzipInvalid) throw error;
-      throw new UnzipInvalid(error instanceof Error ? error.message : 'zip inválido');
-    }
-  };
+type ZipEntry = { name: string; method: number; size: number; original: number; local: number };
+
+const guarded = <T>(fn: () => T): T => {
+  try {
+    return fn();
+  } catch (error) {
+    if (error instanceof UnzipInvalid) throw error;
+    throw new UnzipInvalid(error instanceof Error ? error.message : 'zip inválido');
+  }
+};
+
+/** As entradas do diretório central (sem ler os dados). */
+function centralDirectory(body: Buffer): ZipEntry[] {
+  const read = guarded;
 
   // Fim do diretório central: nos últimos 22 + 65535 bytes (o comentário do zip vai até 64 KB).
   let eocd = body.length - 22;
@@ -64,72 +68,109 @@ export function unzipLimited(body: Buffer, accept: (name: string) => boolean, ma
     });
   }
 
-  const out: Record<string, Uint8Array> = {};
-  let total = 0;
+  const entries: ZipEntry[] = [];
   let at = offset;
   for (let i = 0; i < count; i += 1) {
-    const entry = read(() => {
-      if (body.readUInt32LE(at) !== CENTRAL) throw new UnzipInvalid('entrada do diretório inválida');
-      const flags = body.readUInt16LE(at + 8);
-      const method = body.readUInt16LE(at + 10);
-      let size = body.readUInt32LE(at + 20);
-      let original = body.readUInt32LE(at + 24);
-      const nameLength = body.readUInt16LE(at + 28);
-      const extraLength = body.readUInt16LE(at + 30);
-      const commentLength = body.readUInt16LE(at + 32);
-      let local = body.readUInt32LE(at + 42);
-      const nameEnd = at + 46 + nameLength;
-      if (nameEnd > body.length) throw new UnzipInvalid('nome fora do arquivo');
-      const name = body.subarray(at + 46, nameEnd).toString(flags & 0x800 ? 'utf8' : 'latin1');
-      // Extra zip64 (id 1): os campos que estão em 0xFFFFFFFF, nesta ordem.
-      for (let x = nameEnd; x + 4 <= nameEnd + extraLength; ) {
-        const id = body.readUInt16LE(x);
-        const length = body.readUInt16LE(x + 2);
-        if (id === 1) {
-          let y = x + 4;
-          if (original === MAX32) {
-            original = u64(body, y);
-            y += 8;
+    entries.push(
+      read(() => {
+        if (body.readUInt32LE(at) !== CENTRAL) throw new UnzipInvalid('entrada do diretório inválida');
+        const flags = body.readUInt16LE(at + 8);
+        const method = body.readUInt16LE(at + 10);
+        let size = body.readUInt32LE(at + 20);
+        let original = body.readUInt32LE(at + 24);
+        const nameLength = body.readUInt16LE(at + 28);
+        const extraLength = body.readUInt16LE(at + 30);
+        const commentLength = body.readUInt16LE(at + 32);
+        let local = body.readUInt32LE(at + 42);
+        const nameEnd = at + 46 + nameLength;
+        if (nameEnd > body.length) throw new UnzipInvalid('nome fora do arquivo');
+        const name = body.subarray(at + 46, nameEnd).toString(flags & 0x800 ? 'utf8' : 'latin1');
+        // Extra zip64 (id 1): os campos que estão em 0xFFFFFFFF, nesta ordem.
+        for (let x = nameEnd; x + 4 <= nameEnd + extraLength; ) {
+          const id = body.readUInt16LE(x);
+          const length = body.readUInt16LE(x + 2);
+          if (id === 1) {
+            let y = x + 4;
+            if (original === MAX32) {
+              original = u64(body, y);
+              y += 8;
+            }
+            if (size === MAX32) {
+              size = u64(body, y);
+              y += 8;
+            }
+            if (local === MAX32) local = u64(body, y);
           }
-          if (size === MAX32) {
-            size = u64(body, y);
-            y += 8;
-          }
-          if (local === MAX32) local = u64(body, y);
+          x += 4 + length;
         }
-        x += 4 + length;
-      }
-      at = nameEnd + extraLength + commentLength;
-      return { name, method, size, original, local };
-    });
-    if (!accept(entry.name)) continue;
-    const remaining = maxBytes - total;
-    // O declarado já passa do teto: recusa sem ler nada.
-    if (entry.original > remaining) throw new UnzipTooLarge();
-    const data = read(() => {
-      if (body.readUInt32LE(entry.local) !== LOCAL) throw new UnzipInvalid('cabeçalho local inválido');
-      const start = entry.local + 30 + body.readUInt16LE(entry.local + 26) + body.readUInt16LE(entry.local + 28);
-      if (start + entry.size > body.length) throw new UnzipInvalid('dados fora do arquivo');
-      return body.subarray(start, start + entry.size);
-    });
+        at = nameEnd + extraLength + commentLength;
+        return { name, method, size, original, local };
+      }),
+    );
+  }
+  return entries;
+}
+
+/** Os bytes de uma entrada, no máximo `maxBytes` (contados no inflate). */
+function extractEntry(body: Buffer, entry: ZipEntry, maxBytes: number): Uint8Array {
+  // O declarado já passa do teto: recusa sem ler nada.
+  if (entry.original > maxBytes) throw new UnzipTooLarge();
+  const data = guarded(() => {
+    if (body.readUInt32LE(entry.local) !== LOCAL) throw new UnzipInvalid('cabeçalho local inválido');
+    const start = entry.local + 30 + body.readUInt16LE(entry.local + 26) + body.readUInt16LE(entry.local + 28);
+    if (start + entry.size > body.length) throw new UnzipInvalid('dados fora do arquivo');
+    return body.subarray(start, start + entry.size);
+  });
+  if (entry.method === 0) {
+    if (data.length > maxBytes) throw new UnzipTooLarge();
+    // Sem compressão: a fatia do próprio upload, sem cópia.
+    return data;
+  }
+  if (entry.method === 8) {
     let content: Uint8Array;
-    if (entry.method === 0) {
-      if (data.length > remaining) throw new UnzipTooLarge();
-      content = new Uint8Array(data);
-    } else if (entry.method === 8) {
-      try {
-        // Conta os bytes de verdade: o inflate para ao passar do que resta do teto.
-        content = inflateRawSync(data, { maxOutputLength: Math.max(1, remaining) });
-      } catch (error) {
-        if ((error as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE') throw new UnzipTooLarge();
-        throw new UnzipInvalid(error instanceof Error ? error.message : 'deflate inválido');
-      }
-      if (content.length > remaining) throw new UnzipTooLarge();
-    } else {
-      throw new UnzipInvalid(`compressão ${entry.method} não suportada`);
+    try {
+      // Conta os bytes de verdade: o inflate para ao passar do teto.
+      content = inflateRawSync(data, { maxOutputLength: Math.max(1, maxBytes) });
+    } catch (error) {
+      if ((error as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE') throw new UnzipTooLarge();
+      throw new UnzipInvalid(error instanceof Error ? error.message : 'deflate inválido');
     }
-    total += content.length;
-    out[entry.name] = content;
+    if (content.length > maxBytes) throw new UnzipTooLarge();
+    return content;
+  }
+  throw new UnzipInvalid(`compressão ${entry.method} não suportada`);
+}
+
+/** Extrai as entradas cujo nome passa no filtro, com a soma limitada a `maxBytes`. */
+export function unzipLimited(body: Buffer, accept: (name: string) => boolean, maxBytes: number): Record<string, Uint8Array> {
+  const out: Record<string, Uint8Array> = {};
+  let total = 0;
+  for (const entry of centralDirectory(body)) {
+    if (!accept(entry.name)) continue;
+    const content = extractEntry(body, entry, maxBytes - total);
+    // Sem compressão, a fatia é copiada: o resultado não segura o upload inteiro.
+    const owned = entry.method === 0 ? new Uint8Array(content) : content;
+    total += owned.length;
+    out[entry.name] = owned;
   }
   return out;
 }
+
+/**
+ * Leitor sob demanda das entradas aceitas (os anexos do JSON completo, tarefa 077): o índice vem do
+ * diretório central, e cada entrada é extraída só quando pedida, no máximo `maxBytes` por entrada.
+ * Uma entrada sem compressão sai como fatia do upload, sem cópia. Nome ausente: null.
+ */
+export function zipEntryReader(body: Buffer, accept: (name: string) => boolean, maxBytes: number) {
+  const index = new Map<string, ZipEntry>();
+  for (const entry of centralDirectory(body)) if (accept(entry.name) && !index.has(entry.name)) index.set(entry.name, entry);
+  return {
+    size: index.size,
+    read(name: string): Uint8Array | null {
+      const entry = index.get(name);
+      return entry ? extractEntry(body, entry, maxBytes) : null;
+    },
+  };
+}
+
+export type ZipEntryReader = ReturnType<typeof zipEntryReader>;

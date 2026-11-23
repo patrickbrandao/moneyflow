@@ -6,7 +6,13 @@
  */
 
 export const BACKUP_FORMAT = 'moneyflow-backup';
-export const BACKUP_FORMAT_VERSION = 1;
+/**
+ * Versão do formato. 2 (tarefa 077): no JSON completo, o conteúdo dos anexos sai
+ * do JSON para entradas próprias do .zip (`attachments/<id>`, a linha leva
+ * `content_entry`). A importação aceita a 1 (conteúdo em hex no JSON); uma
+ * versão anterior do MoneyFlow recusa a 2 com "versão mais nova".
+ */
+export const BACKUP_FORMAT_VERSION = 2;
 
 /** Recursos com exportação e importação próprias (telas de Administração → Backup e restauração). */
 export const BACKUP_RESOURCES = ['categories', 'entities', 'caixas', 'ai-providers', 'users'] as const;

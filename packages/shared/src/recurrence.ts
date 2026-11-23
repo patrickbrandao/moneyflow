@@ -38,17 +38,21 @@ export function occurrenceDueDate(rule: RecurrenceRule, n: number): string {
 
 /**
  * Competência da ocorrência n, a partir da competência de uma ocorrência
- * conhecida (o "modelo" da série): mesmo deslocamento do calendário.
+ * conhecida (o "modelo" da série): mesmo deslocamento do calendário. Na série
+ * mensal ou anual, `competenceAnchorDay` é o dia da competência da 1ª
+ * ocorrência: sem ele, o modelo de fevereiro (dia 28) prenderia as seguintes no
+ * dia 28 (tarefa 170).
  */
 export function occurrenceCompetenceDate(
   rule: RecurrenceRule,
   template: { occurrence: number; competenceDate: string },
   n: number,
+  competenceAnchorDay?: number,
 ): string {
   if (rule.frequency === 'weekly') {
     return addDays(template.competenceDate, (n - template.occurrence) * 7 * rule.intervalCount);
   }
-  return addMonths(template.competenceDate, (n - template.occurrence) * monthsStep(rule));
+  return addMonths(template.competenceDate, (n - template.occurrence) * monthsStep(rule), competenceAnchorDay);
 }
 
 /** A ocorrência n existe na regra (respeita fim por data ou por total de parcelas)? */
