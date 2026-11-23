@@ -1,6 +1,7 @@
 import {
   type AgentToolInput,
   addDays,
+  DB_CONSTRAINT_MESSAGES,
   diffDays,
   diffRows,
   formatBRL,
@@ -30,7 +31,7 @@ import { search } from '../services/overview';
 import * as rec from '../services/reconciliation';
 import * as reports from '../services/reports';
 import * as series from '../services/series';
-import { createSettlement, reverseSettlement } from '../services/settlements';
+import { createSettlement, reversalInfo, reverseSettlement, setReversalDate } from '../services/settlements';
 import { accountStatement } from '../services/statement';
 import * as statements from '../services/statements';
 import * as titles from '../services/titles';
@@ -657,6 +658,12 @@ export const TOOL_HANDLERS: Handlers = {
       const warnings = [
         'Cada perna com conta recebe o movimento oposto na data do estorno; o movimento original continua no extrato da conta.',
       ];
+      // Refazer a baixa pede o estorno na data dela (tarefa 045): com outra data, o original e o estorno valem juntos.
+      if (reversedOn !== leg.settledOn && leg.financialAccountId) {
+        warnings.push(
+          `${t.settlement.reverseOtherDate(formatDate(leg.settledOn), formatDate(reversedOn))} ${t.settlement.reverseRedoHint(formatDate(leg.settledOn))}`,
+        );
+      }
       for (const line of matched.rows)
         warnings.push(
           `A linha do extrato ${lineLabel({ postedOn: line.posted_on, description: line.description, amountCents: Number(line.amount_cents) })} continua conciliada com o movimento desta baixa: desfaça antes com unmatch_statement_line.`,
@@ -670,6 +677,43 @@ export const TOOL_HANDLERS: Handlers = {
       };
     },
     run: (ctx, i) => reverseSettlement(ctx, i.settlementId, { reason: i.reason, reversedOn: i.reversedOn, undoTransfer: i.undoTransfer }),
+  },
+  set_reversal_date: {
+    preview: async (ctx, i) => {
+      const info = await reversalInfo(ctx, i.settlementId);
+      const title = await titles.getTitle(ctx, info.titleId);
+      if (!title.canWrite) throw forbidden(t.errors.readOnly);
+      if (!info.reversedAt) throw unprocessable(t.errors.settlementNotReversed, 'settlement_not_reversed');
+      if (diffDays(info.settledOn, i.reversedOn) < 0) throw unprocessable(t.errors.reversalBeforeSettlement);
+      const moving = info.legs.filter((l) => l.movementId);
+      if (moving.some((l) => !l.canWrite)) throw forbidden(t.errors.reversalDateOtherCaixa);
+      if (moving.some((l) => l.reconciled)) {
+        throw unprocessable(DB_CONSTRAINT_MESSAGES.settlements_reversal_reconciled_check!, 'settlements_reversal_reconciled_check');
+      }
+      const rows: PreviewRow[] = [{ label: 'Data da baixa', after: formatDate(info.settledOn) }];
+      for (const leg of info.legs) {
+        const where = [leg.caixaName, leg.accountName ?? (leg.financialAccountId ? null : 'conta a definir')].filter(Boolean).join(' · ');
+        rows.push(
+          leg.occurredOn
+            ? { label: `Estorno em ${where}`, before: formatDate(leg.occurredOn), after: formatDate(i.reversedOn) }
+            : { label: `Perna em ${where}`, after: t.settlement.reversalNoMovement },
+        );
+      }
+      const warnings: string[] = [];
+      if (moving.length === 0) warnings.push('Nenhuma perna tem conta: não há movimento de estorno a mudar.');
+      else if (moving.every((l) => l.occurredOn === i.reversedOn)) warnings.push('O estorno já está nessa data: nada muda.');
+      if (i.reversedOn !== info.settledOn)
+        warnings.push(t.settlement.reverseOtherDate(formatDate(info.settledOn), formatDate(i.reversedOn)));
+      warnings.push('A divergência dos lotes de extrato entre a data antiga e a nova muda junto.');
+      return {
+        title: t.settlement.reversalDate,
+        summary: `${title.description} (${title.entityName})`,
+        action: 'update',
+        rows,
+        warnings,
+      };
+    },
+    run: (ctx, i) => setReversalDate(ctx, i.settlementId, { reversedOn: i.reversedOn }),
   },
   create_transfer: {
     preview: async (ctx, i) => {

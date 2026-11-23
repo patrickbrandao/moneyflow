@@ -8,6 +8,7 @@ import {
   seriesUpdateInput,
   settlementAccountInput,
   settlementCreateInput,
+  settlementReversalDateInput,
   settlementReverseInput,
   titleCreateInput,
   titleDeleteQuery,
@@ -53,6 +54,11 @@ export async function titleRoutes(app: FastifyInstance) {
     settlements.setSettlementAccount(r.ctx, id(r), parse(settlementAccountInput, r.body)),
   );
   app.post('/api/settlements/:id/reverse', (r: Req) => settlements.reverseSettlement(r.ctx, id(r), parse(settlementReverseInput, r.body)));
+  // Data do estorno (tarefa 045): as pernas e os movimentos de estorno, e a correção.
+  app.get('/api/settlements/:id/reversal', (r: Req) => settlements.reversalInfo(r.ctx, id(r)));
+  app.post('/api/settlements/:id/reversal-date', (r: Req) =>
+    settlements.setReversalDate(r.ctx, id(r), parse(settlementReversalDateInput, r.body)),
+  );
 
   app.get('/api/transfers', (r: Req) => transfers.listTransfers(r.ctx, parse(transferListQuery, r.query)));
   app.post('/api/transfers', (r: Req) => transfers.createTransfer(r.ctx, parse(transferCreateInput, r.body)));

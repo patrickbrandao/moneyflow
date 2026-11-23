@@ -28,6 +28,7 @@ import {
 } from '@moneyflow/shared';
 import { and, desc, eq, gt, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { z } from 'zod';
+import type { Access } from '../authz/access';
 import type { ServiceContext } from '../context';
 import { forbidden, notFound, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
@@ -199,14 +200,20 @@ export async function lockTitlePair(tx: Executor, id: string) {
   return { title, mirror };
 }
 
-export async function listSettlements(db: Executor, titleId: string): Promise<SettlementRow[]> {
+export async function listSettlements(db: Executor, titleId: string, access: Access): Promise<SettlementRow[]> {
   const result = await db.execute(sql`
     SELECT s.id, s.title_id, s.settled_on, s.amount_cents, s.interest_cents, s.fine_cents, s.discount_cents,
            (s.amount_cents + s.interest_cents + s.fine_cents - s.discount_cents)::bigint AS cash_cents,
            s.financial_account_id, a.name AS financial_account_name, s.mirror_settlement_id,
-           tr.id AS transfer_id, oa.name AS transfer_other_account_name,
-           s.notes, s.reversed_at, s.reversal_reason, s.created_at
+           tr.id AS transfer_id, oa.name AS transfer_other_account_name, oa.caixa_id AS transfer_other_caixa_id,
+           s.notes, s.reversed_at, s.reversal_reason, s.created_at,
+           -- O movimento de estorno desta perna: o de sinal oposto ao da baixa (tarefa 045).
+           (SELECT m.occurred_on FROM movements m
+             WHERE s.reversed_at IS NOT NULL AND m.settlement_id = s.id
+               AND sign(m.amount_cents) <> CASE st.direction WHEN 'payable' THEN -1 ELSE 1 END
+             LIMIT 1) AS reversal_on
       FROM settlements s
+      JOIN titles st ON st.id = s.title_id
       LEFT JOIN financial_accounts a ON a.id = s.financial_account_id
       LEFT JOIN transfers tr ON tr.settlement_id = s.id
       LEFT JOIN financial_accounts oa
@@ -214,8 +221,16 @@ export async function listSettlements(db: Executor, titleId: string): Promise<Se
      WHERE s.title_id = ${titleId}
      ORDER BY s.settled_on, s.created_at`);
   return result.rows.map((row) => {
-    const r = camel<SettlementRow & { reversedAt: Date | null; createdAt: Date }>(row);
-    return { ...r, reversedAt: r.reversedAt ? new Date(r.reversedAt).toISOString() : null, createdAt: new Date(r.createdAt).toISOString() };
+    const { transferOtherCaixaId, ...r } = camel<
+      SettlementRow & { reversedAt: Date | null; createdAt: Date; transferOtherCaixaId: string | null }
+    >(row);
+    return {
+      ...r,
+      // Desfazer a transferência no estorno pede escrita na caixa da outra conta (tarefa 081).
+      transferUndoAllowed: !transferOtherCaixaId || access.canWrite(transferOtherCaixaId),
+      reversedAt: r.reversedAt ? new Date(r.reversedAt).toISOString() : null,
+      createdAt: new Date(r.createdAt).toISOString(),
+    };
   });
 }
 
@@ -256,7 +271,7 @@ export async function getTitle(ctx: ServiceContext, id: string): Promise<TitleDe
     ...row,
     ...plannedOf(camel<Record<string, unknown>>(planned.rows[0]!)),
     canWrite: ctx.access.canWrite(row.caixaId),
-    settlements: await listSettlements(ctx.db, id),
+    settlements: await listSettlements(ctx.db, id, ctx.access),
     rule,
     mirror,
   };

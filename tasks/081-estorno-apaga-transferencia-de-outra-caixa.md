@@ -86,3 +86,8 @@ Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o ap
 - Decisão: a caixa de seleção "desfazer transferência" do modal de estorno continua marcada por padrão; quem não edita a outra caixa recebe a mensagem e desmarca. A baixa não traz à tela a caixa da outra conta, e mudar isso sairia do escopo.
 - Teste: `apps/server/test/titles.test.ts`, no `describe('baixas (spec 005)')`, "sem escrita na caixa da outra conta, o estorno não desfaz a transferência (tarefa 081)" (403 com a transferência e o saldo da conta A intactos; sem desfazer, 200).
 - Verificação: `pnpm verify:quick` (nível rápido).
+
+### Complemento (revisão de 2026-11-22, frente P2a)
+
+- A decisão de deixar a caixa marcada mudou: `SettlementRow.transferUndoAllowed` (`listSettlements` em `apps/server/src/services/titles.ts`, pela escrita na caixa da outra conta da transferência) e, no `ReverseModal` (`apps/web/src/components/titles/SettlementModal.tsx`), "desfazer a transferência" vem desmarcada e travada para quem não edita a outra caixa, com a explicação `t.settlement.undoTransferLocked`; o pedido sai com `undoTransfer: false`. `docs/005` atualizada.
+- Teste: o valor do campo sai do mesmo `Access` do 403 já testado em `apps/server/test/titles.test.ts`; a tela fica para o e2e. Verificação: `pnpm verify:quick`.

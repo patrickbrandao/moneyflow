@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { addDays, nfeAccessKeyDv, t, todayIso } from '@moneyflow/shared';
+import { addDays, formatBRL, formatDate, nfeAccessKeyDv, t, todayIso } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import pino from 'pino';
@@ -527,11 +527,19 @@ describe('importação a partir de anexo', () => {
     const oldKey = /<chNFe>([0-9A-Z]{44})<\/chNFe>/.exec(xml)![1]!;
     const base = `${oldKey.slice(0, 35)}${String(randomInt(10_000_000, 99_999_999))}`;
     const key = `${base}${nfeAccessKeyDv(base)}`;
-    const nfe = Buffer.from(xml.replaceAll(oldKey, key).replace(/<cNF>\d{8}<\/cNF>/, `<cNF>${key.slice(35, 43)}</cNF>`));
+    // Emitida à noite e com o horário em UTC (01h30 do dia 6 = 22h30 do dia 5 em São Paulo): a data é a de São Paulo,
+    // e não o corte do texto (tarefa 178).
+    const nfe = Buffer.from(
+      xml
+        .replaceAll(oldKey, key)
+        .replace(/<cNF>\d{8}<\/cNF>/, `<cNF>${key.slice(35, 43)}</cNF>`)
+        .replace('<dhEmi>2026-10-05T14:30:00-03:00</dhEmi>', '<dhEmi>2026-10-06T01:30:00+00:00</dhEmi>'),
+    );
     const imported = await approved(adminSession, 'import_nfe', (ids) => ({ attachmentId: ids[0] }), {
       files: [{ name: 'nota.xml', mime: 'application/xml', data: nfe }],
     });
     expect(rowsOf(imported.preview)).toMatchObject({ Valor: 'R$ 433,09', Itens: '3' });
+    expect(rowsOf(imported.preview)['NF-e']).toContain('05/10/2026');
     expect(imported.preview.warnings).toEqual(['O título não é criado aqui: use create_title com o nfeDocumentId devolvido.']);
     expect(imported.value).toMatchObject({ accessKey: key, alreadyImported: false, totalCents: 43_309 });
     expect(imported.value.suggestedTitle).toMatchObject({
@@ -539,6 +547,7 @@ describe('importação a partir de anexo', () => {
       entityId: imported.value.issuer.entityId,
       amountCents: 43_309,
       nfeDocumentId: imported.value.nfeDocumentId,
+      competenceDate: '2026-10-05',
     });
     // Viewer não cadastra (a NF-e cria a entidade do emitente).
     const denied = await call(viewerSession, 'import_nfe', (ids) => ({ attachmentId: ids[0] }), {
@@ -1117,6 +1126,91 @@ describe('títulos e baixas', () => {
       expect((await call(viewerSession, name, { titleId: other.id })).error, name).toBe('Você só tem leitura nesta caixa.');
     }
     // Uma dúzia de conversas com o agente: folga sobre os 30 s padrão.
+  }, 90_000);
+
+  it('as prévias recusam antes do cartão: conta com saldo e o par pelo espelho sem escrita no original (tarefas 079 e 080)', async () => {
+    // Conta com movimento e saldo: arquivar é recusado já na prévia, com o saldo.
+    const account = await admin.post(`/api/caixas/${s.caixaA.id}/accounts`, {
+      kind: 'cash',
+      name: `Cofre prévia ${uid()}`,
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    await admin.post(`/api/accounts/${account.id}/adjustments`, { occurredOn: '2026-03-01', amountCents: 1_500, description: 'Sobra' });
+    const refused = await call(adminSession, 'archive_account', { accountId: account.id }, { approve: false });
+    expect(refused.preview).toBeUndefined();
+    expect(refused.error).toBe(t.errors.accountArchiveBalance(formatBRL(1_500)));
+    // Zerada: a prévia sai.
+    await admin.post(`/api/accounts/${account.id}/adjustments`, { occurredOn: '2026-03-02', amountCents: -1_500, description: 'Saque' });
+    expect((await call(adminSession, 'archive_account', { accountId: account.id }, { approve: false })).preview).toBeTruthy();
+
+    // Pelo espelho, quem edita só a caixa B não cancela, arquiva nem exclui o par: a prévia já recusa.
+    const pair = await newTitle({ entityId: s.holderB.id, mirrorCaixaId: undefined, description: `Par prévia ${uid()}` });
+    expect(pair.mirrorTitleId).toBeTruthy();
+    const editorB = await userSession(h);
+    await admin.post(`/api/caixas/${s.caixaB.id}/members`, { userId: editorB.id, role: 'editor' });
+    for (const name of ['cancel_title', 'archive_title', 'delete_title']) {
+      const out = await call(editorB, name, { titleId: pair.mirrorTitleId }, { approve: false });
+      expect(out.preview, name).toBeUndefined();
+      expect(out.error, name).toBe(t.errors.mirrorPairOriginal);
+    }
+    expect(await admin.get(`/api/titles/${pair.id}`)).toMatchObject({ status: 'open', archivedAt: null });
+  });
+
+  it('estorno na data da baixa e set_reversal_date: prévia, execução com o ator agente, recusas e o /mcp (tarefa 045)', async () => {
+    const today = todayIso();
+    const title = await newTitle({ amountCents: 8_765 });
+    const paid = await admin.post(`/api/titles/${title.id}/settlements`, {
+      settledOn: '2026-09-10',
+      amountCents: 8_765,
+      financialAccountId: s.accountA.id,
+    });
+    const settlementId = paid.settlements[0].id;
+
+    // reverse_settlement sem a data: a prévia avisa que o estorno cai noutro dia e orienta a data da baixa.
+    const asked = await call(adminSession, 'reverse_settlement', { settlementId, reason: 'Refazer' }, { approve: false });
+    expect(asked.preview.warnings.join(' ')).toContain(t.settlement.reverseOtherDate(formatDate('2026-09-10'), formatDate(today)));
+    expect(asked.preview.warnings.join(' ')).toContain(t.settlement.reverseRedoHint(formatDate('2026-09-10')));
+    await admin.post(`/api/settlements/${settlementId}/reverse`, { reason: 'Refazer' });
+
+    // Recusas pela prévia: antes da baixa e o leitor.
+    expect((await call(adminSession, 'set_reversal_date', { settlementId, reversedOn: '2026-09-09' })).error).toBe(
+      t.errors.reversalBeforeSettlement,
+    );
+    expect((await call(viewerSession, 'set_reversal_date', { settlementId, reversedOn: '2026-09-10' })).error).toBe(
+      'Você só tem leitura nesta caixa.',
+    );
+
+    const fixed = await approved(adminSession, 'set_reversal_date', { settlementId, reversedOn: '2026-09-10' });
+    expect(fixed.preview).toMatchObject({ title: t.settlement.reversalDate, action: 'update' });
+    expect(rowsOf(fixed.preview)).toMatchObject({
+      'Data da baixa': '10/09/2026',
+      [`Estorno em ${s.caixaA.name} · Banco A`]: `${formatDate(today)} → 10/09/2026`,
+    });
+    expect(fixed.value.settlements.find((x: any) => x.id === settlementId).reversalOn).toBe('2026-09-10');
+    const [leg] = (await admin.get(`/api/settlements/${settlementId}/reversal`)).legs;
+    expect(await auditActor('movements', leg.movementId)).toMatchObject({ actor_kind: 'agent', agent_run_id: fixed.runId });
+
+    // A mesma data de novo: a prévia avisa que nada muda.
+    const same = await call(adminSession, 'set_reversal_date', { settlementId, reversedOn: '2026-09-10' }, { approve: false });
+    expect(same.preview.warnings).toContain('O estorno já está nessa data: nada muda.');
+
+    // /mcp: pelo token do admin, sem cartão.
+    const token = (await admin.post('/api/account/api-tokens', { name: `MCP estorno ${uid()}`, expiresInDays: 1 })).token;
+    const mcpClient = new Client({ name: 'teste-045', version: '1.0.0' });
+    await mcpClient.connect(
+      new StreamableHTTPClientTransport(new URL(`${await listenOnce()}/mcp`), {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      }),
+    );
+    try {
+      const viaMcp = await mcpClient.callTool({ name: 'set_reversal_date', arguments: { settlementId, reversedOn: '2026-09-11' } });
+      const text = (viaMcp.content as { text: string }[])[0]!.text;
+      expect(viaMcp.isError, text).toBeFalsy();
+      expect(JSON.parse(text).settlements.find((x: any) => x.id === settlementId).reversalOn).toBe('2026-09-11');
+    } finally {
+      await mcpClient.close();
+    }
   }, 90_000);
 });
 

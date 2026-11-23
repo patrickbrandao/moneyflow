@@ -285,10 +285,43 @@ export type SettlementRow = {
   mirrorSettlementId: string | null;
   transferId: string | null;
   transferOtherAccountName: string | null;
+  /** Quem estorna pode desfazer a transferência: edita as caixas das duas contas (tarefa 081). */
+  transferUndoAllowed: boolean;
   notes: string | null;
   reversedAt: string | null;
   reversalReason: string | null;
+  /** Data do movimento de estorno desta perna (nula sem conta ou sem estorno; tarefa 045). */
+  reversalOn: string | null;
   createdAt: string;
+};
+
+/** Uma perna da baixa estornada e o movimento de estorno dela (tarefa 045). */
+export type SettlementReversalLeg = {
+  settlementId: string;
+  titleId: string;
+  caixaId: string;
+  caixaName: string;
+  financialAccountId: string | null;
+  /** Nula quando quem pergunta não lê a caixa da perna. */
+  accountName: string | null;
+  /** Movimento de estorno: nulo sem conta. */
+  movementId: string | null;
+  occurredOn: string | null;
+  amountCents: number | null;
+  /** Conciliado com uma linha do extrato: a data não muda (desfaça a conciliação antes). */
+  reconciled: boolean;
+  canWrite: boolean;
+};
+
+/** A baixa estornada com as pernas, para corrigir a data do estorno (tarefa 045). */
+export type SettlementReversalInfo = {
+  settlementId: string;
+  titleId: string;
+  settledOn: string;
+  reversedAt: string | null;
+  legs: SettlementReversalLeg[];
+  /** Estornada, com algum movimento a mudar, todos em caixas que quem pergunta edita e nenhum conciliado. */
+  canChange: boolean;
 };
 
 export type RecurrenceRuleDto = {

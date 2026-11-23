@@ -6,6 +6,7 @@ import {
   formatDate,
   formatFileSize,
   formatMonth,
+  localDateOf,
   type OPERATION_TOOLS,
   type PreviewField,
   type PreviewRow,
@@ -122,6 +123,16 @@ async function writableTitle(ctx: ServiceContext, titleId: string) {
   const title = await titles.getTitle(ctx, titleId);
   if (!title.canWrite) throw forbidden(t.errors.readOnly);
   return title;
+}
+
+/**
+ * Pelo lado espelho, cancelar, arquivar e excluir mexem no original: o serviço pede escrita também na caixa dele
+ * (tarefa 079), e a prévia recusa do mesmo jeito, antes do cartão.
+ */
+function assertPairOwnerPreview(ctx: ServiceContext, title: { mirrorStatus: string | null; counterpartyCaixaId: string | null }) {
+  if (title.mirrorStatus !== null && title.counterpartyCaixaId && !ctx.access.canWrite(title.counterpartyCaixaId)) {
+    throw forbidden(t.errors.mirrorPairOriginal);
+  }
 }
 
 const titleLabel = (title: { description: string; entityName: string; amountCents: number; dueDate: string }) =>
@@ -697,7 +708,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
       const issuer = await ctx.db.execute<{ name: string }>(sql`SELECT name FROM entities WHERE document = ${nfe.issuer.document}`);
       const rows: PreviewRow[] = [
         { label: 'Arquivo', after: fileLabel(file) },
-        { label: 'NF-e', after: `nº ${nfe.number} série ${nfe.series} · ${formatDate(nfe.issuedAt.slice(0, 10))}` },
+        { label: 'NF-e', after: `nº ${nfe.number} série ${nfe.series} · ${formatDate(localDateOf(nfe.issuedAt))}` },
         { label: 'Emitente', after: `${nfe.issuer.name} (${issuer.rows[0] ? 'já cadastrado' : 'novo cadastro'})` },
         { label: 'Valor', after: formatBRL(nfe.totalCents) },
         { label: 'Itens', after: String(nfe.items.length) },
@@ -721,14 +732,16 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     run: async (ctx, i) => {
       const file = await toolAttachment(ctx, i.attachmentId);
       const result = await nfeEntry(ctx, { name: file.fileName, mime: file.mime, content: file.content });
-      const due = result.duplicates.find((d) => d.dueDate)?.dueDate ?? result.issuedAt.slice(0, 10);
+      // A data da emissão em São Paulo, e não a do ISO em UTC (a NF-e da noite cairia no dia seguinte; tarefa 178).
+      const issuedOn = localDateOf(result.issuedAt);
+      const due = result.duplicates.find((d) => d.dueDate)?.dueDate ?? issuedOn;
       return {
         ...result,
         suggestedTitle: {
           direction: 'payable',
           entityId: result.issuer.entityId,
           description: `NF-e ${result.number} — ${result.issuer.name}`.slice(0, 300),
-          competenceDate: result.issuedAt.slice(0, 10),
+          competenceDate: issuedOn,
           dueDate: due,
           amountCents: result.totalCents,
           nfeDocumentId: result.nfeDocumentId,
@@ -1030,12 +1043,28 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     preview: async (ctx, i) => {
       const account = await writableAccount(ctx, i.accountId);
       if (account.archivedAt) throw unprocessable(t.agents.errors.alreadyArchived, 'already_archived');
+      // Com movimentos ela é arquivada, e arquivar pede saldo zero (tarefa 080): a prévia recusa como o serviço.
+      const state = await ctx.db.execute<{ cents: string; used: boolean }>(sql`
+        SELECT b.balance_cents AS cents,
+               EXISTS (SELECT 1 FROM movements m WHERE m.financial_account_id = b.financial_account_id) AS used
+          FROM financial_account_balances b WHERE b.financial_account_id = ${i.accountId}`);
+      const cents = Number(state.rows[0]?.cents ?? 0);
+      if (cents !== 0 && state.rows[0]?.used) {
+        throw unprocessable(t.errors.accountArchiveBalance(formatBRL(cents)), 'account_archive_balance');
+      }
       return {
         title: 'Arquivar conta financeira',
         summary: (await nameOf(ctx, 'account', i.accountId)) ?? account.name,
         action: 'delete',
-        rows: [{ label: 'Tipo', after: ACCOUNT_KIND(account.kind) }],
-        warnings: ['Sem nenhum movimento, a conta é excluída em vez de arquivada.'],
+        rows: [{ label: 'Tipo', after: ACCOUNT_KIND(account.kind) }, ...(cents !== 0 ? [{ label: 'Saldo', after: formatBRL(cents) }] : [])],
+        warnings: [
+          'Sem nenhum movimento, a conta é excluída em vez de arquivada.',
+          ...(cents !== 0
+            ? [
+                `Com saldo de ${formatBRL(cents)}, ela só sai se puder ser excluída; com outros vínculos (extrato, títulos), zere o saldo antes.`,
+              ]
+            : []),
+        ],
       };
     },
     run: (ctx, i) => caixas.deleteAccount(ctx, i.accountId),
@@ -1114,6 +1143,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     preview: async (ctx, i) => {
       const title = await writableTitle(ctx, i.titleId);
       if (title.status === 'canceled') throw unprocessable(t.agents.errors.titleAlreadyCanceled, 'title_canceled');
+      assertPairOwnerPreview(ctx, title);
       return {
         title: 'Cancelar título',
         summary: titleLabel(title),
@@ -1132,6 +1162,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
       const title = await writableTitle(ctx, i.titleId);
       if (title.cardInvoiceId) throw unprocessable(t.errors.cardInvoiceTitleLocked);
       if (title.archivedAt) throw unprocessable(t.agents.errors.alreadyArchived, 'already_archived');
+      assertPairOwnerPreview(ctx, title);
       return {
         title: 'Arquivar título',
         summary: titleLabel(title),
@@ -1146,6 +1177,7 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     preview: async (ctx, i) => {
       const title = await writableTitle(ctx, i.titleId);
       if (title.cardInvoiceId) throw unprocessable(t.errors.cardInvoiceTitleLocked);
+      assertPairOwnerPreview(ctx, title);
       const series = Boolean(title.recurrenceRuleId && title.occurrence);
       const warnings: string[] = [];
       let outcome = 'Excluído';

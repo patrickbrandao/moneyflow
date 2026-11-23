@@ -1,4 +1,4 @@
-import { addDays, addMonths, todayIso } from '@moneyflow/shared';
+import { addDays, addMonths, t, todayIso } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MATERIALIZE_LOCK, materializeAll, materializeRule } from '../src/services/recurrence';
@@ -768,5 +768,138 @@ describe('busca de títulos (tarefa 147)', () => {
     expect((await ids(s.tag)).sort()).toEqual([byDescription.id, byEntity.id].sort());
     expect(await ids('nada-disso-aqui')).toEqual([]);
     expect((await admin.get(`/api/titles/totals?caixaId=${s.caixaA.id}&q=${encodeURIComponent(`ômega ${s.tag}`)}`)).count).toBe(1);
+  });
+});
+
+/** OFX mínimo de uma conta (SGML), para conciliar uma linha com um movimento. */
+function ofxOf(lines: { date: string; cents: number; memo: string }[]) {
+  const key = Math.random().toString(36).slice(2, 10);
+  const trn = lines
+    .map(
+      (l, i) =>
+        `<STMTTRN><TRNTYPE>${l.cents < 0 ? 'DEBIT' : 'CREDIT'}</TRNTYPE><DTPOSTED>${l.date.replaceAll('-', '')}120000</DTPOSTED>` +
+        `<TRNAMT>${(l.cents / 100).toFixed(2)}</TRNAMT><FITID>${key}-${i}</FITID><NAME>${l.memo}</NAME></STMTTRN>`,
+    )
+    .join('\n');
+  const dates = lines.map((l) => l.date.replaceAll('-', '')).sort();
+  return Buffer.from(`OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+
+<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>BRL</CURDEF>
+<BANKACCTFROM><BANKID>077</BANKID><ACCTID>9</ACCTID><ACCTTYPE>CHECKING</ACCTTYPE></BANKACCTFROM>
+<BANKTRANLIST><DTSTART>${dates[0]}</DTSTART><DTEND>${dates.at(-1)}</DTEND>
+${trn}
+</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`);
+}
+
+describe('data do estorno (tarefa 045)', () => {
+  it('muda as duas pernas com auditoria; recusa antes da baixa, mês fechado, estorno conciliado e quem não edita a outra caixa', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    // A pagar na A contra o titular da B: espelho aceito, baixa com as duas pernas com conta.
+    const title = await admin.post('/api/titles', { ...base(s), amountCents: 43_210, dueDate: '2026-10-15' });
+    expect(title.mirror).not.toBeNull();
+    const paid = await admin.post(`/api/titles/${title.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 43_210,
+      financialAccountId: s.accountA.id,
+      mirrorAccountId: s.accountB.id,
+    });
+    const settlementId = paid.settlements[0].id;
+    // Sem a data, o estorno cai hoje (o caso do agente que estornou para refazer a baixa).
+    const reversed = await admin.post(`/api/settlements/${settlementId}/reverse`, { reason: 'Refazer na outra conta' });
+    expect(reversed.settlements[0]).toMatchObject({ reversalOn: today });
+
+    const info = await admin.get(`/api/settlements/${settlementId}/reversal`);
+    expect(info).toMatchObject({ settlementId, titleId: title.id, settledOn: '2026-10-15', canChange: true });
+    expect(info.legs.map((l: any) => [l.caixaId, l.financialAccountId, l.occurredOn, l.amountCents, l.reconciled])).toEqual([
+      [s.caixaA.id, s.accountA.id, today, 43_210, false],
+      [s.caixaB.id, s.accountB.id, today, -43_210, false],
+    ]);
+    const post = (c: ReturnType<typeof client>, id: string, reversedOn: string) =>
+      c.raw('POST', `/api/settlements/${id}/reversal-date`, { reversedOn });
+    const refused = async (res: { statusCode: number; json: () => any }, status: number, code: string) => {
+      expect(res.statusCode).toBe(status);
+      expect(res.json().error.code).toBe(code);
+    };
+
+    // Antes da baixa e baixa sem estorno: recusados.
+    await refused(await post(admin, settlementId, '2026-10-14'), 422, 'unprocessable');
+    const active = await admin.post('/api/titles', { ...base(s), amountCents: 1_000, mirrorCaixaId: null });
+    const activePaid = await admin.post(`/api/titles/${active.id}/settlements`, {
+      settledOn: '2026-10-15',
+      amountCents: 1_000,
+      financialAccountId: s.accountA.id,
+    });
+    await refused(await post(admin, activePaid.settlements[0].id, '2026-10-15'), 422, 'settlement_not_reversed');
+
+    // Permissões: quem edita só a A não muda a perna da B; leitor e quem não vê a caixa também não.
+    const editor = await userSession(h);
+    await admin.put(`/api/users/${editor.id}/memberships`, {
+      memberships: [
+        { caixaId: s.caixaA.id, role: 'editor' },
+        { caixaId: s.caixaB.id, role: 'viewer' },
+      ],
+    });
+    const editorApi = client(h, editor.cookie);
+    expect((await editorApi.get(`/api/settlements/${settlementId}/reversal`)).canChange).toBe(false);
+    const other = await post(editorApi, settlementId, '2026-10-15');
+    expect(other.statusCode).toBe(403);
+    expect(other.json().error.message).toBe(t.errors.reversalDateOtherCaixa);
+    const viewer = await userSession(h);
+    await admin.put(`/api/users/${viewer.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
+    expect((await post(client(h, viewer.cookie), settlementId, '2026-10-15')).statusCode).toBe(403);
+    const outsider = await userSession(h);
+    expect((await post(client(h, outsider.cookie), settlementId, '2026-10-15')).statusCode).toBe(404);
+
+    // Pela perna do espelho: as duas mudam para a data da baixa, com o ator na auditoria.
+    const moved = await admin.post(`/api/settlements/${info.legs[1].settlementId}/reversal-date`, { reversedOn: '2026-10-15' });
+    expect(moved.id).toBe(title.mirrorTitleId);
+    const after = await admin.get(`/api/settlements/${settlementId}/reversal`);
+    expect(after.legs.map((l: any) => l.occurredOn)).toEqual(['2026-10-15', '2026-10-15']);
+    for (const leg of after.legs) {
+      const audit = await h.db.execute<{ actor_kind: string; user_id: string | null; changed: string[] | null }>(sql`
+        SELECT actor_kind, user_id, changed_columns AS changed FROM audit_log
+         WHERE table_name = 'movements' AND record_id = ${leg.movementId} ORDER BY id DESC LIMIT 1`);
+      expect(audit.rows[0]).toMatchObject({ actor_kind: 'human', user_id: session.id });
+      expect(audit.rows[0]!.changed).toContain('occurred_on');
+    }
+    const statementA = await admin.get(`/api/accounts/${s.accountA.id}/statement?from=2026-10-01&to=2026-10-31`);
+    expect(statementA.rows.map((r: any) => [r.occurredOn, r.amountCents, r.isReversal])).toEqual([
+      ['2026-10-15', -43_210, false],
+      ['2026-10-15', 43_210, true],
+      ['2026-10-15', -1_000, false],
+    ]);
+
+    // Mês fechado na caixa do espelho (na data antiga): nenhuma perna muda.
+    await admin.post(`/api/caixas/${s.caixaB.id}/closings`, { month: '2026-10', force: true });
+    await refused(await post(admin, settlementId, '2026-11-01'), 422, 'period_closings_locked_check');
+    expect((await admin.get(`/api/settlements/${settlementId}/reversal`)).legs.map((l: any) => l.occurredOn)).toEqual([
+      '2026-10-15',
+      '2026-10-15',
+    ]);
+    await admin.del(`/api/caixas/${s.caixaB.id}/closings/2026-10-01`);
+
+    // Estorno conciliado com uma linha do extrato: só depois de desfazer a conciliação.
+    const imported = await h.app.inject({
+      method: 'POST',
+      url: `/api/statement-imports?accountId=${s.accountA.id}&fileName=estorno.ofx`,
+      payload: ofxOf([{ date: '2026-10-15', cents: 43_210, memo: 'ESTORNO' }]),
+      headers: { cookie: session.cookie, 'content-type': 'application/x-ofx' },
+    });
+    expect(imported.statusCode, imported.body).toBe(200);
+    const line = imported.json().lines[0];
+    if (line.movementId !== after.legs[0].movementId || line.status !== 'matched') {
+      if (line.status !== 'new') await admin.post(`/api/statement-lines/${line.id}/unmatch`, {});
+      await admin.post(`/api/statement-lines/${line.id}/match`, { movementId: after.legs[0].movementId });
+    }
+    expect((await admin.get(`/api/settlements/${settlementId}/reversal`)).legs[0]).toMatchObject({ reconciled: true });
+    await refused(await post(admin, settlementId, '2026-10-16'), 422, 'settlements_reversal_reconciled_check');
+    await admin.post(`/api/statement-lines/${line.id}/unmatch`, {});
+    const fixed = await admin.post(`/api/settlements/${settlementId}/reversal-date`, { reversedOn: '2026-10-16' });
+    expect(fixed.settlements.find((x: any) => x.id === settlementId).reversalOn).toBe('2026-10-16');
   });
 });

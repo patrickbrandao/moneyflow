@@ -69,3 +69,8 @@ Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o ap
 Auxiliar novo `localDateOf(instante)` em `packages/shared/src/dates.ts`: a data `YYYY-MM-DD` do instante em São Paulo ('' se inválido). `TitleEntryInfo.tsx` mostra `formatDate(localDateOf(nfe.issuedAt))`: a NF-e de 31/10 às 22h30 (−03:00) aparece como 31/10/2026. O servidor não mudou.
 
 Testes: `packages/shared/test/money-dates.test.ts` → "a data de um instante é a de São Paulo, não a do ISO em UTC (tarefa 178)". Verificação: `pnpm verify:quick`.
+
+### Complemento (revisão de 2026-11-22, frente P2a)
+
+- `apps/server/src/agents/tool-handlers-operation.ts` (`import_nfe`): a prévia e o título sugerido (competência e o vencimento sem duplicata) usam `localDateOf(issuedAt)` no lugar do `slice(0, 10)`, que errava a NF-e com o horário noutro fuso (em UTC, a das 22h30 em São Paulo caía no dia seguinte).
+- Teste: `apps/server/test/agent-tools.test.ts`, "NF-e da sessão…", com o `dhEmi` em UTC (01h30 do dia 6 = 22h30 do dia 5): a prévia e a competência saem 05/10/2026; com o `slice`, o teste falha (conferido). Verificação: `pnpm verify:quick`.
