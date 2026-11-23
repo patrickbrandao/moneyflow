@@ -38,8 +38,9 @@ jobs:
         run: node scripts/check-versions.mjs
       - run: pnpm lint
       - run: pnpm typecheck
+      # Com a cobertura do v8 (tarefa 126): o resumo vai para o resumo do job no passo "Cobertura", ainda sem piso.
       - name: Testes unitários (shared e scripts)
-        run: pnpm test:unit && pnpm test:scripts
+        run: pnpm --filter @moneyflow/shared test:coverage && pnpm test:scripts
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       # A imagem do banco sai do cache do GitHub, a mesma nos três jobs (tarefa 184); o Testcontainers a usa pronta.
       - name: Imagem do banco
@@ -52,9 +53,12 @@ jobs:
           cache-from: type=gha,scope=postgres
           cache-to: type=gha,scope=postgres,mode=max
       - name: Testes de integração da API (Postgres 18 real via Testcontainers)
-        run: pnpm test:integration
+        run: pnpm --filter @moneyflow/server test:coverage
         env:
           MONEYFLOW_TEST_PG_IMAGE: moneyflow-postgres:dev
+      - name: Cobertura (server e shared)
+        if: ${{ !cancelled() }}
+        run: node scripts/coverage-summary.mjs | tee -a "$GITHUB_STEP_SUMMARY"
       - run: pnpm build
 
   database:

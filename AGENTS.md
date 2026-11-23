@@ -37,6 +37,7 @@ pnpm test                       # unitários (shared) + integração da API
 pnpm test:unit                  # só packages/shared
 pnpm test:integration           # API contra Postgres 18 real: o Testcontainers builda database/docker e aplica as migrations
 pnpm test:local                 # a mesma integração no Postgres local (5432), sem container: banco limpo copiado de um modelo migrado
+pnpm --filter @moneyflow/server test:coverage   # com a cobertura do v8 (também no shared); o CI publica o resumo (scripts/coverage-summary.mjs)
 pnpm test:scripts               # testes dos scripts da raiz (node --test); node scripts/check-versions.mjs confere Node, imagens e actions fixos
 pnpm verify:quick               # verificação rápida do que mudou no branch (o padrão; veja Verificação)
 pnpm verify:full                # verificação completa (só quando pedido, antes de PR e release; --e2e, --local)
