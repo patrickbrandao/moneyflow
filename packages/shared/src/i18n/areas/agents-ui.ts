@@ -485,6 +485,7 @@ export const agentsUiStrings = {
       showDiff: 'Ver diff',
       diffTitle: (a: number, b: number) => `Diff da versão ${a} para a ${b}`,
       noDiff: 'As duas versões têm o mesmo conteúdo.',
+      diffTruncated: 'As versões são muito diferentes: o diff foi resumido e as contagens são limites superiores.',
       unknownAuthor: '(usuário removido)',
       restoredFrom: (n: number) => `restaurada da versão ${n}`,
       emptyPrompt: '(prompt vazio)',

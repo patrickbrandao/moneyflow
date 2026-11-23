@@ -274,5 +274,14 @@ function VersionDiff({ documentId, leftId, rightId }: { documentId: string; left
   const a = useApi<ContractDocumentVersionContent>(`/api/contract-documents/${documentId}/versions/${leftId}`);
   const b = useApi<ContractDocumentVersionContent>(`/api/contract-documents/${documentId}/versions/${rightId}`);
   if (!a.data || !b.data) return <p className="hint">{t.common.loading}</p>;
-  return <LineDiff before={a.data.content} after={b.data.content} title={D.diffTitle(a.data.version, b.data.version)} noDiff={D.noDiff} />;
+  return (
+    <LineDiff
+      before={a.data.content}
+      after={b.data.content}
+      title={D.diffTitle(a.data.version, b.data.version)}
+      noDiff={D.noDiff}
+      truncatedNote={D.diffTruncated}
+      testId="document-diff"
+    />
+  );
 }

@@ -117,6 +117,7 @@ export function PromptHistory({
                 after={after.content}
                 title={p.diffTitle(before.version, after.version)}
                 noDiff={p.noDiff}
+                truncatedNote={p.diffTruncated}
                 testId="prompt-diff"
               />
             );
