@@ -23,9 +23,9 @@
 ### Eventos (assinaturas)
 - Um por evento por destino, com parâmetros validados (os mesmos do banco) e filtro de caixas (sem caixas = todas as que o dono vê; os cartões das pagadoras filtradas entram).
 - Horários em America/Sao_Paulo. Se o worker estava parado no horário, envia ao voltar, no mesmo dia. Cada mensagem tem `dedup_key` (única por destino): rodar de novo nunca duplica.
-  - **Vencimentos** (`due_reminder`, padrão D-3, D-1, D-0 às 08:00): uma mensagem por título em aberto (a pagar e a receber; num par espelhado com as duas caixas no escopo, só o lado a pagar), com a linha digitável e o PIX copia-e-cola em `<code>` (toque para copiar). Chave `due_reminder:<título>:D-<n>:<vencimento>`. Até 30 títulos por passada (o resto na seguinte).
-  - **Atrasados** (`overdue`): uma vez por título, ou a cada N dias a partir do primeiro dia de atraso.
-  - **Resumo diário**: vencimentos do dia, total atrasado, saldos por caixa e entradas e saídas de ontem. **Semanal** (no dia escolhido): vencimentos dos próximos 7 dias e entradas e saídas dos últimos 7.
+  - **Vencimentos** (`due_reminder`, padrão D-3, D-1, D-0 às 08:00): uma mensagem por título em aberto (a pagar e a receber; num par espelhado com as duas caixas no escopo, só o lado a pagar), com a linha digitável e o PIX copia-e-cola em `<code>` (toque para copiar). Chave `due_reminder:<título>:D-<n>:<vencimento>`. Até 30 títulos por passada (o resto na seguinte): a consulta deixa de fora os que já estão na fila do destino, então o teto anda (tarefa 105).
+  - **Atrasados** (`overdue`): uma vez por título, ou a cada N dias a partir do primeiro dia de atraso. Também até 30 por passada, sem os já enfileirados.
+  - **Resumo diário**: vencimentos do dia (lista até 25; o "… e mais N" e o total atrasado vêm da contagem e da soma no banco), total atrasado, saldos por caixa e entradas e saídas de ontem. **Semanal** (no dia escolhido): vencimentos dos próximos 7 dias e entradas e saídas dos últimos 7.
   - **Fatura fechada**: valor por pagadora; só faturas fechadas depois de criar a assinatura e nos últimos 3 dias.
   - **Limite do cartão**: uma vez por mês por percentual atingido (o maior atingido).
   - **Divergência de conciliação**: extrato com saldo do banco ≠ saldo do app acima do mínimo, depois de 1 dia do import (tempo de conciliar) e até 8 dias.

@@ -530,6 +530,59 @@ describe('mensagens (spec 013)', () => {
     expect(await count()).toBe(2);
   });
 
+  it('mais de 30 títulos no mesmo dia: o teto anda entre as passadas e o resumo conta todos (tarefa 105)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const yesterday = addDays(today, -1);
+    const create = (description: string, dueDate: string) =>
+      admin.post('/api/titles', {
+        caixaId: s.caixaA.id,
+        direction: 'payable',
+        entityId: s.supplier.id,
+        categoryId: s.expense.id,
+        description,
+        competenceDate: dueDate,
+        dueDate,
+        amountCents: 1_000,
+      });
+    for (let i = 0; i < 35; i += 1) await create(`Hoje ${String(i).padStart(2, '0')}`, today);
+    for (let i = 0; i < 31; i += 1) await create(`Atrasado ${String(i).padStart(2, '0')}`, yesterday);
+    const dest = await admin.post('/api/message-destinations', {
+      name: `Teto ${s.tag}`,
+      ownerKind: 'caixa',
+      ownerCaixaId: s.caixaA.id,
+      botToken: TOKEN,
+      chatId: '105',
+    });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, {
+      eventKind: 'due_reminder',
+      params: { days_before: [0], send_at: '00:00' },
+    });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, { eventKind: 'overdue', params: { send_at: '00:00' } });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, { eventKind: 'daily_summary', params: { send_at: '00:00' } });
+    const counts = async () => {
+      const rows = await h.db.execute<{ event_kind: string; n: number }>(
+        sql`SELECT event_kind, count(*)::int AS n FROM message_outbox WHERE destination_id = ${dest.id} GROUP BY event_kind`,
+      );
+      return Object.fromEntries(rows.rows.map((r) => [r.event_kind, r.n]));
+    };
+    const clock = { date: today, time: '23:00', weekday: isoWeekday(today) };
+    await produceMessages(h.db, h.config, clock);
+    expect(await counts()).toEqual({ due_reminder: 30, overdue: 30, daily_summary: 1 });
+    await produceMessages(h.db, h.config, clock);
+    expect(await counts()).toEqual({ due_reminder: 35, overdue: 31, daily_summary: 1 });
+    await produceMessages(h.db, h.config, clock);
+    expect(await counts()).toEqual({ due_reminder: 35, overdue: 31, daily_summary: 1 });
+    // O resumo lista 25 e conta os 35 do dia pela soma no banco; o total atrasado também.
+    const summary = await h.db.execute<{ text: string }>(
+      sql`SELECT payload->>'text' AS text FROM message_outbox WHERE destination_id = ${dest.id} AND event_kind = 'daily_summary'`,
+    );
+    expect(summary.rows[0]!.text).toContain('… e mais 10');
+    expect(summary.rows[0]!.text).toContain('Atrasados: 31 títulos');
+    await admin.patch(`/api/message-destinations/${dest.id}`, { isActive: false });
+  });
+
   it('evento de agente: o mesmo evento emitido duas vezes (duas réplicas) gera um aviso por destino; outro seq gera outro', async () => {
     const owner = await userSession(h);
     const user = client(h, owner.cookie);

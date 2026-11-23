@@ -22,6 +22,7 @@ import {
   reconciliationLink,
   reminderDueDates,
   type SpClock,
+  SUMMARY_MAX_ITEMS,
   type SummaryData,
   spClock,
   summaryMessage,
@@ -120,10 +121,23 @@ async function applyFilter(db: Database, scope: string[], filter: string[] | nul
 
 type TitleRow = ReminderTitle & { id: string; caixa_id: string };
 
+/** Filtro dos títulos em aberto das caixas (sem o lado a receber de um par cujas duas caixas estão no escopo). */
+function openTitleFilter(caixaIds: string[]) {
+  const arr = uuidArray(caixaIds);
+  return sql`t.caixa_id = ANY (${arr}) AND t.archived_at IS NULL AND t.status IN ('open', 'partial') AND b.open_cents > 0
+       AND NOT (t.direction = 'receivable' AND coalesce(t.counterparty_caixa_id = ANY (${arr}), false))`;
+}
+
+/**
+ * A mensagem com a chave `key` (expressão SQL sobre `t`) ainda não está na fila do destino (tarefa 105):
+ * o `LIMIT` anda, e o que passou do teto numa passada entra na seguinte. A chave tem de ser a de `dedupKeys`.
+ */
+const notQueued = (destinationId: string, key: ReturnType<typeof sql>) =>
+  sql`NOT EXISTS (SELECT 1 FROM message_outbox o WHERE o.destination_id = ${destinationId}::uuid AND o.dedup_key = ${key})`;
+
 /** Títulos em aberto das caixas (sem o lado a receber de um par cujas duas caixas estão no escopo). */
 async function openTitles(db: Executor, caixaIds: string[], where: ReturnType<typeof sql>, limit = 500): Promise<TitleRow[]> {
   if (caixaIds.length === 0) return [];
-  const arr = uuidArray(caixaIds);
   const result = await db.execute<Record<string, unknown>>(sql`
     SELECT t.id, t.caixa_id, t.description, t.direction, t.due_date, b.open_cents, c.name AS caixa_name,
            coalesce(e.trade_name, e.name) AS entity_name, t.boleto_barcode, t.pix_payload,
@@ -134,8 +148,7 @@ async function openTitles(db: Executor, caixaIds: string[], where: ReturnType<ty
       JOIN entities e ON e.id = t.entity_id
       LEFT JOIN contracts ct ON ct.id = t.contract_id
       LEFT JOIN contract_cycles cy ON cy.id = t.contract_cycle_id
-     WHERE t.caixa_id = ANY (${arr}) AND t.archived_at IS NULL AND t.status IN ('open', 'partial') AND b.open_cents > 0
-       AND NOT (t.direction = 'receivable' AND coalesce(t.counterparty_caixa_id = ANY (${arr}), false))
+     WHERE ${openTitleFilter(caixaIds)}
        AND ${where}
      ORDER BY t.due_date, c.name, t.description, t.id
      LIMIT ${limit}`);
@@ -188,10 +201,18 @@ async function flowByCaixa(db: Executor, caixaIds: string[], from: string, to: s
   return result.rows.map((r) => ({ caixaName: r.caixa_name, inflowCents: Number(r.inflow), outflowCents: Number(r.outflow) }));
 }
 
-async function overdueTotals(db: Executor, caixaIds: string[], today: string) {
-  const rows = await openTitles(db, caixaIds, sql`t.due_date < ${today}::date AND t.direction = 'payable'`, 5000);
-  return { count: rows.length, cents: rows.reduce((acc, r) => acc + r.openCents, 0) };
+/** Quantos títulos em aberto e o saldo deles, pela soma no banco (sem cortar numa lista; tarefa 105). */
+async function openTitleTotals(db: Executor, caixaIds: string[], where: ReturnType<typeof sql>) {
+  if (caixaIds.length === 0) return { count: 0, cents: 0 };
+  const result = await db.execute<{ n: number; cents: number }>(sql`
+    SELECT count(*)::int AS n, coalesce(sum(b.open_cents), 0)::bigint AS cents
+      FROM titles t JOIN title_balances b ON b.title_id = t.id
+     WHERE ${openTitleFilter(caixaIds)} AND ${where}`);
+  return { count: Number(result.rows[0]?.n ?? 0), cents: Number(result.rows[0]?.cents ?? 0) };
 }
+
+const overdueTotals = (db: Executor, caixaIds: string[], today: string) =>
+  openTitleTotals(db, caixaIds, sql`t.due_date < ${today}::date AND t.direction = 'payable'`);
 
 async function closedInvoices(db: Executor, since: Date | string) {
   const result = await db.execute<{
@@ -304,7 +325,14 @@ async function eventsFor(db: Database, config: Config, sub: SubscriptionRow, cai
       const targets = reminderDueDates(today, params.days_before as number[]);
       const out: Outgoing[] = [];
       for (const target of targets) {
-        const titles = await openTitles(db, caixaIds, sql`t.due_date = ${target.dueDate}::date`, MAX_TITLE_MESSAGES);
+        // Chave de dedupKeys.dueReminder: os já enfileirados ficam fora, e o teto anda (tarefa 105).
+        const key = sql`'due_reminder:' || t.id::text || ${`:D-${target.daysBefore}:${target.dueDate}`}`;
+        const titles = await openTitles(
+          db,
+          caixaIds,
+          sql`t.due_date = ${target.dueDate}::date AND ${notQueued(sub.destination_id, key)}`,
+          MAX_TITLE_MESSAGES,
+        );
         for (const title of titles) {
           out.push({
             dedupKey: dedupKeys.dueReminder(title.id, target.daysBefore, title.dueDate),
@@ -321,7 +349,17 @@ async function eventsFor(db: Database, config: Config, sub: SubscriptionRow, cai
     }
     case 'overdue': {
       const repeat = (params.repeat_every_days as number | undefined) ?? null;
-      const titles = await openTitles(db, caixaIds, sql`t.due_date < ${today}::date`, 1000);
+      // Como overdueSchedule: com repetição, só nos dias dela e a chave do dia; sem, uma vez por título.
+      // Os já enfileirados ficam fora, e o teto anda (tarefa 105).
+      const key = repeat ? sql`'overdue:' || t.id::text || ${`:${today}`}` : sql`'overdue:' || t.id::text`;
+      const titles = await openTitles(
+        db,
+        caixaIds,
+        sql`t.due_date < ${today}::date
+            ${repeat ? sql`AND (${today}::date - t.due_date - 1) % ${repeat}::int = 0` : sql``}
+            AND ${notQueued(sub.destination_id, key)}`,
+        MAX_TITLE_MESSAGES,
+      );
       const out: Outgoing[] = [];
       for (const title of titles) {
         const schedule = overdueSchedule(title.dueDate, today, repeat);
@@ -344,8 +382,10 @@ async function eventsFor(db: Database, config: Config, sub: SubscriptionRow, cai
       if (weekly && clock.weekday !== params.weekday) return [];
       const until = weekly ? addDays(today, 6) : today;
       const flowFrom = weekly ? addDays(today, -7) : addDays(today, -1);
-      const [due, overdue, balances, flow] = await Promise.all([
-        openTitles(db, caixaIds, sql`t.due_date BETWEEN ${today}::date AND ${until}::date`, 200),
+      const dueWhere = sql`t.due_date BETWEEN ${today}::date AND ${until}::date`;
+      const [due, dueTotals, overdue, balances, flow] = await Promise.all([
+        openTitles(db, caixaIds, dueWhere, SUMMARY_MAX_ITEMS),
+        openTitleTotals(db, caixaIds, dueWhere),
         overdueTotals(db, caixaIds, today),
         balancesByCaixa(db, caixaIds),
         flowByCaixa(db, caixaIds, flowFrom, addDays(today, -1)),
@@ -355,6 +395,7 @@ async function eventsFor(db: Database, config: Config, sub: SubscriptionRow, cai
         heading: weekly ? T.weeklyTitle(formatDate(today), formatDate(until)) : T.dailyTitle(formatDate(today)),
         dueLabel: weekly ? T.dueWeek : T.dueToday,
         due,
+        dueCount: dueTotals.count,
         overdue,
         balances,
         flowLabel: weekly ? T.flowWeek : T.flowYesterday,

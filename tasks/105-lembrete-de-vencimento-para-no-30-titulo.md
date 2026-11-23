@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -79,4 +79,14 @@ Nada foi executado. Não medi o custo da subconsulta; com o índice único da ou
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado em `apps/server/src/services/message-worker.ts`: `due_reminder` lia os 30 primeiros do dia em ordem fixa sem excluir os já enfileirados (a dedup só agia no INSERT), `overdue` lia os 1000 mais antigos do mesmo jeito, e o resumo contava os atrasados numa lista de até 5000 e os vencimentos numa de até 200.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/message-worker.ts`: `openTitleFilter` (o filtro comum dos títulos em aberto) e `notQueued(destino, chave)`, um `NOT EXISTS` na `message_outbox` pelo índice único `(destination_id, dedup_key)`. Vencimentos e atrasados deixam de fora os já enfileirados com a chave de `dedupKeys` montada no SQL, e o teto de 30 anda; os atrasados com repetição filtram os dias da repetição no SQL, como `overdueSchedule`. O teto dos atrasados passa de 1000 para os mesmos 30 por passada (o resto na seguinte). `openTitleTotals` soma no banco: o total atrasado do resumo e a contagem dos vencimentos (`dueCount`) não cortam mais; a lista do resumo busca só os 25 que mostra.
+- `packages/shared/src/messages.ts`: `SummaryData.dueCount` (o "… e mais N" usa a contagem real) e `SUMMARY_MAX_ITEMS` exportado.
+- Spec: `docs/013` (vencimentos, atrasados e resumo).
+- Testes: `apps/server/test/vision.test.ts` ("mais de 30 títulos no mesmo dia…": 35 vencendo hoje e 31 atrasados, três passadas: 30/30, depois 35/31 e nada a mais; o resumo com "… e mais 10" e "Atrasados: 31 títulos") e `packages/shared/test/vision.test.ts` (o "… e mais 235" pelo `dueCount`).
+- Verificação: `pnpm verify:quick`.
