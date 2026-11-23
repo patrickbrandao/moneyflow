@@ -43,7 +43,7 @@ test('a visão geral não baixa as outras telas; o menu e a paleta trazem cada u
   await expect(input).toBeVisible();
   await input.fill('Fluxo');
   await page
-    .getByRole('option', { name: /Fluxo$/ })
+    .getByRole('option', { name: /^Fluxo\b/ })
     .first()
     .click();
   await expect(page).toHaveURL(/\/flow/);

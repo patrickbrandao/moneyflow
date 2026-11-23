@@ -184,7 +184,8 @@ test('calendário anual e mensal, dia filtrando a tabela, janela do lembrete, ab
   await expect(page.locator(`tr[data-note="${infoTitle}"]`)).toBeVisible();
 
   // A janela: corpo renderizado, guia Escopo; e um lembrete mensal pela tela.
-  await page.locator(`tr[data-note="${infoTitle}"]`).click();
+  // O botão do título abre a janela; o centro da linha pode cair no link da entidade (tarefa 114).
+  await page.locator(`tr[data-note="${infoTitle}"]`).getByRole('button', { name: infoTitle }).click();
   const view = page.getByRole('dialog', { name: infoTitle });
   await expect(view.getByRole('heading', { name: 'Título' })).toBeVisible();
   await view.getByRole('tab', { name: 'Escopo' }).click();
