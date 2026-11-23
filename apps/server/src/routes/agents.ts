@@ -70,6 +70,12 @@ const settingKey = (r: Req) => {
 /* Agentes de IA (spec 011): conversas, execuções (SSE), administração, tokens e a IA nos fluxos. */
 export async function agentRoutes(app: FastifyInstance) {
   const id = (r: Req) => param(r, 'id');
+  // Streams SSE abertos: fechados antes do server.close() (tarefa 107), que senão esperaria por eles
+  // (uma execução esperando aprovação mantém o stream aberto). O EventSource reconecta com Last-Event-ID.
+  const streams = new Set<() => void>();
+  app.addHook('preClose', async () => {
+    for (const close of [...streams]) close();
+  });
 
   /* ---------------- sessões por agente (spec 026) ---------------- */
   app.get('/api/agents', (r: Req) => conversations.listAgentOptions(r.ctx));
@@ -144,10 +150,12 @@ export async function agentRoutes(app: FastifyInstance) {
     const close = () => {
       if (closed) return;
       closed = true;
+      streams.delete(close);
       unsubscribe();
       if (ping) clearInterval(ping);
       res.end();
     };
+    streams.add(close);
     const pump = async () => {
       if (closed) return;
       if (running) {

@@ -368,6 +368,85 @@ describe('execução do agente', () => {
     expect((await runStatus(next.run.id)).status).toBe('completed');
   });
 
+  it('parada do worker: a execução no meio da chamada volta à fila na hora e outro worker conclui (tarefa 107)', async () => {
+    const conversation = await newSession(admin, agent.id);
+    // A 1ª chamada é lenta (~4 s em streaming); a retomada responde na hora.
+    llm.queue = [{ text: 'Pensando com calma… '.repeat(40), chunks: 40, delayMs: 100 }, { text: 'Retomada sem esperar.' }];
+    const sent = await chat(admin, conversation.id, 'oi, parada');
+    const claimed = await h.db.execute<ClaimedRun>(sql`SELECT * FROM ai_run_claim(1, '1 hour')`);
+    expect(claimed.rows[0]!.id).toBe(sent.run.id);
+    const shutdown = new AbortController();
+    const job = processRun({ db: h.db, config: h.config, log, shutdown: shutdown.signal }, claimed.rows[0]!);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const start = Date.now();
+    shutdown.abort();
+    await job;
+    expect(Date.now() - start).toBeLessThan(2000);
+    // De volta à fila, sem a reserva e sem gastar tentativa; o console recebe o aviso para descartar o parcial.
+    const row = await h.db.execute<{ status: string; lock_token: string | null; attempts: number }>(
+      sql`SELECT status, lock_token, attempts FROM ai_runs WHERE id = ${sent.run.id}`,
+    );
+    expect(row.rows[0]).toMatchObject({ status: 'queued', lock_token: null, attempts: 0 });
+    const events = await h.db.execute<{ event_type: string; payload: any }>(
+      sql`SELECT event_type, payload FROM ai_run_events WHERE run_id = ${sent.run.id} ORDER BY seq`,
+    );
+    expect(events.rows.some((e) => e.event_type === 'error' && e.payload.code === 'worker_shutdown')).toBe(true);
+    expect(events.rows.at(-1)).toMatchObject({ event_type: 'status', payload: { status: 'queued' } });
+    // Outro worker reserva sem esperar a reserva velha (o drain usa a reserva de 1 h: só pega o que está na fila).
+    await drain();
+    expect((await runStatus(sent.run.id)).status).toBe('completed');
+    const thread = await admin.get(`/api/conversations/${conversation.id}`);
+    const assistant = thread.messages.filter((m: any) => m.role === 'assistant');
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0].content[0].text).toBe('Retomada sem esperar.');
+  });
+
+  it('parada do worker: termina dentro do prazo mesmo com uma execução longa (tarefa 107)', async () => {
+    const conversation = await newSession(admin, agent.id);
+    llm.queue = [{ text: 'Bem devagar… '.repeat(80), chunks: 80, delayMs: 100 }];
+    const sent = await chat(admin, conversation.id, 'oi, prazo');
+    const stop = startAgentWorker(h.db, h.config, log, { pollMs: 50, maintenanceMs: 3_600_000, taskIntervalMs: 3_600_000 });
+    for (let i = 0; i < 50 && (await runStatus(sent.run.id)).status !== 'running'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const start = Date.now();
+    await stop(3000);
+    expect(Date.now() - start).toBeLessThan(3000);
+    expect((await runStatus(sent.run.id)).status).toBe('queued');
+    llm.queue = [{ text: 'Depois da parada.' }];
+    await drain();
+    expect((await runStatus(sent.run.id)).status).toBe('completed');
+  });
+
+  it('a API fecha os streams SSE abertos ao parar (tarefa 107)', async () => {
+    const other = await startApp({ AI_REQUEST_BACKOFF_MS: '5' });
+    let closed = false;
+    const session = await userSession(h, 'admin');
+    const api = client(h, session.cookie);
+    const conversation = await newSession(api, agent.id);
+    // Na fila, sem worker: o stream fica aberto (ping) até o "done".
+    const sent = await chat(api, conversation.id, 'oi, sse');
+    try {
+      const address = await other.app.listen({ port: 0, host: '127.0.0.1' });
+      const res = await fetch(`${address}/api/runs/${sent.run.id}/events`, { headers: { cookie: session.cookie } });
+      const reader = res.body!.getReader();
+      const first = new TextDecoder().decode((await reader.read()).value);
+      expect(first).toContain('conectado');
+      const start = Date.now();
+      closed = true;
+      await other.close();
+      expect(Date.now() - start).toBeLessThan(2000);
+      // O stream terminou (o EventSource do console reconectaria com Last-Event-ID).
+      let done = false;
+      for (let i = 0; i < 5 && !done; i += 1) done = (await reader.read()).done;
+      expect(done).toBe(true);
+    } finally {
+      if (!closed) await other.close();
+      await api.post(`/api/runs/${sent.run.id}/cancel`);
+    }
+  });
+
   it('retomada: reserva abandonada por um worker que caiu é retomada por outro', async () => {
     const conversation = await newSession(admin, agent.id);
     const sent = await chat(admin, conversation.id, 'listar caixas');

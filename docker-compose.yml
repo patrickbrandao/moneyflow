@@ -99,9 +99,13 @@ services:
   worker:
     <<: *app
     command: ["worker"]
+    # Parada (tarefa 107, docs/018): o worker devolve à fila as execuções de agente e termina as passadas em
+    # SHUTDOWN_GRACE_MS (padrão 8 s) e sai; o prazo do Docker fica acima, para nunca chegar ao SIGKILL.
+    stop_grace_period: 30s
     environment:
       <<: *app-env
       MODE: worker
+      SHUTDOWN_GRACE_MS: ${SHUTDOWN_GRACE_MS:-8000}
       WORKER_INTERVAL_MS: ${WORKER_INTERVAL_MS:-3600000}
       CARD_AUTO_CLOSE: ${CARD_AUTO_CLOSE:-false}
       MESSAGE_INTERVAL_MS: ${MESSAGE_INTERVAL_MS:-30000}

@@ -55,10 +55,15 @@ import { RunTools, reportToolError, toolErrorMessage } from './tools-runtime';
  *  - tools em ask no kit do agente (spec 021) e as escritas de MCP viram ai_tool_confirmations e a execução
  *    passa a awaiting_confirmation; decididas, ela volta à fila e este mesmo
  *    loop retoma executando as aprovadas e devolvendo a recusa das rejeitadas;
- *  - escritas de negócio com o ator agent + app.agent_run_id (ServiceContext).
+ *  - escritas de negócio com o ator agent + app.agent_run_id (ServiceContext);
+ *  - parada do worker (tarefa 107, `shutdown`): corta a chamada ao modelo e as
+ *    esperas (transcrição, volta à fila) e, no próximo ponto seguro (antes de
+ *    cada volta e de cada tool), devolve a execução à fila com a cerca da
+ *    reserva, sem gastar tentativa; a tool em andamento termina antes.
  */
 
-export type WorkerDeps = { db: Database; config: Config; log: FastifyBaseLogger };
+/** `shutdown`: o sinal de desligamento do worker (tarefa 107); sem ele (testes, API), a execução vai até o fim. */
+export type WorkerDeps = { db: Database; config: Config; log: FastifyBaseLogger; shutdown?: AbortSignal };
 export type ClaimedRun = RunRow & { lock_token: string };
 
 const HEARTBEAT_MS = 3_000;
@@ -68,9 +73,12 @@ const RECONCILE_MIN_ITERATIONS = 60;
 const FLUSH_MS = 120;
 /** Código do evento `error` de uma volta à fila por erro temporário do provedor (tarefas 074 e 151). */
 export const PROVIDER_RETRY = 'provider_retry';
+/** Código do evento `error` da volta à fila pela parada do worker (tarefa 107; não conta como erro do provedor). */
+export const WORKER_SHUTDOWN = 'worker_shutdown';
 
 class LockLost extends Error {}
 class Canceled extends Error {}
+class Shutdown extends Error {}
 
 /** Espera da volta à fila por erro do provedor: 4 × a base do backoff, dobrando a cada volta (até 60 s). */
 export const requeueDelay = (backoffMs: number, requeues: number) => Math.min(60_000, backoffMs * 4 * 2 ** requeues);
@@ -96,6 +104,20 @@ async function providerRequeues(db: Database, runId: string): Promise<number> {
      WHERE e.run_id = ${runId} AND e.event_type = 'error' AND e.payload ->> 'code' = ${PROVIDER_RETRY}
        AND e.seq > coalesce((SELECT max(m.seq) FROM ai_run_events m WHERE m.run_id = ${runId} AND m.event_type = 'message'), 0)`);
   return Number(result.rows[0]?.n ?? 0);
+}
+
+/**
+ * Devolve a execução à fila com a cerca da reserva (só se esta reserva ainda vale): o banco limpa a
+ * reserva e zera as tentativas; o evento opcional vai antes do status.
+ */
+async function requeue(db: Database, runId: string, token: string, event?: { type: 'error'; message: string; code: string }) {
+  await db.transaction(async (tx) => {
+    const moved = await tx.execute(sql`
+      UPDATE ai_runs SET status = 'queued' WHERE id = ${runId} AND status = 'running' AND lock_token = ${token}::uuid RETURNING id`);
+    if (moved.rows.length === 0) return;
+    if (event) await appendEvent(tx, runId, event);
+    await appendEvent(tx, runId, { type: 'status', status: 'queued' });
+  });
 }
 
 /** Cerca da reserva nas gravações (tarefa 097): só grava se esta reserva ainda vale; senão, LockLost. */
@@ -175,6 +197,9 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
   const abort = new AbortController();
   let canceled = false;
   let lost = false;
+  const stopping = () => deps.shutdown?.aborted === true;
+  // Chamada ao modelo e esperas: param também na parada do worker. As tools, não (terminam antes).
+  const signal = deps.shutdown ? AbortSignal.any([abort.signal, deps.shutdown]) : abort.signal;
 
   const beat = async () => {
     try {
@@ -195,6 +220,7 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
     await beat();
     if (lost) throw new LockLost();
     if (canceled) throw new Canceled();
+    if (stopping()) throw new Shutdown();
   };
   /** Cancelada: fecha os tool_use pendentes com "cancelado" e encerra. */
   const stopCanceled = async () => {
@@ -276,7 +302,7 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
       agentId: agent.id,
       userId: actor.id,
       textProviderId: claimed.provider_id,
-      signal: abort.signal,
+      signal,
     });
 
     await appendEvent(db, runId, { type: 'status', status: 'running' });
@@ -336,6 +362,7 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
         : history;
       await attachments.prepare(messages);
       if (lost) throw new LockLost();
+      if (stopping()) throw new Shutdown();
       // Acima do teto (AI_REQUEST_MAX_BYTES), a chamada nem sai: o provedor recusaria e a sessão travaria (tarefa 098).
       const size = await estimateRequestBytes([system.stable, system.user, system.volatile], tools.list, messages, attachments.load);
       if (size > deps.config.aiRequestMaxBytes) {
@@ -351,7 +378,7 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
         tools: tools.list,
         params: agent.params,
         loadAttachment: attachments.load,
-        signal: abort.signal,
+        signal,
         operation: 'chat',
         purpose: usagePurpose,
       });
@@ -419,6 +446,14 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
       await stopCanceled();
       return;
     }
+    if (error instanceof Shutdown || stopping()) {
+      // Parada do worker (tarefa 107): volta à fila na hora; o console descarta o texto parcial e espera a retomada.
+      log.info({ runId }, 'agente: parada do worker; execução devolvida à fila');
+      await requeue(db, runId, token, { type: 'error', message: t.agents.errors.workerShutdown, code: WORKER_SHUTDOWN }).catch((e) =>
+        log.error({ err: e, runId }, 'agente: falha ao devolver à fila'),
+      );
+      return;
+    }
     if (error instanceof LlmError && error.code === 'context_overflow') {
       // Sessão acima do limite do provedor (tarefa 098): a próxima mensagem falharia igual; a mensagem manda finalizar a sessão.
       const message = t.agents.errors.contextOverflow(error.message).slice(0, 4000);
@@ -435,19 +470,13 @@ async function runLoop(deps: WorkerDeps, claimed: ClaimedRun): Promise<void> {
         // Erro temporário do provedor (tarefa 074): o aviso vai já ao console (ele descarta o texto parcial, tarefa 151),
         // a espera corre com o heartbeat ligado (o "parar" a corta) e a execução volta à fila. O contador fica nos eventos.
         await appendEvent(db, runId, { type: 'error', message, code: PROVIDER_RETRY }).catch(() => {});
-        await pause(requeueDelay(deps.config.aiRequestBackoffMs, requeues), abort.signal);
+        await pause(requeueDelay(deps.config.aiRequestBackoffMs, requeues), signal);
         if (lost) return;
         if (canceled) {
           await stopCanceled();
           return;
         }
-        await db
-          .transaction(async (tx) => {
-            const moved = await tx.execute(sql`
-              UPDATE ai_runs SET status = 'queued' WHERE id = ${runId} AND status = 'running' AND lock_token = ${token}::uuid RETURNING id`);
-            if (moved.rows.length > 0) await appendEvent(tx, runId, { type: 'status', status: 'queued' });
-          })
-          .catch((e) => log.error({ err: e, runId }, 'agente: falha ao devolver à fila'));
+        await requeue(db, runId, token).catch((e) => log.error({ err: e, runId }, 'agente: falha ao devolver à fila'));
         return;
       }
     }

@@ -43,6 +43,8 @@ COPY --from=build /app/apps/server/dist/ ./
 COPY --from=build /app/apps/web/dist/ ./web/
 USER node
 EXPOSE 3000
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-  CMD node -e "if (process.env.MODE === 'worker') process.exit(0); fetch('http://127.0.0.1:' + process.env.PORT + '/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+# Saúde pelo modo do processo (argumento ou MODE, tarefa 107): a API pelo /api/health; o worker pelo batimento
+# que o laço de mensagens grava a cada passada que chega ao banco (até 3 intervalos, mínimo 90 s).
+HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=3 \
+  CMD ["node", "/app/healthcheck.mjs"]
 ENTRYPOINT ["node", "--enable-source-maps", "/app/main.mjs"]

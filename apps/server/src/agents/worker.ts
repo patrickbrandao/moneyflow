@@ -5,6 +5,7 @@ import type { Config } from '../config';
 import { tasksTick } from '../services/agent-tasks';
 import { requestRetentionDays } from '../services/ai-requests';
 import { recipesTick } from '../services/reconcile-recipes';
+import { settleWithin, tracked } from '../shutdown';
 import { type IndexState, indexEmbeddings, purgeEmbeddingIndexes } from './embeddings';
 import { type ClaimedRun, processRun } from './runner';
 import { claimTranscriptions, processTranscription } from './transcriptions';
@@ -23,6 +24,11 @@ import { claimTranscriptions, processTranscription } from './transcriptions';
  * (spec 029, AGENT_TASK_INTERVAL_MS) e a purga da dedup do webhook do Telegram.
  * No ritmo da fila e ao fim de cada execução, a fila das receitas de conciliação
  * ao importar (spec 030, recipesTick).
+ *
+ * A parada (tarefa 107) tem prazo: o sinal de desligamento corta a chamada ao
+ * modelo em andamento e o runner devolve a execução à fila na hora (o worker
+ * seguinte a reserva sem esperar a reserva velha); a parada espera as
+ * execuções, as transcrições e os laços em andamento até o prazo.
  */
 
 const TRANSCRIPTION_CONCURRENCY = 2;
@@ -55,6 +61,9 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
   const concurrency = opts.concurrency ?? config.agentConcurrency;
   const staleAfter = opts.staleAfter ?? '2 minutes';
   const active = new Set<Promise<void>>();
+  // Laços em andamento (reserva, manutenção, tarefas, receitas): a parada os espera dentro do prazo.
+  const loops = new Set<Promise<unknown>>();
+  const shutdown = new AbortController();
   let stopped = false;
   let claiming = false;
 
@@ -67,7 +76,7 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
         const run = result.rows[0];
         if (!run) break;
         log.info({ runId: run.id, attempt: run.attempts }, 'agente: execução reservada');
-        const job = processRun({ db, config, log }, run)
+        const job = processRun({ db, config, log, shutdown: shutdown.signal }, run)
           .catch((error) => log.error({ err: error, runId: run.id }, 'agente: erro inesperado'))
           .finally(() => {
             active.delete(job);
@@ -127,14 +136,13 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
     }
   };
 
-  const pollTimer = setInterval(() => {
-    void claim();
-    void claimTranscription();
-    void recipes();
-  }, pollMs);
-  void claim();
-  void claimTranscription();
-  void recipes();
+  const poll = () => {
+    void tracked(loops, claim());
+    void tracked(loops, claimTranscription());
+    void tracked(loops, recipes());
+  };
+  const pollTimer = setInterval(poll, pollMs);
+  poll();
 
   const indexState: IndexState = { since: new Map() };
   let maintaining = false;
@@ -162,8 +170,8 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
       maintaining = false;
     }
   };
-  const maintenanceTimer = setInterval(() => void maintenance(), opts.maintenanceMs ?? config.agentMaintenanceMs);
-  void maintenance();
+  const maintenanceTimer = setInterval(() => void tracked(loops, maintenance()), opts.maintenanceMs ?? config.agentMaintenanceMs);
+  void tracked(loops, maintenance());
 
   // Tarefas agendadas (spec 029): dispara as vencidas (reserva + sessão + execução numa transação) e acorda a fila.
   let ticking = false;
@@ -182,14 +190,19 @@ export function startAgentWorker(db: Database, config: Config, log: FastifyBaseL
       ticking = false;
     }
   };
-  const tasksTimer = setInterval(() => void tasks(), opts.taskIntervalMs ?? config.agentTaskIntervalMs);
-  void tasks();
+  const tasksTimer = setInterval(() => void tracked(loops, tasks()), opts.taskIntervalMs ?? config.agentTaskIntervalMs);
+  void tracked(loops, tasks());
 
-  return async () => {
+  /** Para de reservar, corta as chamadas ao modelo (as execuções voltam à fila) e espera o resto até o prazo. */
+  return async (graceMs = config.shutdownGraceMs) => {
     stopped = true;
     clearInterval(pollTimer);
     clearInterval(maintenanceTimer);
     clearInterval(tasksTimer);
-    await Promise.allSettled([...active, ...transcribing]);
+    shutdown.abort();
+    const settled = await settleWithin([...active, ...transcribing, ...loops], graceMs);
+    if (!settled) {
+      log.warn({ runs: active.size, transcriptions: transcribing.size }, 'agente: prazo da parada esgotado com trabalho em andamento');
+    }
   };
 }

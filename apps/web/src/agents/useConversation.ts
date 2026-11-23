@@ -210,8 +210,9 @@ export function useConversation(target: PaneTarget) {
           bumpList();
           break;
         case 'error':
-          if (event.code === 'provider_retry') {
-            // A execução volta à fila e a resposta recomeça do zero: o texto parcial da tentativa que caiu sai da tela.
+          if (event.code === 'provider_retry' || event.code === 'worker_shutdown') {
+            // A execução volta à fila (erro do provedor ou parada do worker, tarefa 107) e a resposta recomeça do zero:
+            // o texto parcial da tentativa que caiu sai da tela.
             setLiveText('');
             setLiveThinking('');
             setRetrying(true);

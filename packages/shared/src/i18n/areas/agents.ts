@@ -23,6 +23,8 @@ export const agentsStrings = {
     providerInactive: 'O provedor de IA deste agente está desativado.',
     providerMissing: 'Nenhum agente de IA ativo está configurado. Peça ao administrador para configurar um provedor e um agente.',
     providerError: (message: string) => `O provedor de IA respondeu com erro: ${message}`,
+    /** A execução voltou à fila porque o worker parou (tarefa 107): outro worker retoma. */
+    workerShutdown: 'O worker reiniciou no meio da resposta; ela recomeça em instantes.',
     /** Sessão acima do limite do provedor (tarefa 098): a saída é finalizar e começar outra. */
     contextOverflow: (detail: string) =>
       `A sessão ficou grande demais para o provedor de IA (${detail}). Finalize a sessão e comece outra; depois de finalizar, dá para bifurcar de um ponto anterior.`,
