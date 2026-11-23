@@ -52,6 +52,8 @@ type DestRow = {
   isActive: boolean;
   archivedAt: string | null;
   name: string;
+  /** A parte pública do token (antes do `:`): identifica o bot. */
+  botId: string | null;
   chatId: string | null;
   inboundEnabled: boolean;
   inboundAgentId: string | null;
@@ -184,7 +186,7 @@ export async function createDestination(ctx: ServiceContext, input: z.output<typ
  * Edição do destino. "Receber mensagens" (spec 029): ligar grava a entrada e o
  * hash de um segredo novo e chama setWebhook na mesma transação (o Telegram
  * recusou = nada muda); trocar o token com a entrada ligada liga o webhook no
- * bot novo e desliga no antigo. Desligar, ou desativar o destino (o banco
+ * bot novo e desliga no antigo (só se o bot mudou: o mesmo bot só religa). Desligar, ou desativar o destino (o banco
  * exige a entrada desligada junto), desliga no mesmo UPDATE e chama
  * deleteWebhook depois.
  */
@@ -205,6 +207,9 @@ export async function updateDestination(ctx: ServiceContext, id: string, input: 
     sets.push(sql`inbound_agent_id = ${agentId}`);
   }
   const tokenChanged = input.botToken !== undefined;
+  // O webhook é do bot, não do token (tarefa 167): com o mesmo bot (o mesmo token colado de novo ou um
+  // token novo dele), o setWebhook já substitui o anterior, e o deleteWebhook apagaria o recém-criado.
+  const botChanged = tokenChanged && input.botToken!.split(':')[0] !== d.botId;
   // Liga (ou religa no bot novo) o webhook: segredo novo, gravado como hash.
   const enabling = wantInbound && (!d.inboundEnabled || tokenChanged);
   const disabling = d.inboundEnabled && !wantInbound;
@@ -212,8 +217,8 @@ export async function updateDestination(ctx: ServiceContext, id: string, input: 
   if (wantInbound && input.inboundAgentId && input.inboundAgentId !== d.inboundAgentId) await assertInboundAgent(ctx, input.inboundAgentId);
   if (enabling && !d.inboundEnabled) await assertInboundAgent(ctx, agentId!);
 
-  // O webhook antigo sai: ao desligar e ao trocar o bot com a entrada ligada (o token é lido antes da troca).
-  const oldToken = d.inboundEnabled && (disabling || tokenChanged) ? await inboundToken(ctx.db, id) : null;
+  // O webhook antigo sai: ao desligar e ao trocar de bot com a entrada ligada (o token é lido antes da troca).
+  const oldToken = d.inboundEnabled && (disabling || botChanged) ? await inboundToken(ctx.db, id) : null;
 
   if (enabling) {
     const base = await publicBaseUrl(ctx.db, ctx.config);
@@ -233,7 +238,7 @@ export async function updateDestination(ctx: ServiceContext, id: string, input: 
       await withTx(ctx, (tx) => tx.execute(sql`UPDATE message_destinations SET ${sql.join(sets, sql`, `)} WHERE id = ${id}`));
     }
   }
-  if (oldToken && (disabling || tokenChanged)) await dropWebhook(ctx.config, oldToken);
+  if (oldToken && (disabling || botChanged)) await dropWebhook(ctx.config, oldToken);
   return getDestination(ctx, id);
 }
 

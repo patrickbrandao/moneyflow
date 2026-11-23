@@ -594,6 +594,29 @@ describe('Telegram de entrada', () => {
     await api.del(`/api/message-destinations/${twin.id}`);
   });
 
+  it('regravar o token do mesmo bot só religa o webhook; trocar de bot desliga o do antigo (tarefa 167)', async () => {
+    const callsSince = (from: number, method: string) => tg.calls.slice(from).filter((c) => c.method === method);
+    let from = tg.calls.length;
+    await api.patch(`/api/message-destinations/${destination.id}`, { botToken });
+    expect(callsSince(from, 'setWebhook').map((c) => c.token)).toEqual([botToken]);
+    expect(callsSince(from, 'deleteWebhook')).toEqual([]);
+    expect(tg.webhooks.get(botToken)?.url).toBe(`https://moneyflow.test/api/telegram/webhook/${destination.id}`);
+
+    // Outro bot: o webhook liga no novo e sai do antigo.
+    const other = token();
+    from = tg.calls.length;
+    await api.patch(`/api/message-destinations/${destination.id}`, { botToken: other });
+    expect(callsSince(from, 'setWebhook').map((c) => c.token)).toEqual([other]);
+    expect(callsSince(from, 'deleteWebhook').map((c) => c.token)).toEqual([botToken]);
+    expect(tg.webhooks.has(botToken)).toBe(false);
+
+    // De volta ao bot dos outros casos.
+    from = tg.calls.length;
+    await api.patch(`/api/message-destinations/${destination.id}`, { botToken });
+    expect(callsSince(from, 'deleteWebhook').map((c) => c.token)).toEqual([other]);
+    expect(tg.webhooks.get(botToken)?.url).toBe(`https://moneyflow.test/api/telegram/webhook/${destination.id}`);
+  });
+
   it('segredo errado ou ausente dá 401; update_id repetido é ignorado; chat não pareado recebe o aviso; grupo é ignorado', async () => {
     expect((await hook(destination.id, textUpdate(chat + 1, 'oi'), 'segredo-errado')).statusCode).toBe(401);
     expect((await hook(destination.id, textUpdate(chat + 1, 'oi'), null)).statusCode).toBe(401);
