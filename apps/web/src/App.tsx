@@ -10,33 +10,41 @@ import { ConfirmProvider } from './components/ui';
 import { BRAND } from './config/brand';
 import { useAuth } from './lib/auth';
 import { CommandProvider, useRegisterCommands } from './lib/commands';
+import { lazyNamed } from './lib/lazy';
 import { toggleTheme } from './lib/theme';
-import { AccountPage } from './pages/AccountPage';
-import { AdminAiPage } from './pages/AdminAiPage';
-import { AdminAiProviderPage } from './pages/AdminAiProviderPage';
-import { AdminBackupPage } from './pages/AdminBackupPage';
-import { AdminMcpPage } from './pages/AdminMcpPage';
-import { AuditPage } from './pages/AuditPage';
-import { CaixaPage } from './pages/CaixaPage';
-import { CaixasPage } from './pages/CaixasPage';
-import { CalendarPage } from './pages/CalendarPage';
-import { CategoriesPage } from './pages/CategoriesPage';
-import { ContractPage } from './pages/ContractPage';
-import { ContractsPage } from './pages/ContractsPage';
-import { EntitiesPage } from './pages/EntitiesPage';
-import { EntityPage } from './pages/EntityPage';
-import { FinancialAccountPage } from './pages/FinancialAccountPage';
-import { FlowPage } from './pages/FlowPage';
-import { InvoicePage } from './pages/InvoicePage';
 import { LoginPage } from './pages/LoginPage';
-import { MessagesPage } from './pages/MessagesPage';
-import { NotesPage } from './pages/NotesPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { OverviewPage } from './pages/OverviewPage';
-import { ReconcileRecipesPage } from './pages/ReconcileRecipesPage';
-import { ReportsPage } from './pages/ReportsPage';
-import { TransfersPage } from './pages/TransfersPage';
-import { UsersPage } from './pages/UsersPage';
+
+/*
+ * Telas sob demanda (tarefa 128): o arquivo principal leva só a casca, o login
+ * e a visão geral; cada outra tela (o canvas, a administração de IA, os
+ * contratos…) é um pedaço próprio, baixado na primeira visita. O Suspense fica
+ * no `Layout`, em volta do conteúdo: a casca não pisca ao trocar de tela.
+ */
+const AccountPage = lazyNamed(() => import('./pages/AccountPage'), 'AccountPage');
+const AdminAiPage = lazyNamed(() => import('./pages/AdminAiPage'), 'AdminAiPage');
+const AdminAiProviderPage = lazyNamed(() => import('./pages/AdminAiProviderPage'), 'AdminAiProviderPage');
+const AdminBackupPage = lazyNamed(() => import('./pages/AdminBackupPage'), 'AdminBackupPage');
+const AdminMcpPage = lazyNamed(() => import('./pages/AdminMcpPage'), 'AdminMcpPage');
+const AuditPage = lazyNamed(() => import('./pages/AuditPage'), 'AuditPage');
+const CaixaPage = lazyNamed(() => import('./pages/CaixaPage'), 'CaixaPage');
+const CaixasPage = lazyNamed(() => import('./pages/CaixasPage'), 'CaixasPage');
+const CalendarPage = lazyNamed(() => import('./pages/CalendarPage'), 'CalendarPage');
+const CategoriesPage = lazyNamed(() => import('./pages/CategoriesPage'), 'CategoriesPage');
+const ContractPage = lazyNamed(() => import('./pages/ContractPage'), 'ContractPage');
+const ContractsPage = lazyNamed(() => import('./pages/ContractsPage'), 'ContractsPage');
+const EntitiesPage = lazyNamed(() => import('./pages/EntitiesPage'), 'EntitiesPage');
+const EntityPage = lazyNamed(() => import('./pages/EntityPage'), 'EntityPage');
+const FinancialAccountPage = lazyNamed(() => import('./pages/FinancialAccountPage'), 'FinancialAccountPage');
+const FlowPage = lazyNamed(() => import('./pages/FlowPage'), 'FlowPage');
+const InvoicePage = lazyNamed(() => import('./pages/InvoicePage'), 'InvoicePage');
+const MessagesPage = lazyNamed(() => import('./pages/MessagesPage'), 'MessagesPage');
+const NotesPage = lazyNamed(() => import('./pages/NotesPage'), 'NotesPage');
+const ReconcileRecipesPage = lazyNamed(() => import('./pages/ReconcileRecipesPage'), 'ReconcileRecipesPage');
+const ReportsPage = lazyNamed(() => import('./pages/ReportsPage'), 'ReportsPage');
+const TransfersPage = lazyNamed(() => import('./pages/TransfersPage'), 'TransfersPage');
+const UsersPage = lazyNamed(() => import('./pages/UsersPage'), 'UsersPage');
 
 export default function App() {
   const { user, ready, expired } = useAuth();

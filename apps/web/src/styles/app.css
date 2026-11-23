@@ -181,6 +181,12 @@ table.data tfoot td {
   min-height: 100vh;
   background: var(--bg-chrome);
 }
+/* tela sob demanda chegando (tarefa 128): o carregando no lugar dela, dentro da casca */
+.page-loading {
+  display: grid;
+  place-items: center;
+  min-height: 40vh;
+}
 
 /* `.field` vale 100% e não está numa camada: os utilitários do Tailwind não o sobrescrevem */
 .field.field-auto {

@@ -14,6 +14,7 @@ export * from './markdown';
 export * from './messages';
 export * from './money';
 export * from './notes';
+export * from './notes-input';
 export * from './parsers';
 export * from './period';
 export * from './pix';

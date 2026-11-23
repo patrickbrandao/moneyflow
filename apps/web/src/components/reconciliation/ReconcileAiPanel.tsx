@@ -2,7 +2,7 @@ import { type AiRunEvent, type ReconcileAiStartResult, type ReconcileAiStateDto,
 import { Bot, Check, CheckCheck, Loader2, Sparkles, X } from 'lucide-react';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { useAgentActions } from '../../agents/AgentsProvider';
-import { PreviewRows } from '../../agents/ConversationPane';
+import { PreviewRows } from '../../agents/ConversationBody';
 import { followRun } from '../../agents/stream';
 import { api } from '../../lib/api';
 import { useAction, useApi } from '../../lib/hooks';

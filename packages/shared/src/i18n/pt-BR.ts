@@ -153,6 +153,10 @@ export const ptBR = {
     notFound: 'Página não encontrada',
     notFoundHint: 'O endereço pode ter mudado. Use ⌘K para procurar.',
     backHome: 'Voltar ao início',
+    /** Tela sob demanda (tarefa 128) que não carregou ou falhou ao abrir. */
+    pageError: 'Não foi possível abrir esta tela.',
+    pageErrorHint: 'Pode ser uma versão nova do MoneyFlow no ar. Recarregue a página.',
+    reload: 'Recarregar',
   },
 
   /** Visão geral (página inicial). */

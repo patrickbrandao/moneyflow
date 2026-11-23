@@ -105,7 +105,7 @@ Anotações funcionam como notas, post-its e lembretes presos a um objeto do sis
 - O agente cita as notas de uma entidade ao falar dela consultando as tools (`list_notes` com a entidade); nada é injetado no prompt.
 
 ## API
-Entradas, DTOs e textos em `packages/shared/src/notes.ts` e `t.notes`; serviço `apps/server/src/services/notes.ts`.
+DTOs, constantes e textos em `packages/shared/src/notes.ts` e `t.notes`, as entradas Zod em `notes-input.ts` (fora do arquivo principal do console); serviço `apps/server/src/services/notes.ts`.
 - `GET /api/notes` — a tabela: `from`/`to` (juntos; com período, uma linha por ocorrência, o lembrete em cada dia em que ocorre; sem período, uma linha por anotação na data dela), `kinds` (separados por vírgula), `entityId`, `scope` (`all`, `mine` = as minhas, `global` = as globais), `authorId` (só admin), `q` (título e corpo), `archived` (só as arquivadas), `order` (`desc` padrão), `cursor` e `limit` (até 500). Devolve `{ items, nextCursor }`; cada item é a anotação sem o corpo, com `occursOn` e `bodyExcerpt`.
 - `POST /api/notes`, `GET/PATCH /api/notes/:id`, `POST /api/notes/:id/archive` e `POST /api/notes/:id/unarchive`. O lembrete vai no campo `reminder` da nota; na edição, só os campos que mudam. Trocar o tipo para lembrete cria o lembrete (com os padrões); trocar para outro tipo o remove.
 - `GET /api/notes/calendar?from&to&entityId&kinds` — `[{ day, counts: { tipo: n } }]`, pelo `note_calendar`, com as recorrências expandidas.
