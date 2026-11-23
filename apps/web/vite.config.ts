@@ -1,9 +1,10 @@
+import { fileURLToPath } from 'node:url';
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 
-// Em dev, o Vite encaminha `/api` e o servidor MCP (`/mcp`) para a API (PORT do .env, padrão 3001).
-const api = `http://localhost:${process.env.API_PORT ?? '3001'}`;
+/** A raiz do monorepo: o `.env` dela é o mesmo que o `pnpm dev` da API lê (tarefa 185). */
+const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 /**
  * Teto do arquivo de entrada (tarefa 128): as telas, o miolo da conversa dos
@@ -37,22 +38,32 @@ function entryBudget(): Plugin {
   };
 }
 
-export default defineConfig({
-  plugins: [react(), tailwindcss(), entryBudget()],
-  server: {
-    port: Number(process.env.WEB_PORT ?? 5174),
-    proxy: { '/api': api, '/mcp': api },
-  },
-  build: {
-    outDir: 'dist',
-    // O aviso do Vite vale para todo pedaço, com o mesmo teto do arquivo principal.
-    chunkSizeWarningLimit: ENTRY_BUDGET_KB,
-    rollupOptions: {
-      // O zod traz comentários /*@__PURE__*/ em posições que o Rollup ignora: aviso inofensivo.
-      onwarn(warning, warn) {
-        if (warning.code === 'INVALID_ANNOTATION') return;
-        warn(warning);
+export default defineConfig(({ mode }) => {
+  /*
+   * Em dev, o Vite encaminha `/api` e o servidor MCP (`/mcp`) para a API, na porta que ela escuta: o PORT do
+   * `.env` da raiz (padrão 3001), ou API_PORT para apontar para outra; WEB_PORT troca a do Vite (5174). O que
+   * já está no ambiente vence o arquivo, como na API. Só a configuração lê estas variáveis: nada do `.env` da
+   * raiz chega ao código do console (o `import.meta.env` continua só com o envDir e o prefixo VITE_).
+   */
+  const env = loadEnv(mode, ROOT, '');
+  const api = `http://localhost:${env.API_PORT || env.PORT || '3001'}`;
+  return {
+    plugins: [react(), tailwindcss(), entryBudget()],
+    server: {
+      port: Number(env.WEB_PORT || 5174),
+      proxy: { '/api': api, '/mcp': api },
+    },
+    build: {
+      outDir: 'dist',
+      // O aviso do Vite vale para todo pedaço, com o mesmo teto do arquivo principal.
+      chunkSizeWarningLimit: ENTRY_BUDGET_KB,
+      rollupOptions: {
+        // O zod traz comentários /*@__PURE__*/ em posições que o Rollup ignora: aviso inofensivo.
+        onwarn(warning, warn) {
+          if (warning.code === 'INVALID_ANNOTATION') return;
+          warn(warning);
+        },
       },
     },
-  },
+  };
 });

@@ -1,5 +1,7 @@
 # 007 — Cartão de crédito (caixa do tipo cartão)
 
+> **Conteúdo:** A caixa do tipo cartão, compras com recebedor final, parcelas, estornos, datas da fatura, fechamento por pagadora (espelho aceito no lado da pagadora), pagamento parcial e antecipado, encargos, status da fatura (inclusive rolada), relatórios por competência pelas compras (sem os títulos de fatura) e, no regime de caixa, o pagamento da fatura com a categoria do título. A cobrança recorrente esperada no cartão (obrigação de contrato ou assinatura): ocorrências pelo calendário, a compra ligada à ocorrência, a sugestão "Lançar como cobrança de…" na fatura, a compra à mão ligada e a "não cobrada" ([034](034-contratos-sobre-series.md)).
+
 - Titular = emissor (entidade, ex.: Nu Pagamentos). Atributos: caixa pagadora padrão, limite, dia de fechamento e de vencimento, final do cartão.
 - As **compras** ficam na caixa do cartão, cada uma com entidade recebedora (lojista/CNPJ), categoria e caixa pagadora (herda a padrão, pode ser trocada por compra). Assim todo movimento é rastreável até o recebedor final.
 - Parcelado: a compra-mãe gera N parcelas nas faturas futuras (limite comprometido). Estorno: crédito vinculado à compra original, na fatura aberta.

@@ -1,5 +1,7 @@
 # 004 — Caixas e contas financeiras
 
+> **Conteúdo:** A caixa como livro do titular, caixa principal, tipos de caixa e tipos de conta financeira; o saldo atual como o do fim de hoje, com o lançado com data futura à parte; o nome no título da tela da caixa leva à página inicial dela; a navegação hierárquica caixa → conta (faixa de contas na caixa só com nome e saldo e a tela da conta com resumo — gráficos mensais, saldo e pizzas por categoria —, extrato e conciliação só dela) o resumo da conta na API e o filtro de período das listagens (padrão 60 dias atrás e 30 à frente, atalhos de mês e hoje, última escolha lembrada por visão) e as listagens que cortam no servidor (300 por vez, totais do filtro, "Mostrando N de M" e "Carregar mais"). Na tela da conta, os Previstos (ocorrências em aberto das séries com a conta prevista, com Baixar) e, no cofre, o "É o pagamento de…?" do lançamento avulso ([034](034-contratos-sobre-series.md)).
+
 ## Caixa = livro financeiro de um titular
 
 - Não existe camada de "Espaço". Cada Caixa tem um **titular** (entidade) e é a unidade de permissão ([002](002-usuarios-e-permissoes.md)).

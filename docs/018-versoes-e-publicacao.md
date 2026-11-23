@@ -1,5 +1,7 @@
 # 018 — Versões e publicação
 
+> **Conteúdo:** Série 0.1.x (incrementa o último número a cada release), `latest` só na maior tag, publicação desta máquina (`release-check`: árvore limpa, HEAD na tag, verificação completa, build do commit) ou pelo CI (o CI inteiro antes da imagem), versões fixas (Node do `.nvmrc`, actions pelo SHA, imagens com digest), Docker local aqui e produção num projeto externo; a parada com prazo (`SHUTDOWN_GRACE_MS`) e o healthcheck da imagem pelo modo do processo (o worker pelo batimento do laço de mensagens); os prazos do Postgres na produção (`DB_*_MS`, o `lock_timeout` do dbmate).
+
 ## Versões
 
 - A série atual é **0.1.x**: a primeira publicação é `v0.1.0`, e cada nova release incrementa o último número (`v0.1.1`, `v0.1.2`…). Mudar o número do meio ou chegar à `1.0.0` é decisão do dono do produto.

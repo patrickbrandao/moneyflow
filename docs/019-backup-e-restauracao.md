@@ -1,5 +1,7 @@
 # 019 — Backup e restauração
 
+> **Conteúdo:** Administração → Backup e restauração: exportar/importar categorias, entidades, caixas, provedores de IA (com chave) e usuários (com senha) em JSON com merge (já cadastrados ficam, conflitos não entram e voltam com o motivo, simulação), dump do PostgreSQL (requisições ao provedor só com a estrutura) e JSON completo em .zip (com `app_settings`; formato 2: o conteúdo dos anexos em entradas próprias do zip, lido um por vez; uma trava de backup só, no banco), restauração do dump (transação única pelo `psql`, sem tocar nas extensões e sem vazar os privilégios padrão, dono sem superusuário, mesma versão de schema) e importação do JSON completo. Arquivos de antes dos contratos sobre séries (F20) convertidos pelo critério da migração 0052.
+
 Menu **Administração → Backup e restauração** (só admin), em `/admin/backup`, com uma aba por tela: Categorias, Entidades, Caixas, Provedores de IA, Usuários, Backup e Restauração. Decisões de 2026-10-11.
 
 ## Exportar e importar por recurso

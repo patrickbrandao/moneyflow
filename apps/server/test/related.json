@@ -125,6 +125,10 @@
 
     "packages/db/src/**": ["test/generated-schema.test.ts", "test/db-pool.test.ts"],
     "database/migrations/**": ["test/generated-schema.test.ts"],
+    ".env.example": ["test/config.test.ts"],
+    "apps/web/vite.config.ts": ["test/config.test.ts"],
+    "docker-compose.yml": ["test/config.test.ts"],
+    "docker/database.override.yml": ["test/config.test.ts"],
     "packages/shared/src/reconcile.ts": ["test/statements.test.ts", "test/contracts.test.ts"],
     "packages/shared/src/supersede.ts": ["test/statement-supersede.test.ts"],
     "packages/shared/src/contracts.ts": ["test/contracts.test.ts"],

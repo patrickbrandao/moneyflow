@@ -74,3 +74,33 @@ describe('configuração por ambiente (tarefa 110)', () => {
     expect(config).toMatchObject({ aiRequestBackoffMs: 0, aiTranscriptionTimeoutMs: 0, sessionIdleHours: 0 });
   });
 });
+
+describe('.env.example da raiz (tarefa 185)', () => {
+  const root = join(__dirname, '../../..');
+  const read = (file: string) => readFileSync(join(root, file), 'utf8');
+  const names = (text: string, pattern: RegExp) => new Set([...text.matchAll(pattern)].map((m) => (m[1] ?? m[2])!));
+  // As chaves do exemplo, ativas ou comentadas (`# NOME=valor`).
+  const documented = names(read('.env.example'), /^#? ?([A-Z][A-Z0-9_]+)=/gm);
+
+  it('lista toda variável lida pela configuração da API, pelo modo do processo e pelo Vite', () => {
+    const code = ['apps/server/src/config.ts', 'apps/server/src/health.ts', 'apps/server/src/main.ts', 'apps/web/vite.config.ts']
+      .map(read)
+      .join('\n');
+    const used = names(code, /env\.([A-Z][A-Z0-9_]+)|intEnv\(\s*env,\s*'([A-Z][A-Z0-9_]+)'/g);
+    expect(used.size).toBeGreaterThan(30);
+    expect([...used].filter((name) => !documented.has(name))).toEqual([]);
+  });
+
+  it('nenhuma chave fica sem efeito: cada uma é lida pelo código ou pelo compose da raiz', () => {
+    const code = ['apps/server/src/config.ts', 'apps/server/src/health.ts', 'apps/web/vite.config.ts'].map(read).join('\n');
+    // O compose do banco entra pelo include, mas a porta dele é trocada pelo docker/database.override.yml (`!override`):
+    // MONEYFLOW_DB_* só valem no database/.env, para o banco de desenvolvimento.
+    const dbCompose = read('database/docker-compose.yml').replace(/^\s*- "\$\{MONEYFLOW_DB_.*$/gm, '');
+    const compose = [read('docker-compose.yml'), read('docker/database.override.yml'), dbCompose].join('\n');
+    const effective = new Set([
+      ...names(code, /env\.([A-Z][A-Z0-9_]+)|intEnv\(\s*env,\s*'([A-Z][A-Z0-9_]+)'/g),
+      ...names(compose, /\$\{([A-Z][A-Z0-9_]+)/g),
+    ]);
+    expect([...documented].filter((name) => !effective.has(name))).toEqual([]);
+  });
+});

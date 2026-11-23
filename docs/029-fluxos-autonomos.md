@@ -1,5 +1,7 @@
 # 029 — Fluxos autônomos dos agentes (F15)
 
+> **Conteúdo:** F15: tarefas agendadas dos agentes (agenda e próximo disparo no banco, sessão própria, "Rodar agora", aprovação pelo sino `ai_awaiting_approval`), conciliação completa ao importar (agente dos fluxos com as tools internas do kit dele e aprovação em lote na tela do lote) e conversa pelo Telegram por webhook (segredo, dedup, pareamento por código, sessão ativa do console, mídia, aprovações por botão e comandos); `PUBLIC_BASE_URL`/`telegram.public_base_url`.
+
 Três fluxos em que o agente trabalha sem alguém digitando no console:
 
 - tarefas agendadas;

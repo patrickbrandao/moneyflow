@@ -1,5 +1,9 @@
 # 015 — Fases de entrega
 
+> **Conteúdo:** As fases de entrega F1 a F21 e as especificações que cada uma cobre.
+
+Todas as fases, da F1 à F21, estão entregues. O estado de cada fase fica aqui: o `docs/INDEX.md` não repete a marca.
+
 1. **F1, Núcleo**: banco e agente DBA ([016](016-banco-de-dados.md)); monorepo, Docker, CI; auth, usuários e permissões ([002](002-usuarios-e-permissoes.md)); entidades, PIX e dados bancários ([003](003-entidades.md)); caixas e contas ([004](004-caixas-e-contas.md)); categorias ([008](008-categorias-auditoria-e-exclusao.md)); títulos, baixas, recorrência, transferências ([005](005-titulos-baixas-e-movimentos.md)) e espelhamento ([006](006-espelhamento-entre-caixas.md)).
 2. **F2, Operação**: cartão ([007](007-cartao-de-credito.md)); OFX/CSV e conciliação ([009](009-extratos-e-conciliacao.md)); calendário ([012](012-calendario.md)); anexos; auditoria e fechamento de mês ([008](008-categorias-auditoria-e-exclusao.md)); boleto, PIX copia-e-cola e NF-e ([010](010-entrada-de-titulos.md)).
 3. **F3, Visão**: canvas, relatórios e exportações ([014](014-visualizacao-e-relatorios.md)); Telegram ([013](013-mensagens-telegram.md)).
@@ -20,4 +24,4 @@
 18. **F18, Regras por conta**: regras de classificação exclusivas de cada conta (e de cada cartão), sem regra global, com a cópia entre contas pela tela e pelos agentes ([032](032-regras-de-classificacao-por-conta.md)). Entregue (tarefas 039 e 040).
 19. **F19, Pagamentos de contrato no extrato**: conta das parcelas (com troca por parcela e caixa pagadora), a parcela achada no mesmo mês com encargos, desconto e tolerância, baixa repartida e opcionalmente sem confirmação, e a seção Pagamentos com gráficos no detalhe do contrato ([033](033-pagamentos-de-contrato-no-extrato.md)). Entregue (tarefas 041 e 042).
 20. **F20, Contratos sobre séries**: o contrato vira documento e vínculo com obrigações (séries recorrentes nas contas corrente, poupança e cofre, e cobranças esperadas no cartão), a regra de reconhecimento do pagamento vale para toda série, e os contratos existentes migram ([034](034-contratos-sobre-series.md)). Entregue (tarefas 043 e 044).
-21. **F21, Anotações**: notas por tipo e cor presas a um objeto (hoje a entidade), privadas ou globais, lembretes com repetição disparados pelo worker, alarme sonoro no topo da interface com log, sino e Telegram opcional, calendário anual e mensal, tools e `/mcp` ([035](035-anotacoes.md)).
+21. **F21, Anotações**: notas por tipo e cor presas a um objeto (hoje a entidade), privadas ou globais, lembretes com repetição disparados pelo worker, alarme sonoro no topo da interface com log, sino e Telegram opcional, calendário anual e mensal, tools e `/mcp` ([035](035-anotacoes.md)). Entregue (tarefas 046 e 047, v0.1.21).

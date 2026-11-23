@@ -1,5 +1,7 @@
 # 011 — Agentes de IA
 
+> **Conteúdo:** Provedores (Anthropic e OpenAI-compatível), agentes, registro único de tools (categoria, modo sugerido) com prévia/diff e aprovação pelo kit de ferramentas, segredos digitados no cartão e executados pela API na decisão (o worker nunca os executa), arquivos gerados como anexo da sessão, MCP client e servidor `/mcp` com token pessoal (e Administração → Controle MCP: chaves de qualquer usuário, herdando os poderes dele), execução no worker com SSE, retomada e cancelamento, histórico, uso e custo, UX das janelas e do painel lateral, IA na leitura de documentos e na conciliação (lotes de extrato lidos em páginas pelas tools), embeddings; e o mapa das mudanças F7–F16 (specs 021–030, entregues).
+
 ## Configuração
 - **Provedores**: multi-provedor, cadastrados pelo admin (chaves no servidor). Claude API é o padrão; OpenAI API é suportada. Cada agente escolhe provedor e modelo.
 - **Agentes**: criados **só pelo admin** (nome, system prompt, provedor/modelo, kit de ferramentas, MCPs).

@@ -1,5 +1,7 @@
 # 026 — Sessões dos agentes (F12)
 
+> **Conteúdo:** F12: fio contínuo por usuário e agente dividido em sessões (UUIDv7), uma sessão ativa (índice único no banco), finalizar = arquivar com o motivo (`archived_reason`, parando a execução), só a sessão ativa vai ao modelo, bifurcar para continuar de uma finalizada, `pinned_at` removida, rotas e janelas por agente, conversão do `localStorage` e o ajuste do backup.
+
 A conversa com cada agente passa a ser um **fio contínuo por usuário e agente**, dividido em **sessões**. Substitui o modelo de várias conversas soltas da [011](011-agentes-de-ia.md). Decisões da entrevista de 2026-10-13. Como as sessões anteriores serão aproveitadas (memória, resumo, busca pelo agente) fica para implementações futuras.
 
 ## Regras

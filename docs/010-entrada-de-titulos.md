@@ -1,5 +1,7 @@
 # 010 — Entrada de títulos
 
+> **Conteúdo:** Boleto (linha digitável), PIX copia-e-cola, leitura de PDF/imagem por IA e import de NF-e (chave de acesso com CNPJ alfanumérico, NT 2025.001).
+
 - Linha digitável/código de barras de boleto (bancário e convênio): banco, valor, vencimento.
 - PIX copia-e-cola (BR Code): chave, recebedor, valor, cidade; acha ou cria a entidade.
 - Leitura de PDF/imagem por IA (boleto, nota, comprovante) para pré-preencher o título: `/api/title-entry/document`, feita pelo agente dos fluxos ([011](011-agentes-de-ia.md)); sem agente de IA configurado, 501 e o formulário fica manual.

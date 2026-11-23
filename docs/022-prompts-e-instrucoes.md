@@ -1,5 +1,7 @@
 # 022 — Prompts e instruções dos agentes (F8)
 
+> **Conteúdo:** F8: montagem do prompt com pontos de cache, instruções do usuário, contexto automático (caixas, contas, cartões), variáveis `{{…}}`, histórico de versões do prompt do agente e o modo das `instructions` dos servidores MCP (ignorar, system, user).
+
 O que entra no prompt de sistema além do prompt do agente ([011](011-agentes-de-ia.md)):
 
 - instruções do usuário;

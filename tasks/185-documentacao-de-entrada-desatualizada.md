@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -69,4 +69,37 @@ Nada foi executado; o comportamento do Vite (não carrega `.env` de fora da raiz
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Conferido no código atual da integração (`fe8786d`), ponto a ponto:
+1. `docs/INDEX.md:17` ainda dizia que o contrato "gera os títulos das parcelas do ciclo" e que a renovação é uma tarefa aprovada: confirmado, contra a 020/034 e o `syncLifecycle`.
+2. `README.md`: "tools habilitadas, se as escritas pedem confirmação" e a enumeração das specs até a 016: confirmados. Também o botão "Atualizar tools", que hoje é "Testar e atualizar tools".
+3. `AGENTS.md`: "reaproveitarão" (F4 no futuro): confirmado.
+4. Marcas "(entregue)" desiguais no INDEX (029–031, 033 e 034 sim; 032 e 035 não) e a F21 sem marca na 015: confirmado.
+5. `.env.example`: `HOST`, `WEB_DIST`, `CNPJ_ABERTO_BASE`, `BRASILAPI_BASE`, `MODE`, `API_PORT` e `WEB_PORT` lidos e não documentados, e `MONEYFLOW_DB_PORT` sem efeito na raiz (a porta do banco da pilha é trocada pelo `!override` do `docker/database.override.yml`): confirmados.
+6. `vite.config.ts`: o comentário falava do `PORT` do `.env`, mas o código lia só `process.env.API_PORT`: confirmado.
+
+O que mudou nesta rodada e foi conferido também: Node 26 e pnpm sem corepack, o `verify:quick` com o `related.json`, o `make release` com o `release-check`, `DB_*_MS`, `SHUTDOWN_GRACE_MS` e a validação das numéricas no boot. O `AGENTS.md` e o `.env.example` já estavam certos nesses pontos; faltavam o `README` (requisitos) e o `.claude/agents/app.md` (a heurística antiga do `verify:quick`).
+
 ## Resolução (executor)
+
+- **Contrato** (`docs/INDEX.md`): o conceito passou a ser o da 034 ("documento e vínculo… obrigações em séries recorrentes nas contas ou no cartão; aditivo, renovação, manual ou automática pelo worker, e rescisão operam sobre as séries"). O `README` ganhou o mesmo conceito.
+- **`README.md`**: o provedor com os tipos da tela, a URL base, as capacidades com o modelo padrão e o teste por capacidade; o **Kit de Ferramentas** (e o aviso de que o agente sem kit roda as tools internas sem pedir aprovação; as do MCP pedem, salvo as só de leitura); o **Provedor padrão** no agente; "Testar e atualizar tools" e as instruções do MCP; Uso e Requisições; a conciliação com IA, as tarefas agendadas, o Controle MCP e o Telegram de entrada ("Receber mensagens", `PUBLIC_BASE_URL` e o pareamento); os requisitos (Node 26, pnpm 9.12) e o `.env.example`; as specs pelo índice, sem enumerar.
+- **`AGENTS.md`**: "As tools dos agentes reaproveitam os mesmos serviços, com o mesmo `Access`"; o ator `agent` "nas execuções de agente" (em vez de "na F4").
+- **Marcas de entrega**: decisão, tirar a marca do INDEX e deixar o estado só na 015. A 015 diz que as fases F1–F21 estão entregues e marca a F21 ("Entregue (tarefas 046 e 047, v0.1.21)").
+- **`.env.example`**:
+  - `HOST=127.0.0.1` ativo, com o comentário (sem a variável, 0.0.0.0, como na imagem, que define `HOST`; 0.0.0.0 no `pnpm dev` expõe a API com o admin de senha conhecida). Decisão: a sugestão da tarefa, ativa no exemplo; o `.env` de quem já copiou não muda, e o proxy do Vite continua indo a `localhost`;
+  - comentados, com o que fazem: `WEB_PORT`, `API_PORT`, `MODE`, `WEB_DIST`, `CNPJ_ABERTO_BASE` e `BRASILAPI_BASE`;
+  - `MONEYFLOW_DB_PORT` saiu da raiz (fica no `database/.env.example`), com a nota de onde ficam as portas do banco;
+  - `LOGIN_RATE_LIMIT` e `TRUSTED_PROXIES` saíram da seção "Docker Compose da raiz" para a da aplicação, porque a API os lê também no `pnpm dev`.
+- **`apps/web/vite.config.ts`**: a configuração virou função e lê o `.env` da raiz por `loadEnv(mode, <raiz>, '')`: o proxy vai à `API_PORT` ou à `PORT` (padrão 3001) e o Vite escuta na `WEB_PORT` (5174). O ambiente vence o arquivo, como na API (`--env-file-if-exists`). Só a configuração lê essas variáveis: o `import.meta.env` do console continua só com o prefixo `VITE_` (conferido pelo `resolveConfig`: as chaves do cliente seguem `BASE_URL`, `MODE`, `DEV`, `PROD`). Conferido à mão com o `resolveConfig` do Vite: `PORT=3007` no `.env` leva o proxy à 3007; `PORT=3002` no ambiente, à 3002; `API_PORT=3009 WEB_PORT=5199`, à 3009 com o Vite na 5199.
+- **`docs/001-stack-e-entrega.md`** (Configuração): o Vite com o `PORT` da raiz e a conferência do `.env.example`.
+- **Agentes** (pedido da sessão principal): no `.claude/agents/app.md`, só a regra da verificação, com a da tarefa 127 (os testes de integração saem do `apps/server/test/related.json` e do teste de mesmo nome; arquivo de `apps/server/src` sem teste mapeado faz o `verify:quick` falhar com a lista, e o mapa ganha a entrada no mesmo commit, ou o teste vai depois de `--`). O `dba.md` e o `triage.md` foram conferidos só quanto aos comandos: `make test T=/tests/NNNN_area.sql`, `make dump` e `make -C database psql` existem no `database/Makefile` como descritos; nada mudou neles.
+
+Testes (`apps/server/test/config.test.ts`, `describe('.env.example da raiz (tarefa 185)')`):
+- toda variável lida por `config.ts`, `health.ts`, `main.ts` e `vite.config.ts` (`env.X` e `intEnv(env, 'X', …)`) está no `.env.example`, ativa ou comentada;
+- toda chave do `.env.example` é lida pelo código ou pelo compose da raiz (sem contar as portas do compose do banco, trocadas pelo override).
+
+Os dois pegam a regressão: com `MONEYFLOW_DB_PORT` de volta e sem `HOST`, falham citando cada uma. O `test/related.json` ganhou `.env.example`, `apps/web/vite.config.ts`, `docker-compose.yml` e `docker/database.override.yml` → `test/config.test.ts`.
+
+Verificação: rápida, `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_docs pnpm verify:quick --base fe8786d` e `pnpm lint`; todos os links relativos dos `.md` alterados existem.

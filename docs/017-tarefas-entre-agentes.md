@@ -1,5 +1,7 @@
 # 017 — Tarefas entre agentes (`tasks/`)
 
+> **Conteúdo:** A pasta `tasks/`: tarefas de revisão e correção entre agentes e achados do usuário, formato `nnn-titulo.md` com status no cabeçalho, triagem (`triage`) e executores (`dba`, `app`), ciclo de vida.
+
 ## O que é
 
 `tasks/` guarda **tarefas de revisão e correção de código pedidas entre agentes**, e também os achados do usuário durante a validação. Cada tarefa é um arquivo markdown `tasks/nnn-titulo.md`: número de 3 dígitos com zeros à esquerda, título em kebab-case, em português. Uma tarefa nova recebe o próximo número livre.

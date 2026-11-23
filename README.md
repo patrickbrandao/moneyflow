@@ -5,7 +5,8 @@ Sistema multiusuário de finanças por **caixa**: contas a pagar e a receber, co
 - **Caixa**: o livro financeiro de um titular (pessoa ou empresa), unidade de permissão.
 - **Título**: a pagar ou a receber, liquidado por baixas; quando a contraparte também tem caixa, o lado oposto é espelhado nela.
 - **Cartão de crédito**: uma caixa própria; a fatura vira um título em cada caixa pagadora.
-- **Agentes**: janelas de conversa com tools de leitura e escrita (escritas pedem "Aplicar?" com o diff), MCP client e um servidor MCP próprio em `/mcp`.
+- **Contrato**: documento e vínculo com uma entidade (vigência, documentos em PDF e markdown) cujas obrigações são séries recorrentes nas contas ou no cartão.
+- **Agentes**: janelas de conversa com tools de leitura e escrita (o kit de ferramentas do agente diz quais rodam direto e quais pedem "Aplicar?" com o diff), MCP client e um servidor MCP próprio em `/mcp`.
 
 Stack: monorepo pnpm, Node/TypeScript (Fastify, Drizzle), React 19 + Vite, PostgreSQL 18 com pgvector, imagem Docker única `tmsoftbrasil/moneyflow`.
 
@@ -33,14 +34,16 @@ No primeiro boot, se não houver usuários, a API cria o administrador com `ADMI
 
 Em **Administração → IA e agentes** (só admin):
 
-1. **Provedores**: escolha *Anthropic* (Claude API) ou *OpenAI-compatível*, informe a chave de API (fica guardada no banco e nunca é mostrada de novo) e, para servidores compatíveis (Azure, OpenRouter, Ollama…), a URL base terminando em `/v1`. Use **Testar conexão** para conferir a chave e listar os modelos.
-2. **Preços** (opcional): preço por milhão de tokens por modelo, para o custo estimado no painel de uso.
-3. **Agentes**: nome, prompt de sistema, provedor e modelo (sugestões: `claude-sonnet-5-5` para o dia a dia, `claude-opus-5-5` para análises pesadas), tools habilitadas, se as escritas pedem confirmação, cor e servidores MCP. Ative o agente.
-4. **Servidores MCP** (opcional): URL Streamable HTTP, cabeçalhos secretos (ex.: `Authorization`) e visibilidade (`global`, `public`, `private`); **Atualizar tools** lê a lista de tools do servidor.
+1. **Provedores**: escolha *Anthropic (Claude API)* ou *OpenAI ou compatível* e informe a chave de API (fica guardada no banco e nunca é mostrada de novo). Com a URL base vazia, é a API oficial; preenchida, um servidor compatível (OpenRouter, Azure, Ollama…; no tipo OpenAI, terminando em `/v1`), e o Anthropic compatível exige o modelo de texto padrão. Marque as **capacidades** (texto, visão, embeddings, áudio→texto, texto→áudio), cada uma com o modelo padrão, e use **Testar conexão**, que confere capacidade por capacidade e lista os modelos.
+2. **Preços** (opcional): preço por milhão de tokens (e de áudio) por modelo, para o custo estimado no painel de uso.
+3. **Kit de Ferramentas**: as tools que o agente pode usar e, para cada uma, se roda direto (`allow`) ou pede aprovação (`ask`). Agente sem kit tem todas as tools internas, sem pedir aprovação (só as de segredo pedem sempre, e as de administrador valem só para quem é admin): para dar menos poder, crie um kit. As tools dos servidores MCP não passam pelo kit e pedem aprovação, salvo as marcadas como só leitura.
+4. **Agentes**: nome, prompt de sistema (com variáveis e histórico de versões), o **Provedor padrão** (preenche o provedor de texto e as inferências que ele suporta, cada uma trocável depois), o modelo (sugestões: `claude-sonnet-5-5` para o dia a dia, `claude-opus-5-5` para análises pesadas), o kit de ferramentas, cor e servidores MCP. Ative o agente.
+5. **Servidores MCP** (opcional): URL Streamable HTTP, cabeçalhos secretos (ex.: `Authorization`), visibilidade (`global`, `public`, `private`) e o que fazer com as instruções do servidor; **Testar e atualizar tools** lê a lista de tools do servidor.
+6. **Uso** e **Requisições** (opcional): orçamentos mensais, o limite de execuções por minuto, o painel de uso e o registro das chamadas ao provedor.
 
-Depois disso, o ícone **Agentes** na barra superior abre as conversas. O agente marcado em **Agentes → Usar nos fluxos automáticos** (ou, sem marca, o primeiro agente ativo) também lê PDFs e imagens de boletos e notas na criação de títulos, sugere a classificação das linhas de extrato importadas e lê os PDFs dos contratos. A variável `AI_FLOW_AGENT` deixou de existir: quem a usava marca o agente nessa opção.
+Depois disso, o ícone **Agentes** na barra superior abre as sessões de cada agente. O agente marcado em **Agentes → Usar nos fluxos automáticos** (ou, sem marca, o primeiro agente ativo) também lê PDFs e imagens de boletos e notas na criação de títulos, sugere a classificação das linhas de extrato importadas, concilia o lote com IA ao importar (quando ligado na conta) e lê os PDFs dos contratos. Cada usuário pode criar tarefas agendadas para os agentes em **Minha conta**. A variável `AI_FLOW_AGENT` deixou de existir: quem a usava marca o agente nessa opção.
 
-Para usar as tools do MoneyFlow num cliente MCP externo, gere um token em **Minha conta → Tokens de API** e configure o cliente com `https://<seu-host>/mcp` e o cabeçalho `Authorization: Bearer <token>`.
+Para usar as tools do MoneyFlow num cliente MCP externo, gere um token em **Minha conta → Tokens de API** (o admin gera para qualquer usuário em **Administração → Controle MCP**) e configure o cliente com `https://<seu-host>/mcp` e o cabeçalho `Authorization: Bearer <token>`. O token tem as permissões do dono.
 
 ## Configurar um destino do Telegram
 
@@ -49,12 +52,12 @@ Para usar as tools do MoneyFlow num cliente MCP externo, gere um token em **Minh
 3. Em **Mensagens → Novo destino**, informe nome, token e chat id (pessoal ou de uma caixa) e use **Enviar teste**.
 4. Na gaveta do destino, escolha os eventos: vencimentos, atrasados, resumos, fatura fechada, limite do cartão, divergência de conciliação e os avisos dos agentes.
 
-O token do bot também é write-only. Para os links das mensagens apontarem para o console, defina `APP_URL`.
+O token do bot também é write-only. Para os links das mensagens apontarem para o console, defina `APP_URL`. Para conversar com os agentes pelo Telegram, ligue **Receber mensagens** no destino (exige a URL pública HTTPS da API em `PUBLIC_BASE_URL` ou em **Administração → IA e agentes → Tarefas e Telegram**) e pareie o seu chat em **Minha conta → Telegram**.
 
 ## Desenvolvimento
 
-Os comandos (instalação, banco de desenvolvimento, `pnpm dev`, testes unitários, de integração e e2e, build e release) estão em [AGENTS.md](AGENTS.md). O banco (`database/`) tem regras e comandos próprios em [database/AGENTS.md](database/AGENTS.md).
+Requisitos: Node 26 (o `.nvmrc`) e pnpm 9.12. Os comandos (instalação, banco de desenvolvimento, `pnpm dev`, os dois níveis de verificação, testes unitários, de integração e e2e, build e release) estão em [AGENTS.md](AGENTS.md), e o mapa de cada pacote no `AGENTS.md` da pasta. O banco (`database/`) tem regras e comandos próprios em [database/AGENTS.md](database/AGENTS.md). As variáveis de ambiente estão todas no [.env.example](.env.example).
 
 ## Especificações
 
-As especificações do produto, fonte da verdade de cada decisão, estão em [`docs/`](docs/INDEX.md), começando pelo índice [docs/INDEX.md](docs/INDEX.md): stack e entrega, usuários e permissões, entidades, caixas e contas, títulos e baixas, espelhamento, cartão, categorias e auditoria, extratos e conciliação, entrada de títulos, agentes de IA, calendário, mensagens, visualização e relatórios, fases e banco de dados.
+As especificações do produto, fonte da verdade de cada decisão, estão em [`docs/`](docs/INDEX.md): veja o índice [docs/INDEX.md](docs/INDEX.md), com os conceitos centrais e uma frase por especificação.
