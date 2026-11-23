@@ -529,6 +529,27 @@ describe('embeddings por par (provedor, modelo)', () => {
     const done = await search(agentB.id);
     expect(done.payload.building).toBeUndefined();
     expect(done.payload.hits[0]).toMatchObject({ id: entity.id });
+    const mark = async (model: string) =>
+      (
+        await h.db.execute<{ complete: boolean }>(sql`
+          SELECT complete_at IS NOT NULL AS complete FROM ai_embedding_indexes WHERE provider_id = ${provider.id} AND model = ${model}`)
+      ).rows[0]?.complete;
+    expect([await mark('emb-a'), await mark('emb-b')]).toEqual([true, true]);
+
+    // Tarefa 161: o texto editado e já sincronizado (o vetor na fila, needs_reindex) volta a avisar, sem contar as
+    // fontes, até a passada seguinte recalcular; um processo novo (sem cursor) desmarca até alcançar o fim.
+    await admin.patch(`/api/entities/${entity.id}`, { name: `${name} Filial` });
+    await syncEmbeddingSources(h.db, { providerId: provider.id, model: 'emb-b' }, state);
+    expect((await search(agentB.id)).payload).toMatchObject({ building: true });
+    await index();
+    expect((await search(agentB.id)).payload.building).toBeUndefined();
+    // O worker que reinicia relê do começo: a primeira passada (lote de 1, sem alcançar o fim) desmarca o par.
+    const restarted: IndexState = { since: new Map() };
+    expect((await indexEmbeddings(h.db, h.config, restarted, { sourceBatch: 1 })).errors).toEqual([]);
+    expect(await mark('emb-b')).toBe(false);
+    expect((await search(agentB.id)).payload).toMatchObject({ building: true });
+    await index();
+    expect(await mark('emb-b')).toBe(true);
 
     // Progresso do índice no detalhe do provedor.
     const summary = await admin.get(`/api/admin/ai/providers/${provider.id}/summary`);
