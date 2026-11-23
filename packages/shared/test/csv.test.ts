@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyCsvAmountSign,
   applyCsvMapping,
   type CsvMapping,
   csvBankBalance,
@@ -7,6 +8,7 @@ import {
   parseAmount,
   parseCsv,
   parseDateWithFormat,
+  suggestCsvAmountSign,
 } from '../src/parsers/csv';
 import { fixtureText } from './fixtures';
 
@@ -159,5 +161,21 @@ describe('csvBankBalance (tarefa 090)', () => {
   it('um dia só (sem ordem): a última linha; sem saldo: null', () => {
     expect(balanceOf('20/10/2026;A;-1,00;99,00\n20/10/2026;B;-1,00;98,00\n')).toEqual({ amountCents: 9800, date: '2026-10-20' });
     expect(balanceOf('20/10/2026;A;-1,00;\n')).toBeNull();
+  });
+});
+
+describe('sinal dos valores do mapeamento (tarefa 091)', () => {
+  const lines = (...cents: number[]) => cents.map((amountCents) => ({ amountCents }));
+  it('inverte só pelo mapeamento, nunca pela maioria das linhas', () => {
+    // Uma compra e o pagamento da fatura: com "inverter", a compra fica negativa e o pagamento positivo.
+    expect(applyCsvAmountSign(lines(15_000, -15_000), 'invert').map((l) => l.amountCents)).toEqual([-15_000, 15_000]);
+    // Mais créditos que compras, "como vêm": nada muda.
+    expect(applyCsvAmountSign(lines(-5_000, 20_000, 3_000), 'as_is').map((l) => l.amountCents)).toEqual([-5_000, 20_000, 3_000]);
+  });
+  it('a sugestão para a tela pré-marca pela maioria só no cartão', () => {
+    expect(suggestCsvAmountSign(lines(100, 200, -50), true)).toBe('invert');
+    expect(suggestCsvAmountSign(lines(100, -200), true)).toBe('as_is');
+    expect(suggestCsvAmountSign([], true)).toBe('invert');
+    expect(suggestCsvAmountSign(lines(100, 200, 300), false)).toBe('as_is');
   });
 });

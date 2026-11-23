@@ -856,6 +856,8 @@ export type CsvMappingRow = {
   dateFormat: string;
   decimalSeparator: string;
   columns: Record<string, string | number>;
+  /** Sinal dos valores do arquivo (tarefa 091): como vêm ou invertidos. */
+  amountSign: 'as_is' | 'invert';
   isDefault: boolean;
 };
 

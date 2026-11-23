@@ -276,6 +276,75 @@ describe('extratos e conciliação (spec 009)', () => {
     expect((await admin.get(`/api/csv-mappings?accountId=${s.accountA.id}`))[0].id).toBe(mapping.id);
   });
 
+  it('o sinal da fatura em CSV é o do mapeamento, nunca a maioria das linhas (tarefa 091)', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const issuer = await admin.post('/api/entities', { kind: 'company', name: `Emissor CSV ${s.tag}` });
+    const card = await admin.post('/api/caixas', {
+      name: `Cartão CSV ${s.tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: s.caixaA.id,
+      creditLimitCents: 500_000,
+      closingDay: 25,
+      dueDay: 5,
+      cardLast4: '2222',
+    });
+    const mapping = (name: string, extra: object) =>
+      admin.post('/api/csv-mappings', {
+        cardCaixaId: card.id,
+        name,
+        delimiter: ';',
+        columns: { date: 'data', description: 'descrição', amount: 'valor' },
+        ...extra,
+      });
+    const csv = (...rows: string[]) => Buffer.from(['Data;Descrição;Valor', ...rows].join('\n'));
+    const importCsv = async (mappingId: string, file: Buffer) => {
+      const res = await upload(
+        adminSession.cookie,
+        `/api/statement-imports?cardCaixaId=${card.id}&fileName=fatura.csv&mappingId=${mappingId}`,
+        file,
+        'text/csv',
+      );
+      expect(res.statusCode, res.body).toBe(200);
+      return Object.fromEntries(res.json().lines.map((l: any) => [l.description, l.amountCents]));
+    };
+
+    // Sem o sinal, o mapeamento do cartão nasce invertido (a fatura traz as compras positivas).
+    const invert = await mapping('Compras positivas', {});
+    expect(invert.amountSign).toBe('invert');
+    // Uma compra e o pagamento: a compra fica negativa e o pagamento positivo (antes, 1 de 2 positivas não invertia).
+    expect(await importCsv(invert.id, csv('05/10/2026;LOJA X;150,00', '10/10/2026;PAGAMENTO RECEBIDO;-150,00'))).toEqual({
+      'LOJA X': -15_000,
+      'PAGAMENTO RECEBIDO': 15_000,
+    });
+
+    // "Como vêm": mais créditos que compras não inverte (antes, 2 de 3 positivas invertiam).
+    const asIs = await mapping('Compras negativas', { amountSign: 'as_is' });
+    expect(asIs.amountSign).toBe('as_is');
+    expect(
+      await importCsv(asIs.id, csv('06/10/2026;LOJA Y;-50,00', '11/10/2026;PAGAMENTO;200,00', '12/10/2026;ESTORNO LOJA Z;30,00')),
+    ).toEqual({ 'LOJA Y': -5_000, PAGAMENTO: 20_000, 'ESTORNO LOJA Z': 3_000 });
+
+    // A troca fica no mapeamento; a conta nasce "como vem".
+    expect((await admin.patch(`/api/csv-mappings/${asIs.id}`, { amountSign: 'invert' })).amountSign).toBe('invert');
+    expect((await admin.get(`/api/csv-mappings?cardCaixaId=${card.id}`)).map((m: any) => m.amountSign)).toEqual(['invert', 'invert']);
+    const account = await admin.post('/api/csv-mappings', {
+      financialAccountId: s.accountA.id,
+      name: 'Conta',
+      columns: { date: 'data', description: 'descrição', amount: 'valor' },
+    });
+    expect(account.amountSign).toBe('as_is');
+    const bad = await admin.raw('POST', '/api/csv-mappings', {
+      cardCaixaId: card.id,
+      name: 'X',
+      columns: invert.columns,
+      amountSign: 'talvez',
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
   it('importa a fatura do cartão: casa com as compras e linha nova vira compra', async () => {
     const adminSession = await userSession(h, 'admin');
     const admin = client(h, adminSession.cookie);

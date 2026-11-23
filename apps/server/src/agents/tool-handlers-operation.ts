@@ -595,7 +595,14 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         { label: 'Entradas', after: formatBRL(info.inCents) },
         { label: 'Saídas', after: formatBRL(info.outCents) },
       ];
-      if (i.csvMapping) rows.push({ label: 'Mapeamento CSV (salvo)', after: i.csvMapping.name });
+      if (i.csvMapping) {
+        // O sinal que o mapeamento salvo vai ter (tarefa 091): o informado ou o padrão do alvo.
+        const sign = i.csvMapping.amountSign ?? (i.cardCaixaId ? 'invert' : 'as_is');
+        rows.push(
+          { label: 'Mapeamento CSV (salvo)', after: i.csvMapping.name },
+          { label: t.statements.amountSignRow, after: t.statements.amountSignLabels[sign] ?? sign },
+        );
+      }
       if (info.provisional) rows.push({ label: 'Lote', after: 'Provisório (extrato parcial do mês)' });
       if (info.superseded) rows.push(...supersedeRows(info.superseded));
       return {

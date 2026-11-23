@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto';
 import { attachments, type Executor, statementCsvMappings, statementImports, statementLines, type Tx } from '@moneyflow/db';
 import {
   addDays,
+  applyCsvAmountSign,
   applyCsvMapping,
   type CardChargeOccurrence,
   type CardChargeSuggestion,
+  type CsvAmountSign,
   type CsvMapping,
   cardChargeMatch,
   csvBankBalance,
@@ -193,11 +195,17 @@ async function findMapping(db: Executor, target: StatementTarget, mappingId?: st
   return row ?? null;
 }
 
-/** Mapeamento CSV ainda não salvo (prévia da tool import_statement, spec 027). */
+/** Mapeamento CSV ainda não salvo (prévia da tool import_statement, spec 027); sem o sinal, o padrão do alvo. */
 export type InlineCsvMapping = Pick<
   typeof statementCsvMappings.$inferSelect,
   'delimiter' | 'encoding' | 'hasHeader' | 'skipRows' | 'dateFormat' | 'decimalSeparator' | 'columns'
->;
+> & { amountSign?: string };
+
+/**
+ * Sinal do mapeamento criado sem ele (tarefa 091), o mesmo da migração sem evidência: a fatura do cartão em CSV
+ * costuma trazer as compras positivas (spec 009), e a conta vem como está.
+ */
+export const defaultCsvAmountSign = (target: { kind: 'account' | 'card' }): CsvAmountSign => (target.kind === 'card' ? 'invert' : 'as_is');
 
 /**
  * Lê o arquivo (OFX ou CSV com o mapeamento) e devolve as linhas no ponto de
@@ -245,10 +253,8 @@ export async function parseStatementFile(
     fitid: line.fitid,
     raw: line.raw as Record<string, unknown>,
   }));
-  // Fatura de cartão em CSV costuma trazer compras positivas: no app, compra sai (−).
-  if (target.kind === 'card' && lines.filter((l) => l.amountCents > 0).length > lines.length / 2) {
-    lines = lines.map((l) => ({ ...l, amountCents: -l.amountCents }));
-  }
+  // O sinal é o do mapeamento (tarefa 091), nunca a maioria das linhas do arquivo: no app, compra e débito saem (−).
+  lines = applyCsvAmountSign(lines, (mapping.amountSign as CsvAmountSign | undefined) ?? defaultCsvAmountSign(target));
   return {
     format: 'csv',
     lines,

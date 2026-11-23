@@ -823,6 +823,66 @@ describe('backup: recursos num sistema novo', () => {
     expect((await bApi.get('/api/classification-rules')).some((r: any) => r.pattern === orphan.pattern)).toBe(false);
   });
 
+  it('mapeamento de CSV de arquivo antigo, sem o sinal, entra invertido no cartão e como vem na conta (tarefa 091)', async () => {
+    if (skip) return;
+    const adminA = await userSession(h, 'admin');
+    const bApi = client(b, adminB.cookie);
+    const tag = uid();
+    const holder = await bApi.post('/api/entities', { kind: 'company', name: `Titular CSV ${tag}` });
+    const caixa = await bApi.post('/api/caixas', { name: `Caixa CSV ${tag}`, holderEntityId: holder.id });
+    const checking = await bApi.post(`/api/caixas/${caixa.id}/accounts`, {
+      kind: 'checking',
+      name: 'Corrente',
+      openingBalanceCents: 0,
+      openingDate: '2026-01-01',
+    });
+    const issuer = await bApi.post('/api/entities', { kind: 'company', name: `Emissor CSV ${tag}` });
+    const card = await bApi.post('/api/caixas', {
+      name: `Cartão CSV ${tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: caixa.id,
+      creditLimitCents: 100_000,
+      closingDay: 25,
+      dueDay: 5,
+      cardLast4: '5151',
+    });
+    const mapping = (target: { financial_account_id?: string; card_caixa_id?: string }, name: string, extra: object = {}) => ({
+      id: randomUUID(),
+      financial_account_id: null,
+      card_caixa_id: null,
+      ...target,
+      name,
+      delimiter: ';',
+      encoding: 'utf-8',
+      has_header: true,
+      skip_rows: 0,
+      date_format: 'dd/MM/yyyy',
+      decimal_separator: ',',
+      columns: { date: 0, description: 1, amount: 2 },
+      is_default: false,
+      ...extra,
+    });
+    const base = await exportJson(h, adminA.cookie, 'categories');
+    const rows = [
+      mapping({ card_caixa_id: card.id }, 'Fatura antiga'),
+      mapping({ financial_account_id: checking.id }, 'Conta antiga'),
+      // Arquivo novo: o sinal gravado vale.
+      mapping({ card_caixa_id: card.id }, 'Fatura nova', { amount_sign: 'as_is' }),
+    ];
+    const report = await importFile(b, adminB.cookie, 'full', {
+      ...base,
+      kind: 'full',
+      tables: { statement_csv_mappings: rows },
+      references: {},
+    });
+    expect(failures(report)).toEqual([]);
+    const signOf = async (query: string) =>
+      Object.fromEntries((await bApi.get(`/api/csv-mappings?${query}`)).map((m: any) => [m.name, m.amountSign]));
+    expect(await signOf(`cardCaixaId=${card.id}`)).toEqual({ 'Fatura antiga': 'invert', 'Fatura nova': 'as_is' });
+    expect(await signOf(`accountId=${checking.id}`)).toEqual({ 'Conta antiga': 'as_is' });
+  });
+
   it('contratos de arquivo antigo (parcelas por ciclo, conta de passagem, tarefa aberta) viram obrigações em série (spec 034)', async () => {
     if (skip) return;
     const adminA = await userSession(h, 'admin');

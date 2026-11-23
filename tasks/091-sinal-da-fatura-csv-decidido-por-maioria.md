@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
@@ -106,3 +106,19 @@ Migration `database/migrations/0063_csv_mapping_amount_sign.sql`; teste `databas
 6. Testes em `apps/server/test/statements.test.ts`:
    - fatura CSV de cartão com 1 compra + 1 pagamento, com `amountSign` `invert` e `as_is`;
    - o caso de mais créditos que compras com `as_is`, que não pode ser invertido.
+
+### Aplicação (app)
+
+- `pnpm db:pull` já estava feito no branch de integração (`amount_sign` no schema gerado).
+- `packages/shared/src/schemas/operation.ts`: `CSV_AMOUNT_SIGNS`/`CsvAmountSign`; `amountSign` opcional em `csvMappingInput` e `csvMappingUpdateInput` (a tool `import_statement` herda pelo `csvMapping`, com a descrição do padrão). `types.ts`: `CsvMappingRow.amountSign`.
+- Decisão: na criação, `amountSign` é opcional e, omitido, vale o padrão do alvo (`invert` no cartão, `as_is` na conta, o mesmo da migração sem evidência), em vez de obrigatório: os clientes da API e os agentes que já criam mapeamentos continuam valendo, e o cartão não passa a entrar com o sinal trocado por omissão.
+- `packages/shared/src/parsers/csv.ts`: `applyCsvAmountSign` (aplica o sinal do mapeamento) e `suggestCsvAmountSign` (a maioria das linhas, só para pré-marcar a tela no mapeamento novo do cartão).
+- `apps/server/src/services/statements.ts` (`parseStatementFile`): a inversão pela maioria saiu; vale o sinal do mapeamento (o salvo ou o informado na tool), para cartão e conta. `defaultCsvAmountSign` exportado.
+- `apps/server/src/services/reconciliation.ts`: o DTO (`toMapping`) devolve `amountSign`; `createMapping` grava o informado ou o padrão; `updateMapping` grava o informado.
+- `apps/server/src/agents/tool-handlers-operation.ts`: a prévia do `import_statement` com `csvMapping` mostra o sinal que o mapeamento salvo vai ter.
+- `apps/server/src/services/backup/import.ts` (`normalizeRow`): mapeamento de arquivo anterior à 0063, sem `amount_sign`, entra `invert` no cartão e `as_is` na conta. Só essa linha, por causa da tarefa 077 no mesmo arquivo.
+- `apps/web/src/components/reconciliation/ImportModal.tsx`: a opção "Compras vêm positivas (inverter o sinal)" ("Débitos vêm positivos" na conta), pré-marcada pela sugestão só no mapeamento novo (o salvo traz o dele), e a prévia "Como as linhas vão entrar" com as primeiras linhas e o sinal final; textos em `i18n/areas/statements.ts`.
+- `docs/009-extratos-e-conciliacao.md` e a linha da 009 no `docs/INDEX.md`.
+- Testes: `apps/server/test/statements.test.ts`, "o sinal da fatura em CSV é o do mapeamento, nunca a maioria das linhas" (1 compra + 1 pagamento com `invert`, mais créditos que compras com `as_is`, o padrão do cartão e da conta, a troca pelo PATCH e o valor inválido); `apps/server/test/backup.test.ts`, "mapeamento de CSV de arquivo antigo, sem o sinal, entra invertido no cartão e como vem na conta"; `packages/shared/test/csv.test.ts`, o sinal aplicado e a sugestão.
+- Verificação: `pnpm verify:quick` (nível rápido).
+
