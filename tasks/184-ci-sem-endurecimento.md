@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -86,4 +86,23 @@ Não vi as configurações do repositório no GitHub (permissões padrão do tok
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código atual: nenhum `permissions` nem `timeout-minutes` nos dois workflows; todas as actions por tag (`@v3`–`@v6`); `cancel-in-progress: true` também no `main`; `node:22-bookworm-slim` sem digest; a chave do PGDG baixada sem conferência; `dbmate:2` no compose da raiz; a imagem do banco construída do zero no `check` (Testcontainers), no `database` (`make test`) e no `image` (compose). A parte do banco (pgvector e pgTAP fixos, dbmate do `database/docker-compose.yml`) já tinha sido feita pelo dba na tarefa 163.
+
 ## Resolução (executor)
+
+1. **`permissions: contents: read`** no topo do `ci.yml` e do `release.yml` (o push ao Docker Hub usa o secret, não o token).
+2. **Actions pelo SHA do commit**, com a versão no comentário (`actions/checkout@11d5960… # v4.4.0`). Decisão: a última versão da major que já estava em uso (checkout/setup-node/pnpm v4, upload-artifact v4, buildx v3, build-push v6, qemu v3, metadata v5, login v3), para não mudar comportamento sem rodar o CI; as majors novas chegam pelo Dependabot de `github-actions` (tarefa 071), cada uma num PR com o CI. SHAs tirados com `git ls-remote` das tags.
+3. **`timeout-minutes`**: `check` 30, `database` 20, `image` 45 (o e2e ficou serial na tarefa 125) e a imagem da release 60 (multi-arch com QEMU). O job que chama o CI reutilizável não aceita a chave; os jobs dele já têm.
+4. **`cancel-in-progress: ${{ github.event_name == 'pull_request' }}`**: o `main` e a tag nunca cancelam a execução anterior.
+5. **Bases fixas**: `FROM node:26.13.1-bookworm-slim@sha256:5df7998…` (o índice multi-arch, conferido com `docker buildx imagetools inspect`), num estágio `node-base` usado pelo build e pelo runtime; a chave do PGDG conferida por `sha256sum -c` (`ARG PGDG_KEY_SHA256`, o mesmo hash do arquivo baixado hoje; a impressão digital no comentário); `dbmate:2.38.2` no compose da raiz (a mesma do `database/docker-compose.yml`). Decisão: o `postgresql-client-18` fica sem versão do apt, porque o PGDG só mantém a mais nova no repositório e um pin quebraria o build a cada versão menor; a major é a do servidor.
+6. **Imagem do banco uma vez**: os três jobs constroem `database/docker` com o `docker/build-push-action` e o cache do GitHub (`type=gha,scope=postgres`), então o `apt-get` do pgTAP roda uma vez e os jobs usam a mesma imagem. O Testcontainers aceita a imagem pronta por `MONEYFLOW_TEST_PG_IMAGE` (`apps/server/test/global-setup.ts`), e o compose do job `image` sobe sem `--build`. O `make -C database test` do job `database` ainda chama `compose up --build` (`database/Makefile`, do dba), que reaproveita as camadas do builder já aquecido.
+7. **Artefatos gerados conferidos** (com a tarefa 163): `make -C database dump` + `git diff --exit-code database/schema.sql database/privileges.sql` no job `database`, e o schema Drizzle por `test/generated-schema.test.ts` na integração do `check`.
+- Release: `sbom: true` e `provenance: mode=max` no `build-push-action`.
+- `scripts/check-versions.mjs` (job `check`) impede a volta: action sem SHA ou sem o comentário da versão, workflow sem `permissions`, job sem `timeout-minutes`, `FROM` sem digest nos dois Dockerfiles, dbmate sem versão completa ou diferente entre os compose.
+- Dependabot: a base do banco (`/database/docker`) entrou junto da imagem da aplicação.
+
+Testes: `scripts/check-versions.test.mjs` (`pnpm test:scripts`): action por tag, SHA sem versão, falta de `permissions` e de `timeout-minutes`, `FROM` sem digest e dbmate solto ou divergente são acusados, e o repositório passa. O CI em si não roda daqui: o primeiro PR mostra o token só de leitura no log e o tempo dos jobs.
+
+Verificação: rápida, `pnpm verify:quick --base 290403d` (só o que esta frente mudou; o portão do lint, o typecheck de todos os pacotes e os testes de integração tocados no Postgres local), `pnpm test:scripts` e o build do servidor com o target `node26`.

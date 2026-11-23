@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "pnpm@9.12.0",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=26.13.0 <27"
   },
   "scripts": {
     "dev": "pnpm --parallel --filter @moneyflow/server --filter @moneyflow/web dev",
@@ -18,6 +18,7 @@
     "test:unit": "pnpm --filter @moneyflow/shared test",
     "test:integration": "pnpm --filter @moneyflow/server test",
     "test:local": "pnpm --filter @moneyflow/server test:local",
+    "test:scripts": "node --test 'scripts/*.test.mjs'",
     "e2e": "pnpm --filter @moneyflow/e2e test",
     "verify:quick": "node scripts/verify.mjs quick",
     "verify:full": "node scripts/verify.mjs full",

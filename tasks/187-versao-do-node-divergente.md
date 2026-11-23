@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -63,4 +63,24 @@ A data exata de remoção do corepack (Node 25) e do strip-types sem flag (22.18
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado no código atual: `engines.node` `>=22.12.0` sem teto, sem `.nvmrc` nem `engine-strict`; CI e imagem no 22 (`node-version: 22`, `ARG NODE_VERSION=22`), bundle `target: 'node22'`, `@types/node` 26.6.5 nos quatro pacotes; `corepack: command not found` na máquina (Node 26.13.1, pnpm 9.12.0 do Homebrew); `RUN corepack enable` no `Dockerfile`.
+
 ## Resolução (executor)
+
+Decisão: subir tudo para o **Node 26** (a versão desta máquina, LTS desde outubro de 2026 e a major do `@types/node` que já estava em todos os pacotes), em vez de descer o desenvolvimento e os tipos para o 22. A versão fica num lugar só, o `.nvmrc`, e o resto é conferido contra ele.
+
+- `.nvmrc`: `26.13.1`. `package.json`: `engines.node` `>=26.13.0 <27`. `.npmrc` novo com `engine-strict=true`.
+- CI (`ci.yml`): `node-version-file: .nvmrc` nos dois `setup-node`.
+- `Dockerfile`: base `node:26.13.1-bookworm-slim` pelo digest (junto com a tarefa 184). O `corepack enable` saiu: o pnpm é instalado por `npm install -g` na versão do `packageManager` do `package.json`. O `.npmrc` entra no build.
+- `apps/server/build.mjs`: `target: 'node26'`. `@types/node` continua 26.6.5, agora a major do runtime.
+- `AGENTS.md`: Node 26 do `.nvmrc` e o pnpm 9.12 por `npm i -g pnpm@9.12.0` ou pelo gerenciador do sistema, sem o corepack. O `node e2e/fakes/fake-llm.ts 18082` funciona sem flag no Node 26; o comentário do arquivo foi alinhado.
+- `scripts/check-versions.mjs` (novo, roda no job `check` do CI): falha se a imagem, o `engines`, o `target` do bundle ou o `@types/node` de qualquer pacote saírem da versão/major do `.nvmrc`, ou se um workflow usar `node-version` solto.
+
+Testes:
+- `scripts/check-versions.test.mjs` (`pnpm test:scripts`, `node --test`): imagem, engines, target e `@types/node` fora da major são acusados, o `.nvmrc` exige X.Y.Z, e o repositório passa.
+- À mão: com `engines.node` trocado para `>=27.0.0 <28`, o `pnpm install --frozen-lockfile` recusou o Node 26.13.1 (`ERR_PNPM_UNSUPPORTED_ENGINE`); o arquivo voltou ao valor certo.
+- Não rodei o build da imagem (fora do permitido nesta frente). O digest foi conferido com `docker buildx imagetools inspect node:26.13.1-bookworm-slim`.
+
+Verificação: rápida, `pnpm verify:quick --base 290403d` (só o que esta frente mudou; o portão do lint, o typecheck de todos os pacotes e os testes de integração tocados no Postgres local), `pnpm test:scripts` e o build do servidor com o target `node26`.

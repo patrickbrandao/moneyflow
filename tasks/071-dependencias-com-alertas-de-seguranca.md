@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: debito-tecnico
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: alta
 criada: 2026-11-21
 commit:
@@ -84,4 +84,36 @@ Só o `pnpm audit` e o `pnpm outdated` foram executados. O texto de cada alerta 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+`pnpm audit` em 2026-11-22 confirmou os 38 alertas (7 altos). Os altos eram quatro pacotes:
+- `pdfjs-dist` 5.7.284 (GHSA-hq66-cqwq-w95j, corrigido só na 6.2.108: não há 5.x corrigida);
+- `zod` 4.6.5;
+- `body-parser` 2.3.0, do `express` do `@modelcontextprotocol/sdk`;
+- `undici` 8.11.2 (quatro altos). Ele vem do `testcontainers` (dependência de desenvolvimento); no `openai` é só um peer opcional, resolvido para o mesmo `undici` da árvore.
+
+O alerta do pdf.js só vale com `enableScripting` ligado, opção do visualizador completo (`pdf_viewer`), que o projeto não usa: o `PdfViewer.tsx` só desenha a página no canvas. A CSP do SPA (tarefa 065) também barra o script. Mesmo assim, a troca de versão é o que zera o alerta.
+
 ## Resolução (executor)
+
+Atualizado só o necessário para zerar os altos, por versão de correção, fora o `pdfjs-dist`:
+- `zod` 4.6.5 → 4.6.7 (`packages/shared`, `apps/server`).
+- `testcontainers` e `@testcontainers/postgresql` 12.2.0 → 12.2.2: trazem o `undici` 8.13.1, que o peer do `openai` também usa. O `openai` ficou na 7.32.0.
+- `body-parser` 2.3.0 → 2.4.0 (e o `qs` 6.17.1 dele), só no lockfile, dentro da faixa do `express`. Foi feito com um `pnpm.overrides` temporário, tirado em seguida: o `pnpm update body-parser` também mexia no `rolldown` e no `postcss` do vitest sem precisar.
+- `pdfjs-dist` 5.7.284 → 6.4.299 no servidor e no web. É troca de versão maior, inevitável: a 6.4 é a mais nova sem mudança de arquitetura. A 6.5 passa o desenho do canvas para um worker.
+  - Notas da 6.0 a 6.4 lidas. Afetam o projeto só a remoção do `PDFDocumentProxy.destroy()` (6.0) e o mínimo de Node `>=22.13`.
+  - `PdfViewer.tsx`: o `loadPdf` devolve o documento com `destroy` ligado ao `loadingTask.destroy()`. O fechamento do visualizador e da miniatura do chat (`AttachmentPreview.tsx`) chamava um método que não existe mais.
+  - `pdf-text.ts` sem mudança: a build `legacy` e o worker na própria thread continuam iguais.
+  - O `isEvalSupported` sugerido não existe mais no pdf.js 6, que não usa `eval`.
+  - Conferido também o bundle no formato do `build.mjs`, rodando fora de qualquer `node_modules`, como na imagem: extrai o texto e conta as páginas. O `vite build` do web gera o worker 6.4.
+- CI: passo "Alertas de segurança das dependências" (`pnpm audit --prod --audit-level high`) no job `check`, logo depois do `pnpm install`.
+- `.github/dependabot.yml`:
+  - npm só com as correções de segurança, num grupo; as atualizações de versão ficam desligadas, porque as versões são fixas;
+  - `github-actions` e a base `docker` do `Dockerfile` toda semana.
+  - Falta ligar "Dependabot security updates" nas configurações do repositório.
+- Ficam os moderados e baixos, sem alto nem crítico. São `fflate`, `fastify`, `dompurify`, `fast-uri`, `ip-address`, `hono`, `@hono/node-server`, `esbuild` do `drizzle-kit`, e `glob`/`minimatch`. A tarefa pediu só o necessário para os altos.
+- Resultado:
+  - `pnpm audit --audit-level high`: 0 altos e 0 críticos (18 moderados, 9 baixos);
+  - `pnpm audit --prod --audit-level high`: 0 altos (15 moderados, 9 baixos).
+
+Testes: `test/capabilities.test.ts` e `test/chat-media.test.ts`, onde ficam a camada de texto e a contagem de páginas do PDF, passaram no Postgres local. Também passaram o typecheck de todos os pacotes e o `vite build`. O e2e dos contratos e da prévia de PDF no chat fica para a verificação completa da sessão principal. Verificação: `pnpm verify:quick -- test/capabilities.test.ts test/chat-media.test.ts`.

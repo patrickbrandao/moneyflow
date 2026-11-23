@@ -44,11 +44,13 @@ services:
   # restauração do dump pelo dono falha. Volume antigo: rode uma vez
   #   docker compose exec postgres bash /docker-entrypoint-initdb.d/03-owner-role.sh
   # (idempotente) antes de subir esta versão.
+  # A versão do dbmate é a de database/docker-compose.yml (tarefa 163; scripts/check-versions.mjs confere), e o
+  # lock_timeout de 10 s é o mesmo (tarefa 102): a migration que não consegue o lock falha em vez de enfileirar a API.
   migrate:
-    image: ghcr.io/amacneil/dbmate:2
+    image: ghcr.io/amacneil/dbmate:2.38.2
     command: ["--wait", "--wait-timeout", "60s", "up"]
     environment:
-      DATABASE_URL: postgres://moneyflow_owner:${OWNER_DB_PASSWORD:-moneyflow_owner}@postgres:5432/${POSTGRES_DB:-moneyflow}?sslmode=disable
+      DATABASE_URL: postgres://moneyflow_owner:${OWNER_DB_PASSWORD:-moneyflow_owner}@postgres:5432/${POSTGRES_DB:-moneyflow}?sslmode=disable&options=-c%20lock_timeout%3D10s
       DBMATE_MIGRATIONS_DIR: /db/migrations
       DBMATE_NO_DUMP_SCHEMA: "true"
       DBMATE_STRICT: "true"

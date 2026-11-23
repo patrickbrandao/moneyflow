@@ -18,13 +18,13 @@ Achados do usuário e pedidos de revisão/correção entre agentes viram arquivo
 
 ## Verificação (dois níveis)
 
-- **Rápida, o padrão** enquanto se desenvolve e ao concluir uma tarefa: `pnpm verify:quick`. Olha só o que mudou desde o ponto em que o branch saiu do `main` (commits, alterações e arquivos novos): Biome nos arquivos alterados, typecheck dos pacotes afetados e dos que dependem deles, testes do shared relacionados, testes de integração dos arquivos tocados (`test/x.test.ts` alterado, ou o de mesmo nome de `src/.../x.ts`) contra o Postgres local, sem container, e o pgTAP dos testes de `database/tests/` alterados. Não roda build, e2e nem a suíte inteira. Se a heurística não achar o teste certo, passe-o: `pnpm verify:quick -- test/contracts.test.ts -t "renovação"`. Toda mudança continua vindo com o teste que a cobre; o que muda é quanto da suíte roda.
+- **Rápida, o padrão** enquanto se desenvolve e ao concluir uma tarefa: `pnpm verify:quick`. Olha só o que mudou desde o ponto em que o branch saiu do `main` (commits, alterações e arquivos novos): Biome nos arquivos alterados, typecheck dos pacotes afetados e dos que dependem deles, testes do shared relacionados, testes de integração dos arquivos tocados (`test/x.test.ts` alterado, os do mapa `apps/server/test/related.json` ou o de mesmo nome de `src/.../x.ts`; arquivo de `apps/server/src` sem teste nenhum faz a verificação falhar com a lista, e arquivo novo em `src` entra no mapa no mesmo commit) contra o Postgres local, sem container, e o pgTAP dos testes de `database/tests/` alterados. Não roda build, e2e nem a suíte inteira. Se a heurística não achar o teste certo, passe-o: `pnpm verify:quick -- test/contracts.test.ts -t "renovação"`. Toda mudança continua vindo com o teste que a cobre; o que muda é quanto da suíte roda.
 - **Completa, só quando o usuário pedir** ("verificação completa", "rode tudo"), antes de abrir PR e antes de release: `pnpm verify:full` (lint, typecheck, todos os testes com Testcontainers, build e todo o pgTAP; `--e2e` acrescenta o Playwright com a pilha no ar, `--local` roda a integração no Postgres local). O CI roda sempre o completo.
 - Modo local dos testes de integração (`MONEYFLOW_TEST_DB=local`, `pnpm test:local`): usa o Postgres de desenvolvimento (`make -C database up`, porta 5432); as migrations ficam no banco modelo `moneyflow_it_tpl`, refeito quando `database/migrations` muda, e cada execução recria `moneyflow_it` por cópia dele (começa limpo). Não usa `moneyflow_test`, que é do pgTAP. Duas execuções locais ao mesmo tempo disputam o mesmo banco; para separá-las (worktrees em paralelo), dê a cada uma um nome em `MONEYFLOW_TEST_LOCAL_DB` (o modelo vira `<nome>_tpl`). Como no initdb (tarefa 054), os bancos de teste são criados pelo superusuário (`MONEYFLOW_TEST_LOCAL_SUPER_URL`) com dono `moneyflow_owner` e migrados por ele (`MONEYFLOW_TEST_LOCAL_OWNER_URL`); o Testcontainers faz o mesmo. A ida e volta do dump em `test/backup.test.ts` precisa do cliente do PostgreSQL 18 (`pg_dump`, `pg_restore`, `psql`) no `PATH` ou em `PG_BIN_DIR`; sem ele, o teste fica como pulado.
 
 ## Comandos
 
-Node 22.12+ e pnpm 9 (`corepack enable`). Copie `.env.example` para `.env` na raiz.
+Node 26 (a versão do `.nvmrc`, a mesma do CI e da imagem; o `engine-strict` do `.npmrc` recusa outra major) e pnpm 9.12 (o `packageManager` do `package.json`: `npm i -g pnpm@9.12.0` ou o gerenciador do sistema, porque o Node 25+ não traz o corepack). Copie `.env.example` para `.env` na raiz.
 
 ```bash
 pnpm install
@@ -37,12 +37,13 @@ pnpm test                       # unitários (shared) + integração da API
 pnpm test:unit                  # só packages/shared
 pnpm test:integration           # API contra Postgres 18 real: o Testcontainers builda database/docker e aplica as migrations
 pnpm test:local                 # a mesma integração no Postgres local (5432), sem container: banco limpo copiado de um modelo migrado
+pnpm test:scripts               # testes dos scripts da raiz (node --test); node scripts/check-versions.mjs confere Node, imagens e actions fixos
 pnpm verify:quick               # verificação rápida do que mudou no branch (o padrão; veja Verificação)
 pnpm verify:full                # verificação completa (só quando pedido, antes de PR e release; --e2e, --local)
 pnpm build                      # SPA (apps/web/dist) + bundle da API/worker (apps/server/dist/main.mjs)
-pnpm db:pull                    # regenera packages/db/src/generated depois de uma migration nova (nunca edite à mão)
+pnpm db:pull                    # regenera packages/db/src/generated depois de uma migration nova (nunca edite à mão; test/generated-schema.test.ts confere)
 docker compose up --build -d    # pilha completa: Postgres (5433), migrations, api (http://localhost:3000, serve o SPA) e worker
-pnpm e2e                        # Playwright contra a pilha no ar (E2E_BASE_URL, padrão http://localhost:3000)
+pnpm e2e                        # Playwright contra a pilha no ar (E2E_BASE_URL, padrão http://localhost:3000), um arquivo por vez (workers: 1)
 # Os e2e de mensagens sobem uma Bot API falsa na porta 18081 (E2E_TELEGRAM_PORT): suba a pilha apontando para ela
 TELEGRAM_API_BASE=http://host.docker.internal:18081 docker compose up --build -d
 # Os e2e de agentes sobem um provedor de IA falso na porta 18082 (E2E_LLM_PORT) e o cadastram com
@@ -51,7 +52,7 @@ node e2e/fakes/fake-llm.ts 18082   # o mesmo provedor falso, à mão, para testa
 # O e2e do Telegram de entrada (visao.spec.ts) sobe outro provedor falso na 18083 (E2E_LLM_TELEGRAM_PORT) e chama o webhook direto,
 # com o segredo que a Bot API falsa (e2e/fakes/fake-telegram.ts, a mesma dos testes de integração) recebeu no setWebhook.
 node e2e/fakes/fake-telegram.ts 18081   # a Bot API falsa, à mão (setWebhook, getFile e o download, botões; nada vai ao Telegram)
-make release                    # build multi-arch e push de tmsoftbrasil/moneyflow:<versão> e :latest
+make release                    # release-check (árvore limpa, HEAD na tag, verify:full) e build multi-arch do commit; push de :<versão> e :latest (docs/018)
 ```
 
 Teste isolado:

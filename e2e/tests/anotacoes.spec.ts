@@ -111,7 +111,9 @@ test('alarme: dispara, autoplay bloqueado e liberado, adiar, dispensar e marcar 
   expect(plays.some((src) => src.endsWith('/sounds/chime.wav'))).toBe(true);
 
   // Adiar: continua não lido (adiado até…); dispensar: lido. O som para quando nenhum toca mais.
-  if (!(await popover.isVisible())) await alarm.click();
+  // O clique no título, fora do popover, o fechou (useClickOutside): reabre pelo ícone.
+  await expect(popover).toBeHidden();
+  await alarm.click();
   const snoozed = popover.locator('[data-firing]', { hasText: snoozeTitle });
   await snoozed.getByRole('button', { name: 'Adiar 5 min' }).click();
   await expect(snoozed).toContainText('adiado até');

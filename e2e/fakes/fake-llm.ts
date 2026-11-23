@@ -501,7 +501,18 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
       res.end(JSON.stringify({ error: { message: String(error) } }));
     }
   });
-  await new Promise<void>((resolve) => server.listen(port, host, resolve));
+  // Porta ocupada (por exemplo, o fake-llm rodando à mão na mesma porta) vira um erro claro no beforeAll, em vez de uma
+  // exceção solta que derruba o worker do Playwright (tarefa 125).
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', (error: NodeJS.ErrnoException) =>
+      reject(
+        error.code === 'EADDRINUSE'
+          ? new Error(`provedor de IA falso: a porta ${port} está ocupada (pare o fake-llm manual ou o processo que a usa)`)
+          : error,
+      ),
+    );
+    server.listen(port, host, resolve);
+  });
   const actual = (server.address() as AddressInfo).port;
   fake.port = actual;
   fake.url = `http://127.0.0.1:${actual}`;
@@ -513,7 +524,7 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
   return fake;
 }
 
-/* Execução avulsa: `node --experimental-strip-types e2e/fakes/fake-llm.ts 18082`. */
+/* Execução avulsa: `node e2e/fakes/fake-llm.ts 18082` (o Node do .nvmrc roda TypeScript sem flag). */
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
   const port = Number(process.argv[2] ?? 18082);
   void startFakeLlm(port).then((fake) =>
