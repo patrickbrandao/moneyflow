@@ -860,7 +860,8 @@ export async function produceNotifications(
              count(*) FILTER (WHERE b.due_date < ${clock.date}::date)::int AS overdue,
              coalesce(sum(b.open_cents) FILTER (WHERE b.due_date < ${clock.date}::date), 0)::bigint AS overdue_cents
         FROM caixas c JOIN title_balances b ON b.caixa_id = c.id
-       WHERE c.archived_at IS NULL AND c.kind = 'general' AND b.archived_at IS NULL AND b.open_cents > 0 AND b.due_date <= ${clock.date}::date
+       WHERE c.archived_at IS NULL AND c.kind = 'general' AND b.archived_at IS NULL AND b.status IN ('open', 'partial')
+         AND b.open_cents > 0 AND b.due_date <= ${clock.date}::date
        GROUP BY c.id, c.name`);
       for (const r of rows.rows) {
         if (r.due_today > 0) {

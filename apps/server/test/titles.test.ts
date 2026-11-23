@@ -1,4 +1,4 @@
-import { addMonths, todayIso } from '@moneyflow/shared';
+import { addDays, addMonths, todayIso } from '@moneyflow/shared';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { materializeAll } from '../src/services/recurrence';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
@@ -624,5 +624,58 @@ describe('listagem cortada e os totais do filtro (tarefa 116)', () => {
     // Sem acesso à caixa, os totais respondem 404, como a lista.
     const outsider = client(h, (await userSession(h)).cookie);
     await outsider.get(`/api/titles/totals?caixaId=${s.caixaA.id}`, 404);
+  });
+});
+
+describe('saldo em aberto pelo status (tarefa 093)', () => {
+  it('a caixa e a visão geral somam só o aberto e o parcial, com o estornado de volta em aberto', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const past = addDays(today, -5);
+    const future = addDays(today, 5);
+    const title = (amountCents: number, dueDate: string, direction: 'payable' | 'receivable' = 'payable') =>
+      admin.post('/api/titles', {
+        ...base(s),
+        direction,
+        categoryId: direction === 'payable' ? s.expense.id : s.income.id,
+        description: `Aberto ${amountCents}`,
+        competenceDate: dueDate,
+        dueDate,
+        amountCents,
+        mirrorCaixaId: null,
+      });
+    const pay = (id: string, amountCents: number) =>
+      admin.post(`/api/titles/${id}/settlements`, { settledOn: past, amountCents, financialAccountId: s.accountA.id });
+
+    await title(10_000, past); // aberto e vencido
+    const partial = await title(9_000, past); // parcial e vencido: 5.000 em aberto
+    await pay(partial.id, 4_000);
+    const paid = await title(7_000, past); // pago: fora
+    await pay(paid.id, 7_000);
+    const canceled = await title(3_000, past); // cancelado: fora
+    await admin.post(`/api/titles/${canceled.id}/cancel`, {});
+    const archived = await title(2_000, past); // arquivado (tem baixa estornada): fora
+    const archivedPaid = await pay(archived.id, 2_000);
+    await admin.post(`/api/settlements/${archivedPaid.settlements[0].id}/reverse`, { reason: 'Errado', reversedOn: past });
+    expect(await admin.del(`/api/titles/${archived.id}`)).toMatchObject({ archived: true });
+    const reversed = await title(6_000, future); // pago e estornado: volta a 6.000 em aberto, a vencer
+    const reversedPaid = await pay(reversed.id, 6_000);
+    await admin.post(`/api/settlements/${reversedPaid.settlements[0].id}/reverse`, { reason: 'Refazer', reversedOn: past });
+    await title(8_000, future, 'receivable');
+
+    const expected = {
+      payableOpenCents: 10_000 + 5_000 + 6_000,
+      receivableOpenCents: 8_000,
+      overdueCount: 2,
+      overdueCents: 15_000,
+    };
+    expect(await admin.get(`/api/caixas/${s.caixaA.id}`)).toMatchObject(expected);
+    const overview = await admin.get('/api/overview');
+    expect(overview.caixas.find((c: { id: string }) => c.id === s.caixaA.id)).toMatchObject(expected);
+    const overdueHere = overview.overdue.filter((t: { caixaId: string }) => t.caixaId === s.caixaA.id);
+    expect(overdueHere.map((t: { openCents: number }) => t.openCents).sort((a: number, b: number) => a - b)).toEqual([5_000, 10_000]);
+    const unpaid = await admin.get(`/api/titles/totals?caixaId=${s.caixaA.id}&status=unpaid`);
+    expect(unpaid).toMatchObject({ count: 4, openCents: 10_000 + 5_000 + 6_000 + 8_000 });
   });
 });

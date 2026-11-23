@@ -1,5 +1,5 @@
 ---
-status: em-andamento
+status: concluida
 tipo: banco
 origem: agente
 autor: principal
@@ -122,3 +122,14 @@ Migration `database/migrations/0057_balance_queries.sql` (grupo dos saldos); tes
 3. Conferir que `rg "open_cents > 0" apps/server/src` não acha consulta sem o status.
 4. Teste em `apps/server/test/titles.test.ts`: os totais de `GET /api/caixas` e `GET /api/overview` com títulos pagos, parciais, cancelados, arquivados e com baixa estornada.
 5. Esta parte não precisa de `db:pull` (as colunas não mudam); o da 0057 vale para as outras tarefas do grupo.
+
+### Aplicação (app)
+
+- `apps/server/src/services/caixas.ts` (`summarySql`): as quatro subconsultas de saldo em aberto e vencido filtram `tb.status IN ('open', 'partial')` (o `openStatus`), o que deixa o planejador usar `titles_caixa_id_status_due_date_idx`.
+- `apps/server/src/services/titles.ts` (`listTitles`/`titleTotals`): as situações `unpaid` e `overdue` filtram pelo status, além do `open_cents > 0`.
+- `apps/server/src/services/message-worker.ts` (resumo diário): `b.status IN ('open', 'partial')`.
+- `apps/server/src/services/contracts.ts` (próxima ocorrência do contrato): `x.status IN ('open', 'partial')` no lugar de `x.status <> 'canceled'`; o LATERAL quer mesmo só as em aberto (o `open_cents > 0` já excluía as pagas).
+- `rg "open_cents > 0" apps/server/src`: os que sobram são expressões de coluna (`overdue` da listagem e do contrato), não filtros, ou já têm o status.
+- Teste: `apps/server/test/titles.test.ts`, "a caixa e a visão geral somam só o aberto e o parcial, com o estornado de volta em aberto" — `GET /api/caixas/:id` e `GET /api/overview` com títulos aberto, parcial, pago, cancelado, arquivado (com baixa estornada) e pago e estornado, e os totais de `status=unpaid`.
+- Verificação: `pnpm verify:quick` (nível rápido).
+

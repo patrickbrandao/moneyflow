@@ -118,11 +118,12 @@ function titleListWhere(
     case 'canceled':
       where.push(sql`t.status = ${query.status}`);
       break;
+    // Em aberto pelo status, que tem índice (tarefa 093); open_cents > 0 é o mesmo pelas invariantes do banco.
     case 'unpaid':
-      where.push(sql`tb.open_cents > 0`);
+      where.push(sql`t.status IN ('open', 'partial') AND tb.open_cents > 0`);
       break;
     case 'overdue':
-      where.push(sql`tb.open_cents > 0 AND t.due_date < ${today}::date`);
+      where.push(sql`t.status IN ('open', 'partial') AND tb.open_cents > 0 AND t.due_date < ${today}::date`);
       break;
     case 'pending_acceptance':
       where.push(sql`t.mirror_status = 'pending'`);

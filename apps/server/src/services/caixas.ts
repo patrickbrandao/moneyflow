@@ -43,13 +43,19 @@ export function readableFilter(access: Access, column = sql`c.id`) {
   )})`;
 }
 
+/**
+ * Em aberto pelo status (tarefa 093): `open_cents > 0` ⇔ aberto ou parcial pelas invariantes do banco, e o status
+ * deixa o planejador usar titles_caixa_id_status_due_date_idx em vez de ler todo o histórico da caixa.
+ */
+const openStatus = sql`tb.status IN ('open', 'partial')`;
+
 const summarySql = (today: string) => sql`
   c.id, c.name, c.kind, c.holder_entity_id, e.name AS holder_name, c.is_primary, c.description, c.archived_at, c.card_last4,
   coalesce((SELECT sum(b.balance_cents) FROM financial_account_balances b WHERE b.caixa_id = c.id AND b.archived_at IS NULL), 0)::bigint AS balance_cents,
-  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.direction = 'payable' AND tb.archived_at IS NULL), 0)::bigint AS payable_open_cents,
-  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.direction = 'receivable' AND tb.archived_at IS NULL), 0)::bigint AS receivable_open_cents,
-  (SELECT count(*)::int FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.open_cents > 0 AND tb.archived_at IS NULL AND tb.due_date < ${today}::date) AS overdue_count,
-  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND tb.open_cents > 0 AND tb.archived_at IS NULL AND tb.due_date < ${today}::date), 0)::bigint AS overdue_cents`;
+  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND ${openStatus} AND tb.direction = 'payable' AND tb.archived_at IS NULL), 0)::bigint AS payable_open_cents,
+  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND ${openStatus} AND tb.direction = 'receivable' AND tb.archived_at IS NULL), 0)::bigint AS receivable_open_cents,
+  (SELECT count(*)::int FROM title_balances tb WHERE tb.caixa_id = c.id AND ${openStatus} AND tb.open_cents > 0 AND tb.archived_at IS NULL AND tb.due_date < ${today}::date) AS overdue_count,
+  coalesce((SELECT sum(tb.open_cents) FROM title_balances tb WHERE tb.caixa_id = c.id AND ${openStatus} AND tb.open_cents > 0 AND tb.archived_at IS NULL AND tb.due_date < ${today}::date), 0)::bigint AS overdue_cents`;
 
 function toSummary(access: Access, row: Record<string, unknown>): CaixaSummary {
   const r = camel<CaixaSummary & { archivedAt: Date | null }>(row);

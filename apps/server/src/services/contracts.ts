@@ -187,7 +187,7 @@ const listFrom = (ctx: ServiceContext) => sql`
   LEFT JOIN LATERAL (
     SELECT x.id, x.due_date, b.open_cents, x.recurrence_rule_id, x.occurrence, x.description
       FROM titles x JOIN title_balances b ON b.title_id = x.id
-     WHERE x.contract_id = c.id AND x.archived_at IS NULL AND b.open_cents > 0 AND x.status <> 'canceled'
+     WHERE x.contract_id = c.id AND x.archived_at IS NULL AND x.status IN ('open', 'partial') AND b.open_cents > 0
        AND ${readableFilter(ctx.access, sql`x.caixa_id`)}
      ORDER BY x.due_date, x.occurrence, x.mirror_status IS NOT NULL LIMIT 1) nx ON true`;
 
