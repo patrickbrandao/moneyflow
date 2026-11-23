@@ -139,6 +139,39 @@ describe('extratos e conciliação (spec 009)', () => {
     });
     expect(file.statusCode).toBe(200);
     expect(file.body).toContain('OFX2-0001');
+
+    // A regra aprendida casa pela descrição normalizada (tarefa 076): no mês seguinte, a mesma descrição
+    // com acento e com o número do documento no meio entram classificadas por ela.
+    const learned = rules.find((r: any) => r.origin === 'correction');
+    expect(learned.pattern).toBe('pix recebido cliente omega');
+    const nextFile = ofxOf([
+      { date: '2026-11-04', cents: 123_400, memo: 'PIX RECEBIDO Cliente Ômega' },
+      { date: '2026-11-05', cents: 20_000, memo: 'PIX RECEBIDO 98765432 Cliente Ômega' },
+      { date: '2026-11-06', cents: -30_000, memo: 'TED ENVIADO 55443322 Condomínio Édifício' },
+      { date: '2026-11-07', cents: -31_500, memo: 'TED ENVIADO 99887766 Condomínio Édifício' },
+    ]);
+    const next = await upload(adminSession.cookie, url, nextFile, 'application/x-ofx');
+    expect(next.statusCode, next.body).toBe(200);
+    const nextLines = next.json().lines.sort((a: any, b: any) => a.postedOn.localeCompare(b.postedOn));
+    for (const line of nextLines.slice(0, 2)) {
+      expect(line).toMatchObject({
+        classificationSource: 'rule',
+        classificationRuleId: learned.id,
+        entityId: s.holderB.id,
+        categoryId: s.income.id,
+      });
+    }
+    expect(nextLines[2]).toMatchObject({ classificationSource: null });
+
+    // Pelo "Aplicar regras": a correção de uma TED vira regra e alcança a outra, com outro documento.
+    await admin.patch(`/api/statement-lines/${nextLines[2].id}`, { entityId: s.supplier.id, categoryId: s.expense.id, learnRule: true });
+    const ted = (await admin.get(`/api/classification-rules?caixaId=${s.caixaA.id}`)).find(
+      (r: any) => r.origin === 'correction' && r.pattern === 'ted enviado condominio edificio',
+    );
+    expect(ted).toBeTruthy();
+    expect(await admin.post(`/api/statement-imports/${next.json().id}/apply-rules`)).toEqual({ updated: 1 });
+    const applied = (await admin.get(`/api/statement-imports/${next.json().id}`)).lines.find((l: any) => l.id === nextLines[3].id);
+    expect(applied).toMatchObject({ classificationSource: 'rule', classificationRuleId: ted.id, entityId: s.supplier.id });
   });
 
   it('lança a linha como título baixado com o espelho escolhido na tela: outra caixa da entidade, a principal ou nenhum (spec 006)', async () => {

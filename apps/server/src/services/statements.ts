@@ -18,6 +18,7 @@ import {
   type importRenameInput,
   type LineStatus,
   type MatchCandidate,
+  normalizeDescription,
   normalizeDescriptionForDedup,
   type ObligationMatch,
   type OfxInspectStatement,
@@ -590,11 +591,13 @@ export async function rulesFor(
   lines: { description: string; amountCents: number }[],
 ): Promise<(Rule | null)[]> {
   if (lines.length === 0) return [];
-  const items = lines.map((l, i) => ({ i, d: l.description, v: l.amountCents }));
+  // A descrição normalizada vai junto (tarefa 076): a regra aprendida guarda o padrão normalizado
+  // (rulePatternOf), sem acentos, pontuação, números de documento nem datas, e casa por ela.
+  const items = lines.map((l, i) => ({ i, d: l.description, v: l.amountCents, n: normalizeDescription(l.description) }));
   const result = await tx.execute<{ i: number; id: string; entity_id: string | null; category_id: string | null }>(sql`
     WITH x AS MATERIALIZED (
-      SELECT x.i, classification_rule_for(${target.accountId}::uuid, ${target.cardCaixaId}::uuid, x.d, x.v) AS rule_id
-        FROM json_to_recordset(${JSON.stringify(items)}::json) AS x(i int, d text, v bigint))
+      SELECT x.i, classification_rule_for(${target.accountId}::uuid, ${target.cardCaixaId}::uuid, x.d, x.v, x.n) AS rule_id
+        FROM json_to_recordset(${JSON.stringify(items)}::json) AS x(i int, d text, v bigint, n text))
     SELECT x.i, r.id, r.entity_id, r.category_id FROM x JOIN classification_rules r ON r.id = x.rule_id`);
   const out: (Rule | null)[] = lines.map(() => null);
   for (const row of result.rows) out[Number(row.i)] = { id: row.id, entityId: row.entity_id, categoryId: row.category_id };
