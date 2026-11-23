@@ -20,7 +20,9 @@ updates:
     groups:
       actions:
         patterns: ['*']
+  # Bases fixadas por versão e digest (tarefas 163 e 184): a da aplicação e a do banco. Ao subir a do Node, o .nvmrc
+  # e o engines acompanham no mesmo PR (scripts/check-versions.mjs falha no CI se não).
   - package-ecosystem: docker
-    directory: /
+    directories: [/, /database/docker]
     schedule:
       interval: weekly

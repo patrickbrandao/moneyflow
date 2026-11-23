@@ -1,42 +1,73 @@
 name: Release
 
-# Tag v* → imagem multi-arch (amd64 + arm64) tmsoftbrasil/moneyflow:X.Y.Z e :latest.
-# O login e o push só acontecem se os secrets DOCKERHUB_USERNAME e DOCKERHUB_TOKEN existirem;
-# sem eles o workflow só valida o build.
+# Tag v* → imagem multi-arch (amd64 + arm64) tmsoftbrasil/moneyflow:X.Y.Z e, só se a tag for a maior versão, :latest.
+# Antes do build, o CI inteiro (ci.yml: lint, typecheck, testes, pgTAP, imagem e e2e) roda no commit da tag; a imagem
+# só sai se ele passar (tarefa 078). O login e o push só acontecem se os secrets DOCKERHUB_USERNAME e DOCKERHUB_TOKEN
+# existirem; sem eles o workflow só valida o build.
 
 on:
   push:
     tags: ['v*']
 
+# O GITHUB_TOKEN só lê o repositório; o push vai ao Docker Hub com o secret (tarefa 184).
+permissions:
+  contents: read
+
 jobs:
+  ci:
+    name: CI no commit da tag
+    uses: ./.github/workflows/ci.yml
+
   image:
+    name: Imagem multi-arch
+    needs: [ci]
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # As tags, para saber se esta é a maior versão.
+          fetch-depth: 0
+      - name: A tag é a versão do package.json e a maior?
+        id: version
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::A tag $GITHUB_REF_NAME não é a versão do package.json ($version)."
+            exit 1
+          fi
+          newest="$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1)"
+          if [ "$newest" = "$GITHUB_REF_NAME" ]; then latest=true; else latest=false; fi
+          [ "$latest" = true ] || echo "::notice::$GITHUB_REF_NAME não é a maior tag ($newest): o :latest fica onde está."
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: tmsoftbrasil/moneyflow
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ steps.version.outputs.latest }}
       - if: env.HAS_DOCKERHUB == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - if: env.HAS_DOCKERHUB != 'true'
         run: echo "::warning::Secrets DOCKERHUB_USERNAME/DOCKERHUB_TOKEN ausentes; a imagem é construída, mas não publicada."
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: ${{ env.HAS_DOCKERHUB == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # SBOM e proveniência completa junto da imagem publicada (tarefa 184).
+          sbom: true
+          provenance: mode=max
           cache-from: type=gha
           cache-to: type=gha,mode=max

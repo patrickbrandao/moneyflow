@@ -4,46 +4,88 @@ on:
   pull_request:
   push:
     branches: [main]
+  # A release (release.yml) roda este mesmo CI no commit da tag antes de publicar (tarefa 078).
+  workflow_call:
 
+# O GITHUB_TOKEN só lê o repositório (tarefa 184).
+permissions:
+  contents: read
+
+# Só o PR cancela a execução anterior: no main e na tag cada commit fica com o seu resultado (tarefa 184).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Actions fixadas pelo SHA do commit, com a versão no comentário (tarefa 184; o Dependabot as atualiza). O Node vem do
+# .nvmrc (tarefa 187), e scripts/check-versions.mjs confere tudo isso no job check.
 jobs:
   check:
     name: Lint, typecheck e testes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Falha com alerta alto ou crítico numa dependência de produção (tarefa 071).
       - name: Alertas de segurança das dependências
         run: pnpm audit --prod --audit-level high
+      - name: Versões fixas (Node, actions e imagens)
+        run: node scripts/check-versions.mjs
       - run: pnpm lint
       - run: pnpm typecheck
-      - name: Testes unitários (shared)
-        run: pnpm test:unit
+      - name: Testes unitários (shared e scripts)
+        run: pnpm test:unit && pnpm test:scripts
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      # A imagem do banco sai do cache do GitHub, a mesma nos três jobs (tarefa 184); o Testcontainers a usa pronta.
+      - name: Imagem do banco
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: database
+          file: database/docker/Dockerfile
+          load: true
+          tags: moneyflow-postgres:dev
+          cache-from: type=gha,scope=postgres
+          cache-to: type=gha,scope=postgres,mode=max
       - name: Testes de integração da API (Postgres 18 real via Testcontainers)
         run: pnpm test:integration
+        env:
+          MONEYFLOW_TEST_PG_IMAGE: moneyflow-postgres:dev
       - run: pnpm build
 
   database:
-    name: Banco (pgTAP)
+    name: Banco (pgTAP e referências geradas)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Imagem do banco
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: database
+          file: database/docker/Dockerfile
+          load: true
+          tags: moneyflow-postgres:dev
+          cache-from: type=gha,scope=postgres
+          cache-to: type=gha,scope=postgres,mode=max
       - run: make -C database test
+      # A referência commitada tem de bater com as migrations (tarefa 163): migration nova sem `make dump` falha aqui.
+      - name: schema.sql e privileges.sql em dia com as migrations
+        run: |
+          make -C database dump
+          git diff --exit-code database/schema.sql database/privileges.sql
       - if: always()
         run: docker compose -f database/docker-compose.yml down -v
 
   image:
     name: Imagem Docker e E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [check]
     env:
       ADMIN_USERNAME: admin
@@ -52,16 +94,26 @@ jobs:
       # Bot API falsa do e2e de mensagens (sobe no runner; a pilha a alcança por host.docker.internal)
       TELEGRAM_API_BASE: http://host.docker.internal:18081
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Build da imagem (sem push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           load: true
           tags: tmsoftbrasil/moneyflow:dev
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Já carregada, o compose não a constrói de novo (sobe sem --build).
+      - name: Imagem do banco
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: database
+          file: database/docker/Dockerfile
+          load: true
+          tags: moneyflow-postgres:dev
+          cache-from: type=gha,scope=postgres
+          cache-to: type=gha,scope=postgres,mode=max
       - name: Sobe a pilha (banco, migrations, api, worker)
         run: docker compose up -d --wait api worker
       - name: Login do admin e SPA
@@ -70,17 +122,17 @@ jobs:
           curl -fsS -c /tmp/cj -H 'content-type: application/json' \
             -d "{\"login\":\"$ADMIN_USERNAME\",\"password\":\"$ADMIN_PASSWORD\"}" http://localhost:3000/api/auth/login
           curl -fsS http://localhost:3000/ | grep -q '<div id="root">'
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @moneyflow/e2e exec playwright install --with-deps chromium
       - name: E2E (Playwright)
         run: pnpm e2e
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: playwright-report
           path: e2e/playwright-report

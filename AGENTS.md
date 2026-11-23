@@ -24,7 +24,7 @@ Achados do usuário e pedidos de revisão/correção entre agentes viram arquivo
 
 ## Comandos
 
-Node 22.12+ e pnpm 9 (`corepack enable`). Copie `.env.example` para `.env` na raiz.
+Node 26 (a versão do `.nvmrc`, a mesma do CI e da imagem; o `engine-strict` do `.npmrc` recusa outra major) e pnpm 9.12 (o `packageManager` do `package.json`: `npm i -g pnpm@9.12.0` ou o gerenciador do sistema, porque o Node 25+ não traz o corepack). Copie `.env.example` para `.env` na raiz.
 
 ```bash
 pnpm install
@@ -37,10 +37,11 @@ pnpm test                       # unitários (shared) + integração da API
 pnpm test:unit                  # só packages/shared
 pnpm test:integration           # API contra Postgres 18 real: o Testcontainers builda database/docker e aplica as migrations
 pnpm test:local                 # a mesma integração no Postgres local (5432), sem container: banco limpo copiado de um modelo migrado
+pnpm test:scripts               # testes dos scripts da raiz (node --test); node scripts/check-versions.mjs confere Node, imagens e actions fixos
 pnpm verify:quick               # verificação rápida do que mudou no branch (o padrão; veja Verificação)
 pnpm verify:full                # verificação completa (só quando pedido, antes de PR e release; --e2e, --local)
 pnpm build                      # SPA (apps/web/dist) + bundle da API/worker (apps/server/dist/main.mjs)
-pnpm db:pull                    # regenera packages/db/src/generated depois de uma migration nova (nunca edite à mão)
+pnpm db:pull                    # regenera packages/db/src/generated depois de uma migration nova (nunca edite à mão; test/generated-schema.test.ts confere)
 docker compose up --build -d    # pilha completa: Postgres (5433), migrations, api (http://localhost:3000, serve o SPA) e worker
 pnpm e2e                        # Playwright contra a pilha no ar (E2E_BASE_URL, padrão http://localhost:3000)
 # Os e2e de mensagens sobem uma Bot API falsa na porta 18081 (E2E_TELEGRAM_PORT): suba a pilha apontando para ela
@@ -51,7 +52,7 @@ node e2e/fakes/fake-llm.ts 18082   # o mesmo provedor falso, à mão, para testa
 # O e2e do Telegram de entrada (visao.spec.ts) sobe outro provedor falso na 18083 (E2E_LLM_TELEGRAM_PORT) e chama o webhook direto,
 # com o segredo que a Bot API falsa (e2e/fakes/fake-telegram.ts, a mesma dos testes de integração) recebeu no setWebhook.
 node e2e/fakes/fake-telegram.ts 18081   # a Bot API falsa, à mão (setWebhook, getFile e o download, botões; nada vai ao Telegram)
-make release                    # build multi-arch e push de tmsoftbrasil/moneyflow:<versão> e :latest
+make release                    # release-check (árvore limpa, HEAD na tag, verify:full) e build multi-arch do commit; push de :<versão> e :latest (docs/018)
 ```
 
 Teste isolado:

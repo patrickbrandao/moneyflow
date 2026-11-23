@@ -513,7 +513,7 @@ export async function startFakeLlm(port = 0, host = '0.0.0.0'): Promise<FakeLlm>
   return fake;
 }
 
-/* Execução avulsa: `node --experimental-strip-types e2e/fakes/fake-llm.ts 18082`. */
+/* Execução avulsa: `node e2e/fakes/fake-llm.ts 18082` (o Node do .nvmrc roda TypeScript sem flag). */
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
   const port = Number(process.argv[2] ?? 18082);
   void startFakeLlm(port).then((fake) =>

@@ -4,12 +4,13 @@
 
 - A série atual é **0.1.x**: a primeira publicação é `v0.1.0`, e cada nova release incrementa o último número (`v0.1.1`, `v0.1.2`…). Mudar o número do meio ou chegar à `1.0.0` é decisão do dono do produto.
 - A versão fica em `package.json` (raiz) e é a fonte do `make release`. A tag git `vX.Y.Z` aponta para o commit publicado.
-- Cada release publica `tmsoftbrasil/moneyflow:X.Y.Z` e move `:latest` para ela (amd64 + arm64).
+- Cada release publica `tmsoftbrasil/moneyflow:X.Y.Z` (amd64 + arm64) e move `:latest` para ela só se `vX.Y.Z` for a maior tag: uma correção de uma versão antiga não move o `:latest`.
 
 ## Como publicar
 
-- **Desta máquina** (padrão hoje): atualizar a versão em `package.json`, commitar, criar a tag `vX.Y.Z`, rodar `make release` com a conta `tmsoftbrasil` logada no Docker e fazer push do commit e da tag.
-- **Pelo CI**: `release.yml` faz o mesmo numa tag `v*`, mas só publica se os secrets `DOCKERHUB_USERNAME` e `DOCKERHUB_TOKEN` existirem no repositório.
+- **Desta máquina** (padrão hoje): atualizar a versão em `package.json`, commitar, criar a tag `vX.Y.Z` nesse commit, rodar `make release` com a conta `tmsoftbrasil` logada no Docker e fazer push do commit e da tag. O `make release` passa antes pelo `release-check` (tarefa 078), que recusa a árvore com alteração não commitada e o `HEAD` que não é a tag `v<versão do package.json>`, e roda `pnpm verify:full` (`VERIFY_ARGS="--e2e"` acrescenta o e2e, com a pilha no ar). A imagem é construída do commit (`git archive HEAD`), nunca da árvore de trabalho.
+- **Pelo CI**: `release.yml` faz o mesmo numa tag `v*`. Primeiro roda o CI inteiro no commit da tag (o `ci.yml` como workflow reutilizável: lint, typecheck, testes, pgTAP, imagem e e2e); só depois constrói, com SBOM e proveniência. Recusa a tag que não é a versão do `package.json`, e só publica se os secrets `DOCKERHUB_USERNAME` e `DOCKERHUB_TOKEN` existirem no repositório.
+- **Versões fixas** (tarefas 163, 184 e 187): o Node do `.nvmrc` é o do desenvolvimento, do CI e da imagem (`FROM node:<versão>-bookworm-slim@sha256:…`); as actions vão pelo SHA do commit; o dbmate e a imagem do banco têm versão completa (e digest, [016](016-banco-de-dados.md)). O `scripts/check-versions.mjs` confere tudo isso no CI. A produção (projeto externo) deve usar a imagem do banco com a mesma tag e o mesmo digest de `database/docker/Dockerfile`, ou registrar as versões dela.
 
 ## Ambientes
 
