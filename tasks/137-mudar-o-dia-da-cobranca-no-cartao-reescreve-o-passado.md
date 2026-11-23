@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -60,4 +60,12 @@ Nada foi executado. O efeito foi deduzido das fórmulas do calendário em `packa
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: no ramo do cartão de `planSeriesChange`, o dia novo só fazia `UPDATE recurrence_rules SET anchor_day`. As datas esperadas (`occurrenceDueDate`, `contract_payments`) são recalculadas desde a 1ª ocorrência, então o passado mudava.
+
 ## Resolução (executor)
+
+- Decisão (a de curto prazo da tarefa): a cobrança no cartão não muda de dia. `apps/server/src/services/series.ts`: `planSeriesChange` recusa a mudança do dia âncora numa série de cartão com 422 `card_charge_anchor_day` (`t.contracts.errors.cardAnchorDay`: "encerre a cobrança e crie outra com o novo dia"). A recusa vale na prévia e na aplicação do aditivo, no `PATCH /api/series/:id` e nas tools que passam por ali. O `UPDATE` morto do ramo saiu.
+- `apps/web/src/components/contracts/ObligationFormModal.tsx`: o `SeriesEditModal` não mostra nem manda o dia numa cobrança no cartão.
+- `docs/034-contratos-sobre-series.md` (decisões, "Edição da série").
+- Teste: `apps/server/test/contracts.test.ts`, no `describe('obrigação no cartão')`, "a cobrança no cartão não muda de dia (aditivo ou edição): as datas esperadas do passado ficam (tarefa 137)". O aditivo e o `PATCH` com `anchorDay` dão 422, as datas de `/payments` não mudam e a descrição continua editável.
+- Verificação: `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s1 pnpm verify:quick` (nível rápido).

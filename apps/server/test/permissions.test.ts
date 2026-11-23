@@ -59,6 +59,51 @@ describe('permissões por caixa', () => {
     await editor.post(`/api/caixas/${s.caixaA.id}/members`, { userId: viewerUser.id, role: 'editor' }, 403);
   });
 
+  it('só quem edita a caixa principal do titular a troca; o admin troca qualquer uma (tarefa 072)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const editorUser = await userSession(h);
+    await admin.put(`/api/users/${editorUser.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'editor' }] });
+    const editor = client(h, editorUser.cookie);
+    const isPrimary = async (id: string) => (await admin.get(`/api/caixas/${id}`)).isPrimary;
+
+    // Criando: a principal do titular B é a caixa B, que o editor não edita.
+    const denied = await editor.post('/api/caixas', { name: `Toma B ${s.tag}`, holderEntityId: s.holderB.id, isPrimary: true }, 403);
+    expect(denied.error.message).toMatch(/principal/);
+    expect(await isPrimary(s.caixaB.id)).toBe(true);
+
+    // Sem marcar a principal, cria; marcar depois pelo PATCH também é recusado.
+    const plain = await editor.post('/api/caixas', { name: `Outra B ${s.tag}`, holderEntityId: s.holderB.id, isPrimary: false });
+    expect(plain.isPrimary).toBe(false);
+    await editor.patch(`/api/caixas/${plain.id}`, { isPrimary: true }, 403);
+    // Caixa vazia de outro titular trocando para o titular B e marcando a principal.
+    const empty = await editor.post('/api/caixas', { name: `Vazia ${s.tag}`, holderEntityId: s.supplier.id, isPrimary: false });
+    await editor.patch(`/api/caixas/${empty.id}`, { holderEntityId: s.holderB.id, isPrimary: true }, 403);
+    expect(await isPrimary(s.caixaB.id)).toBe(true);
+    // Sem espelho capturado: o título contra o titular B continua espelhando na caixa B.
+    const title = await admin.post('/api/titles', {
+      caixaId: s.caixaA.id,
+      direction: 'receivable',
+      entityId: s.holderB.id,
+      categoryId: s.income.id,
+      description: 'Venda',
+      competenceDate: '2026-10-01',
+      dueDate: '2026-10-20',
+      amountCents: 10_000,
+    });
+    expect(title.counterpartyCaixaId).toBe(s.caixaB.id);
+
+    // Quem edita a principal atual (caixa A) troca a do titular A.
+    const newA = await editor.post('/api/caixas', { name: `Nova A ${s.tag}`, holderEntityId: s.holderA.id, isPrimary: true });
+    expect(newA.isPrimary).toBe(true);
+    expect(await isPrimary(s.caixaA.id)).toBe(false);
+
+    // O admin troca a principal de qualquer titular.
+    const adminB = await admin.post('/api/caixas', { name: `Admin B ${s.tag}`, holderEntityId: s.holderB.id, isPrimary: true });
+    expect(adminB.isPrimary).toBe(true);
+    expect(await isPrimary(s.caixaB.id)).toBe(false);
+  });
+
   it('traduz erros do banco para mensagens pt-BR', async () => {
     const admin = client(h, (await userSession(h, 'admin')).cookie);
     const s = await scenario(h, admin);

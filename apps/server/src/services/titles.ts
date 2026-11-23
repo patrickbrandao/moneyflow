@@ -3,11 +3,13 @@ import {
   addDays,
   type DeleteResult,
   dayOfMonth,
+  type Frequency,
   formatDate,
   isoWeekday,
   type MirrorStatus,
   type mirrorAcceptInput,
   type mirrorDisputeInput,
+  occurrenceDueDate,
   parseBoleto,
   type RecurrenceRuleDto,
   type SeriesEndPreview,
@@ -26,11 +28,12 @@ import {
 import { and, desc, eq, gt, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
-import { notFound, unprocessable } from '../errors';
+import { forbidden, notFound, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
 import { assertPlannedAccount, PLANNED_JOINS, PLANNED_SELECT, plannedOf } from './planned-account';
 import { clearStatementSuggestions } from './reconciliation-guards';
 import { MATERIALIZE_LOCK, materializeRule } from './recurrence';
+import { closedMonths } from './series';
 import { assertTolerance, ruleDto, termsColumns } from './series-core';
 import { insertTitlePair, type MirrorPlan, opposite } from './title-pair';
 import { deleteOrArchive, withTx } from './tx';
@@ -81,11 +84,13 @@ function toRow(row: Record<string, unknown>): TitleRow {
 export async function listTitles(
   ctx: ServiceContext,
   query: z.output<typeof titleListQuery>,
-  opts: { writableOnly?: boolean } = {},
+  /** `cardInvoiceId`: só os títulos dessa fatura (o detalhe da fatura, tarefa 084). */
+  opts: { writableOnly?: boolean; cardInvoiceId?: string } = {},
 ): Promise<TitleRow[]> {
   if (query.caixaId) ctx.access.assertRead(query.caixaId);
   const today = todayIso();
   const where = [readableFilter(ctx.access, sql`t.caixa_id`)];
+  if (opts.cardInvoiceId) where.push(sql`t.card_invoice_id = ${opts.cardInvoiceId}`);
   if (opts.writableOnly && !ctx.access.isAdmin) {
     const ids = ctx.access.writableCaixaIds() as string[];
     where.push(
@@ -140,6 +145,24 @@ async function loadTitle(db: Executor, id: string, lock = false) {
   const [row] = lock ? await query.for('update') : await query;
   if (!row) throw notFound();
   return row;
+}
+
+/**
+ * Trava o título e o espelho numa ordem fixa (pelo id), qualquer que seja o
+ * lado pedido: duas escritas simultâneas nos dois lados do par não se travam
+ * uma à outra (tarefa 188).
+ */
+export async function lockTitlePair(tx: Executor, id: string) {
+  const [peek] = await tx.select({ mirrorTitleId: titles.mirrorTitleId }).from(titles).where(eq(titles.id, id));
+  if (!peek) throw notFound();
+  const ids = [id, ...(peek.mirrorTitleId ? [peek.mirrorTitleId] : [])];
+  const rows = await tx.select().from(titles).where(inArray(titles.id, ids)).orderBy(titles.id).for('update');
+  const title = rows.find((r) => r.id === id);
+  if (!title) throw notFound();
+  const mirror = title.mirrorTitleId
+    ? (rows.find((r) => r.id === title.mirrorTitleId) ?? (await loadTitle(tx, title.mirrorTitleId, true)))
+    : null;
+  return { title, mirror };
 }
 
 export async function listSettlements(db: Executor, titleId: string): Promise<SettlementRow[]> {
@@ -339,13 +362,21 @@ type Patch = Partial<typeof titles.$inferInsert>;
 
 export async function updateTitle(ctx: ServiceContext, id: string, input: z.output<typeof titleUpdateInput>): Promise<TitleDetail> {
   await withTx(ctx, async (tx) => {
-    const title = await loadTitle(tx, id, true);
+    if (input.scope === 'following') {
+      // Trava da série antes dos títulos, na ordem do worker e do "Editar série" (tarefa 075).
+      const [peek] = await tx.select({ ruleId: titles.recurrenceRuleId }).from(titles).where(eq(titles.id, id));
+      if (peek?.ruleId) await tx.execute(sql`SELECT pg_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${peek.ruleId}))`);
+    }
+    const { title, mirror } = await lockTitlePair(tx, id);
     ctx.access.assertWrite(title.caixaId);
-    const mirror = title.mirrorTitleId ? await loadTitle(tx, title.mirrorTitleId, true) : null;
     if (mirror && input.entityId && input.entityId !== title.entityId) throw unprocessable(strings.errors.mirrorEntityLocked);
 
     const amountChanged = input.amountCents !== undefined && input.amountCents !== title.amountCents;
     const dueChanged = input.dueDate !== undefined && input.dueDate !== title.dueDate;
+    const competenceChanged = input.competenceDate !== undefined && input.competenceDate !== title.competenceDate;
+    // Título de fatura: valor, vencimento e competência são os da fatura (spec 007, tarefa 132).
+    if (title.cardInvoiceId && (amountChanged || dueChanged || competenceChanged))
+      throw unprocessable(strings.errors.cardInvoiceTitleLocked, 'card_invoice_title_locked');
     if (mirror && (amountChanged || dueChanged)) {
       await syncMirror(ctx, tx, title, mirror, { amountCents: input.amountCents, dueDate: input.dueDate });
     }
@@ -371,38 +402,98 @@ export async function updateTitle(ctx: ServiceContext, id: string, input: z.outp
     }
     if (Object.keys(patch).length > 0) await tx.update(titles).set(patch).where(eq(titles.id, id));
 
-    // "Esta e as próximas": reescreve as ocorrências futuras ainda em aberto (datas seguem a regra).
     if (following && title.recurrenceRuleId && title.occurrence) {
-      const following = await tx
-        .select()
-        .from(titles)
-        .where(
-          and(
-            eq(titles.recurrenceRuleId, title.recurrenceRuleId),
-            eq(titles.caixaId, title.caixaId),
-            gt(titles.occurrence, title.occurrence),
-            eq(titles.status, 'open'),
-          ),
-        )
-        .for('update');
-      const futurePatch: Patch = {};
-      if (input.categoryId !== undefined) futurePatch.categoryId = input.categoryId;
-      if (input.description !== undefined) futurePatch.description = input.description;
-      if (input.amountCents !== undefined) futurePatch.amountCents = input.amountCents;
-      if (input.notes !== undefined) futurePatch.notes = input.notes;
-      if (input.entityId !== undefined && !mirror) futurePatch.entityId = input.entityId;
-      if (plannedChanged) Object.assign(futurePatch, { plannedAccountId: input.plannedAccountId ?? null, plannedAccountCustom: false });
-      for (const next of following) {
-        if (Object.keys(futurePatch).length === 0) break;
-        if (next.mirrorTitleId && input.amountCents !== undefined && input.amountCents !== next.amountCents) {
-          const nextMirror = await loadTitle(tx, next.mirrorTitleId, true);
-          await syncMirror(ctx, tx, next, nextMirror, { amountCents: input.amountCents });
-        }
-        await tx.update(titles).set(futurePatch).where(eq(titles.id, next.id));
-      }
+      await applyToFollowing(ctx, tx, title, !!mirror, {
+        categoryId: input.categoryId !== undefined && input.categoryId !== title.categoryId ? input.categoryId : undefined,
+        description: input.description !== undefined && input.description !== title.description ? input.description : undefined,
+        amountCents: amountChanged ? input.amountCents : undefined,
+        notes: input.notes !== undefined && input.notes !== title.notes ? input.notes : undefined,
+        entityId: !mirror && input.entityId !== undefined && input.entityId !== title.entityId ? input.entityId : undefined,
+        dueDate: dueChanged ? input.dueDate : undefined,
+        plannedAccountId: plannedChanged ? (input.plannedAccountId ?? null) : undefined,
+      });
     }
   });
   return getTitle(ctx, id);
+}
+
+/**
+ * "Esta e as próximas" no formulário do título (tarefa 075): só o que mudou
+ * nesta ocorrência vai para as seguintes da mesma caixa, em aberto e sem
+ * baixa; as de mês fechado ficam, como no "Editar série" (spec 034). Um
+ * vencimento noutro dia muda o dia da série (a âncora da regra) e move as
+ * seguintes para esse dia; no mesmo dia (outro mês, por exemplo), só esta muda.
+ */
+async function applyToFollowing(
+  ctx: ServiceContext,
+  tx: Tx,
+  title: typeof titles.$inferSelect,
+  hasMirror: boolean,
+  change: {
+    categoryId?: string;
+    description?: string;
+    amountCents?: number;
+    notes?: string | null;
+    entityId?: string;
+    dueDate?: string;
+    plannedAccountId?: string | null;
+  },
+) {
+  const [rule] = await tx.select().from(recurrenceRules).where(eq(recurrenceRules.id, title.recurrenceRuleId!)).for('update');
+  if (!rule) throw notFound();
+  let anchorRule: (typeof rule & { frequency: Frequency }) | null = null;
+  if (change.dueDate !== undefined) {
+    const anchorDay = rule.frequency === 'weekly' ? isoWeekday(change.dueDate) : dayOfMonth(change.dueDate);
+    if (anchorDay !== rule.anchorDay) {
+      // O dia é da série, que é do lado original.
+      ctx.access.assertWrite(rule.caixaId);
+      anchorRule = { ...rule, frequency: rule.frequency as Frequency, anchorDay };
+      await tx.update(recurrenceRules).set({ anchorDay }).where(eq(recurrenceRules.id, rule.id));
+    }
+  }
+
+  const futurePatch: Patch = {};
+  if (change.categoryId !== undefined) futurePatch.categoryId = change.categoryId;
+  if (change.description !== undefined) futurePatch.description = change.description;
+  if (change.amountCents !== undefined) futurePatch.amountCents = change.amountCents;
+  if (change.notes !== undefined) futurePatch.notes = change.notes;
+  if (change.entityId !== undefined && !hasMirror) futurePatch.entityId = change.entityId;
+  if (change.plannedAccountId !== undefined)
+    Object.assign(futurePatch, { plannedAccountId: change.plannedAccountId, plannedAccountCustom: false });
+  if (Object.keys(futurePatch).length === 0 && !anchorRule) return;
+
+  const following = await tx
+    .select()
+    .from(titles)
+    .where(
+      and(
+        eq(titles.recurrenceRuleId, rule.id),
+        eq(titles.caixaId, title.caixaId),
+        gt(titles.occurrence, title.occurrence!),
+        eq(titles.status, 'open'),
+      ),
+    )
+    .orderBy(titles.occurrence)
+    .for('update');
+  const closed = await closedMonths(
+    tx,
+    [title.caixaId, ...new Set(following.map((f) => f.counterpartyCaixaId))],
+    following.map((f) => f.competenceDate),
+  );
+  for (const next of following) {
+    if (closed.has(`${next.competenceDate.slice(0, 7)}-01`)) continue;
+    const dueDate = anchorRule ? occurrenceDueDate(anchorRule, next.occurrence!) : next.dueDate;
+    const rowPatch: Patch = { ...futurePatch, ...(dueDate !== next.dueDate ? { dueDate } : {}) };
+    if (Object.keys(rowPatch).length === 0) continue;
+    const sync = {
+      amountCents: change.amountCents !== undefined && change.amountCents !== next.amountCents ? change.amountCents : undefined,
+      dueDate: dueDate !== next.dueDate ? dueDate : undefined,
+    };
+    if (next.mirrorTitleId && (sync.amountCents !== undefined || sync.dueDate !== undefined)) {
+      await syncMirror(ctx, tx, next, await loadTitle(tx, next.mirrorTitleId, true), sync);
+    }
+    await tx.update(titles).set(rowPatch).where(eq(titles.id, next.id));
+  }
 }
 
 /**
@@ -426,12 +517,25 @@ async function syncMirror(
   await tx.update(titles).set(patch).where(eq(titles.id, mirror.id));
 }
 
+/**
+ * O par é do lado original (specs 005 e 006): pelo espelho, excluir, arquivar,
+ * restaurar, cancelar, reabrir ou mexer na série pede escrita também na caixa
+ * do original; sem ela, o editor do espelho aceita ou contesta (tarefa 079).
+ */
+function assertPairOwner(ctx: ServiceContext, title: typeof titles.$inferSelect) {
+  if (title.mirrorStatus === null || !title.mirrorTitleId || !title.counterpartyCaixaId) return;
+  if (!ctx.access.canWrite(title.counterpartyCaixaId)) throw forbidden(strings.errors.mirrorPairOriginal);
+}
+
 /** Cancela o título e o espelho (um débito cancelado vale para os dois lados). */
 export async function cancelTitle(ctx: ServiceContext, id: string): Promise<TitleDetail> {
   await withTx(ctx, async (tx) => {
     const title = await loadTitle(tx, id, true);
     ctx.access.assertWrite(title.caixaId);
+    assertPairOwner(ctx, title);
     const ids = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
+    // Título cancelado não recebe baixa: a linha sugerida para ele volta a "nova" (tarefa 129).
+    await clearStatementSuggestions(tx, { titleIds: ids });
     await tx.update(titles).set({ status: 'canceled' }).where(inArray(titles.id, ids));
   });
   return getTitle(ctx, id);
@@ -441,6 +545,7 @@ export async function reopenTitle(ctx: ServiceContext, id: string): Promise<Titl
   await withTx(ctx, async (tx) => {
     const title = await loadTitle(tx, id, true);
     ctx.access.assertWrite(title.caixaId);
+    assertPairOwner(ctx, title);
     if (title.status !== 'canceled') return;
     const ids = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
     await tx
@@ -461,6 +566,7 @@ export async function deleteTitle(ctx: ServiceContext, id: string, scope: 'this'
   const title = await loadTitle(ctx.db, id);
   ctx.access.assertWrite(title.caixaId);
   if (title.cardInvoiceId) throw unprocessable(strings.errors.cardInvoiceTitleLocked);
+  assertPairOwner(ctx, title);
   const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
 
   if (title.recurrenceRuleId && title.occurrence) {
@@ -468,7 +574,10 @@ export async function deleteTitle(ctx: ServiceContext, id: string, scope: 'this'
       await withTx(ctx, (tx) => endSeriesFrom(tx, title.recurrenceRuleId!, title.occurrence!, title.dueDate));
       return { deleted: true, archived: false };
     }
-    await withTx(ctx, (tx) => tx.update(titles).set({ archivedAt: sql`now()` }).where(inArray(titles.id, pair)));
+    await withTx(ctx, async (tx) => {
+      await clearStatementSuggestions(tx, { titleIds: pair });
+      await tx.update(titles).set({ archivedAt: sql`now()` }).where(inArray(titles.id, pair));
+    });
     return { deleted: false, archived: true };
   }
 
@@ -488,19 +597,22 @@ export async function archiveTitle(ctx: ServiceContext, id: string): Promise<Tit
   const title = await loadTitle(ctx.db, id);
   ctx.access.assertWrite(title.caixaId);
   if (title.cardInvoiceId) throw unprocessable(strings.errors.cardInvoiceTitleLocked);
+  assertPairOwner(ctx, title);
   const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
-  await withTx(ctx, (tx) =>
-    tx
+  await withTx(ctx, async (tx) => {
+    await clearStatementSuggestions(tx, { titleIds: pair });
+    await tx
       .update(titles)
       .set({ archivedAt: sql`now()` })
-      .where(and(inArray(titles.id, pair), isNull(titles.archivedAt))),
-  );
+      .where(and(inArray(titles.id, pair), isNull(titles.archivedAt)));
+  });
   return getTitle(ctx, id);
 }
 
 export async function restoreTitle(ctx: ServiceContext, id: string): Promise<TitleDetail> {
   const title = await loadTitle(ctx.db, id);
   ctx.access.assertWrite(title.caixaId);
+  assertPairOwner(ctx, title);
   const pair = [title.id, ...(title.mirrorTitleId ? [title.mirrorTitleId] : [])];
   await withTx(ctx, (tx) => tx.update(titles).set({ archivedAt: null }).where(inArray(titles.id, pair)));
   return getTitle(ctx, id);
@@ -614,6 +726,8 @@ export async function endSeries(ctx: ServiceContext, titleId: string, endsOn: st
 }
 
 async function endSeriesFrom(tx: Tx, ruleId: string, occurrence: number, dueDate: string) {
+  // Mesma chave do worker e do "Encerrar série": nada materializa a série enquanto ela muda.
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${ruleId}))`);
   const [rule] = await tx.select().from(recurrenceRules).where(eq(recurrenceRules.id, ruleId)).for('update');
   if (!rule) throw notFound();
   const doomed = await tx

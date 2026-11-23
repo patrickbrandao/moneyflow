@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -60,4 +60,16 @@ Só os exemplos do `parseAmount` foram executados (`<RASCUNHO>/scripts/edge.ts`)
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: `parseStatementFile` descartava `applied.errors`; a resposta do import e a prévia da tool não citavam as linhas que não entraram. A tela avisava antes de importar, mas contava o "valor zero" (as linhas de "SALDO ANTERIOR") como problema.
+
 ## Resolução (executor)
+
+- `packages/shared/src/parsers/csv.ts`: `applyCsvMapping` devolve `zeroRows` (as linhas de valor zero) fora de `errors`, que fica só com data ou valor inválidos. A tela (que mostra "N com problema") deixa de contar o ruído.
+- `apps/server/src/services/statements.ts`: `ParsedFile.invalidRows`; `previewStatementImport` e `importStatement` devolvem `invalidRows` (`{ total, rows }`, até 50, com o número da linha e o motivo).
+- O aviso "N linha(s) do arquivo não foram lidas (ex.: linha 12, valor inválido)" vem de `statementImportNotices` (shared): na prévia da tool `import_statement` (`tool-handlers-operation.ts`, uma linha) e no toast da importação na tela.
+- Decisão: sem recusar o import por percentual de linhas inválidas (o passo opcional); o aviso basta e o arquivo sem nenhuma linha válida já é `statement_empty`.
+- Spec 009 (linhas inválidas avisadas).
+- Testes: `packages/shared/test/csv.test.ts` (o "valor zero" em `zeroRows`, os motivos em `errors`); `apps/server/test/statements.test.ts`, "CSV em Latin-1 decrescente…": `invalidRows` na prévia do serviço, o aviso no cartão da tool (`TOOL_HANDLERS.import_statement.preview`) e na resposta do import.
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

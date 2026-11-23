@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -78,4 +78,16 @@ Nada foi executado. Os relatórios (`report_*`) não foram lidos para saber se i
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `deleteAccount` arquivava sem olhar o saldo (a caixa soma só as ativas e o `caixa_daily_balances` soma todas), e `accountInCaixa`, `addAdjustment`, `createTransfer` e `resolveTarget(…, true)` não conferiam `archived_at`.
+
 ## Resolução (executor)
+
+- Decisão (item 1): recusar o arquivamento com saldo diferente de zero, a opção recomendada; assim o total da caixa, a visão geral e o calendário continuam batendo. A exclusão física (conta sem movimentos) segue sem a trava, porque a conta some de todos os números.
+- `apps/server/src/services/caixas.ts`: no ramo de arquivar do `deleteAccount`, saldo ≠ 0 → 422 `account_archive_balance` (`t.errors.accountArchiveBalance(valor)`); `assertAccountActive` (422 `account_archived`) usado no `addAdjustment`.
+- `apps/server/src/services/settlements.ts` (`accountInCaixa`, que cobre a baixa, a perna do espelho e o "definir conta", e a conta de origem da transferência da baixa), `transfers.ts` (as duas contas) e `reconciliation.ts` (o avulso lançado pela linha do extrato): conta arquivada não recebe movimento novo. O estorno continua permitido (ele é obrigatório nas duas pernas no banco, e a outra perna pode ser de quem não restaura a conta).
+- `apps/server/src/services/statements.ts`: `resolveTarget` com escrita recusa a conta arquivada (422 `statement_account_archived`) — importação pela tela, pela API e pela tool, a prévia da tool e os mapeamentos de CSV; a leitura dos lotes continua.
+- `apps/web/src/components/caixa/AccountsTab.tsx`: a confirmação de excluir diz que a arquivada sai do saldo da caixa e precisa de saldo zero.
+- `packages/shared/src/i18n/pt-BR.ts`: `accountArchived`, `accountArchiveBalance`, `statementAccountArchived`. `docs/008-categorias-auditoria-e-exclusao.md`: a regra.
+- Testes: `apps/server/test/account-summary.test.ts`, `describe('conta arquivada (tarefa 080)')` (recusa com saldo, arquiva zerada com a caixa e o calendário iguais, 422 no avulso, na baixa, na transferência e no extrato, lotes antigos legíveis e o estorno); `apps/server/test/agent-tools.test.ts`, o caso de arquivar conta pela tool passa a zerar o saldo antes.
+- Limite: contas já arquivadas com saldo antes desta mudança continuam fora do total da caixa e dentro do calendário; o estorno de uma baixa antiga também muda o saldo de uma arquivada. Para isso, restaurar a conta e zerar.
+- Verificação: `pnpm verify:quick` (nível rápido).

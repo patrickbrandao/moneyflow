@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -84,4 +84,11 @@ Nada foi executado. O número de títulos por caixa em produção não foi verif
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `getInvoice` listava até 1.000 títulos de cada caixa (`listTitles` por `due_date` crescente) e filtrava em memória. Numa pagadora com mais de mil títulos anteriores, os da fatura ficavam de fora.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/titles.ts`: `listTitles` com a opção interna `cardInvoiceId` (`t.card_invoice_id = …`, com o `readableFilter` e o mesmo `rowSelect`).
+- `apps/server/src/services/cards.ts`: `getInvoice` faz uma consulta só dos títulos da fatura (não arquivados, como antes) e filtra pela pagadora pedida.
+- Teste: `apps/server/test/cards.test.ts`, "o detalhe da fatura traz os títulos dela mesmo com mais de mil títulos antes na pagadora (tarefa 084)". Insere 1.005 títulos antigos na pagadora direto no banco e confere as duas pernas no fechamento. O teste falha sem a correção.
+- Verificação: `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s1 pnpm verify:quick` (nível rápido).

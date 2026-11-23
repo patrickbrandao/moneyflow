@@ -294,16 +294,29 @@ async function currentContent(tx: Executor, documentId: string): Promise<string 
   return result.rows[0]?.content ?? null;
 }
 
+/**
+ * Nova versão do markdown. Concorrência otimista (tarefa 135): com
+ * `baseVersionId` (a versão que o editor abriu), ou com `unchangedSince` (a
+ * tool aprovada depois: a hora da prévia), uma versão atual mais nova recusa a
+ * gravação com 409 `version_conflict`, sem criar versão.
+ */
 export async function saveVersion(
   ctx: ServiceContext,
   documentId: string,
-  input: z.output<typeof contractVersionCreateInput>,
+  input: Omit<z.output<typeof contractVersionCreateInput>, 'baseVersionId'> & { baseVersionId?: string | null },
+  opts: { unchangedSince?: string | null } = {},
 ): Promise<{ version: number; document: ContractDocumentDto }> {
   const { doc } = await documentAccess(ctx, documentId, true);
   if (doc.format !== 'markdown') throw unprocessable(E.notMarkdown, 'not_markdown');
   const version = await withTx(ctx, async (tx) => {
     await loadDocument(tx, documentId, true);
-    if ((await currentContent(tx, documentId)) === input.content) throw unprocessable(t.contracts.documents.noChanges, 'no_changes');
+    const current = await tx.execute<{ id: string; version: number; content: string; newer: boolean | null }>(sql`
+      SELECT v.id, v.version, v.content, (v.created_at > ${opts.unchangedSince ?? null}::timestamptz) AS newer
+        FROM contract_documents d JOIN contract_document_versions v ON v.id = d.current_version_id WHERE d.id = ${documentId}`);
+    const row = current.rows[0];
+    if (row && ((input.baseVersionId && row.id !== input.baseVersionId) || row.newer))
+      throw new AppError(409, 'version_conflict', t.contracts.documents.versionConflict(Number(row.version)));
+    if (row?.content === input.content) throw unprocessable(t.contracts.documents.noChanges, 'no_changes');
     return appendVersion(ctx, tx, documentId, input.content, { note: input.note });
   });
   return { version, document: await getContractDocument(ctx, documentId) };

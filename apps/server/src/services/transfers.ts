@@ -4,7 +4,7 @@ import { eq, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { notFound, unprocessable } from '../errors';
-import { getAccount, readableFilter } from './caixas';
+import { assertAccountActive, getAccount, readableFilter } from './caixas';
 import { assertNotReconciled, clearStatementSuggestions, transferMovementIds } from './reconciliation-guards';
 import { withTx } from './tx';
 import { camel } from './util';
@@ -54,6 +54,8 @@ export async function createTransfer(ctx: ServiceContext, input: z.output<typeof
     const to = await getAccount(ctx, input.toAccountId, tx);
     ctx.access.assertWrite(from.caixaId);
     ctx.access.assertWrite(to.caixaId);
+    assertAccountActive(from);
+    assertAccountActive(to);
     const [row] = await tx
       .insert(transfers)
       .values({

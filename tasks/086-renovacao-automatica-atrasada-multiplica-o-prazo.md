@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -88,4 +88,11 @@ Nada foi executado contra o banco. Só as funções puras do `packages/shared` r
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `syncLifecycle` avançava o fim no laço, mas gravava uma vigência só, de `contract.endsOn + 1` até o fim final. Na passada seguinte, `termMonths` da última vigência devolvia N × prazo.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/contracts.ts`: `syncLifecycle` renova um prazo por vez (`renewInTx` com `cycleEnd(fim + 1, meses)`), recarregando o contrato a cada passo, até cobrir hoje (teto de 600). Cada vigência tem o prazo da última. O aviso usa o `seq` da última, e o corpo mostra o início da primeira e o fim da última.
+- `docs/020-contratos.md` e `docs/034-contratos-sobre-series.md`: "uma vigência por prazo".
+- Teste: `apps/server/test/contracts.test.ts`, "renovação automática atrasada: uma vigência por prazo e a seguinte pelo mesmo prazo (tarefa 086)". O contrato vai de 2023-01-01 a 2023-12-31. Em 21/11/2026, ganha as vigências 2 a 4 de 12 meses e a obrigação vai até 31/12/2026. Em 02/01/2027, ganha a vigência 5 até 31/12/2027, com a obrigação junto.
+- Verificação: `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s1 pnpm verify:quick` (nível rápido).

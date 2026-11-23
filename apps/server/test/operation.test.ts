@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildBrCode } from '@moneyflow/shared';
+import { addMonths, buildBrCode, todayIso } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { type MaterializeFailure, materializeAll } from '../src/services/recurrence';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
 let h: Harness;
@@ -102,6 +103,52 @@ describe('fechamento de mês (spec 008)', () => {
     const reopened = await admin.del(`/api/caixas/${s.caixaA.id}/closings/2026-10-01`);
     expect(reopened.closings).toEqual([]);
     await user.post(`/api/accounts/${s.accountA.id}/adjustments`, { occurredOn: '2026-10-05', amountCents: 100, description: 'Ajuste' });
+  });
+
+  it('não fecha mês futuro; a série presa num mês fechado aparece no log do worker (tarefa 082)', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const today = todayIso();
+    const next = `${addMonths(today, 1).slice(0, 7)}-01`;
+    const future = await admin.raw('POST', `/api/caixas/${s.caixaA.id}/closings`, { month: next, force: true });
+    expect(future.statusCode).toBe(422);
+    expect(future.json().error.code).toBe('closing_future_month');
+    expect((await admin.get(`/api/caixas/${s.caixaA.id}/closings`)).closings).toEqual([]);
+
+    // Um mês futuro já fechado (de antes da trava), direto no banco: a série para nele e o worker diz qual e por quê.
+    const series = await admin.post('/api/titles', {
+      caixaId: s.caixaA.id,
+      direction: 'payable',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      description: 'Assinatura',
+      competenceDate: today,
+      dueDate: today,
+      amountCents: 1_000,
+      mirrorCaixaId: null,
+      series: { kind: 'recurrence', frequency: 'monthly', endsOn: addMonths(today, 13) },
+    });
+    const blocked = `${addMonths(today, 13).slice(0, 7)}-01`;
+    await h.db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT set_config('app.user_id', ${adminSession.id}, true), set_config('app.actor_kind', 'human', true)`);
+      await tx.execute(
+        sql`INSERT INTO period_closings (caixa_id, month, closed_by_user_id) VALUES (${s.caixaA.id}, ${blocked}::date, ${adminSession.id})`,
+      );
+    });
+    const failures: MaterializeFailure[] = [];
+    const result = await materializeAll(h.db, addMonths(today, 14), (failure) => failures.push(failure));
+    const mine = failures.find((f) => f.ruleId === series.recurrenceRuleId);
+    expect(mine).toMatchObject({ code: 'period_closings_locked_check' });
+    expect(mine!.message).toMatch(/mês está fechado/);
+    expect(result.closedMonth).toBeGreaterThanOrEqual(1);
+    expect(result.failed).toBeGreaterThanOrEqual(result.closedMonth);
+
+    // Reaberto o mês, a série volta a andar.
+    await admin.del(`/api/caixas/${s.caixaA.id}/closings/${blocked}`);
+    await materializeAll(h.db, addMonths(today, 14));
+    const titles = await admin.get(`/api/titles?caixaId=${s.caixaA.id}&limit=1000`);
+    expect(titles.filter((t: { recurrenceRuleId: string }) => t.recurrenceRuleId === series.recurrenceRuleId)).toHaveLength(14);
   });
 
   it('estorno com desfazer transferência é barrado se a transferência caiu em mês fechado', async () => {
@@ -394,5 +441,52 @@ describe('calendário (spec 012)', () => {
     const days = await admin.get(`/api/calendar/balances?from=2030-01-24&to=2030-01-26&caixaId=${s.caixaA.id}`);
     expect(days.map((d: any) => d.projectedCents)).toEqual([100_000, 130_000, 130_000]);
     expect((await admin.raw('GET', `/api/calendar?from=2030-01-01&to=2035-01-01`)).statusCode).toBe(422);
+  });
+
+  it('o título de fatura não se arrasta nem muda de vencimento pelo PATCH (tarefa 132)', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const issuer = await admin.post('/api/entities', { kind: 'company', name: `Emissor ${s.tag}` });
+    const card = await admin.post('/api/caixas', {
+      name: `Cartão ${s.tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: s.caixaA.id,
+      creditLimitCents: 500_000,
+      closingDay: 3,
+      dueDay: 10,
+      cardLast4: '4321',
+    });
+    await admin.post(`/api/cards/${card.id}/purchases`, {
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      purchasedOn: '2026-09-12',
+      description: 'Material',
+      amountCents: 10_000,
+    });
+    const oct = (await admin.get(`/api/cards/${card.id}`)).invoices.find((i: any) => i.referenceMonth === '2026-10-01');
+    const closed = await admin.post(`/api/card-invoices/${oct.id}/close`, {});
+    const payerTitle = closed.titles.find((tr: any) => tr.caixaId === s.caixaA.id);
+    const cardTitle = closed.titles.find((tr: any) => tr.caixaId === card.id);
+
+    const items = await admin.get(`/api/calendar?from=2026-10-01&to=2026-10-31&caixaIds=${s.caixaA.id},${card.id}`);
+    const invoiceItems = items.filter((i: any) => i.titleId === payerTitle.id || i.titleId === cardTitle.id);
+    expect(invoiceItems).toHaveLength(2);
+    expect(invoiceItems.every((i: any) => i.canWrite && !i.canReschedule)).toBe(true);
+
+    for (const body of [{ dueDate: '2026-10-15' }, { amountCents: 9_000 }, { competenceDate: '2026-11-01' }]) {
+      const res = await admin.raw('PATCH', `/api/titles/${payerTitle.id}`, body);
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error.code).toBe('card_invoice_title_locked');
+    }
+    await admin.raw('PATCH', `/api/titles/${cardTitle.id}`, { dueDate: '2026-10-15' }).then((r) => expect(r.statusCode).toBe(422));
+    // O resto continua editável, e o corpo do formulário (valor e datas iguais) passa.
+    const edited = await admin.patch(`/api/titles/${payerTitle.id}`, {
+      description: 'Fatura do cartão',
+      dueDate: payerTitle.dueDate,
+      competenceDate: payerTitle.competenceDate,
+    });
+    expect(edited).toMatchObject({ description: 'Fatura do cartão', dueDate: oct.dueDate });
+    expect((await admin.get(`/api/titles/${cardTitle.id}`)).dueDate).toBe(oct.dueDate);
   });
 });

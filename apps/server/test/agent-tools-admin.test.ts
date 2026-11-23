@@ -387,18 +387,27 @@ describe('mensagens', () => {
 
 describe('fechamento e auditoria', () => {
   it('quem edita fecha; só o admin reabre; viewer negado; histórico do registro', async () => {
-    expect((await call(viewerSession, 'close_month', { caixaId: s.caixaA.id, month: '2031-05' })).error).toBe(
+    expect((await call(viewerSession, 'close_month', { caixaId: s.caixaA.id, month: '2026-05' })).error).toBe(
       'Você só tem leitura nesta caixa.',
     );
-    const closed = await approved(editorSession, 'close_month', { caixaId: s.caixaA.id, month: '2031-05', notes: 'conferido' });
-    expect(rowsOf(closed.preview)).toMatchObject({ Mês: 'Aberto → Fechado', Observações: 'conferido' });
-    expect(closed.value.closings.map((c: any) => c.month)).toContain('2031-05-01');
+    // Mês futuro: recusado já na prévia (tarefa 082).
     expect((await call(editorSession, 'close_month', { caixaId: s.caixaA.id, month: '2031-05' })).error).toBe(
+      'Só se fecha até o mês atual: o fechamento congela o que já aconteceu.',
+    );
+    const closed = await approved(editorSession, 'close_month', {
+      caixaId: s.caixaA.id,
+      month: '2026-05',
+      notes: 'conferido',
+      force: true,
+    });
+    expect(rowsOf(closed.preview)).toMatchObject({ Mês: 'Aberto → Fechado', Observações: 'conferido' });
+    expect(closed.value.closings.map((c: any) => c.month)).toContain('2026-05-01');
+    expect((await call(editorSession, 'close_month', { caixaId: s.caixaA.id, month: '2026-05' })).error).toBe(
       'Este mês já está fechado nesta caixa.',
     );
     expect((await call(viewerSession, 'list_month_closings', { caixaId: s.caixaA.id })).value.closings).toHaveLength(1);
-    expect((await call(editorSession, 'reopen_month', { caixaId: s.caixaA.id, month: '2031-05' })).error).toBe(notOffered('reopen_month'));
-    const reopened = await approved(adminSession, 'reopen_month', { caixaId: s.caixaA.id, month: '2031-05' });
+    expect((await call(editorSession, 'reopen_month', { caixaId: s.caixaA.id, month: '2026-05' })).error).toBe(notOffered('reopen_month'));
+    const reopened = await approved(adminSession, 'reopen_month', { caixaId: s.caixaA.id, month: '2026-05' });
     expect(reopened.preview).toMatchObject({ action: 'delete' });
     expect(reopened.value.closings).toHaveLength(0);
 

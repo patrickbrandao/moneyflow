@@ -174,8 +174,14 @@ export const ptBR = {
     mirrorSameCaixa: 'A caixa do espelho não pode ser a caixa do título.',
     mirrorNotPending: 'Este título não é um espelho aguardando aceite.',
     mirrorEditOriginal: 'Valor e vencimento de um espelho mudam pelo título original.',
+    mirrorPairOriginal:
+      'O título original é de outra caixa: pelo espelho, só quem edita também a caixa do original exclui, arquiva, cancela ou mexe na série. Conteste o espelho para avisar o autor.',
     mirrorEntityLocked: 'Título espelhado não troca de entidade.',
     accountOtherCaixa: 'A conta escolhida não é desta caixa.',
+    accountArchived: 'A conta está arquivada: restaure-a para lançar nela.',
+    accountArchiveBalance: (balance: string) =>
+      `A conta tem saldo de ${balance}: zere-o com uma transferência ou um lançamento avulso antes de excluí-la (com histórico, ela é arquivada e sai do saldo da caixa).`,
+    statementAccountArchived: 'A conta está arquivada: ela não importa extrato novo. Restaure-a para importar.',
     accountRequiredForTransfer: 'Para pagar com a conta de outra caixa, escolha também a conta desta caixa que recebe a transferência.',
     sameCaixaSource: 'A conta de origem já é desta caixa; não há transferência a gerar.',
     zeroCashTransfer: 'Com valor em dinheiro zero não há transferência a gerar.',
@@ -183,6 +189,8 @@ export const ptBR = {
     settlementHasAccount: 'Esta baixa já tem conta definida.',
     reversalBeforeSettlement: 'O estorno não pode ser antes da data da baixa.',
     transferFromSettlement: 'Esta transferência nasceu de uma baixa: estorne a baixa.',
+    undoTransferOtherCaixa:
+      'A transferência desta baixa mexe numa conta de outra caixa que você não edita: estorne sem desfazer a transferência ou peça a quem edita aquela caixa.',
     seriesHasSettlements: 'Há ocorrências seguintes com baixa; estorne-as antes.',
     seriesEndInstallments: 'Parcelamento não tem data de fim: exclua as parcelas seguintes.',
     seriesEndBeforeStart: 'A série não pode terminar antes do início.',
@@ -190,6 +198,8 @@ export const ptBR = {
       `Há ocorrências com baixa depois dessa data (${list}); estorne-as ou escolha uma data a partir do vencimento delas.`,
     caixaKindF1: 'Caixas de cartão chegam na fase 2.',
     holderArchived: 'O titular está arquivado.',
+    primaryOfOtherCaixa:
+      'O titular já tem uma caixa principal que você não edita: só o administrador troca a principal dele. Salve esta caixa sem marcá-la como principal.',
     inactiveUser: 'Usuário desativado.',
     invalidMonth: 'Mês inválido.',
     cardFieldsRequired: 'Cartão precisa de pagadora padrão, limite, dias de fechamento e vencimento e os 4 últimos dígitos.',
@@ -255,6 +265,7 @@ export const ptBR = {
     attachmentTooLarge: 'O arquivo passa de 20 MB.',
     uploadInvalidBase64: 'Conteúdo inválido: envie o arquivo em base64.',
     uploadTooLarge: 'O arquivo enviado pelo MCP passa de 5 MB.',
+    closingFutureMonth: 'Só se fecha até o mês atual: o fechamento congela o que já aconteceu.',
     closingUnreconciled: (n: number) =>
       `Há ${n} linha(s) de extrato do mês sem conciliar nas contas desta caixa. Concilie antes ou feche assim mesmo.`,
     reopenAdminOnly: 'Só um administrador reabre um mês fechado.',
@@ -436,6 +447,8 @@ export const ptBR = {
     endsOn: 'Termina em',
     scopeThis: 'Só este',
     scopeFollowing: 'Este e os próximos',
+    scopeFollowingHint:
+      'Só o que você mudar aqui vai para os próximos em aberto e sem baixa (os de mês fechado ficam). Um vencimento noutro dia muda o dia da série; o valor e as observações de cada um ficam se você não os mudar.',
     endSeries: 'Encerrar série…',
     endSeriesTitle: 'Encerrar ou estender a série',
     endSeriesHint:

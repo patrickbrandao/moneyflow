@@ -4,6 +4,7 @@ import {
   categories,
   classificationRules,
   type Executor,
+  financialAccounts,
   movements,
   settlements,
   statementCsvMappings,
@@ -39,14 +40,14 @@ import { and, eq, inArray, isNull, ne, type SQL, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { ServiceContext } from '../context';
 import { notFound, translateDbError, unprocessable } from '../errors';
-import { readableFilter } from './caixas';
+import { assertAccountActive, readableFilter } from './caixas';
 import { insertChargePurchase } from './card-charges';
 import { insertPurchase, loadCard } from './card-core';
 import { assertPurchaseDeletable, deletePurchaseTx } from './cards';
 import { settleFromLine } from './line-settle';
 import { assertNotReconciled, clearStatementSuggestions } from './reconciliation-guards';
 import { uuidArray } from './reports';
-import { candidatesFor, listLines, type RuleTarget, resolveTarget, ruleFor } from './statements';
+import { bumpRuleUsage, candidatesFor, listLines, type RuleTarget, resolveTarget, rulesFor } from './statements';
 import { insertTitlePair } from './title-pair';
 import { resolveMirror } from './titles';
 import { withTx } from './tx';
@@ -404,6 +405,11 @@ async function createInTx(ctx: ServiceContext, tx: Tx, line: Line, input: z.outp
   } else {
     if (!line.financialAccountId) throw unprocessable(t.errors.lineAccountOnly);
     if (input.mode === 'adjustment') {
+      const [account] = await tx
+        .select({ archivedAt: financialAccounts.archivedAt })
+        .from(financialAccounts)
+        .where(eq(financialAccounts.id, line.financialAccountId));
+      assertAccountActive(account ?? { archivedAt: null });
       const [movement] = await tx
         .insert(movements)
         .values({
@@ -787,28 +793,36 @@ async function applyRulesTo(tx: Tx, target: RuleTarget, where: SQL): Promise<num
        AND l.status = 'new' AND (l.classification_source IS NULL OR l.classification_source = 'rule')
      ORDER BY l.posted_on, l.line_number
        FOR UPDATE OF l`);
+  // As regras de todas as linhas numa consulta e as mudanças num UPDATE só (tarefa 139).
+  const rules = await rulesFor(
+    tx,
+    target,
+    lines.rows.map((line) => ({ description: line.description, amountCents: Number(line.amount_cents) })),
+  );
   const usage = new Map<string, number>();
-  let updated = 0;
-  for (const line of lines.rows) {
-    const rule = await ruleFor(tx, target, line.description, Number(line.amount_cents));
+  const changes: { id: string; entity_id: string | null; category_id: string | null; rule_id: string | null; source: 'rule' | null }[] = [];
+  lines.rows.forEach((line, i) => {
+    const rule = rules[i];
     const next = { entityId: rule?.entityId ?? null, categoryId: rule?.categoryId ?? null, ruleId: rule?.id ?? null };
-    if (next.ruleId === line.classification_rule_id && next.entityId === line.entity_id && next.categoryId === line.category_id) continue;
-    await tx
-      .update(statementLines)
-      .set({
-        entityId: next.entityId,
-        categoryId: next.categoryId,
-        classificationRuleId: next.ruleId,
-        classificationSource: rule ? 'rule' : null,
-      })
-      .where(eq(statementLines.id, line.id));
-    updated += 1;
+    if (next.ruleId === line.classification_rule_id && next.entityId === line.entity_id && next.categoryId === line.category_id) return;
+    changes.push({
+      id: line.id,
+      entity_id: next.entityId,
+      category_id: next.categoryId,
+      rule_id: next.ruleId,
+      source: rule ? 'rule' : null,
+    });
     if (rule) usage.set(rule.id, (usage.get(rule.id) ?? 0) + 1);
+  });
+  if (changes.length > 0) {
+    await tx.execute(sql`
+      UPDATE statement_lines l
+         SET entity_id = x.entity_id, category_id = x.category_id, classification_rule_id = x.rule_id, classification_source = x.source
+        FROM json_to_recordset(${JSON.stringify(changes)}::json) AS x(id uuid, entity_id uuid, category_id uuid, rule_id uuid, source text)
+       WHERE l.id = x.id`);
   }
-  for (const [ruleId, count] of usage) {
-    await tx.execute(sql`UPDATE classification_rules SET usage_count = usage_count + ${count}, last_used_at = now() WHERE id = ${ruleId}`);
-  }
-  return updated;
+  await bumpRuleUsage(tx, usage);
+  return changes.length;
 }
 
 /** "Aplicar regras" no detalhe do lote (conta ou fatura do cartão), com as regras da conta dele. */

@@ -312,39 +312,44 @@ export function TerminationModal({
   const [penaltyDue, setPenaltyDue] = useState(addDays(todayIso(), 10));
   const [penaltyCategory, setPenaltyCategory] = useState<string | null>(null);
   const [penaltyAccount, setPenaltyAccount] = useState<string | null>(null);
+  // Competência da multa: sem escolha, a data da rescisão (mês fechado é recusado na prévia).
+  const [penaltyCompetence, setPenaltyCompetence] = useState<string | null>(null);
   const [notes, setNotes] = useState('');
   const { run, busy } = useAction();
 
+  const penalty: ContractTerminationInput['penalty'] =
+    withPenalty && penaltyCents && penaltyCategory
+      ? {
+          direction: penaltyDirection,
+          amountCents: penaltyCents,
+          dueDate: penaltyDue,
+          categoryId: penaltyCategory,
+          description: R.penaltyDescription(contract.name),
+          accountId: penaltyAccount,
+          competenceDate: penaltyCompetence,
+        }
+      : null;
   const { preview, error } = usePreview<TerminationPreview>(
     `/api/contracts/${contract.id}/terminate`,
-    { terminatedOn },
+    { terminatedOn, penalty },
     Boolean(terminatedOn),
   );
 
-  // A última ocorrência de cada obrigação vem com o proporcional sugerido.
-  const suggestionKey = JSON.stringify(preview?.last.map((l) => [l.titleId, l.proratedCents, l.settled]) ?? []);
+  // A última ocorrência de cada obrigação vem com o proporcional sugerido (a com baixa ou em mês fechado não muda).
+  const fixed = (l: TerminationPreview['last'][number]) => l.settled || l.closed;
+  const suggestionKey = JSON.stringify(preview?.last.map((l) => [l.titleId, l.proratedCents, fixed(l)]) ?? []);
   useEffect(() => {
     const next: Record<string, number | null> = {};
-    for (const l of preview?.last ?? []) if (!l.settled) next[l.titleId] = l.proratedCents;
+    for (const l of preview?.last ?? []) if (!fixed(l)) next[l.titleId] = l.proratedCents;
     setLastAmounts(next);
   }, [suggestionKey]);
 
   const body: ContractTerminationInput = {
     terminatedOn,
     lastAmounts: (preview?.last ?? [])
-      .filter((l) => !l.settled && lastAmounts[l.titleId] && lastAmounts[l.titleId] !== l.amountCents)
+      .filter((l) => !fixed(l) && lastAmounts[l.titleId] && lastAmounts[l.titleId] !== l.amountCents)
       .map((l) => ({ titleId: l.titleId, amountCents: lastAmounts[l.titleId]! })),
-    penalty:
-      withPenalty && penaltyCents && penaltyCategory
-        ? {
-            direction: penaltyDirection,
-            amountCents: penaltyCents,
-            dueDate: penaltyDue,
-            categoryId: penaltyCategory,
-            description: R.penaltyDescription(contract.name),
-            accountId: penaltyAccount,
-          }
-        : null,
+    penalty,
     notes,
   };
   const nameOf = (ruleId: string) => contract.obligations.find((o) => o.id === ruleId)?.description ?? '—';
@@ -383,10 +388,10 @@ export function TerminationModal({
                     <Field
                       key={l.titleId}
                       label={`${nameOf(l.ruleId)} · ${formatMonth(l.competenceDate)} (${formatAccounting(l.amountCents)})`}
-                      hint={l.settled ? R.lastSettled : R.prorated(formatAccounting(l.proratedCents))}
+                      hint={l.settled ? R.lastSettled : l.closed ? R.lastClosed : R.prorated(formatAccounting(l.proratedCents))}
                     >
                       <MoneyInput
-                        value={l.settled ? l.amountCents : (lastAmounts[l.titleId] ?? null)}
+                        value={fixed(l) ? l.amountCents : (lastAmounts[l.titleId] ?? null)}
                         onChange={(v) => setLastAmounts((m) => ({ ...m, [l.titleId]: v }))}
                         ariaLabel={`${R.lastOccurrence} ${nameOf(l.ruleId)}`}
                       />
@@ -426,6 +431,15 @@ export function TerminationModal({
                     value={penaltyDue}
                     onChange={(e) => setPenaltyDue(e.target.value)}
                     aria-label={C.columns.due}
+                  />
+                </Field>
+                <Field label={R.penaltyCompetence}>
+                  <input
+                    className="field"
+                    type="date"
+                    value={penaltyCompetence ?? terminatedOn}
+                    onChange={(e) => setPenaltyCompetence(e.target.value || null)}
+                    aria-label={R.penaltyCompetence}
                   />
                 </Field>
                 <Field label={C.fields.category}>

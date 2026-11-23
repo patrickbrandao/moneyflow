@@ -1,8 +1,12 @@
-import { addMonths, spClock, todayIso } from '@moneyflow/shared';
+import { addMonths, spClock, statementImportQuery, todayIso } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { contractMaintenance } from '../src/services/contract-worker';
+import { Access, loadAccess } from '../src/authz/access';
+import type { ServiceContext } from '../src/context';
+import { type ContractMaintenanceFailure, contractMaintenance } from '../src/services/contract-worker';
+import { syncLifecycle } from '../src/services/contracts';
 import { produceNotifications, recipientsByCaixa } from '../src/services/message-worker';
+import { importStatement } from '../src/services/statements';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
 /*
@@ -69,6 +73,23 @@ const lease = (s: Scenario, obligations: unknown[], extra: Record<string, unknow
 });
 
 const obligation = (contract: any, description: string) => contract.obligations.find((o: any) => o.description === description);
+
+/** Fecha o mês na caixa direto no banco (sem as checagens da tela), como quem concluiu a conciliação. */
+async function closeMonth(userId: string, caixaId: string, month: string) {
+  await h.db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT set_config('app.user_id', ${userId}, true), set_config('app.actor_kind', 'human', true)`);
+    await tx.execute(sql`INSERT INTO period_closings (caixa_id, month, closed_by_user_id) VALUES (${caixaId}, ${month}::date, ${userId})`);
+  });
+}
+
+/** O ciclo de vida de um contrato pelo calendário, como o worker (acesso de sistema), sem tocar nos outros contratos do banco. */
+async function lifecycle(contractId: string, today: string) {
+  const access = new Access(
+    { id: '00000000-0000-0000-0000-000000000000', username: 'system', email: '', role: 'admin', isActive: true },
+    new Map(),
+  );
+  return h.db.transaction((tx) => syncLifecycle({ db: h.db, access, config: h.config }, tx, contractId, today));
+}
 
 async function occurrences(ruleId: string) {
   const result = await h.db.execute<{ id: string; occurrence: number; due_date: string; amount_cents: string; status: string }>(sql`
@@ -396,6 +417,43 @@ describe('reconhecer o pagamento pela série (specs 033 e 034)', () => {
     expect(late.lines[0].target.series).toMatchObject({ contractId: null, ruleId: light.rule.id, split: { kind: 'exact', days: 22 } });
   });
 
+  it('baixa sem confirmação que falha vira sugestão e deixa o motivo no log, sem valores (tarefa 136)', async () => {
+    const { session, admin, s } = await setup();
+    const contract = await admin.post('/api/contracts', lease(s, [rentObligation(s)]));
+    const rent = obligation(contract, 'Aluguel');
+    await admin.patch(`/api/series/${rent.id}`, { autoSettle: true });
+    await closeMonth(session.id, s.caixaA.id, '2026-11-01');
+    const warnings: Record<string, unknown>[] = [];
+    const actor = {
+      id: session.id,
+      username: session.username,
+      email: `${session.username}@teste.local`,
+      role: 'admin' as const,
+      isActive: true,
+    };
+    const ctx: ServiceContext = {
+      db: h.db,
+      access: await loadAccess(h.db, actor),
+      config: h.config,
+      log: { warn: (obj) => warnings.push(obj as Record<string, unknown>) },
+    };
+    const imp = await importStatement(ctx, statementImportQuery.parse({ accountId: s.accountA.id, fileName: 'extrato.ofx' }), {
+      mime: 'application/x-ofx',
+      content: ofxOf([{ date: '2026-11-10', cents: -200_000, memo: 'PIX ALUGUEL' }]),
+    });
+    expect(imp.lines[0]).toMatchObject({ status: 'suggested', autoSettled: false });
+    expect(warnings).toEqual([
+      {
+        importId: imp.id,
+        lineId: imp.lines[0]!.id,
+        code: 'period_closings_locked_check',
+        pgCode: '23514',
+        constraint: 'period_closings_locked_check',
+      },
+    ]);
+    expect(JSON.stringify(warnings)).not.toContain('200000');
+  });
+
   it('cofre: os previstos da conta, "Baixar" e o "É o pagamento de…?" do lançamento avulso', async () => {
     const { admin, s } = await setup();
     const contract = await admin.post('/api/contracts', lease(s, [condoObligation(s, { lateFeePercent: 2 })]));
@@ -613,6 +671,30 @@ describe('obrigação no cartão (spec 034)', () => {
     const payments = await admin.get(`/api/contracts/${contract.id}/payments`);
     expect(payments.rows.filter((r: any) => r.kind === 'card_charge').map((r: any) => r.occurrence)).toEqual([1, 2, 3, 4]);
   });
+
+  it('a cobrança no cartão não muda de dia (aditivo ou edição): as datas esperadas do passado ficam (tarefa 137)', async () => {
+    const { admin, contract, rule } = await cardSetup();
+    const dueDates = async () =>
+      (await admin.get(`/api/contracts/${contract.id}/payments`)).rows
+        .filter((r: any) => r.kind === 'card_charge')
+        .map((r: any) => r.dueDate);
+    const before = await dueDates();
+    expect(before.slice(0, 2)).toEqual(['2026-11-15', '2026-12-15']);
+    const amended = await admin.raw('POST', `/api/contracts/${contract.id}/amendments?dryRun=1`, {
+      effectiveOn: '2027-03-01',
+      ruleIds: [rule.id],
+      anchorDay: 2,
+    });
+    expect(amended.statusCode).toBe(422);
+    expect(amended.json().error.code).toBe('card_charge_anchor_day');
+    const patched = await admin.raw('PATCH', `/api/series/${rule.id}`, { anchorDay: 2, effectiveOn: '2027-03-01' });
+    expect(patched.statusCode).toBe(422);
+    expect(await dueDates()).toEqual(before);
+    // O resto da edição continua valendo no cartão.
+    expect((await admin.patch(`/api/series/${rule.id}`, { description: 'Streaming HD', effectiveOn: '2027-03-01' })).description).toBe(
+      'Streaming HD',
+    );
+  });
 });
 
 /* ---------------- aditivo, renovação e rescisão ---------------- */
@@ -685,7 +767,8 @@ describe('aditivo, renovação e rescisão como operações da série (spec 034)
     expect(preview.preview).toMatchObject({
       startsOn: '2027-05-01',
       endsOn: '2027-10-31',
-      rules: [{ ruleId: rent.id, endsOn: '2027-10-30', kind: 'account' }],
+      // A série acompanha a vigência: termina no novo fim (tarefa 087).
+      rules: [{ ruleId: rent.id, endsOn: '2027-10-31', kind: 'account' }],
     });
     await admin.post(`/api/contracts/${contract.id}/renew`, { endsOn: '2027-04-30' }, 422);
     const renewed = await admin.post(`/api/contracts/${contract.id}/renew`, { endsOn: '2027-10-31' });
@@ -723,6 +806,127 @@ describe('aditivo, renovação e rescisão como operações da série (spec 034)
     expect(notice.rows[0]?.title).toContain('renovado automaticamente');
     // Encerrado pode ser renovado à mão.
     expect((await admin.post(`/api/contracts/${stop.id}/renew`, { endsOn: '2027-06-30' })).contract.status).toBe('active');
+  });
+
+  it('contrato que o worker não consegue renovar vai para o log com o id e o motivo (tarefa 136)', async () => {
+    const { session, admin, s } = await setup();
+    const contract = await admin.post(
+      '/api/contracts',
+      lease(s, [rentObligation(s, { firstDueDate: '2026-01-10' })], {
+        startsOn: '2026-01-01',
+        endsOn: '2026-06-30',
+        autoRenew: true,
+        contractNumber: null,
+      }),
+    );
+    // Agosto fechado na caixa: a renovação não materializa a ocorrência dele.
+    await closeMonth(session.id, s.caixaA.id, '2026-08-01');
+    const failures: ContractMaintenanceFailure[] = [];
+    const result = await contractMaintenance(h.db, todayIso(), undefined, (failure) => failures.push(failure));
+    expect(result.failed).toBeGreaterThanOrEqual(1);
+    expect(failures.find((f) => f.contractId === contract.id)).toMatchObject({
+      code: 'period_closings_locked_check',
+      constraint: 'period_closings_locked_check',
+      message: expect.stringMatching(/mês está fechado/),
+    });
+    expect((await admin.get(`/api/contracts/${contract.id}`)).status).toBe('active');
+    // Fora das passadas seguintes deste arquivo.
+    await admin.del(`/api/contracts/${contract.id}`);
+  });
+
+  it('renovar até o meio do mês ou com vencimento no dia 31 não perde a última ocorrência (tarefa 087)', async () => {
+    const { admin, s } = await setup();
+    const day31 = rentObligation(s, { description: 'Dia 31', amountCents: 10_000, firstDueDate: '2026-12-31' });
+    const contract = await admin.post('/api/contracts', lease(s, [rentObligation(s), day31]));
+    const mid = await admin.post(`/api/contracts/${contract.id}/renew?dryRun=1`, { endsOn: '2027-08-15' });
+    expect(mid.preview.rules.map((r: any) => r.endsOn)).toEqual(['2027-08-15', '2027-08-15']);
+    await admin.post(`/api/contracts/${contract.id}/renew`, { endsOn: '2027-08-15' });
+    const rent = obligation(contract, 'Aluguel');
+    expect((await occurrences(rent.id)).map((r) => r.due_date).at(-1)).toBe('2027-08-10');
+    // Renovar de novo até 31/10: a de dia 31 ganha a de outubro.
+    const renewed = await admin.post(`/api/contracts/${contract.id}/renew`, { endsOn: '2027-10-31' });
+    expect(obligation(renewed.contract, 'Dia 31').endsOn).toBe('2027-10-31');
+    const due = (await occurrences(obligation(contract, 'Dia 31').id)).map((r) => r.due_date);
+    expect(due.slice(-3)).toEqual(['2027-08-31', '2027-09-30', '2027-10-31']);
+  });
+
+  it('renovação automática atrasada: uma vigência por prazo e a seguinte pelo mesmo prazo (tarefa 086)', async () => {
+    const { admin, s } = await setup();
+    const contract = await admin.post(
+      '/api/contracts',
+      lease(s, [rentObligation(s, { amountCents: 1_000, firstDueDate: '2023-01-10' })], {
+        startsOn: '2023-01-01',
+        endsOn: '2023-12-31',
+        autoRenew: true,
+        contractNumber: null,
+      }),
+    );
+    expect(await lifecycle(contract.id, '2026-11-21')).toMatchObject({ action: 'renewed', seq: 4, endsOn: '2026-12-31' });
+    let after = await admin.get(`/api/contracts/${contract.id}`);
+    expect(after.cycles.map((y: any) => [y.seq, y.startsOn, y.endsOn])).toEqual([
+      [4, '2026-01-01', '2026-12-31'],
+      [3, '2025-01-01', '2025-12-31'],
+      [2, '2024-01-01', '2024-12-31'],
+      [1, '2023-01-01', '2023-12-31'],
+    ]);
+    expect(obligation(after, 'Aluguel').endsOn).toBe('2026-12-31');
+    // A passada seguinte estende por 12 meses, não por 36.
+    await lifecycle(contract.id, '2027-01-02');
+    after = await admin.get(`/api/contracts/${contract.id}`);
+    expect(after.endsOn).toBe('2027-12-31');
+    expect(after.cycles[0]).toMatchObject({ seq: 5, startsOn: '2027-01-01', endsOn: '2027-12-31' });
+    expect(obligation(after, 'Aluguel').endsOn).toBe('2027-12-31');
+  });
+
+  it('encerrado sem renovar: as obrigações sem fim (ou ligadas depois) terminam no fim; as com baixa ficam (tarefa 083)', async () => {
+    const { admin, s } = await setup();
+    const past = { startsOn: '2026-01-01', endsOn: '2026-06-30', contractNumber: null };
+    const contract = await admin.post(
+      '/api/contracts',
+      lease(
+        s,
+        [
+          rentObligation(s, { firstDueDate: '2026-01-10', endsOn: null }),
+          rentObligation(s, { description: 'Até antes', firstDueDate: '2026-01-10', endsOn: '2026-03-31' }),
+        ],
+        past,
+      ),
+    );
+    const rent = obligation(contract, 'Aluguel');
+    expect(rent.endsOn).toBeNull();
+    // Série solta sem fim, ligada depois; julho dela já pago.
+    const loose = await admin.post('/api/titles', {
+      caixaId: s.caixaA.id,
+      direction: 'payable',
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      description: 'IPTU',
+      competenceDate: '2026-01-01',
+      dueDate: '2026-01-20',
+      amountCents: 30_000,
+      mirrorCaixaId: null,
+      series: { kind: 'recurrence', frequency: 'monthly', intervalCount: 1, endsOn: null },
+    });
+    await admin.post(`/api/contracts/${contract.id}/obligations/link`, { ruleId: loose.rule.id });
+    const iptu = await occurrences(loose.rule.id);
+    await admin.post(`/api/titles/${iptu[7]!.id}/settlements`, {
+      settledOn: '2026-08-20',
+      amountCents: 30_000,
+      financialAccountId: s.accountA.id,
+    });
+
+    expect(await lifecycle(contract.id, '2026-11-21')).toEqual({ action: 'ended' });
+    const ended = await admin.get(`/api/contracts/${contract.id}`);
+    expect(ended.status).toBe('ended');
+    expect(obligation(ended, 'Aluguel').endsOn).toBe('2026-06-30');
+    expect(obligation(ended, 'Até antes').endsOn).toBe('2026-03-31');
+    const rentRows = await occurrences(rent.id);
+    expect(rentRows.slice(0, 6).every((r) => r.status === 'open')).toBe(true);
+    expect(rentRows.slice(6).every((r) => r.status === 'canceled')).toBe(true);
+    expect(rentRows.length).toBeGreaterThan(6);
+    // IPTU: termina no vencimento de agosto (pago); julho, sem baixa, sai junto com as seguintes.
+    expect(obligation(ended, 'IPTU').endsOn).toBe('2026-08-20');
+    expect((await occurrences(loose.rule.id)).slice(5, 9).map((r) => r.status)).toEqual(['open', 'canceled', 'paid', 'canceled']);
   });
 
   it('rescindir encerra as séries na data (canceladas sem apagar), ajusta a última ocorrência e lança a multa avulsa', async () => {
@@ -774,6 +978,55 @@ describe('aditivo, renovação e rescisão como operações da série (spec 034)
   });
 });
 
+describe('rescisão com a data em mês fechado (tarefa 138)', () => {
+  it('a última ocorrência em mês fechado não muda, a multa pede competência aberta e a rescisão conclui', async () => {
+    const { session, admin, s } = await setup();
+    const contract = await admin.post(
+      '/api/contracts',
+      lease(s, [rentObligation(s, { firstDueDate: '2026-08-10' })], { startsOn: '2026-08-01', endsOn: '2027-01-31', contractNumber: null }),
+    );
+    const rows = await occurrences(obligation(contract, 'Aluguel').id);
+    await closeMonth(session.id, s.caixaA.id, '2026-09-01');
+    const penalty = { direction: 'payable', amountCents: 50_000, dueDate: '2026-12-10', categoryId: s.expense.id };
+    const body = { terminatedOn: '2026-09-15', lastAmounts: [{ titleId: rows[1]!.id, amountCents: 100_000 }] };
+
+    const preview = await admin.post(`/api/contracts/${contract.id}/terminate?dryRun=1`, body);
+    expect(preview.preview.last).toEqual([expect.objectContaining({ titleId: rows[1]!.id, closed: true, settled: false })]);
+    expect(preview.preview.canceled.map((c: any) => c.occurrence)).toEqual([3, 4, 5, 6]);
+    // A multa na competência da rescisão (setembro, fechado) é recusada já na prévia; numa competência aberta, entra.
+    const refused = await admin.raw('POST', `/api/contracts/${contract.id}/terminate?dryRun=1`, { ...body, penalty });
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json().error).toMatchObject({ code: 'penalty_closed_month', message: expect.stringContaining('set/2026') });
+
+    const done = await admin.post(`/api/contracts/${contract.id}/terminate`, {
+      ...body,
+      penalty: { ...penalty, competenceDate: '2026-11-01' },
+    });
+    expect(done.contract).toMatchObject({ status: 'terminated', terminatedOn: '2026-09-15' });
+    const after = await occurrences(obligation(contract, 'Aluguel').id);
+    expect(after.map((r) => r.status)).toEqual(['open', 'open', 'canceled', 'canceled', 'canceled', 'canceled']);
+    expect(after[1]!.amount_cents).toBe(200_000);
+    const fine = await admin.get(`/api/titles/${done.contract.extraTitles[0].titleId}`);
+    expect(fine).toMatchObject({ competenceDate: '2026-11-01', amountCents: 50_000 });
+  });
+});
+
+describe('rescisão e a sugestão do extrato (tarefa 129)', () => {
+  it('a linha sugerida para uma ocorrência cancelada pela rescisão volta a "nova"', async () => {
+    const { session, admin, s } = await setup();
+    const contract = await admin.post('/api/contracts', lease(s, [rentObligation(s)]));
+    const rows = await occurrences(obligation(contract, 'Aluguel').id);
+    const imp = await importOfx(session.cookie, `accountId=${s.accountA.id}`, [
+      { date: '2026-12-10', cents: -200_000, memo: 'PIX ALUGUEL DEZEMBRO' },
+    ]);
+    expect(imp.lines[0]).toMatchObject({ status: 'suggested', titleId: rows[1]!.id });
+    await admin.post(`/api/contracts/${contract.id}/terminate`, { terminatedOn: '2026-11-15' });
+    expect((await occurrences(obligation(contract, 'Aluguel').id))[1]!.status).toBe('canceled');
+    const after = await admin.get(`/api/statement-imports/${imp.id}`);
+    expect(after.lines[0]).toMatchObject({ status: 'new', titleId: null });
+  });
+});
+
 /* ---------------- espelho, documentos e painel ---------------- */
 
 describe('espelho e permissões', () => {
@@ -808,9 +1061,57 @@ describe('espelho e permissões', () => {
       404,
     );
 
+    // Pagamentos pelo espelho: as ocorrências do lado legível, sem os ids do lado do contrato (tarefa 134).
+    const mirrorRows = (await other.get(`/api/contracts/${contract.id}/payments`)).rows;
+    expect(mirrorRows).toHaveLength(6);
+    expect(mirrorRows[0]).toMatchObject({ kind: 'title', titleId: title.mirror.id, caixaId: s.caixaB.id, accountId: null });
+    const listed = (await other.get('/api/contracts')).find((c: any) => c.id === contract.id);
+    expect(listed).toMatchObject({ obligationCount: 0, withoutAccount: 0, nextOccurrence: { titleId: title.mirror.id } });
+
     const stranger = client(h, (await userSession(h)).cookie);
     await stranger.get(`/api/contracts/${contract.id}`, 404);
     expect((await stranger.get('/api/contracts')).map((c: any) => c.id)).not.toContain(contract.id);
+  });
+
+  it('leitor só da caixa do contrato não vê a próxima ocorrência, as contagens nem as cobranças no cartão de caixas que não lê (tarefa 134)', async () => {
+    const { admin, s } = await setup();
+    const issuer = await admin.post('/api/entities', { kind: 'company', name: `Emissor ${s.tag}` });
+    const card = await admin.post('/api/caixas', {
+      name: `Cartão ${s.tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: s.caixaB.id,
+      creditLimitCents: 500_000,
+      closingDay: 25,
+      dueDay: 5,
+      cardLast4: '2222',
+    });
+    const streaming = { kind: 'card', description: 'Streaming', amountCents: 5_990, firstDueDate: '2026-11-15', cardCaixaId: card.id };
+    // O condomínio (dia 5) é do cofre da caixa B e vence antes do aluguel (dia 10, caixa A).
+    const contract = await admin.post('/api/contracts', lease(s, [rentObligation(s), condoObligation(s), streaming]));
+    expect((await admin.get(`/api/contracts?caixaId=${s.caixaA.id}`)).find((c: any) => c.id === contract.id)).toMatchObject({
+      obligationCount: 3,
+      nextOccurrence: { dueDate: '2026-11-05' },
+    });
+
+    const readerSession = await userSession(h);
+    await admin.put(`/api/users/${readerSession.id}/memberships`, { memberships: [{ caixaId: s.caixaA.id, role: 'viewer' }] });
+    const reader = client(h, readerSession.cookie);
+    const row = (await reader.get(`/api/contracts?caixaId=${s.caixaA.id}`)).find((c: any) => c.id === contract.id);
+    expect(row).toMatchObject({ obligationCount: 1, withoutAccount: 0, nextOccurrence: { dueDate: '2026-11-10', amountCents: 200_000 } });
+    expect((await reader.get(`/api/contracts/${contract.id}`)).nextOccurrence.dueDate).toBe('2026-11-10');
+    const payments = (await reader.get(`/api/contracts/${contract.id}/payments`)).rows;
+    expect(payments.length).toBeGreaterThan(0);
+    expect(payments.every((r: any) => r.kind === 'title' && r.caixaId === s.caixaA.id)).toBe(true);
+    // Quem lê a pagadora vê as cobranças no cartão.
+    await admin.put(`/api/users/${readerSession.id}/memberships`, {
+      memberships: [
+        { caixaId: s.caixaA.id, role: 'viewer' },
+        { caixaId: s.caixaB.id, role: 'viewer' },
+      ],
+    });
+    const withPayer = (await reader.get(`/api/contracts/${contract.id}/payments`)).rows;
+    expect(withPayer.some((r: any) => r.kind === 'card_charge')).toBe(true);
   });
 });
 
@@ -838,12 +1139,22 @@ describe('documentos', () => {
     });
     expect(v2.version).toBe(2);
     await admin.post(`/api/contract-documents/${doc.id}/versions`, { content: '# Contrato\n\nCláusula 1: R$ 150\n' }, 422);
+    // Duas edições abertas na mesma versão: a segunda a salvar recebe 409 e nada é gravado (tarefa 135).
+    const opened = (await admin.get(`/api/contract-documents/${doc.id}`)).currentVersionId;
+    const first = await admin.post(`/api/contract-documents/${doc.id}/versions`, { content: '# A\n', baseVersionId: opened });
+    const late = await admin.raw('POST', `/api/contract-documents/${doc.id}/versions`, { content: '# B\n', baseVersionId: opened });
+    expect(late.statusCode).toBe(409);
+    expect(late.json().error).toMatchObject({ code: 'version_conflict', message: expect.stringContaining('versão 3') });
+    expect(first.version).toBe(3);
+    // Restaurar a 2 (versão 4) volta ao conteúdo que o resto do teste espera.
+    const v2id = (await admin.get(`/api/contract-documents/${doc.id}/versions`)).find((v: any) => v.version === 2).id;
+    await admin.post(`/api/contract-documents/${doc.id}/versions/${v2id}/restore`);
     const versions = await admin.get(`/api/contract-documents/${doc.id}/versions`);
-    expect(versions.map((v: any) => v.version)).toEqual([2, 1]);
-    const restored = await admin.post(`/api/contract-documents/${doc.id}/versions/${versions[1].id}/restore`);
-    expect(restored.version).toBe(3);
+    expect(versions.map((v: any) => v.version)).toEqual([4, 3, 2, 1]);
+    const restored = await admin.post(`/api/contract-documents/${doc.id}/versions/${versions[3].id}/restore`);
+    expect(restored.version).toBe(5);
     const current = await admin.get(`/api/contract-documents/${doc.id}/versions/${restored.document.currentVersionId}`);
-    expect(current).toMatchObject({ version: 3, restoredFromVersion: 1, content: '# Contrato\n\nCláusula 1: R$ 100\n' });
+    expect(current).toMatchObject({ version: 5, restoredFromVersion: 1, content: '# Contrato\n\nCláusula 1: R$ 100\n' });
     await expect(h.db.execute(sql`UPDATE contract_document_versions SET note = 'x' WHERE document_id = ${doc.id}`)).rejects.toThrow();
     expect((await upload(session.cookie, contract.id, 'ruim.md', Buffer.from([0xff, 0xfe, 0x00]), 'text/markdown')).statusCode).toBe(422);
     expect((await upload(session.cookie, contract.id, 'planilha.xlsx', Buffer.from('x'), 'application/octet-stream')).statusCode).toBe(422);

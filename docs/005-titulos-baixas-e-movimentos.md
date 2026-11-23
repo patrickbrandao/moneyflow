@@ -2,7 +2,7 @@
 
 - Cada caixa tem os próprios **títulos** a pagar e a receber: entidade, categoria, competência, vencimento, valor, anotações e anexos.
 - Um título recebe uma ou mais **baixas** (parcial, juros, multa, desconto); cada baixa gera um **movimento** numa conta financeira. O estorno de baixa é uma operação própria.
-- Recorrência e parcelamento por regra (mensal no dia X, semanal, anual, N parcelas). O worker materializa os títulos até 12 meses à frente; editar "esta e as próximas" reescreve os futuros (inclusive a conta prevista).
+- Recorrência e parcelamento por regra (mensal no dia X, semanal, anual, N parcelas). O worker materializa os títulos até 12 meses à frente; editar "esta e as próximas" no formulário do título leva às ocorrências seguintes da mesma caixa, em aberto e sem baixa, só o que mudou nesta (descrição, categoria, valor, observações, entidade sem espelho e a conta prevista); as de mês fechado ficam, como no "Editar série". Um vencimento noutro dia muda o dia da série e move as seguintes para ele; no mesmo dia (outro mês, por exemplo), só esta muda (2026-11-21, tarefa 075).
 - **A série** (spec [034](034-contratos-sobre-series.md)) mora numa caixa — a do título; numa obrigação de contrato, a da conta onde o dinheiro se move — e tem:
   - a **conta prevista** de cada ocorrência (corrente, poupança ou cofre da caixa da série), copiada da ocorrência mais recente para as novas;
   - o **contrato** de que é obrigação, opcional ([020](020-contratos.md)): ligar ou desligar leva junto as ocorrências;
@@ -17,5 +17,5 @@
   - "Excluir este e os próximos" continua existindo para apagar ocorrências lançadas por engano (some com elas e falha se houver baixa).
 - **Listagem de títulos** (abas A pagar e A receber da caixa): filtro de vencimento com o padrão dos últimos 60 dias e próximos 30, os atalhos Mês anterior, Mês atual, Próximo mês e Hoje e a última escolha lembrada por caixa e direção, como no extrato ([004](004-caixas-e-contas.md)). As abas de situação (em aberto, vencido…) combinam com o período.
 - **Transferência** = par de movimentos ligados por `transfer_id`; não conta como receita nem despesa.
-- Pagar um título da caixa B com uma conta da caixa A (com permissão) gera automaticamente a transferência A → B e a baixa em B.
+- Pagar um título da caixa B com uma conta da caixa A (com permissão) gera automaticamente a transferência A → B e a baixa em B. O estorno desfaz essa transferência por padrão, o que pede escrita nas caixas das duas contas dela (como excluir uma transferência); sem isso, a resposta é 403 e o estorno sai sem desfazer (2026-11-21, tarefa 081).
 - Títulos cuja contraparte é titular de uma caixa são espelhados ([006](006-espelhamento-entre-caixas.md)).

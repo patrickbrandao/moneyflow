@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -66,4 +66,12 @@ Não reproduzido; a conclusão vem da ordem das chamadas. Apontado de passagem p
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado na leitura: `settleInTx` travava o título pedido e depois o espelho; `updateTitle` e o estorno (`loadLeg` da perna pedida e depois da outra) tinham o mesmo padrão. O teste novo de 20 pares simultâneos falha no código anterior.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/titles.ts`: `lockTitlePair(tx, id)` trava o título e o espelho com um só `SELECT … WHERE id IN (…) ORDER BY id FOR UPDATE`, qualquer que seja o lado pedido; usado no `updateTitle` (entrou no commit da 075) e no `settleInTx`.
+- `apps/server/src/services/settlements.ts`: `settleInTx` usa `lockTitlePair` (vale para a baixa pela tela, pela conciliação, pela linha do extrato e pelo pagamento da fatura); o estorno trava as duas pernas da mesma forma (`loadLegPair`).
+- `apps/server/src/errors.ts` e `packages/shared/src/i18n/errors.ts`: rede de segurança — `40P01` (deadlock) e `40001` (serialização) viram 409 "Outra operação mexia nos mesmos registros ao mesmo tempo. Tente de novo."
+- Teste: `apps/server/test/titles.test.ts`, "baixas simultâneas nos dois lados do espelho não se travam (tarefa 188)" — 20 pares de baixas simultâneas (metade de cada lado), todas 200 e o título pago.
+- Verificação: `pnpm verify:quick` (nível rápido).

@@ -222,6 +222,7 @@ export function TitleFormModal({
                 className="field"
                 value={competenceDate}
                 required
+                readOnly={invoiceLocked}
                 onChange={(e) => {
                   setCompetenceDate(e.target.value);
                   setCompetenceTouched(true);
@@ -301,7 +302,7 @@ export function TitleFormModal({
             {!editing && seriesKind !== 'none' && <SeriesTermsFields value={terms} onChange={setTerms} />}
 
             {editing && title?.recurrenceRuleId && (
-              <Field label="Aplicar a" className="span-all">
+              <Field label="Aplicar a" className="span-all" hint={scope === 'following' ? t.title.scopeFollowingHint : undefined}>
                 <div className="segmented" role="group">
                   <button type="button" className={scope === 'this' ? 'active' : ''} onClick={() => setScope('this')}>
                     {t.title.scopeThis}

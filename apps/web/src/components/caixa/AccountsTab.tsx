@@ -57,7 +57,8 @@ export function AccountsTab({ caixa, onChanged }: { caixa: CaixaDetail; onChange
   async function archive(account: AccountRow) {
     const ok = await confirm({
       title: `Excluir a conta ${account.name}?`,
-      description: 'Sem movimentos ela é excluída; com histórico, é arquivada (some das listas e continua nos relatórios).',
+      description:
+        'Sem movimentos ela é excluída; com histórico, é arquivada (some das listas e do saldo da caixa, continua nos relatórios) e, para isso, o saldo precisa estar zerado.',
       confirmLabel: t.common.delete,
       danger: true,
     });

@@ -21,7 +21,7 @@ import {
   type contractUpdateInput,
   cycleEnd,
   type DeleteResult,
-  diffDays,
+  formatMonth,
   noticeDeadline,
   type ObligationNext,
   type obligationInput,
@@ -160,18 +160,25 @@ export async function contractOwner(ctx: ServiceContext, tx: Executor, contractI
 
 /* ---------------- leitura ---------------- */
 
-const listSelect = sql`
+/**
+ * Colunas da lista. As obrigações, a próxima ocorrência e as sem conta só
+ * contam as caixas que o usuário lê (como o detalhe, tarefa 134): a próxima é
+ * a do lado legível do par — o original, ou o espelho para quem vê pela
+ * contraparte.
+ */
+const listSelect = (ctx: ServiceContext) => sql`
   c.id, c.caixa_id, k.name AS caixa_name, c.entity_id, e.name AS entity_name, c.direction, c.name, c.contract_number,
   c.category_id, cat.name AS category_name, coalesce(cat.color_slot, pc.color_slot) AS category_color_slot, c.status, c.auto_renew,
   c.starts_on, c.ends_on, c.terminated_on, c.archived_at,
-  (SELECT count(*)::int FROM recurrence_rules r WHERE r.contract_id = c.id) AS obligation_count,
+  (SELECT count(*)::int FROM recurrence_rules r WHERE r.contract_id = c.id AND ${readableFilter(ctx.access, sql`r.caixa_id`)}) AS obligation_count,
   nx.id AS next_title_id, nx.due_date AS next_due_date, nx.open_cents AS next_open_cents, nx.recurrence_rule_id AS next_rule_id,
   nx.occurrence AS next_occurrence, nx.description AS next_description,
   (SELECT count(*)::int FROM titles w
     WHERE w.contract_id = c.id AND w.recurrence_rule_id IS NOT NULL AND w.mirror_status IS NULL AND w.archived_at IS NULL
-      AND w.status IN ('open', 'partial') AND w.planned_account_id IS NULL) AS without_account`;
+      AND w.status IN ('open', 'partial') AND w.planned_account_id IS NULL
+      AND ${readableFilter(ctx.access, sql`w.caixa_id`)}) AS without_account`;
 
-const listFrom = sql`
+const listFrom = (ctx: ServiceContext) => sql`
   FROM contracts c
   JOIN caixas k ON k.id = c.caixa_id
   JOIN entities e ON e.id = c.entity_id
@@ -180,8 +187,9 @@ const listFrom = sql`
   LEFT JOIN LATERAL (
     SELECT x.id, x.due_date, b.open_cents, x.recurrence_rule_id, x.occurrence, x.description
       FROM titles x JOIN title_balances b ON b.title_id = x.id
-     WHERE x.contract_id = c.id AND x.mirror_status IS NULL AND x.archived_at IS NULL AND b.open_cents > 0 AND x.status <> 'canceled'
-     ORDER BY x.due_date, x.occurrence LIMIT 1) nx ON true`;
+     WHERE x.contract_id = c.id AND x.archived_at IS NULL AND b.open_cents > 0 AND x.status <> 'canceled'
+       AND ${readableFilter(ctx.access, sql`x.caixa_id`)}
+     ORDER BY x.due_date, x.occurrence, x.mirror_status IS NOT NULL LIMIT 1) nx ON true`;
 
 /** Contratos visíveis: da caixa legível, ou com título espelhado numa caixa legível. */
 function visibleFilter(ctx: ServiceContext): SQL {
@@ -244,7 +252,7 @@ export async function listContracts(ctx: ServiceContext, query: z.output<typeof 
     where.push(sql`(c.name ILIKE ${`%${query.q}%`} OR c.contract_number ILIKE ${`%${query.q}%`} OR e.name ILIKE ${`%${query.q}%`})`);
   where.push(query.archived ? sql`c.archived_at IS NOT NULL` : sql`c.archived_at IS NULL`);
   const result = await ctx.db.execute(sql`
-    SELECT ${listSelect} ${listFrom}
+    SELECT ${listSelect(ctx)} ${listFrom(ctx)}
      WHERE ${sql.join(where, sql` AND `)}
      ORDER BY CASE c.status WHEN 'active' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END, c.name, c.id
      LIMIT ${query.limit}`);
@@ -252,7 +260,7 @@ export async function listContracts(ctx: ServiceContext, query: z.output<typeof 
 }
 
 async function contractRow(ctx: ServiceContext, id: string): Promise<ContractRow> {
-  const result = await ctx.db.execute(sql`SELECT ${listSelect} ${listFrom} WHERE c.id = ${id}`);
+  const result = await ctx.db.execute(sql`SELECT ${listSelect(ctx)} ${listFrom(ctx)} WHERE c.id = ${id}`);
   const raw = result.rows[0];
   if (!raw) throw notFound();
   return toRow(ctx, raw);
@@ -481,7 +489,8 @@ const ownerOf = (contract: ContractRecord): SeriesOwner => ({
 /**
  * Pelo calendário (worker, como ator `system`): o contrato vigente que passou
  * do fim é renovado pelo mesmo prazo, com as obrigações estendidas (renovação
- * automática), ou encerrado. Devolve o que aconteceu.
+ * automática), ou encerrado, com as obrigações terminando no fim. Devolve o
+ * que aconteceu.
  */
 export async function syncLifecycle(
   ctx: ServiceContext,
@@ -492,17 +501,65 @@ export async function syncLifecycle(
   const contract = await loadContract(tx, contractId, true);
   if (contract.status !== 'active' || contract.archivedAt || !contract.endsOn || today <= contract.endsOn) return null;
   if (!contract.autoRenew) {
+    await endObligationsAt(ctx, tx, contractId, contract.endsOn);
     await tx.execute(sql`UPDATE contracts SET status = 'ended' WHERE id = ${contractId}`);
     return { action: 'ended' };
   }
-  // Renova quantas vezes for preciso para cobrir hoje (o worker pode ter ficado parado).
+  // Uma vigência por prazo, quantas forem precisas para cobrir hoje (o worker pode ter ficado
+  // parado, ou o contrato ser cadastrado já vencido): cada uma com o prazo da última (tarefa 086).
   const cycles = await loadCycles(tx, contractId);
   const last = cycles.at(-1);
   const months = termMonths(last?.startsOn ?? contract.startsOn, contract.endsOn);
-  let endsOn = contract.endsOn;
-  while (endsOn < today) endsOn = cycleEnd(addDays(endsOn, 1), months);
-  const renewed = await renewInTx(ctx, tx, contract, endsOn);
-  return { action: 'renewed', startsOn: addDays(contract.endsOn, 1), endsOn, seq: renewed.seq };
+  let current = contract;
+  let seq = 0;
+  for (let i = 0; current.endsOn && current.endsOn < today && i < 600; i += 1) {
+    seq = (await renewInTx(ctx, tx, current, cycleEnd(addDays(current.endsOn, 1), months))).seq;
+    current = await loadContract(tx, contractId);
+  }
+  return { action: 'renewed', startsOn: addDays(contract.endsOn, 1), endsOn: current.endsOn!, seq };
+}
+
+/**
+ * Fim da vigência sem renovar (spec 034, "Encerrar"): as obrigações que iam
+ * além do fim — sem fim, ou ligadas depois com o fim mais adiante — terminam
+ * nele, com as ocorrências seguintes em aberto canceladas (sem apagar). As
+ * ocorrências depois do fim com baixa (de um dos lados) ou em mês fechado
+ * ficam, e a série termina no vencimento da última delas, como na rescisão
+ * (tarefa 083).
+ */
+async function endObligationsAt(ctx: ServiceContext, tx: Tx, contractId: string, endsOn: string) {
+  const rules = await tx.execute<{ id: string; target: string }>(sql`
+    SELECT id, to_char(greatest(${endsOn}::date, starts_on), 'YYYY-MM-DD') AS target FROM recurrence_rules
+     WHERE contract_id = ${contractId} AND installments_total IS NULL AND (ends_on IS NULL OR ends_on > ${endsOn}::date)
+     ORDER BY created_at, id`);
+  for (const rule of rules.rows) {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${MATERIALIZE_LOCK}, hashtext(${rule.id}))`);
+    const after = await tx.execute<{
+      id: string;
+      mirror_title_id: string | null;
+      mirror_caixa_id: string | null;
+      mirror_status: string | null;
+      due_date: string;
+      kept: boolean;
+    }>(sql`
+      SELECT x.id, x.mirror_title_id, m.caixa_id AS mirror_caixa_id, m.mirror_status, to_char(x.due_date, 'YYYY-MM-DD') AS due_date,
+             (x.status IN ('partial', 'paid') OR coalesce(m.status IN ('partial', 'paid'), false)
+              OR EXISTS (SELECT 1 FROM period_closings p
+                          WHERE p.caixa_id IN (x.caixa_id, m.caixa_id) AND p.month = date_trunc('month', x.competence_date)::date)) AS kept
+        FROM titles x LEFT JOIN titles m ON m.id = x.mirror_title_id
+       WHERE x.recurrence_rule_id = ${rule.id} AND x.mirror_status IS NULL AND x.occurrence IS NOT NULL
+         AND x.status <> 'canceled' AND x.due_date > ${rule.target}::date
+       ORDER BY x.occurrence
+         FOR UPDATE OF x`);
+    const target = after.rows.reduce((max, r) => (r.kept && r.due_date > max ? r.due_date : max), rule.target);
+    // As em aberto entre o fim e a última que fica saem também; as seguintes, o "encerrar série" cancela.
+    for (const row of after.rows) {
+      if (row.kept || row.due_date > target) continue;
+      const pair = { id: row.id, mirrorTitleId: row.mirror_title_id, mirrorCaixaId: row.mirror_caixa_id, mirrorStatus: row.mirror_status };
+      await patchOccurrence(ctx, tx, pair, { status: 'canceled' });
+    }
+    await applySeriesEnd(tx, await seriesEndPlanOf(ctx, tx, rule.id, target, true));
+  }
 }
 
 /* ---------------- escrita ---------------- */
@@ -773,6 +830,12 @@ type TerminationPlan = TerminationPreview & {
 /** A rescisão nunca estende a série: uma obrigação que já acabava antes fica com o fim dela. */
 const notLater = (rule: { endsOn?: string | null }, endsOn: string) => (rule.endsOn && rule.endsOn < endsOn ? rule.endsOn : endsOn);
 
+/** A multa nasce na competência pedida (padrão a data da rescisão): mês fechado na caixa do contrato ou do espelho é recusado já na prévia. */
+async function assertPenaltyMonthOpen(db: Executor, contract: ContractRecord, competence: string) {
+  const closed = await closedMonths(db, [contract.caixaId, contract.counterpartyCaixaId], [competence]);
+  if (closed.size > 0) throw unprocessable(E.penaltyClosedMonth(formatMonth(competence)), 'penalty_closed_month');
+}
+
 async function planTermination(
   ctx: ServiceContext,
   tx: Executor,
@@ -836,12 +899,14 @@ async function planTermination(
       }
       if (row.dueDate > lastDue) lastDue = row.dueDate;
       const periodEnd = occurrencePeriodEnd(row.competenceDate, rule);
+      // Em mês fechado (de um dos lados), a última fica como está: o valor não muda (tarefa 138).
       if (terminatedOn < periodEnd)
         preview.last.push({
           ...item,
           periodEnd,
           proratedCents: Math.max(1, proratedAmount(row.amountCents, row.competenceDate, periodEnd, terminatedOn)),
           settled: row.settledCents > 0,
+          closed: closed.has(monthStart(row.competenceDate)),
         });
     }
     preview.ruleEnds.push({ ruleId, endsOn: notLater(rule, lastDue > rule.startsOn ? lastDue : rule.startsOn) });
@@ -859,6 +924,8 @@ export async function terminateContract(
   ctx.access.assertWrite(contract.caixaId);
   assertLive(contract);
   if (input.penalty) await assertCategory(ctx.db, input.penalty.categoryId, input.penalty.direction);
+  const penaltyCompetence = input.penalty ? (input.penalty.competenceDate ?? input.terminatedOn) : null;
+  if (penaltyCompetence) await assertPenaltyMonthOpen(ctx.db, contract, penaltyCompetence);
   const strip = ({ rows: _r, ruleEnds: _e, ...preview }: TerminationPlan): TerminationPreview => preview;
   if (dryRun) return { preview: strip(await planTermination(ctx, ctx.db, contract, input.terminatedOn, false)), contract: null };
   const preview = await withTx(ctx, async (tx) => {
@@ -870,13 +937,14 @@ export async function terminateContract(
     for (const item of plan.canceled) await patchOccurrence(ctx, tx, plan.rows.get(item.titleId)!, { status: 'canceled' });
     for (const change of input.lastAmounts) {
       const last = plan.last.find((l) => l.titleId === change.titleId);
-      if (!last || last.settled || change.amountCents === last.amountCents) continue;
+      if (!last || last.settled || last.closed || change.amountCents === last.amountCents) continue;
       await patchOccurrence(ctx, tx, plan.rows.get(change.titleId)!, { amountCents: change.amountCents });
     }
     for (const end of plan.ruleEnds)
       await tx.execute(sql`UPDATE recurrence_rules SET ends_on = ${end.endsOn}::date WHERE id = ${end.ruleId}`);
-    if (input.penalty) {
+    if (input.penalty && penaltyCompetence) {
       const penalty = input.penalty;
+      await assertPenaltyMonthOpen(tx, locked, penaltyCompetence);
       const accountId = await assertPlannedAccount(tx, locked.caixaId, penalty.accountId);
       let mirror: MirrorPlan | null = null;
       if (locked.counterpartyCaixaId) {
@@ -898,7 +966,7 @@ export async function terminateContract(
           entityId: locked.entityId,
           categoryId: penalty.categoryId,
           description: penalty.description ?? t.contracts.termination.penaltyDescription(locked.name),
-          competenceDate: input.terminatedOn,
+          competenceDate: penaltyCompetence,
           dueDate: penalty.dueDate,
           amountCents: penalty.amountCents,
           notes: null,
@@ -954,13 +1022,11 @@ async function renewableRules(tx: Executor, contract: ContractRecord) {
   });
 }
 
-/** Novo fim da série: o antigo deslocado pelo mesmo tanto que a vigência (ou sem fim). */
-function shiftedEnd(rule: { ends_on: string; frequency: string }, oldEnd: string, newEnd: string | null): string | null {
-  if (newEnd === null) return null;
-  if (rule.frequency === 'weekly') return addDays(rule.ends_on, diffDays(oldEnd, newEnd));
-  return addMonths(rule.ends_on, termMonths(addDays(oldEnd, 1), newEnd));
-}
-
+/**
+ * A série que acompanhava a vigência passa a terminar no novo fim dela (ou sem
+ * fim). Deslocar o fim antigo por meses inteiros perdia a última ocorrência
+ * (renovação até o meio do mês, vencimento no dia 31; tarefa 087).
+ */
 async function planRenewal(tx: Executor, contract: ContractRecord, endsOn: string | null): Promise<RenewalPreview> {
   if (!contract.endsOn) throw unprocessable(t.contracts.renewal.indeterminateBlocked, 'contract_indeterminate');
   if (endsOn !== null && endsOn <= contract.endsOn) throw unprocessable(E.renewBeforeEnd, 'contract_renew_date');
@@ -968,12 +1034,7 @@ async function planRenewal(tx: Executor, contract: ContractRecord, endsOn: strin
   return {
     startsOn: addDays(contract.endsOn, 1),
     endsOn,
-    rules: rules.map((r) => ({
-      ruleId: r.id,
-      description: r.description ?? '',
-      kind: r.card ? 'card' : 'account',
-      endsOn: shiftedEnd(r, contract.endsOn!, endsOn),
-    })),
+    rules: rules.map((r) => ({ ruleId: r.id, description: r.description ?? '', kind: r.card ? 'card' : 'account', endsOn })),
   };
 }
 
@@ -1094,17 +1155,30 @@ export async function contractPayments(ctx: ServiceContext, id: string, cycleId?
     if (!row) throw notFound();
     range = { from: row.starts_on, to: row.ends_on };
   }
+  // Só as caixas legíveis (tarefa 134): a ocorrência pela caixa dela ou, para quem vê pela contraparte, pelo
+  // espelho; a cobrança no cartão para quem lê o cartão ou a pagadora.
+  const can = (column: SQL) => readableFilter(ctx.access, column);
   const result = await ctx.db.execute(sql`
-    SELECT p.*, a.name AS account_name, a.caixa_id AS account_caixa_id, pa.name AS planned_account_name, pa.caixa_id AS planned_caixa_id
+    SELECT p.*, a.name AS account_name, a.caixa_id AS account_caixa_id, pa.name AS planned_account_name, pa.caixa_id AS planned_caixa_id,
+           mt.id AS mirror_title_id, mt.caixa_id AS mirror_caixa_id
       FROM contract_payments(${id}::uuid, ${range.from}::date, ${range.to}::date, ${todayIso()}::date) p
       LEFT JOIN financial_accounts a ON a.id = coalesce(p.funding_account_id, p.account_id)
       LEFT JOIN financial_accounts pa ON pa.id = p.planned_account_id
-     WHERE ${readableFilter(ctx.access, sql`p.caixa_id`)} OR p.kind = 'card_charge'
+      LEFT JOIN titles ot ON ot.id = p.title_id
+      LEFT JOIN titles mt ON mt.id = ot.mirror_title_id
+      LEFT JOIN card_recurring_charges g ON g.recurrence_rule_id = p.recurrence_rule_id
+      LEFT JOIN card_purchases cp ON cp.id = p.card_purchase_id
+     WHERE (p.kind = 'title' AND (${can(sql`p.caixa_id`)} OR (mt.id IS NOT NULL AND ${can(sql`mt.caixa_id`)})))
+        OR (p.kind = 'card_charge' AND (${can(sql`p.caixa_id`)} OR (g.payer_caixa_id IS NOT NULL AND ${can(sql`g.payer_caixa_id`)})
+                                        OR (cp.payer_caixa_id IS NOT NULL AND ${can(sql`cp.payer_caixa_id`)})))
      ORDER BY p.due_date, p.kind DESC, p.occurrence NULLS LAST, p.title_id, p.card_purchase_id`);
   const readable = (caixaId: unknown, name: unknown) =>
     typeof caixaId === 'string' && ctx.access.canRead(caixaId) ? ((name as string | null) ?? null) : null;
   const rows: ContractPaymentRow[] = result.rows.map((raw) => {
     const r = camel<Record<string, unknown>>(raw);
+    // Visto pelo espelho: a linha aponta para o título da contraparte, sem os ids do lado do contrato.
+    const viaMirror = r.kind === 'title' && !ctx.access.canRead(String(r.caixaId));
+    const own = <T>(value: T) => (viaMirror ? null : value);
     const settlements = (r.settlements as Record<string, unknown>[]).map((s) => {
       const x = camel<Record<string, unknown>>(s);
       return {
@@ -1115,10 +1189,10 @@ export async function contractPayments(ctx: ServiceContext, id: string, cycleId?
         fineCents: Number(x.fineCents ?? 0),
         discountCents: Number(x.discountCents ?? 0),
         cashCents: Number(x.cashCents ?? x.amountCents),
-        financialAccountId: (x.financialAccountId as string | null) ?? null,
-        transferId: (x.transferId as string | null) ?? null,
-        fundingAccountId: (x.fundingAccountId as string | null) ?? null,
-        statementLineId: (x.statementLineId as string | null) ?? null,
+        financialAccountId: own((x.financialAccountId as string | null) ?? null),
+        transferId: own((x.transferId as string | null) ?? null),
+        fundingAccountId: own((x.fundingAccountId as string | null) ?? null),
+        statementLineId: own((x.statementLineId as string | null) ?? null),
         reconciled: Boolean(x.reconciled),
         origin: x.origin as PaymentOrigin,
         days: Number(x.days),
@@ -1128,10 +1202,10 @@ export async function contractPayments(ctx: ServiceContext, id: string, cycleId?
       kind: r.kind as 'title' | 'card_charge',
       ruleId: (r.recurrenceRuleId as string | null) ?? null,
       occurrence: r.occurrence === null ? null : Number(r.occurrence),
-      titleId: (r.titleId as string | null) ?? null,
+      titleId: viaMirror ? String(r.mirrorTitleId) : ((r.titleId as string | null) ?? null),
       cardPurchaseId: (r.cardPurchaseId as string | null) ?? null,
       cardInvoiceId: (r.cardInvoiceId as string | null) ?? null,
-      caixaId: String(r.caixaId),
+      caixaId: viaMirror ? String(r.mirrorCaixaId) : String(r.caixaId),
       description: String(r.description),
       competenceDate: String(r.competenceDate),
       dueDate: String(r.dueDate),
@@ -1148,9 +1222,9 @@ export async function contractPayments(ctx: ServiceContext, id: string, cycleId?
       days: r.days === null ? null : Number(r.days),
       overdue: Boolean(r.overdue),
       notCharged: Boolean(r.notCharged),
-      accountId: (r.fundingAccountId as string | null) ?? (r.accountId as string | null) ?? null,
+      accountId: own((r.fundingAccountId as string | null) ?? (r.accountId as string | null) ?? null),
       accountName: readable(r.accountCaixaId, r.accountName),
-      plannedAccountId: (r.plannedAccountId as string | null) ?? null,
+      plannedAccountId: own((r.plannedAccountId as string | null) ?? null),
       plannedAccountName: readable(r.plannedCaixaId, r.plannedAccountName),
       lastOrigin: (r.lastOrigin as PaymentOrigin | null) ?? null,
       settlements,

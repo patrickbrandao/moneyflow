@@ -487,4 +487,7 @@ export const DB_CODE_MESSAGES: Record<string, string> = {
   '22P02': 'Valor em formato inválido.',
   '42501': 'Permissão negada.',
   '22023': 'Período inválido.',
+  // Concorrência (tarefa 188): a transação foi desfeita inteira e pode ser repetida.
+  '40P01': 'Outra operação mexia nos mesmos registros ao mesmo tempo. Tente de novo.',
+  '40001': 'Outra operação mexia nos mesmos registros ao mesmo tempo. Tente de novo.',
 };

@@ -88,8 +88,10 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
   const awaiting = title?.mirrorStatus === 'pending' || title?.mirrorStatus === 'disputed';
   /** Título de fatura de cartão: valor, vencimento, cancelamento e exclusão mudam pela fatura. */
   const isInvoice = Boolean(title?.cardInvoiceId);
+  /** O par é do lado original: pelo espelho, cancelar, excluir e mexer na série pedem escrita também lá (tarefa 079). */
+  const ownsPair = Boolean(title?.canWrite && (title.mirrorStatus === null || title.mirror?.canWrite));
   /** Recorrência (não parcelamento): pode ser encerrada ou estendida numa data. */
-  const canEndSeries = Boolean(title?.canWrite && title.rule && title.rule.installmentsTotal === null);
+  const canEndSeries = Boolean(ownsPair && title?.rule && title.rule.installmentsTotal === null);
 
   async function cancel() {
     if (!title) return;
@@ -263,7 +265,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                 <Button size="sm" variant="ghost" onClick={() => setModal({ kind: 'edit' })}>
                   <Pencil /> {t.common.edit}
                 </Button>
-                {isInvoice ? null : title.status === 'canceled' ? (
+                {isInvoice || !ownsPair ? null : title.status === 'canceled' ? (
                   <Button size="sm" variant="ghost" onClick={() => void reopen()}>
                     <RotateCcw /> Reabrir
                   </Button>
@@ -391,7 +393,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
                     {termsSummary(title.rule.terms)}
                   </dd>
                 </dl>
-                {title.canWrite && (
+                {ownsPair && (
                   <div className="mt-2 flex flex-wrap gap-2">
                     <Button size="sm" variant="ghost" onClick={() => void editSeries()} data-testid="title-series-edit">
                       <Pencil /> {t.contracts.planned.seriesEdit}
@@ -522,7 +524,7 @@ export function TitleDrawer({ titleId, onClose, onChanged }: { titleId: string; 
               />
             </div>
 
-            {title.canWrite && !title.archivedAt && !isInvoice && (
+            {ownsPair && !title.archivedAt && !isInvoice && (
               <div className="sec flex flex-wrap gap-2">
                 <Button size="sm" variant="danger" onClick={() => void remove('this')}>
                   <Trash2 /> {title.recurrenceRuleId ? t.title.scopeThis : t.common.delete}

@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -65,4 +65,15 @@ Nada foi executado. A frequência real de FITID repetido nos bancos brasileiros 
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: a chave era só `fitid:<FITID>`; entre arquivos a linha com o FITID já existente saía como duplicada sem olhar data e valor, e no mesmo arquivo duas transações com o mesmo FITID derrubavam o import no índice único (`23505`, "Essa linha já foi importada nesta conta").
+
 ## Resolução (executor)
+
+- `apps/server/src/services/statements.ts`: `dedupHashes(lines, holders)` recebe as linhas da conta que têm `fitid:<FITID>` (data e valor). A linha com a mesma data e o mesmo valor da dona da chave é a mesma transação (duplicada, uma vez só); a que tem outra data ou outro valor, ou que repete o FITID de outra linha do arquivo, recebe a chave de reserva `fitid:<FITID até 129>#<SHA-256 de FITID|data|valor|descrição normalizada|ordem entre as iguais>` (até 200 caracteres). As chaves já gravadas não mudam, e o reimport dá as mesmas chaves em qualquer ordem. `dedupAgainstTarget` (duas consultas, as donas das chaves e as chaves existentes) substitui o código repetido da prévia e do import.
+- A resposta do import e a prévia da tool trazem `fitidCollisions` (`{ total, lines }`, até 50); o aviso vem de `statementImportNotices` (novo `packages/shared/src/statement-import.ts`, usado pela prévia da tool e pelo toast da tela), com os textos em `t.statements`.
+- Decisão: o FITID repetido com tudo igual no mesmo arquivo também entra (pela ordem), como as linhas idênticas sem FITID.
+- Specs 009 e 016 (a chave de reserva) e a linha da 009 no `docs/INDEX.md`. O `COMMENT ON COLUMN statement_lines.dedup_hash` do banco ainda descreve só `'fitid:' || FITID` (cosmético, fica para o dba numa próxima migration).
+- Teste: `apps/server/test/statements.test.ts`, "FITID repetido…": dois OFX de meses diferentes com o mesmo FITID (as duas linhas entram, com o aviso), FITID repetido no mesmo arquivo (três linhas, duas colisões) e o reimport de todos (inclusive na ordem inversa) com 409 `statement_duplicated`.
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

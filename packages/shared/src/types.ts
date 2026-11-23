@@ -731,6 +731,13 @@ export type StatementImportDetail = StatementImportSummary & {
   skippedDuplicates?: number;
   /** Só na resposta do import de um OFX com várias contas: as contas do arquivo que ficaram de fora (spec 009). */
   ofxLeftOut?: string[];
+  /** Só na resposta do import de um CSV (tarefa 140): as linhas que não foram lidas (data ou valor inválidos), até 50, e o total. */
+  invalidRows?: StatementInvalidRows;
+  /**
+   * Só na resposta do import (tarefa 089): linhas novas cujo FITID a conta já tinha com outra data ou valor, ou
+   * repetido no arquivo. Entraram com a chave de reserva; até 50, e o total.
+   */
+  fitidCollisions?: StatementFitidCollisions;
   /** Só na resposta do import: a sugestão do agente dos fluxos enfileirada para as linhas novas (a tela acompanha a execução). */
   aiSuggestion?: { queued: boolean; runId: string | null; lines: number; skippedReason?: string } | null;
   /** Só na resposta do import (spec 031): a troca dos provisórios feita na mesma transação. */
@@ -746,6 +753,15 @@ export type StatementImportDetail = StatementImportSummary & {
     skippedReason?: string;
     recipes?: number;
   } | null;
+};
+
+/** Linhas do CSV que não foram lidas (tarefa 140): o número da linha no arquivo e o motivo. */
+export type StatementInvalidRows = { total: number; rows: { row: number; message: string }[] };
+
+/** Linhas novas com o FITID de outra transação (tarefa 089). */
+export type StatementFitidCollisions = {
+  total: number;
+  lines: { fitid: string; postedOn: string; amountCents: number; description: string }[];
 };
 
 /** Resumo de um extrato do OFX; `position` (1, 2, …) é a ordem no arquivo, o `ofxStatement` do import. */
@@ -1626,7 +1642,8 @@ export type TerminationPreview = {
   /** Ocorrências em aberto com competência depois da data: canceladas (com o espelho). */
   canceled: TerminationOccurrence[];
   /** A última ocorrência de cada obrigação (a que cobre a data), com o proporcional sugerido. */
-  last: (TerminationOccurrence & { periodEnd: string; proratedCents: number; settled: boolean })[];
+  /** `closed`: competência em mês fechado (de um dos lados): o valor não muda, como na com baixa. */
+  last: (TerminationOccurrence & { periodEnd: string; proratedCents: number; settled: boolean; closed: boolean })[];
   /** Em mês fechado: não mudam. */
   blockedClosed: TerminationOccurrence[];
   /** Com baixa depois da data: ficam como estão. */

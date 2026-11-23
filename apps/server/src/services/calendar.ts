@@ -35,11 +35,13 @@ export async function calendarItems(ctx: ServiceContext, query: { from: string; 
       LEFT JOIN categories cat ON cat.id = ci.category_id
       LEFT JOIN categories pc ON pc.id = cat.parent_id`);
   return result.rows.map((row) => {
-    const r = camel<Omit<CalendarItem, 'key' | 'canWrite' | 'canReschedule'> & { isMirrorSide: boolean }>(row);
+    const r = camel<Omit<CalendarItem, 'key' | 'canWrite' | 'canReschedule'> & { isMirrorSide: boolean; isInvoiceTitle: boolean }>(row);
     const canWrite = ctx.access.canWrite(r.caixaId);
     // O vencimento do par muda pelo original: no lado espelho, só com escrita também na outra caixa.
+    // O título de fatura vence com a fatura (muda pela tela do cartão, spec 007).
     const canReschedule =
       r.itemKind === 'title' &&
+      !r.isInvoiceTitle &&
       canWrite &&
       (!r.isMirrorSide || (r.counterpartyCaixaId !== null && ctx.access.canWrite(r.counterpartyCaixaId)));
     return { ...r, key: r.titleId ?? `${r.cardInvoiceId}:${r.caixaId}:${r.direction}`, canWrite, canReschedule };

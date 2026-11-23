@@ -211,6 +211,9 @@ export const OPERATION_TOOLS = [
         kind: z.enum(CONTRACT_DOCUMENT_KINDS).default('contract').describe('Tipo do documento novo.'),
         content: contractVersionCreateInput.shape.content,
         note: optionalText(500),
+        baseVersionId: id
+          .optional()
+          .describe('Nova versão: a versão lida (currentVersionId de get_contract_document); se a atual mudou, nada é gravado.'),
       })
       .refine((v) => (v.documentId ? 1 : 0) + (v.contractId ? 1 : 0) === 1, {
         path: ['documentId'],

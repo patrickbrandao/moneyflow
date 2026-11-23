@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: melhoria
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -59,4 +59,14 @@ Nada foi executado. A tela manda só `{ content: draft, note }` (`apps/web/src/c
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `contractVersionCreateInput` era só `{ content, note }`, e `saveVersion` gravava a versão N+1 mesmo com a atual diferente da aberta. A tool `save_contract_markdown` executava na aprovação sem conferir o que mudou desde a prévia.
+
 ## Resolução (executor)
+
+- `packages/shared/src/schemas/contracts.ts`: `baseVersionId` opcional em `contractVersionCreateInput`.
+- `apps/server/src/services/contract-documents.ts`: `saveVersion(ctx, doc, input, { unchangedSince })`, dentro da trava do documento. Responde 409 `version_conflict` (`t.contracts.documents.versionConflict`, com o número da atual) quando a atual não é a `baseVersionId`, ou quando foi gravada depois de `unchangedSince`. Nada é gravado.
+- `apps/server/src/agents/tool-handlers-operation.ts`: a prévia de `save_contract_markdown` recusa uma `baseVersionId` que já não é a atual. Na execução, a hora da confirmação (`ai_tool_confirmations.created_at`, a da prévia) vai como `unchangedSince`, e a tool aprovada depois de outra gravação volta ao agente como erro. `packages/shared/src/agents/tools-operation.ts`: `baseVersionId` no schema da tool, para o agente mandar a versão lida.
+- `apps/web/src/components/contracts/DocumentView.tsx`: o editor guarda a versão em que a edição começou e a manda ao salvar. No 409, recarrega a atual, mantém o rascunho e mostra o aviso com "Salvar por cima da atual". Textos em `packages/shared/src/i18n/areas/contracts.ts`.
+- `docs/020-contratos.md` ("Documentos").
+- Testes: `apps/server/test/contracts.test.ts`, no caso de documentos, faz duas gravações com a mesma base (a segunda recebe 409). `apps/server/test/agent-tools.test.ts`, no caso dos contratos, deixa a confirmação pendente, faz uma gravação humana, aprova e confere o erro de conflito. Também confere a `baseVersionId` antiga recusada já na prévia. A tela não tem e2e; o caminho dela foi conferido pelo typecheck.
+- Verificação: `MONEYFLOW_TEST_LOCAL_DB=moneyflow_it_s1 pnpm verify:quick` (nível rápido).

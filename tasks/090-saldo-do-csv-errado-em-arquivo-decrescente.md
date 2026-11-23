@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -82,4 +82,14 @@ Só a redução foi executada, num script descartável (`<RASCUNHO>/scripts/csvb
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: a redução com `>=` ficava com a última linha do último dia na ordem do arquivo, que no arquivo decrescente é a primeira transação do dia (saldo intermediário). "Voltar ao saldo do arquivo" repetia o erro.
+
 ## Resolução (executor)
+
+- `packages/shared/src/parsers/csv.ts`: `csvBankBalance(lines)`: o arquivo é decrescente quando a primeira linha tem data posterior à última; no dia mais recente, vale a primeira linha dele no decrescente e a última no crescente.
+- `apps/server/src/services/statements.ts`: `parseStatementFile` usa `csvBankBalance` (vale para o import e para o "Voltar ao saldo do arquivo").
+- Spec 009 (saldo do arquivo no CSV).
+- Testes: `packages/shared/test/csv.test.ts` ("csvBankBalance": decrescente, crescente, um dia só e sem saldo); `apps/server/test/statements.test.ts`, "CSV em Latin-1 decrescente…": o lote fica com R$ 1.000,00 em 20/10 e o "Voltar ao saldo do arquivo" devolve o mesmo.
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

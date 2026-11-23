@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -77,4 +77,12 @@ Nada foi executado. A mensagem e o padrão da caixa de seleção na tela ficam p
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado: `reverseSettlement` conferia só a escrita na caixa do título da perna pedida e, com `undoTransfer` (padrão), apagava a transferência e os dois movimentos dela, inclusive o da conta de outra caixa.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/settlements.ts`: com `undoTransfer`, antes de apagar, lê as contas `from`/`to` das transferências das pernas e exige escrita nas caixas delas (a regra de `deleteTransfer`); sem ela, 403 com `t.errors.undoTransferOtherCaixa` ("estorne sem desfazer a transferência ou peça a quem edita aquela caixa"). A caixa da conta é lida direto em `financial_accounts`, para quem não lê a outra caixa receber o 403 com a mensagem, e não um 404. O estorno sem desfazer continua permitido.
+- `packages/shared/src/i18n/pt-BR.ts`: `errors.undoTransferOtherCaixa`. `docs/005-titulos-baixas-e-movimentos.md`: a regra.
+- Decisão: a caixa de seleção "desfazer transferência" do modal de estorno continua marcada por padrão; quem não edita a outra caixa recebe a mensagem e desmarca. A baixa não traz à tela a caixa da outra conta, e mudar isso sairia do escopo.
+- Teste: `apps/server/test/titles.test.ts`, no `describe('baixas (spec 005)')`, "sem escrita na caixa da outra conta, o estorno não desfaz a transferência (tarefa 081)" (403 com a transferência e o saldo da conta A intactos; sem desfazer, 200).
+- Verificação: `pnpm verify:quick` (nível rápido).

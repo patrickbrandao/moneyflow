@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  decodeCsvFile,
   decodeStatementFile,
+  detectCsvEncoding,
+  detectStatementEncoding,
   ofxStatementMatches,
   parseOfx,
   parseOfxAmount,
@@ -25,6 +28,26 @@ describe('decodeStatementFile', () => {
     expect(decodeStatementFile(utf8)).toBe('Pão');
     expect(decodeStatementFile(new Uint8Array([0xef, 0xbb, 0xbf, ...utf8]))).toBe('Pão');
     expect(decodeStatementFile(new Uint8Array([0x50, 0xe3, 0x6f]))).toBe('Pão');
+  });
+});
+
+describe('codificação do CSV (tarefa 088)', () => {
+  const utf8 = new TextEncoder().encode('data;lançamento\n10/10/2026;PADARIA SÃO JOÃO');
+  const latin1 = Uint8Array.from('data;lançamento\n10/10/2026;PADARIA SÃO JOÃO', (c) => c.charCodeAt(0));
+
+  it('detecta UTF-8 (com e sem BOM) e Latin-1', () => {
+    expect(detectStatementEncoding(utf8)).toBe('utf-8');
+    expect(detectStatementEncoding(new Uint8Array([0xef, 0xbb, 0xbf, ...utf8]))).toBe('utf-8');
+    expect(detectStatementEncoding(latin1)).toBe('windows-1252');
+    expect(detectCsvEncoding(latin1)).toBe('windows-1252');
+    expect(detectCsvEncoding(utf8)).toBe('utf-8');
+    expect(detectStatementEncoding(fixtureBytes('extrato-ofx1.ofx'))).toBe('windows-1252');
+  });
+  it('mapeamento em UTF-8 com o arquivo em Latin-1 lê como windows-1252, sem "�"', () => {
+    expect(decodeCsvFile(latin1, 'utf-8')).toBe('data;lançamento\n10/10/2026;PADARIA SÃO JOÃO');
+    expect(decodeCsvFile(latin1, 'latin1')).toContain('SÃO JOÃO');
+    expect(decodeCsvFile(utf8, 'utf-8')).toContain('SÃO JOÃO');
+    expect(decodeCsvFile(new Uint8Array([0xef, 0xbb, 0xbf, ...utf8]), 'windows-1252')).toBe('data;lançamento\n10/10/2026;PADARIA SÃO JOÃO');
   });
 });
 

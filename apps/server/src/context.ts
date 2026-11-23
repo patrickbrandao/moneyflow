@@ -25,4 +25,9 @@ export type ServiceContext = {
    * todas as sessões do usuário são encerradas.
    */
   sessionId?: string | null;
+  /**
+   * Log da requisição, quando houver: falhas que o serviço contorna sem erro (a baixa automática que
+   * vira sugestão, tarefa 136) ficam registradas com o motivo, sem dados da linha.
+   */
+  log?: { warn: (obj: object, msg: string) => void };
 };

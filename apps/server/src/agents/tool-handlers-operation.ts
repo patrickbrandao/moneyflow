@@ -10,12 +10,13 @@ import {
   type PreviewRow,
   parseBoleto,
   parseNfeXml,
+  statementImportNotices,
   t,
   todayIso,
 } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
 import type { ServiceContext } from '../context';
-import { forbidden, notFound, unprocessable } from '../errors';
+import { AppError, forbidden, notFound, unprocessable } from '../errors';
 import { assertAttachTarget, linkExistingAttachment } from '../services/attachments';
 import * as caixas from '../services/caixas';
 import * as cards from '../services/cards';
@@ -480,6 +481,8 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
       if (i.documentId) {
         const doc = await documents.writableContractDocument(ctx, i.documentId);
         if (doc.format !== 'markdown') throw unprocessable(t.contracts.errors.notMarkdown, 'not_markdown');
+        if (i.baseVersionId && doc.currentVersionId && i.baseVersionId !== doc.currentVersionId)
+          throw new AppError(409, 'version_conflict', t.contracts.documents.versionConflict(doc.currentVersion ?? 0));
         if (doc.content === i.content) throw unprocessable(t.contracts.documents.noChanges, 'no_changes');
         const stats = diffStats(diffLines(doc.content ?? '', i.content));
         return {
@@ -506,8 +509,21 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         ],
       };
     },
-    run: async (ctx, i) => {
-      if (i.documentId) return documents.saveVersion(ctx, i.documentId, { content: i.content, note: i.note });
+    run: async (ctx, i, meta) => {
+      if (i.documentId) {
+        // Aprovada depois da prévia: uma versão gravada nesse meio tempo recusa a gravação (409, tarefa 135).
+        const since = meta?.runId
+          ? await ctx.db.execute<{ at: string }>(
+              sql`SELECT created_at::text AS at FROM ai_tool_confirmations WHERE run_id = ${meta.runId} AND tool_use_id = ${meta.toolUseId}`,
+            )
+          : null;
+        return documents.saveVersion(
+          ctx,
+          i.documentId,
+          { content: i.content, note: i.note, baseVersionId: i.baseVersionId },
+          { unchangedSince: since?.rows[0]?.at ?? null },
+        );
+      }
       return documents.createMarkdownDocument(ctx, i.contractId!, {
         kind: i.kind,
         title: i.title!,
@@ -572,6 +588,8 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
         warnings: [
           ...(info.duplicated > 0 ? [`${info.duplicated} linha(s) já importada(s) ficam de fora.`] : []),
           ...(info.ofxLeftOut.length ? [t.statements.ofxLeftOut(info.ofxLeftOut.join(', '))] : []),
+          // Tarefas 140 e 089: as linhas do CSV que não foram lidas e o FITID repetido que entra como linha nova.
+          ...statementImportNotices(info),
           ...(!info.superseded && info.provisionalOverlap.length
             ? [t.statements.supersede.overlapWarning(info.provisionalOverlap.map((p) => `${p.fileName} (${p.id})`).join(', '))]
             : []),
@@ -855,6 +873,8 @@ export const OPERATION_HANDLERS: Handlers<OperationToolName> = {
     preview: async (ctx, i) => {
       ctx.access.assertWrite(i.cardId);
       const c = i.charge;
+      // A pagadora pedida precisa ser legível, como na compra (tarefa 133).
+      if (c.payerCaixaId) ctx.access.assertRead(c.payerCaixaId);
       return {
         title: 'Lançar encargo do cartão',
         summary: `${t.card.chargeKinds[c.chargeKind] ?? c.chargeKind} · ${formatBRL(c.amountCents)}`,

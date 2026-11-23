@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: alta
 criada: 2026-11-21
 commit:
@@ -88,4 +88,13 @@ Nada foi executado. Supõe que a instalação tem usuários que não devem ver a
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app). Confirmado no código: `createCaixa` e `updateCaixa` faziam `UPDATE caixas SET is_primary = false` em todas as caixas do titular para quem só passava em `assertRegistryWrite()`/`assertWrite(id)`, e o `resolveMirror` usa a principal como caixa padrão do espelho. O teste novo falha sem a correção (`POST /api/caixas` devolvia 200 com `isPrimary: true`).
+
 ## Resolução (executor)
+
+- `apps/server/src/services/caixas.ts`: `assertCanTakePrimary` — sem ser admin, marcar uma caixa como principal (no `createCaixa` e no `updateCaixa`, inclusive trocando o titular de uma caixa vazia) exige escrita na principal atual do titular; sem ela, 403 com `t.errors.primaryOfOtherCaixa`. O admin continua trocando a principal de qualquer titular. De passagem, o `PATCH` de um cartão com `isPrimary: true` não tira mais a principal do titular (o cartão nunca é principal).
+- `packages/shared/src/i18n/pt-BR.ts`: `errors.primaryOfOtherCaixa`.
+- `docs/004-caixas-e-contas.md`: a regra da troca da principal.
+- Decisão: segui a solução 1 da tarefa. O item 2 (criar caixa para um titular que ainda não tem principal, ou que só tem caixas de outros, continua aberto a qualquer editor de alguma caixa) fica como decisão de produto: a caixa nova vira a principal desse titular e passa a receber os espelhos dos títulos lançados contra ele dali em diante. O destaque opcional no formulário (item 3) não foi feito.
+- Teste: `apps/server/test/permissions.test.ts`, "só quem edita a caixa principal do titular a troca; o admin troca qualquer uma (tarefa 072)" (POST e PATCH recusados, a caixa B continua principal e recebendo o espelho; quem edita a principal atual troca; o admin troca).
+- Verificação: `pnpm verify:quick` (nível rápido).

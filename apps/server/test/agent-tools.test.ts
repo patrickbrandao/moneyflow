@@ -342,6 +342,28 @@ describe('contratos', () => {
     const read = await call(viewerSession, 'get_contract_document', { documentId });
     expect(read.value.version).toMatchObject({ version: 2, content: '# Contrato\n\nCláusula 1.\nCláusula 2.' });
     expect(read.value.versions.map((v: any) => v.authorKind)).toEqual(['agent', 'agent']);
+    // Aprovada depois de uma gravação humana: a tool volta com conflito em vez de sobrescrever (tarefa 135).
+    const pending = await call(
+      adminSession,
+      'save_contract_markdown',
+      { documentId, content: '# Contrato\n\nDo agente.' },
+      { approve: false },
+    );
+    expect(pending.preview).toBeTruthy();
+    await admin.post(`/api/contract-documents/${documentId}/versions`, { content: '# Contrato\n\nCláusula 1.\nCláusula 2.\nHumana.' });
+    await admin.post(`/api/runs/${pending.runId}/confirmations`, { decision: 'approved' });
+    await drain();
+    const late = (await admin.get(`/api/conversations/${pending.conversationId}`)).messages.filter((m: any) => m.role === 'tool').at(-1)
+      .content[0];
+    expect(late.is_error).toBe(true);
+    expect(late.content).toContain('mudou depois que a edição começou');
+    // A base lida pelo agente que já não é a atual também recusa, já na prévia.
+    const stale = await call(adminSession, 'save_contract_markdown', {
+      documentId,
+      content: 'x',
+      baseVersionId: version.value.document.currentVersionId,
+    });
+    expect(stale.error).toContain('mudou depois que a edição começou');
 
     const renewed = await approved(adminSession, 'renew_contract', { contractId, renewal: { endsOn: '2027-10-31' } });
     expect(rowsOf(renewed.preview)).toMatchObject({ Vigência: '01/11/2026 a 30/04/2027 → 01/05/2027 a 31/10/2027' });
@@ -796,12 +818,12 @@ describe('caixas e contas', () => {
 
     const adjustment = await approved(adminSession, 'create_adjustment', {
       accountId: account.value.id,
-      adjustment: { occurredOn: '2026-02-01', amountCents: -1_500, description: 'Tarifa', categoryId: s.expense.id },
+      adjustment: { occurredOn: '2026-02-01', amountCents: -5_000, description: 'Tarifa', categoryId: s.expense.id },
     });
-    expect(rowsOf(adjustment.preview)).toMatchObject({ Saída: 'R$ 15,00', Descrição: 'Tarifa' });
+    expect(rowsOf(adjustment.preview)).toMatchObject({ Saída: 'R$ 50,00', Descrição: 'Tarifa' });
     expect(adjustment.value.id).toBeTruthy();
 
-    // Conta com movimento: arquivada; caixa com conta: arquivada (só admin).
+    // Conta com movimento (e saldo zero, tarefa 080): arquivada; caixa com conta: arquivada (só admin).
     const archivedAccount = await approved(adminSession, 'archive_account', { accountId: account.value.id });
     expect(archivedAccount.preview.action).toBe('delete');
     expect(archivedAccount.value).toEqual({ deleted: false, archived: true });
@@ -988,6 +1010,11 @@ describe('títulos e baixas', () => {
     });
     const mirrorId = pair.mirrorTitleId;
     expect((await admin.get(`/api/titles/${mirrorId}`)).mirrorStatus).toBe('pending');
+    // Pelo espelho, quem edita só a caixa B não arquiva o par (tarefa 079; excluir e cancelar em titles.test.ts).
+    const editorBSession = await userSession(h);
+    await admin.post(`/api/caixas/${s.caixaB.id}/members`, { userId: editorBSession.id, role: 'editor' });
+    expect((await call(editorBSession, 'archive_title', { titleId: mirrorId })).error).toMatch(/caixa do original/);
+    expect((await admin.get(`/api/titles/${pair.id}`)).archivedAt).toBeNull();
     const disputed = await approved(adminSession, 'dispute_mirror', { titleId: mirrorId, reason: 'não reconheço' });
     expect(rowsOf(disputed.preview)).toMatchObject({ Espelho: 'Aguardando aceite → Contestado', Motivo: 'não reconheço' });
     expect(disputed.value.mirrorStatus).toBe('disputed');
@@ -1019,7 +1046,8 @@ describe('títulos e baixas', () => {
     for (const name of ['cancel_title', 'archive_title', 'delete_title']) {
       expect((await call(viewerSession, name, { titleId: other.id })).error, name).toBe('Você só tem leitura nesta caixa.');
     }
-  });
+    // Uma dúzia de conversas com o agente: folga sobre os 30 s padrão.
+  }, 90_000);
 });
 
 describe('categorias e regras', () => {

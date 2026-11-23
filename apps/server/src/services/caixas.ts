@@ -12,6 +12,7 @@ import {
   type caixaCreateInput,
   type caixaUpdateInput,
   type DeleteResult,
+  formatBRL,
   type hiddenCategoriesInput,
   type MemberRow,
   type memberInput,
@@ -23,7 +24,7 @@ import { and, asc, eq, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { Access } from '../authz/access';
 import type { ServiceContext } from '../context';
-import { notFound, unprocessable } from '../errors';
+import { forbidden, notFound, unprocessable } from '../errors';
 import { type Card, ensureHorizon, invoiceDates } from './card-core';
 import { assertNotReconciled, clearStatementSuggestions } from './reconciliation-guards';
 import { deleteOrArchive, withTx } from './tx';
@@ -94,6 +95,20 @@ async function assertHolder(db: Executor, entityId: string) {
   if (holder.archivedAt) throw unprocessable(t.errors.holderArchived);
 }
 
+/**
+ * Marcar a principal tira a atual do titular, e é nela que os espelhos dos
+ * títulos lançados contra ele caem (spec 006). Sem ser admin, só quem edita a
+ * principal atual a troca (tarefa 072).
+ */
+async function assertCanTakePrimary(ctx: ServiceContext, db: Executor, holderEntityId: string, exceptId?: string) {
+  if (ctx.access.isAdmin) return;
+  const current = await db
+    .select({ id: caixas.id })
+    .from(caixas)
+    .where(and(eq(caixas.holderEntityId, holderEntityId), eq(caixas.isPrimary, true), ...(exceptId ? [ne(caixas.id, exceptId)] : [])));
+  if (current.some((c) => !ctx.access.canWrite(c.id))) throw forbidden(t.errors.primaryOfOtherCaixa);
+}
+
 export async function createCaixa(ctx: ServiceContext, input: z.output<typeof caixaCreateInput>): Promise<CaixaDetail> {
   ctx.access.assertRegistryWrite();
   const isCard = input.kind === 'credit_card';
@@ -102,6 +117,7 @@ export async function createCaixa(ctx: ServiceContext, input: z.output<typeof ca
     await assertHolder(tx, input.holderEntityId);
     if (isCard) await assertGeneralPayer(tx, input.defaultPayerCaixaId!);
     if (input.isPrimary && !isCard) {
+      await assertCanTakePrimary(ctx, tx, input.holderEntityId);
       await tx.update(caixas).set({ isPrimary: false }).where(eq(caixas.holderEntityId, input.holderEntityId));
     }
     const [row] = await tx
@@ -151,7 +167,8 @@ export async function updateCaixa(ctx: ServiceContext, id: string, input: z.outp
       const linked = await tx.execute(sql`SELECT 1 FROM titles WHERE caixa_id = ${id} OR counterparty_caixa_id = ${id} LIMIT 1`);
       if (linked.rows.length > 0) throw unprocessable(t.errors.mirrorCaixaNotHeld);
     }
-    if (input.isPrimary) {
+    if (input.isPrimary && current.kind !== 'credit_card') {
+      await assertCanTakePrimary(ctx, tx, holder, id);
       await tx
         .update(caixas)
         .set({ isPrimary: false })
@@ -288,6 +305,11 @@ export async function listAccounts(
     .filter((a) => !opts.writable || a.canWrite);
 }
 
+/** Conta arquivada não recebe movimento novo (baixa, avulso, transferência); o estorno continua (tarefa 080). */
+export function assertAccountActive(account: { archivedAt: Date | string | null }) {
+  if (account.archivedAt) throw unprocessable(t.errors.accountArchived, 'account_archived');
+}
+
 export async function getAccount(ctx: ServiceContext, id: string, db: Executor = ctx.db) {
   const [account] = await db.select().from(financialAccounts).where(eq(financialAccounts.id, id));
   if (!account) throw notFound();
@@ -331,7 +353,15 @@ export async function deleteAccount(ctx: ServiceContext, id: string): Promise<De
     deleteOrArchive(
       tx,
       async (sp) => (await sp.delete(financialAccounts).where(eq(financialAccounts.id, id))).rowCount ?? 0,
-      (t) => t.update(financialAccounts).set({ archivedAt: sql`now()` }).where(eq(financialAccounts.id, id)),
+      async (tx) => {
+        // Arquivada, ela sai do saldo da caixa: só com saldo zero, para o total não mudar sem lançamento (tarefa 080).
+        const balance = await tx.execute<{ balance_cents: string }>(
+          sql`SELECT balance_cents FROM financial_account_balances WHERE financial_account_id = ${id}`,
+        );
+        const cents = Number(balance.rows[0]?.balance_cents ?? 0);
+        if (cents !== 0) throw unprocessable(t.errors.accountArchiveBalance(formatBRL(cents)), 'account_archive_balance');
+        await tx.update(financialAccounts).set({ archivedAt: sql`now()` }).where(eq(financialAccounts.id, id));
+      },
     ),
   );
 }
@@ -346,6 +376,7 @@ export async function restoreAccount(ctx: ServiceContext, id: string) {
 export async function addAdjustment(ctx: ServiceContext, accountId: string, input: z.output<typeof adjustmentInput>) {
   const account = await getAccount(ctx, accountId);
   ctx.access.assertWrite(account.caixaId);
+  assertAccountActive(account);
   const [row] = await withTx(ctx, (tx) =>
     tx
       .insert(movements)

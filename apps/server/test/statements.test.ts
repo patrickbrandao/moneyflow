@@ -1,11 +1,17 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENT_TOOLS } from '@moneyflow/shared';
+import { createPool, dbSchema } from '@moneyflow/db';
+import { AGENT_TOOLS, addDays, statementImportNotices, statementImportQuery } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { TOOL_HANDLERS } from '../src/agents/tool-handlers';
 import { loadAccess } from '../src/authz/access';
 import type { ServiceContext } from '../src/context';
+import { storeAttachment } from '../src/services/attachments';
+import { applyRulesToImport } from '../src/services/reconciliation';
+import { importStatement, previewStatementImport } from '../src/services/statements';
+import { withTx } from '../src/services/tx';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
 let h: Harness;
@@ -511,6 +517,75 @@ describe('desfazer e excluir o lançamento que nasceu da linha (spec 009)', () =
   });
 });
 
+describe('título cancelado deixa de ser sugerido (tarefa 129)', () => {
+  it('cancelar, "excluir só esta" numa série e pagar 0 na fatura devolvem a linha sugerida para "nova"', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const s = await scenario(h, admin);
+    const payable = (extra: Record<string, unknown>) =>
+      admin.post('/api/titles', {
+        caixaId: s.caixaA.id,
+        direction: 'payable',
+        entityId: s.supplier.id,
+        categoryId: s.expense.id,
+        competenceDate: '2026-10-01',
+        mirrorCaixaId: null,
+        ...extra,
+      });
+    // PIX de 400,00 (22/10): um título avulso; assinatura de 59,90 (03/10): uma série; 230,15 (08/10): a fatura do cartão.
+    // (A série com o valor da menor saída do mês: as outras, maiores, não a pegam como pagamento parcial.)
+    const single = await payable({ description: 'Pagamento avulso', dueDate: '2026-10-22', amountCents: 40_000 });
+    const series = await payable({
+      description: 'Assinatura',
+      dueDate: '2026-10-03',
+      amountCents: 5_990,
+      plannedAccountId: s.accountA.id,
+      series: { kind: 'recurrence', frequency: 'monthly', endsOn: '2026-11-03' },
+    });
+    const issuer = await admin.post('/api/entities', { kind: 'company', name: `Emissor ${s.tag}` });
+    const card = await admin.post('/api/caixas', {
+      name: `Cartão ${s.tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: s.caixaA.id,
+      creditLimitCents: 500_000,
+      closingDay: 3,
+      dueDay: 10,
+      cardLast4: '9876',
+    });
+    await admin.post(`/api/cards/${card.id}/purchases`, {
+      entityId: s.supplier.id,
+      categoryId: s.expense.id,
+      purchasedOn: '2026-09-12',
+      description: 'Mercado no cartão',
+      amountCents: 23_015,
+    });
+    const oct = (await admin.get(`/api/cards/${card.id}`)).invoices.find((i: any) => i.referenceMonth === '2026-10-01');
+    const closed = await admin.post(`/api/card-invoices/${oct.id}/close`, {});
+    const invoiceTitle = closed.titles.find((tr: any) => tr.caixaId === s.caixaA.id);
+
+    const res = await upload(
+      adminSession.cookie,
+      `/api/statement-imports?accountId=${s.accountA.id}&fileName=e.ofx`,
+      fixture('extrato-ofx2.ofx'),
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    const imp = res.json();
+    const line = async (fitid: string) => (await admin.get(`/api/statement-imports/${imp.id}`)).lines.find((l: any) => l.fitid === fitid);
+    expect(await line('OFX2-0006')).toMatchObject({ status: 'suggested', titleId: single.id });
+    expect(await line('OFX2-0001')).toMatchObject({ status: 'suggested', titleId: series.id });
+    expect(await line('OFX2-0003')).toMatchObject({ status: 'suggested', titleId: invoiceTitle.id });
+
+    await admin.post(`/api/titles/${single.id}/cancel`);
+    expect(await line('OFX2-0006')).toMatchObject({ status: 'new', titleId: null });
+    expect(await admin.del(`/api/titles/${series.id}?scope=this`)).toEqual({ deleted: false, archived: true });
+    expect(await line('OFX2-0001')).toMatchObject({ status: 'new', titleId: null });
+    await admin.post(`/api/card-invoices/${oct.id}/pay`, { payerCaixaId: s.caixaA.id, settledOn: '2026-10-10', amountCents: 0 });
+    expect((await admin.get(`/api/titles/${invoiceTitle.id}`)).status).toBe('canceled');
+    expect(await line('OFX2-0003')).toMatchObject({ status: 'new', titleId: null });
+  });
+});
+
 describe('aplicar regras e buscar nas linhas (spec 009)', () => {
   it('reaplica as regras às linhas novas sem mexer nas do usuário nem nas do agente', async () => {
     const adminSession = await userSession(h, 'admin');
@@ -726,13 +801,13 @@ describe('renomear o arquivo do lote (spec 009)', () => {
 
 /* ---------------- ocorrências de série no extrato (specs 033 e 034) ---------------- */
 
-function ofxOf(lines: { date: string; cents: number; memo: string }[]) {
+function ofxOf(lines: { date: string; cents: number; memo: string; fitid?: string }[]) {
   const key = Math.random().toString(36).slice(2, 10);
   const trn = lines
     .map(
       (l, i) =>
         `<STMTTRN><TRNTYPE>${l.cents < 0 ? 'DEBIT' : 'CREDIT'}</TRNTYPE><DTPOSTED>${l.date.replaceAll('-', '')}120000</DTPOSTED>` +
-        `<TRNAMT>${(l.cents / 100).toFixed(2)}</TRNAMT><FITID>${key}-${i}</FITID><NAME>${l.memo}</NAME></STMTTRN>`,
+        `<TRNAMT>${(l.cents / 100).toFixed(2)}</TRNAMT><FITID>${l.fitid ?? `${key}-${i}`}</FITID><NAME>${l.memo}</NAME></STMTTRN>`,
     )
     .join('\n');
   const dates = lines.map((l) => l.date.replaceAll('-', '')).sort();
@@ -872,4 +947,347 @@ describe('ocorrências de série no extrato (specs 033 e 034)', () => {
     };
     return { admin, s, rule: first.rule, rows: listed.rows as any[], importLines };
   }
+});
+
+/** Contexto de serviço de um usuário (para chamar a prévia das tools direto). */
+async function ctxOf(session: Awaited<ReturnType<typeof userSession>>, role: 'admin' | 'user'): Promise<ServiceContext> {
+  const actor = { id: session.id, username: session.username, email: `${session.username}@teste.local`, role, isActive: true };
+  return { db: h.db, access: await loadAccess(h.db, actor), config: h.config };
+}
+
+describe('leitura do arquivo na importação (tarefas 088, 089, 090 e 140)', () => {
+  it('CSV em Latin-1 decrescente: codificação detectada, sem "�", saldo do último dia e as linhas que não foram lidas', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const text = [
+      'data;lançamento;valor;saldo',
+      '20/10/2026;PADARIA SÃO JOÃO;-10,00;1.000,00',
+      '20/10/2026;PIX RECEBIDO;100,00;1.010,00',
+      '19/10/2026;TED;1,234.56;910,00',
+      '19/10/2026;MERCADO;-50,00;910,00',
+      '18/10/2026;SALDO ANTERIOR;0,00;960,00',
+    ].join('\r\n');
+    const latin1 = Buffer.from(text, 'latin1');
+    expect(latin1.includes(0xc3)).toBe(true); // "Ã" em Latin-1, não UTF-8
+
+    const inspect = await upload(session.cookie, '/api/statements/inspect?fileName=x.csv', latin1, 'text/csv');
+    expect(inspect.json()).toMatchObject({ format: 'csv', encoding: 'windows-1252' });
+    expect(inspect.json().csv.rows[0]).toEqual(['data', 'lançamento', 'valor', 'saldo']);
+
+    // A prévia da tool (o agente não vê os bytes; o mapeamento inline vem em UTF-8, o padrão).
+    const ctx = await ctxOf(session, 'admin');
+    const columns = { date: 'data', description: 'lançamento', amount: 'valor', balance: 'saldo' };
+    const inline = {
+      delimiter: ';',
+      encoding: 'utf-8',
+      hasHeader: true,
+      skipRows: 0,
+      dateFormat: 'dd/MM/yyyy',
+      decimalSeparator: ',',
+      columns,
+    };
+    const preview = await previewStatementImport(ctx, { accountId: s.accountA.id }, latin1, { inline });
+    expect(preview).toMatchObject({ lines: 3, fresh: 3, invalidRows: { total: 1, rows: [{ row: 4, message: 'valor inválido' }] } });
+    const attachmentId = await withTx(ctx, (tx) => storeAttachment(tx, ctx, { name: 'extrato.csv', mime: 'text/csv', content: latin1 }));
+    const input = AGENT_TOOLS.find((d) => d.name === 'import_statement')!.input.parse({
+      attachmentId,
+      accountId: s.accountA.id,
+      csvMapping: { name: 'Banco', delimiter: ';', dateFormat: 'dd/MM/yyyy', decimalSeparator: ',', columns },
+    });
+    const card = await TOOL_HANDLERS.import_statement.preview!(ctx, input as never);
+    expect(card.warnings).toContain('1 linha(s) do arquivo não foram lidas (ex.: linha 4, valor inválido).');
+
+    await admin.post('/api/csv-mappings', { financialAccountId: s.accountA.id, name: 'Banco', delimiter: ';', columns, isDefault: true });
+    const res = await upload(session.cookie, `/api/statement-imports?accountId=${s.accountA.id}&fileName=x.csv`, latin1, 'text/csv');
+    expect(res.statusCode, res.body).toBe(200);
+    const imp = res.json();
+    expect(imp.lines.map((l: any) => l.description).sort()).toEqual(['MERCADO', 'PADARIA SÃO JOÃO', 'PIX RECEBIDO']);
+    expect(imp.lines.some((l: any) => l.description.includes('\uFFFD'))).toBe(false);
+    // Arquivo do mais recente para o mais antigo: o saldo final do dia 20 é o da primeira linha (tarefa 090).
+    expect(imp).toMatchObject({ bankBalanceCents: 100_000, bankBalanceOn: '2026-10-20' });
+    // A linha do valor zero não conta como problema (tarefa 140).
+    expect(imp.invalidRows).toEqual({ total: 1, rows: [{ row: 4, message: 'valor inválido' }] });
+    expect(statementImportNotices(imp)).toEqual(['1 linha(s) do arquivo não foram lidas (ex.: linha 4, valor inválido).']);
+
+    // "Voltar ao saldo do arquivo" relê o CSV pela mesma regra.
+    await admin.put(`/api/statement-imports/${imp.id}/bank-balance`, { mode: 'clear' });
+    const restored = await admin.put(`/api/statement-imports/${imp.id}/bank-balance`, { mode: 'file' });
+    expect(restored).toMatchObject({ bankBalanceCents: 100_000, bankBalanceOn: '2026-10-20' });
+  });
+
+  it('FITID repetido: outra transação entra com aviso, no arquivo ou entre arquivos; o reimport continua duplicado', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const fitid = `F-${s.tag}`;
+    const post = (file: Buffer) => upload(session.cookie, `/api/statement-imports?accountId=${s.accountA.id}&fileName=x.ofx`, file);
+
+    const october = ofxOf([
+      { date: '2026-10-05', cents: -5_000, memo: 'FARMACIA', fitid },
+      { date: '2026-10-06', cents: -1_000, memo: 'CAFE' },
+    ]);
+    const first = await post(october);
+    expect(first.statusCode, first.body).toBe(200);
+    expect(first.json().fitidCollisions).toBeUndefined();
+
+    // Novembro com o mesmo FITID numa transação diferente: entra, com o aviso.
+    const november = ofxOf([{ date: '2026-11-05', cents: -8_000, memo: 'MERCADO', fitid }]);
+    const second = await post(november);
+    expect(second.statusCode, second.body).toBe(200);
+    expect(second.json()).toMatchObject({
+      lineCount: 1,
+      skippedDuplicates: 0,
+      fitidCollisions: { total: 1, lines: [{ fitid, postedOn: '2026-11-05', amountCents: -8_000, description: 'MERCADO' }] },
+    });
+    expect(second.json().lines[0]).toMatchObject({ fitid, amountCents: -8_000 });
+    expect(statementImportNotices(second.json())[0]).toContain(`FITID ${fitid} em 05/11/2026`);
+
+    // O mesmo FITID duas vezes no arquivo (transações diferentes e uma repetida igual): tudo entra.
+    const same = `G-${s.tag}`;
+    const twice = [
+      { date: '2026-12-01', cents: -2_000, memo: 'PADARIA', fitid: same },
+      { date: '2026-12-02', cents: -3_000, memo: 'LIVRARIA', fitid: same },
+      { date: '2026-12-02', cents: -3_000, memo: 'LIVRARIA', fitid: same },
+    ];
+    const third = await post(ofxOf(twice));
+    expect(third.statusCode, third.body).toBe(200);
+    expect(third.json()).toMatchObject({ lineCount: 3, fitidCollisions: { total: 2 } });
+
+    // Reimportar os mesmos arquivos (inclusive na ordem inversa) continua 409.
+    for (const file of [october, november, ofxOf(twice), ofxOf([...twice].reverse())]) {
+      const again = await post(file);
+      expect(again.statusCode, again.body).toBe(409);
+      expect(again.json().error.code).toBe('statement_duplicated');
+    }
+    const keys = await h.db.execute<{ dedup_hash: string }>(
+      sql`SELECT dedup_hash FROM statement_lines WHERE financial_account_id = ${s.accountA.id} AND fitid = ${same}`,
+    );
+    expect(keys.rows.map((r) => r.dedup_hash).filter((k) => k === `fitid:${same}`)).toHaveLength(1);
+    expect(keys.rows.every((r) => r.dedup_hash.length <= 200)).toBe(true);
+  });
+});
+
+/* ---------------- lote grande (tarefa 139) e parcelas da fatura (tarefa 141) ---------------- */
+
+/** Contexto de serviço de um admin cujo banco conta as consultas (drizzle logger), num pool próprio. */
+async function countingCtx(session: Awaited<ReturnType<typeof userSession>>) {
+  const pool = createPool(inject('databaseUrl'), 2);
+  const counter = { queries: 0 };
+  const db = drizzle(pool, {
+    schema: dbSchema,
+    logger: {
+      logQuery: () => {
+        counter.queries += 1;
+      },
+    },
+  });
+  const actor = {
+    id: session.id,
+    username: session.username,
+    email: `${session.username}@teste.local`,
+    role: 'admin' as const,
+    isActive: true,
+  };
+  const ctx: ServiceContext = { db, access: await loadAccess(db, actor), config: h.config };
+  /** Quantas consultas `run` fez. */
+  const measure = async <T>(run: () => Promise<T>) => {
+    const before = counter.queries;
+    const value = await run();
+    return { value, queries: counter.queries - before };
+  };
+  return { ctx, measure, close: () => pool.end() };
+}
+
+describe('lote grande na importação e no "Aplicar regras" (tarefa 139)', () => {
+  it('2.000 linhas: casamento e regras como antes, e o número de consultas não cresce com as linhas', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const counting = await countingCtx(session);
+    try {
+      const rule = await admin.post('/api/classification-rules', {
+        accountId: s.accountA.id,
+        pattern: 'mercado',
+        direction: 'out',
+        entityId: s.supplier.id,
+        categoryId: s.expense.id,
+      });
+      // Em cada lote: um movimento já lançado (conciliado) e um título em aberto (sugerido).
+      const planted = async (month: string, cents: number) => {
+        const movement = await admin.post(`/api/accounts/${s.accountA.id}/adjustments`, {
+          occurredOn: `${month}-03`,
+          amountCents: -cents,
+          description: 'Assinatura streaming',
+          categoryId: s.expense.id,
+        });
+        const title = await admin.post('/api/titles', {
+          caixaId: s.caixaA.id,
+          direction: 'payable',
+          entityId: s.supplier.id,
+          categoryId: s.expense.id,
+          description: 'Conta de luz',
+          competenceDate: `${month}-01`,
+          dueDate: `${month}-07`,
+          amountCents: cents + 1,
+        });
+        return {
+          movement,
+          title,
+          lines: [
+            { date: `${month}-03`, cents: -cents, memo: 'ASSINATURA STREAMING' },
+            { date: `${month}-07`, cents: -(cents + 1), memo: 'CONTA DE LUZ' },
+          ],
+        };
+      };
+      const generated = (n: number, start: string) =>
+        Array.from({ length: n }, (_, i) => ({
+          date: addDays(start, i % 180),
+          cents: -(10_000 + i),
+          memo: i % 10 === 0 ? `COMPRA MERCADO ${i}` : `PIX ENVIADO ${i}`,
+        }));
+      const importLines = (lines: { date: string; cents: number; memo: string }[]) =>
+        counting.measure(() =>
+          importStatement(counting.ctx, statementImportQuery.parse({ accountId: s.accountA.id, fileName: 'extrato.ofx' }), {
+            mime: 'application/x-ofx',
+            content: ofxOf(lines),
+          }),
+        );
+
+      const smallPlanted = await planted('2026-01', 5_990);
+      const small = await importLines([...smallPlanted.lines, ...generated(8, '2026-01-10')]);
+      const bigPlanted = await planted('2026-08', 6_990);
+      const started = performance.now();
+      const big = await importLines([...bigPlanted.lines, ...generated(1_998, '2026-02-01')]);
+      const elapsed = performance.now() - started;
+
+      // O resultado do casamento e das regras é o de sempre.
+      const summary = async (importId: string) => {
+        const r = await h.db.execute<{ ruled: number; matched: number; suggested: number }>(sql`
+          SELECT count(*) FILTER (WHERE classification_source = 'rule' AND entity_id = ${s.supplier.id})::int AS ruled,
+                 count(*) FILTER (WHERE status = 'matched')::int AS matched,
+                 count(*) FILTER (WHERE status = 'suggested')::int AS suggested
+            FROM statement_lines WHERE statement_import_id = ${importId}`);
+        return r.rows[0];
+      };
+      expect(await summary(small.value.id)).toEqual({ ruled: 1, matched: 1, suggested: 1 });
+      expect(await summary(big.value.id)).toEqual({ ruled: 200, matched: 1, suggested: 1 });
+      const links = await h.db.execute<{ movement_id: string | null; title_id: string | null }>(sql`
+        SELECT movement_id, title_id FROM statement_lines
+         WHERE statement_import_id = ${big.value.id} AND status IN ('matched', 'suggested') ORDER BY posted_on`);
+      expect(links.rows).toEqual([
+        { movement_id: bigPlanted.movement.id, title_id: null },
+        { movement_id: null, title_id: bigPlanted.title.id },
+      ]);
+      expect((await admin.get(`/api/classification-rules?accountId=${s.accountA.id}`)).find((r: any) => r.id === rule.id)).toMatchObject({
+        usageCount: 201,
+      });
+
+      // Fora os blocos de 500 do INSERT, o lote de 2.000 faz as mesmas consultas que o de 10.
+      expect(big.queries).toBe(small.queries + Math.ceil(2_000 / 500) - 1);
+      expect(elapsed).toBeLessThan(30_000);
+
+      // "Aplicar regras": a regra nova pega os PIX das linhas novas, com as mesmas consultas nos dois lotes.
+      await admin.post('/api/classification-rules', { accountId: s.accountA.id, pattern: 'pix enviado', entityId: s.holderB.id });
+      const smallApply = await counting.measure(() => applyRulesToImport(counting.ctx, small.value.id));
+      const bigApply = await counting.measure(() => applyRulesToImport(counting.ctx, big.value.id));
+      expect(smallApply.value).toEqual({ updated: 7 });
+      expect(bigApply.value).toEqual({ updated: 1_798 });
+      expect(bigApply.queries).toBe(smallApply.queries);
+      const pix = await h.db.execute<{ n: number }>(sql`
+        SELECT count(*)::int AS n FROM statement_lines
+         WHERE statement_import_id = ${big.value.id} AND entity_id = ${s.holderB.id} AND classification_source = 'rule'`);
+      expect(pix.rows[0]!.n).toBe(1_798);
+    } finally {
+      await counting.close();
+    }
+  });
+});
+
+function cardOfxOf(lines: { date: string; cents: number; memo: string }[]) {
+  const key = Math.random().toString(36).slice(2, 10);
+  const trn = lines
+    .map(
+      (l, i) =>
+        `<STMTTRN><TRNTYPE>DEBIT</TRNTYPE><DTPOSTED>${l.date.replaceAll('-', '')}120000</DTPOSTED>` +
+        `<TRNAMT>${(l.cents / 100).toFixed(2)}</TRNAMT><FITID>${key}-${i}</FITID><NAME>${l.memo}</NAME></STMTTRN>`,
+    )
+    .join('\n');
+  const dates = lines.map((l) => l.date.replaceAll('-', '')).sort();
+  return Buffer.from(`OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+
+<OFX><CREDITCARDMSGSRSV1><CCSTMTTRNRS><CCSTMTRS><CURDEF>BRL</CURDEF>
+<CCACCTFROM><ACCTID>4111********1111</ACCTID></CCACCTFROM>
+<BANKTRANLIST><DTSTART>${dates[0]}</DTSTART><DTEND>${dates.at(-1)}</DTEND>
+${trn}
+</BANKTRANLIST></CCSTMTRS></CCSTMTTRNRS></CREDITCARDMSGSRSV1></OFX>`);
+}
+
+describe('parcelas da fatura do cartão (tarefa 141)', () => {
+  it('a linha casa com a parcela da fatura do lote, mesmo fora de ordem; sem fatura, a de menor número em aberto', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const issuer = await admin.post('/api/entities', { kind: 'company', name: `Emissor ${s.tag}` });
+    const card = await admin.post('/api/caixas', {
+      name: `Cartão ${s.tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: s.caixaA.id,
+      creditLimitCents: 500_000,
+      closingDay: 25,
+      dueDay: 5,
+      cardLast4: '1111',
+    });
+    const purchase = (description: string, purchasedOn: string, amountCents: number, installmentsTotal = 1) =>
+      admin.post(`/api/cards/${card.id}/purchases`, {
+        entityId: s.supplier.id,
+        categoryId: s.expense.id,
+        purchasedOn,
+        description,
+        amountCents,
+        installmentsTotal,
+      });
+    const itemsOf = async (purchaseId: string) =>
+      (
+        await h.db.execute<{ id: string; card_invoice_id: string }>(sql`
+          SELECT id, card_invoice_id FROM card_invoice_items WHERE card_purchase_id = ${purchaseId} ORDER BY installment_number`)
+      ).rows;
+    const shop = await purchase('Loja X', '2026-10-02', 30_000, 3);
+    const parcels = await itemsOf(shop.id);
+    expect(new Set(parcels.map((p) => p.card_invoice_id)).size).toBe(3);
+    const cash = await purchase('Posto Estrela', '2026-10-04', 8_000);
+    const [cashItem] = await itemsOf(cash.id);
+    expect(cashItem!.card_invoice_id).toBe(parcels[0]!.card_invoice_id);
+
+    const importInvoice = async (invoiceId: string | null, lines: { date: string; cents: number; memo: string }[]) => {
+      const query = invoiceId ? `&cardInvoiceId=${invoiceId}` : '';
+      const res = await upload(
+        session.cookie,
+        `/api/statement-imports?cardCaixaId=${card.id}&fileName=fatura.ofx${query}`,
+        cardOfxOf(lines),
+      );
+      expect(res.statusCode, res.body).toBe(200);
+      return res.json().lines as any[];
+    };
+    // A fatura do mês 2 antes da do mês 1: a parcela 2, conciliada direto (sobra uma parcela só dessa fatura).
+    // A compra à vista, que está na fatura do mês 1, entra pelos candidatos das outras faturas.
+    const second = await importInvoice(parcels[1]!.card_invoice_id, [
+      { date: '2026-10-02', cents: -10_000, memo: 'LOJA X 02/03' },
+      { date: '2026-10-04', cents: -8_000, memo: 'POSTO ESTRELA' },
+    ]);
+    expect(second.find((l) => l.amountCents === -10_000)).toMatchObject({ status: 'matched', cardInvoiceItemId: parcels[1]!.id });
+    expect(second.find((l) => l.amountCents === -8_000)).toMatchObject({ status: 'matched', cardInvoiceItemId: cashItem!.id });
+    // Depois a do mês 1: a parcela 1, não a 3.
+    const first = await importInvoice(parcels[0]!.card_invoice_id, [{ date: '2026-10-02', cents: -10_000, memo: 'LOJA X 01/03' }]);
+    expect(first[0]).toMatchObject({ status: 'matched', cardInvoiceItemId: parcels[0]!.id });
+
+    // Sem a fatura no lote: as parcelas empatam e a sugerida é a de menor número em aberto.
+    const other = await purchase('Loja Y', '2026-10-06', 15_000, 3);
+    const otherParcels = await itemsOf(other.id);
+    const loose = await importInvoice(null, [{ date: '2026-10-06', cents: -5_000, memo: 'LOJA Y 02/03' }]);
+    expect(loose[0]).toMatchObject({ status: 'suggested', cardInvoiceItemId: otherParcels[0]!.id });
+  });
 });

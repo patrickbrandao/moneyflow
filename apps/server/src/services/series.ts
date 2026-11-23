@@ -26,6 +26,7 @@ import { notFound, unprocessable } from '../errors';
 import { readableFilter } from './caixas';
 import { contractOwner } from './contracts';
 import { assertPlannedAccount } from './planned-account';
+import { clearStatementSuggestions } from './reconciliation-guards';
 import { MATERIALIZE_LOCK, materializeRule } from './recurrence';
 import { uuidArray } from './reports';
 import { assertTolerance, TERMS_SQL, termsColumns, termsOf } from './series-core';
@@ -516,6 +517,9 @@ export async function patchOccurrence(
   if (patch.plannedAccountId !== undefined) sets.push(sql`planned_account_id = ${patch.plannedAccountId}, planned_account_custom = false`);
   if (patch.status !== undefined) sets.push(sql`status = ${patch.status}`);
   if (sets.length === 0) return;
+  // Cancelada (rescisão, encerramento) não recebe baixa: a sugestão do extrato sai (tarefa 129).
+  if (patch.status === 'canceled')
+    await clearStatementSuggestions(tx, { titleIds: [row.id, ...(row.mirrorTitleId ? [row.mirrorTitleId] : [])] });
   await tx.execute(sql`UPDATE titles SET ${sql.join(sets, sql`, `)} WHERE id = ${row.id}`);
   if (!row.mirrorTitleId) return;
   const mirrorSets: SQL[] = [];
@@ -532,7 +536,8 @@ export async function patchOccurrence(
  * Plano de "esta e as próximas" numa série a partir de `effectiveOn`: na
  * conta, as ocorrências em aberto sem baixa com vencimento na data ou depois
  * mudam (as com baixa ou em mês fechado ficam, na lista dos puladas); no
- * cartão, o valor esperado muda a partir da primeira ocorrência na data.
+ * cartão, o valor esperado muda a partir da primeira ocorrência na data, e o
+ * dia não muda (encerre a cobrança e crie outra).
  */
 export async function planSeriesChange(
   ctx: ServiceContext,
@@ -554,6 +559,8 @@ export async function planSeriesChange(
   }
 
   if (rule.card) {
+    // As datas esperadas saem do dia âncora desde a 1ª ocorrência: mudar o dia reescreveria o passado (tarefa 137).
+    if (anchorChanged) throw unprocessable(E.cardAnchorDay, 'card_charge_anchor_day');
     const card = rule.card;
     const expected = nextExpectedOccurrence(rule, effectiveOn);
     const cardFrom: AmendmentPreview['cardFrom'] = [];
@@ -607,7 +614,6 @@ export async function planSeriesChange(
         if (after.description) sets.push(sql`description = ${after.description as string}`);
         if (sets.length)
           await w.execute(sql`UPDATE card_recurring_charges SET ${sql.join(sets, sql`, `)} WHERE recurrence_rule_id = ${rule.id}`);
-        if (anchorChanged) await w.execute(sql`UPDATE recurrence_rules SET anchor_day = ${change.anchorDay!} WHERE id = ${rule.id}`);
       },
     };
   }
