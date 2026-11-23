@@ -6,7 +6,7 @@ import { alphaCnpj, client, type Harness, scenario, startApp, uid, userSession }
  * Filhos da entidade pela API (spec 003, tarefa 126): contatos, endereços,
  * dados bancários, chaves PIX (a principal e o CNPJ alfanumérico na edição) e
  * vínculos — criar, editar e apagar; o filho de outra entidade não muda
- * (404 na edição, sem efeito na exclusão); quem só lê não escreve; arquivar e
+ * (404 na edição e na exclusão); quem só lê não escreve; arquivar e
  * restaurar a entidade.
  */
 
@@ -61,16 +61,18 @@ describe('contatos (spec 003)', () => {
     });
     expect(detail.contacts.find((c: any) => c.id === first.id).isPrimary).toBe(false);
 
-    // Pelo caminho de outra entidade: a edição é 404 e nada muda (nem a marca de principal da outra).
+    // Pelo caminho de outra entidade: a edição e a exclusão são 404 e nada muda (nem a marca de principal da outra).
     await editor.post(`/api/entities/${other.id}/contacts`, { kind: 'email', value: 'a@b.com', isPrimary: true });
     await editor.put(`/api/entities/${other.id}/contacts/${first.id}`, { kind: 'email', value: 'x@y.com', isPrimary: true }, 404);
     expect((await editor.get(`/api/entities/${other.id}`)).contacts[0]).toMatchObject({ value: 'a@b.com', isPrimary: true });
-    await editor.del(`/api/entities/${other.id}/contacts/${first.id}`);
+    await editor.del(`/api/entities/${other.id}/contacts/${first.id}`, 404);
     expect((await editor.get(`/api/entities/${entity.id}`)).contacts.map((c: any) => c.id)).toContain(first.id);
 
     detail = await editor.del(`/api/entities/${entity.id}/contacts/${first.id}`);
     expect(detail.contacts.map((c: any) => c.id)).toEqual([second.id]);
     await editor.put(`/api/entities/${entity.id}/contacts/${first.id}`, { kind: 'phone', value: '1199999' }, 404);
+    // Apagar de novo o que já não existe também é 404.
+    await editor.del(`/api/entities/${entity.id}/contacts/${first.id}`, 404);
   });
 });
 
@@ -116,11 +118,12 @@ describe('endereços (spec 003)', () => {
     });
     expect(bad.statusCode).toBe(400);
     await editor.put(`/api/entities/${other.id}/addresses/${address.id}`, { label: 'Invasão', city: 'Recife', state: 'PE' }, 404);
-    await editor.del(`/api/entities/${other.id}/addresses/${address.id}`);
+    await editor.del(`/api/entities/${other.id}/addresses/${address.id}`, 404);
     expect((await editor.get(`/api/entities/${entity.id}`)).addresses[0].label).toBe('Filial');
 
     detail = await editor.del(`/api/entities/${entity.id}/addresses/${address.id}`);
     expect(detail.addresses).toEqual([]);
+    await editor.del(`/api/entities/${entity.id}/addresses/${address.id}`, 404);
 
     // A consulta de CEP recusa o CEP malformado antes de sair para o ViaCEP.
     expect((await editor.get('/api/lookup/cep/123', 400)).error.code).toBe('validation');
@@ -169,11 +172,12 @@ describe('dados bancários (spec 003)', () => {
       { bankCode: '001', accountNumber: '1', accountType: 'checking' },
       404,
     );
-    await editor.del(`/api/entities/${other.id}/bank-accounts/${account.id}`);
+    await editor.del(`/api/entities/${other.id}/bank-accounts/${account.id}`, 404);
     expect((await editor.get(`/api/entities/${entity.id}`)).bankAccounts).toHaveLength(1);
 
     detail = await editor.del(`/api/entities/${entity.id}/bank-accounts/${account.id}`);
     expect(detail.bankAccounts).toEqual([]);
+    await editor.del(`/api/entities/${entity.id}/bank-accounts/${account.id}`, 404);
   });
 });
 
@@ -207,19 +211,21 @@ describe('chaves PIX (spec 003)', () => {
     const listed = (await editor.get(`/api/entities?q=${encodeURIComponent(entity.name)}`)).find((e: any) => e.id === entity.id);
     expect(listed.primaryPix).toEqual({ keyType: 'cnpj', keyValue: cnpj });
 
-    // Chave inválida no PUT: 400, e a chave fica como estava.
+    // Chave inválida no PUT (dígitos verificadores trocados): 400, e a chave fica como estava.
+    const wrongDv = cnpj.slice(12) === '00' ? '01' : '00';
     const invalid = await editor.raw('PUT', `/api/entities/${entity.id}/pix-keys/${second.id}`, {
       keyType: 'cnpj',
-      keyValue: `${cnpj.slice(0, 12)}00`.toLowerCase(),
+      keyValue: `${cnpj.slice(0, 12)}${wrongDv}`.toLowerCase(),
     });
     expect(invalid.statusCode).toBe(400);
     expect((await editor.get(`/api/entities/${entity.id}`)).pixKeys[0].keyValue).toBe(cnpj);
 
     detail = await editor.del(`/api/entities/${entity.id}/pix-keys/${second.id}`);
     expect(detail.pixKeys.map((k: any) => k.id)).toEqual([first.id]);
+    await editor.del(`/api/entities/${entity.id}/pix-keys/${second.id}`, 404);
   });
 
-  it('pelo caminho de outra entidade o PUT é 404 e a principal dela não perde a marca (a transação desfaz)', async () => {
+  it('pelo caminho de outra entidade o PUT e o DELETE são 404 e a principal dela não perde a marca (a transação desfaz)', async () => {
     const { editor } = await people();
     const entity = await newEntity(editor);
     const other = await newEntity(editor);
@@ -235,7 +241,7 @@ describe('chaves PIX (spec 003)', () => {
     expect((await editor.get(`/api/entities/${other.id}`)).pixKeys[0]).toMatchObject({ id: theirs.id, isPrimary: true });
     expect((await editor.get(`/api/entities/${entity.id}`)).pixKeys[0]).toMatchObject({ id: mine.id, keyValue: mine.keyValue });
 
-    await editor.del(`/api/entities/${other.id}/pix-keys/${mine.id}`);
+    await editor.del(`/api/entities/${other.id}/pix-keys/${mine.id}`, 404);
     expect((await editor.get(`/api/entities/${entity.id}`)).pixKeys).toHaveLength(1);
   });
 });
@@ -260,12 +266,13 @@ describe('vínculos (spec 003)', () => {
       otherEntityId: entity.id,
     });
 
-    // Uma terceira entidade não apaga o vínculo das outras.
-    await editor.del(`/api/entities/${third.id}/links/${link.id}`);
+    // Uma terceira entidade não apaga o vínculo das outras (404).
+    await editor.del(`/api/entities/${third.id}/links/${link.id}`, 404);
     expect((await editor.get(`/api/entities/${entity.id}`)).links).toHaveLength(1);
     // Pelo lado de quem recebe o vínculo, apaga.
     expect((await editor.del(`/api/entities/${partner.id}/links/${link.id}`)).links).toEqual([]);
     expect((await editor.get(`/api/entities/${entity.id}`)).links).toEqual([]);
+    await editor.del(`/api/entities/${entity.id}/links/${link.id}`, 404);
 
     await editor.post(`/api/entities/${entity.id}/links`, { relatedEntityId: crypto.randomUUID(), kind: 'other' }, 404);
   });

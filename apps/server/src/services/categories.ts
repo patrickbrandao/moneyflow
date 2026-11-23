@@ -76,17 +76,32 @@ export async function deleteCategory(ctx: ServiceContext, id: string): Promise<D
     deleteOrArchive(
       tx,
       async (sp) => (await sp.delete(categories).where(eq(categories.id, id))).rowCount ?? 0,
-      // Arquivar o grupo arquiva as subcategorias.
+      // Arquivar o grupo arquiva as subcategorias. A que já estava arquivada fica com a data dela,
+      // e o grupo já arquivado também: é o que o restaurar usa para saber quais filhas voltam.
       (t) =>
         t
           .update(categories)
-          .set({ archivedAt: sql`now()` })
+          .set({ archivedAt: sql`coalesce(${categories.archivedAt}, now())` })
           .where(or(eq(categories.id, id), eq(categories.parentId, id))),
     ),
   );
 }
 
+/**
+ * Restaurar desarquiva a categoria. No grupo, voltam junto as subcategorias
+ * arquivadas pelo arquivamento dele: as que têm o mesmo `archived_at` (o
+ * `now()` da transação que arquivou o grupo e as filhas). A filha arquivada
+ * antes, à parte, continua arquivada (spec 008).
+ */
 export async function restoreCategory(ctx: ServiceContext, id: string) {
   ctx.access.assertAdmin();
-  await withTx(ctx, (tx) => tx.update(categories).set({ archivedAt: null }).where(eq(categories.id, id)));
+  const [row] = await ctx.db.select({ id: categories.id }).from(categories).where(eq(categories.id, id));
+  if (!row) throw notFound();
+  await withTx(ctx, (tx) =>
+    tx.execute(sql`
+      UPDATE categories c SET archived_at = NULL
+        FROM categories g
+       WHERE g.id = ${id} AND g.archived_at IS NOT NULL
+         AND (c.id = g.id OR (g.parent_id IS NULL AND c.parent_id = g.id AND c.archived_at = g.archived_at))`),
+  );
 }

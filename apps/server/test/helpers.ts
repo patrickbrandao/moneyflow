@@ -232,3 +232,16 @@ export async function stopLeftoverRuns(h: Harness) {
   );
   for (const run of left.rows) await h.db.transaction((tx) => stopRun(tx, run.id, run.conversation_id));
 }
+
+/**
+ * Cancela as mensagens que os arquivos anteriores deixaram na fila do Telegram.
+ * O `consumeOutbox` reserva as mais antigas de qualquer destino, até 50 por
+ * passada: com a fila cheia de sobras, a mensagem do teste fica para depois e o
+ * envio esperado não acontece. Chame no `beforeAll`, depois do `startApp`, nos
+ * arquivos que consomem a fila.
+ */
+export async function cancelLeftoverMessages(h: Harness) {
+  await h.db.execute(
+    sql`UPDATE message_outbox SET status = 'canceled', last_error = coalesce(last_error, 'canceled_by_test') WHERE status = 'pending'`,
+  );
+}

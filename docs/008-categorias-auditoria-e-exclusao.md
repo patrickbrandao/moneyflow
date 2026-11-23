@@ -3,6 +3,7 @@
 ## Categorias
 - Plano **global**, separado em receita e despesa, em dois níveis (grupo → subcategoria), com cor e ícone; tags livres opcionais.
 - Cada caixa pode ocultar as categorias que não usa.
+- Arquivar um grupo arquiva as subcategorias ainda ativas; restaurar o grupo traz de volta as que foram arquivadas com ele (a mesma data de arquivamento), e a subcategoria arquivada antes, à parte, continua arquivada até ser restaurada sozinha (2026-11-22, tarefa 126).
 - Relatórios alternam entre **competência** (padrão) e **caixa**.
 
 ## Exclusão

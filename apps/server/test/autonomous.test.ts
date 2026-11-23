@@ -21,7 +21,7 @@ import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { drainTranscriptions } from '../src/agents/transcriptions';
 import { tasksTick } from '../src/services/agent-tasks';
 import { handleUpdate } from '../src/services/telegram-inbound';
-import { client, type Harness, scenario, startApp, TINY_PNG, uid, userSession } from './helpers';
+import { client, type Harness, scenario, startApp, stopLeftoverRuns, TINY_PNG, uid, userSession } from './helpers';
 
 /*
  * Fluxos autônomos dos agentes (spec 029), com o provedor de IA falso e a Bot
@@ -100,6 +100,8 @@ beforeAll(async () => {
     AI_TRANSCRIPTION_TIMEOUT_MS: '2500',
     AI_REQUEST_BACKOFF_MS: '0',
   });
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   provider = await admin.post('/api/admin/ai/providers', {

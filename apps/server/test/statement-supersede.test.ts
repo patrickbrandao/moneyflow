@@ -6,7 +6,7 @@ import { type FakeLlm, startFakeLlm } from '../../../e2e/fakes/fake-llm';
 import { type ClaimedRun, processRun } from '../src/agents/runner';
 import { loadAccess } from '../src/authz/access';
 import { previewStatementImport } from '../src/services/statements';
-import { client, type Harness, newSession, scenario, startApp, uid, userSession } from './helpers';
+import { client, type Harness, newSession, scenario, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * Lote provisório e a troca pelo consolidado (spec 031): as conciliações do
@@ -110,6 +110,8 @@ async function call(name: string, input: Record<string, unknown>) {
 beforeAll(async () => {
   llm = await startFakeLlm(0, '127.0.0.1');
   h = await startApp({ AI_REQUEST_BACKOFF_MS: '0' });
+  // O drain() pega a execução mais antiga do banco: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
   const provider = await admin.post('/api/admin/ai/providers', {

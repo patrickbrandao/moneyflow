@@ -7,7 +7,7 @@ import { purgeOperational, startAgentWorker } from '../src/agents/worker';
 import { hashToken, purgeExpiredSessions } from '../src/auth/session';
 import { loadAccess } from '../src/authz/access';
 import { storeUnlinkedAttachment } from '../src/services/attachments';
-import { client, type Harness, minimalPdf, scenario, startApp, uid, userSession } from './helpers';
+import { client, type Harness, minimalPdf, scenario, startApp, stopLeftoverRuns, uid, userSession } from './helpers';
 
 /*
  * Manutenção do worker (tarefas 103 e 162): a retenção operacional (operational_purge) pelo laço de manutenção dos
@@ -22,6 +22,8 @@ let adminSession: Awaited<ReturnType<typeof userSession>>;
 
 beforeAll(async () => {
   h = await startApp();
+  // O worker deste arquivo reserva execuções ao subir: as sobras de outros arquivos saem antes.
+  await stopLeftoverRuns(h);
   adminSession = await userSession(h, 'admin');
   admin = client(h, adminSession.cookie);
 });

@@ -212,6 +212,55 @@ describe('plano de categorias (spec 008)', () => {
     const unused = await admin.post('/api/categories', { kind: 'income', name: `Avulsa ${s.tag}` });
     expect(await admin.del(`/api/categories/${unused.id}`)).toEqual({ deleted: true, archived: false });
   });
+
+  it('restaurar o grupo traz de volta as filhas arquivadas com ele; a arquivada antes, à parte, continua arquivada', async () => {
+    const { s } = await people();
+    const group = await admin.post('/api/categories', { kind: 'expense', name: `Veículos ${s.tag}` });
+    const fuel = await admin.post('/api/categories', { kind: 'expense', name: `Combustível ${s.tag}`, parentId: group.id });
+    const parking = await admin.post('/api/categories', { kind: 'expense', name: `Estacionamento ${s.tag}`, parentId: group.id });
+    const tolls = await admin.post('/api/categories', { kind: 'expense', name: `Pedágio ${s.tag}`, parentId: group.id });
+    // Em uso: excluir arquiva (o combustível e o estacionamento; o pedágio fica sem uso).
+    for (const category of [fuel, parking]) {
+      await admin.post('/api/titles', {
+        caixaId: s.caixaA.id,
+        direction: 'payable',
+        entityId: s.supplier.id,
+        categoryId: category.id,
+        description: `Despesa ${category.name}`,
+        competenceDate: '2026-10-01',
+        dueDate: '2026-10-15',
+        amountCents: 5_000,
+        mirrorCaixaId: null,
+      });
+    }
+    const archivedIds = async () =>
+      new Set(
+        (await admin.get('/api/categories?kind=expense&archived=true'))
+          .flatMap((c: any) => [c, ...c.children])
+          .filter((c: any) => c.archivedAt)
+          .map((c: any) => c.id),
+      );
+
+    // O estacionamento sai antes, à parte; depois o grupo leva o combustível e o pedágio.
+    expect(await admin.del(`/api/categories/${parking.id}`)).toEqual({ deleted: false, archived: true });
+    expect(await admin.del(`/api/categories/${group.id}`)).toEqual({ deleted: false, archived: true });
+    // Excluir o grupo já arquivado de novo não muda as datas.
+    expect(await admin.del(`/api/categories/${group.id}`)).toEqual({ deleted: false, archived: true });
+    let archived = await archivedIds();
+    for (const category of [group, fuel, parking, tolls]) expect(archived.has(category.id), category.name).toBe(true);
+
+    expect(await admin.post(`/api/categories/${group.id}/restore`)).toEqual({ ok: true });
+    archived = await archivedIds();
+    expect([group, fuel, tolls].filter((c) => archived.has(c.id))).toEqual([]);
+    expect(archived.has(parking.id)).toBe(true);
+    const active = (await admin.get('/api/categories?kind=expense')).find((c: any) => c.id === group.id);
+    expect(active.children.map((c: any) => c.id).sort()).toEqual([fuel.id, tolls.id].sort());
+
+    // A filha arquivada à parte volta sozinha; restaurar o que não existe é 404.
+    expect(await admin.post(`/api/categories/${parking.id}/restore`)).toEqual({ ok: true });
+    expect((await archivedIds()).has(parking.id)).toBe(false);
+    await admin.post(`/api/categories/${crypto.randomUUID()}/restore`, {}, 404);
+  });
 });
 
 /* ---------------- extrato: mapeamentos de CSV, regras e conciliação com IA ---------------- */
