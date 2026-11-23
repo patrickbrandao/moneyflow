@@ -6,7 +6,7 @@ autor: principal
 responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 6022ec5
 ---
 
 # Bifurcar a sessão não religa os arquivos gerados pelas tools

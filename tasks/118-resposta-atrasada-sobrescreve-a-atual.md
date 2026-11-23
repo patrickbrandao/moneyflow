@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d6f991c
 ---
 
 # Resposta de um filtro ou arquivo anterior sobrescreve a atual em cinco telas

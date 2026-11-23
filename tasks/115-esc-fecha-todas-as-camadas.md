@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d6f991c
 ---
 
 # Esc fecha todas as camadas de uma vez: fechar a lista do seletor de entidade descarta o formulário inteiro

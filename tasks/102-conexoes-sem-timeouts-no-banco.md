@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 09b0ea7
 ---
 
 # Papel da aplicação, pool e migrations sem nenhum timeout no Postgres

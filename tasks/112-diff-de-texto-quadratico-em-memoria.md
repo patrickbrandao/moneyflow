@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 877862f
 ---
 
 # Diff de texto guarda o vetor inteiro a cada passo: documento grande trava o worker e o navegador

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-10-21
-commit:
+commit: 734b618
 ---
 
 # Corrigir a data do estorno de uma baixa, com auditoria

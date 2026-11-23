@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 734b618
 ---
 
 # Gaveta do título mostra a NF-e emitida à noite com a data do dia seguinte

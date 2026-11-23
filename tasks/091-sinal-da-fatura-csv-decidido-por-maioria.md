@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 75153d8
 ---
 
 # Sinal da fatura do cartão em CSV decidido pela maioria das linhas de cada arquivo

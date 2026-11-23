@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 832da3f
 ---
 
 # Saldo da conta somado desde a abertura várias vezes por linha (lotes, resumo e projeção)

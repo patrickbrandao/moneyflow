@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 6ef8283
 ---
 
 # O cursor da indexação de embeddings perde registros (empate de `updated_at` acima de 500 e COMMIT tardio)

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: 8ed8fd2
 ---
 
 # Senhas e tokens vão em texto claro para o log quando uma consulta falha

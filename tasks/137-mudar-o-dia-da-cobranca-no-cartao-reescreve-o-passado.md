@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: d658050
 ---
 
 # Mudar o dia de uma cobrança no cartão (aditivo ou edição da série) reescreve as datas esperadas do passado

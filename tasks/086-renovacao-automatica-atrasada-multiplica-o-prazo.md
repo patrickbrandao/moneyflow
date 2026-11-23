@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d658050
 ---
 
 # Renovação automática atrasada vira uma vigência só e multiplica o prazo das seguintes

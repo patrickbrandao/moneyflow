@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 6a7d975
 ---
 
 # Nova entidade importa o endereço e os contatos de um CNPJ consultado antes de trocar o documento

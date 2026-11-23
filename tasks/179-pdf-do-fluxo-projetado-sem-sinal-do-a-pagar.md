@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 6a7d975
 ---
 
 # Fluxo projetado exportado mostra o "a pagar" positivo, ao contrário da tela e da spec 014

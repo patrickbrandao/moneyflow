@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: b24cae1
 ---
 
 # Prévia do `import_statement` lê lotes de `supersedeImportIds` sem `Access` e sem validar o alvo

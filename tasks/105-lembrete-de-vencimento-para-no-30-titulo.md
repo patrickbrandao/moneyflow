@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 57e458a
 ---
 
 # Aviso de vencimento no Telegram para no 30º título: "o resto na seguinte" nunca vem

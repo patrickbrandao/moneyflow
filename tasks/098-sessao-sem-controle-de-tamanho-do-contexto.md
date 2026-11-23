@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d0514fa
 ---
 
 # Uma sessão que passa do limite do provedor falha em toda mensagem nova, sem orientar o usuário

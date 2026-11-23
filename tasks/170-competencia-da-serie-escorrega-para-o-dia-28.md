@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: ecb16b1
 ---
 
 # Competência das ocorrências novas da série escorrega para o dia 28 depois de fevereiro

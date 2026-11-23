@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: bf102a8
 ---
 
 # A API aceita fechar mês futuro, e o worker para de materializar as séries daquele mês sem dizer qual nem por quê

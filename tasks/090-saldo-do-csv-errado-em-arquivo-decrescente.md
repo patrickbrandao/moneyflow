@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: b24cae1
 ---
 
 # Saldo do banco do lote CSV sai errado quando o arquivo vem do mais recente para o mais antigo

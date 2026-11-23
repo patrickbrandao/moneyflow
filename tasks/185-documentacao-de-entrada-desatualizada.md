@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: c5e748d
 ---
 
 # Documentação de entrada contradiz as specs e o código (contrato, agentes, variáveis de ambiente)

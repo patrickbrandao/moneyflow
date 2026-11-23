@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d6f991c
 ---
 
 # Listas de títulos, compras, entidades e transferências cortadas em silêncio (300 linhas), com totais só do que veio

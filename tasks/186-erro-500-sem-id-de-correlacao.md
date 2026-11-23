@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 8ed8fd2
 ---
 
 # Erro 500 sem identificador: o usuário vê "Algo deu errado" e o log não tem como ser achado

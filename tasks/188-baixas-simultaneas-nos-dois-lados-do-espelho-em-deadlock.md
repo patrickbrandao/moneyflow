@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5384fd8
 ---
 
 # Baixas simultâneas nos dois lados do espelho entram em deadlock e voltam como erro 500

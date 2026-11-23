@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d6f991c
 ---
 
 # Sessão que cai desmonta o console inteiro e perde o formulário que estava sendo preenchido

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: f5e6c13
 ---
 
 # Textos pt-BR fixos fora do `t` do shared e datas no fuso do navegador nas telas

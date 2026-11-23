@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: b066caf
 ---
 
 # Resposta e botões do agente no Telegram são marcados como enviados antes do envio e se perdem numa falha

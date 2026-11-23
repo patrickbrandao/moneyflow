@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # Specs 021 e 027 descrevem tools de contrato e de regra que não existem mais, e um teste confere uma tool removida

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: ecb16b1
 ---
 
 # Gaveta de um grupo grande do canvas falha: os ids das entidades vão na query string

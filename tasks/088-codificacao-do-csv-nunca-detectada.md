@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: b24cae1
 ---
 
 # Codificação do CSV nunca é detectada: arquivo em Latin-1 entra com "�" nas descrições

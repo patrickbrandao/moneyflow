@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: fd7a041
 ---
 
 # Limite de corpo do JSON: o `/mcp` recusa acima de 1 MB e as rotas públicas leem até 20 MB antes de recusar

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: 388a7d2
 ---
 
 # Regra aprendida da correção não casa nem com a descrição de onde nasceu

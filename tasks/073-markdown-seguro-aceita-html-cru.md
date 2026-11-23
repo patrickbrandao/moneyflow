@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: 2aad6e7
 ---
 
 # O markdown "seguro" aceita HTML cru: `<style>`, `style=`, formulários e `popover` mudam o console inteiro

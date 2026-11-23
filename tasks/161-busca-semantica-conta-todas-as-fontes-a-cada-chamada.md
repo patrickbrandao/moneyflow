@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 990d632
 ---
 
 # A busca semântica recalcula o tamanho de todas as fontes e do índice a cada chamada

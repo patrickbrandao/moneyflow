@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: 83af4a3
 ---
 
 # Release publica `:X.Y.Z` e `:latest` sem verificação e a partir da árvore de trabalho

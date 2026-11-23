@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # set_message_subscriptions grava cada assinatura numa transação: falha no meio deixa metade aplicada

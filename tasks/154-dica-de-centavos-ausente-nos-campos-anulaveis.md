@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # Campos de centavos anuláveis vão ao modelo sem a dica "centavos" (aditivo, multa, limite do cartão)

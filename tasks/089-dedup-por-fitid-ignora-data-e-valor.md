@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: b24cae1
 ---
 
 # Dedup por FITID ignora data e valor: FITID repetido descarta lançamento real ou derruba o import

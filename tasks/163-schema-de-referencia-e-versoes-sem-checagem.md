@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 83af4a3
 ---
 
 # `schema.sql` sem privilégios e sem conferência no CI, e imagens do banco sem versão fixa

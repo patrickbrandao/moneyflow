@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 83af4a3
 ---
 
 # Node 26 no desenvolvimento, 22 no CI e na imagem, `@types/node` 26 e `corepack enable` que não existe mais

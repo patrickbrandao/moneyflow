@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: e035b34
 ---
 
 # Estado das janelas do agente não sincroniza entre abas: a última aba a gravar desfaz o que a outra fechou

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 9b41c2e
 ---
 
 # Importação, casamento e "Aplicar regras" fazem consultas por linha (N+1) numa transação longa

@@ -6,7 +6,7 @@ autor: principal
 responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: cad1ff1
 ---
 
 # `contract_payments` procura a linha conciliada de cada baixa varrendo todas as linhas do sistema

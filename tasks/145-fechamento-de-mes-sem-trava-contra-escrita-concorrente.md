@@ -6,7 +6,7 @@ autor: principal
 responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: d5fa53b
 ---
 
 # Fechar o mês não espera as escritas em andamento naquele mês (escrita entra no mês fechado)

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 14aa8fe
 ---
 
 # Cancelar, arquivar ou rescindir deixa a linha do extrato sugerida para o título cancelado

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 84876e4
 ---
 
 # Paginação do JSON completo compara a parte numérica da chave composta como texto, e nenhum teste passa de um lote

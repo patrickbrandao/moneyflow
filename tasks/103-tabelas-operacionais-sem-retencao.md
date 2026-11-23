@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 0d8d59c
 ---
 
 # Fila, sino, logs operacionais e anexos órfãos crescem sem nenhuma purga

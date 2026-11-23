@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: 84876e4
 ---
 
 # JSON completo com os anexos em hex: a exportação lê 500 anexos por consulta e a importação não lê arquivo acima de 512 MiB

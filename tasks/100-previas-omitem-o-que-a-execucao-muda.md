@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # Cartão de aprovação não mostra parte do que a tool vai mudar (agente, série, senha, encerrar série)

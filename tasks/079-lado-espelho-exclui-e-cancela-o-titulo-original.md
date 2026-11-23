@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 734b618
 ---
 
 # Do lado espelho, excluir, arquivar e "Excluir este e os próximos" mexem no título e na série da outra caixa sem escrita nela

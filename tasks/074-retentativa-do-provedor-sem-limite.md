@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: d0514fa
 ---
 
 # Erro temporário do provedor devolve a execução à fila para sempre

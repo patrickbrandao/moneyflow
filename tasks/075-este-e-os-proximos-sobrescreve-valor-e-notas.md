@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: c75cafa
 ---
 
 # "Este e os próximos" no formulário do título sobrescreve o valor e as notas das ocorrências seguintes, mesmo sem mudá-los

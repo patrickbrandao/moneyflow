@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 832da3f
 ---
 
 # Consultas do extrato escritas de um jeito que impede o uso dos índices feitos para elas

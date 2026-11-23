@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: b3ee66e
 ---
 
 # Saldos em aberto e vencidos recalculam a baixa de todos os títulos já pagos

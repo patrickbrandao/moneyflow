@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 84876e4
 ---
 
 # "Uma operação de backup por vez" usa duas travas diferentes e deixa a restauração correr junto com a importação

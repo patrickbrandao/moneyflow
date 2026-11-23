@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 734b618
 ---
 
 # Estorno com "desfazer transferência" apaga o movimento da conta de outra caixa sem escrita nela

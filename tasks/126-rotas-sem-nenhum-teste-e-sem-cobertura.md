@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 9dcc349
 ---
 
 # Rotas de escrita sem nenhum teste (integração, tool ou e2e) e cobertura nunca medida

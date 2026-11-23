@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 258af1e
 ---
 
 # `verify:quick` sai verde sem rodar teste nenhum na maior parte das mudanças do servidor

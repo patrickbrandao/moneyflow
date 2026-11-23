@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 6ddbeb7
 ---
 
 # Miniatura de PDF no chat mantém um worker do pdf.js por anexo e vaza o documento ao desmontar cedo

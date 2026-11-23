@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d658050
 ---
 
 # Renovar o contrato encurta o fim das obrigações e perde a última ocorrência

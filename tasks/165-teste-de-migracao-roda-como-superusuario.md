@@ -6,7 +6,7 @@ autor: principal
 responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: c362cad
 ---
 
 # O teste de migração com dados roda as migrations como superusuário, ao contrário da produção (tarefa 054)

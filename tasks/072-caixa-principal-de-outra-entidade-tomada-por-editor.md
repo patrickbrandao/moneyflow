@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: 6d9ded8
 ---
 
 # Editor de qualquer caixa toma a caixa principal de outra entidade e passa a receber os espelhos dela

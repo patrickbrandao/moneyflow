@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # Erros inesperados das tools viram "Algo deu errado" sem nenhum log

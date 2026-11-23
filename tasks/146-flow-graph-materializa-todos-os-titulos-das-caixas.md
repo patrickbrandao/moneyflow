@@ -6,7 +6,7 @@ autor: principal
 responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: cad1ff1
 ---
 
 # O canvas de fluxo lê todos os títulos das caixas, de qualquer data, a cada chamada

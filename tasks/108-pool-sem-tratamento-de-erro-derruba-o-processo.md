@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 09b0ea7
 ---
 
 # Pool do Postgres sem `on('error')`: conexão ociosa que cai derruba a API e o worker

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: b24cae1
 ---
 
 # Linhas do CSV com data ou valor inválidos somem do import sem aviso (API e tools)

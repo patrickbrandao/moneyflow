@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 520d60e
 ---
 
 # Ajustes de reconhecimento da série têm dois editores e dois resumos que se comportam diferente

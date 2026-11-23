@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: d0514fa
 ---
 
 # Leitura e conversão de documento desistem em 120 s, mas a execução continua e é paga

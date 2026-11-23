@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: d4bf9d3
 ---
 
 # Sino: as não lidas não vêm primeiro e as que passam das 30 mais recentes ficam inalcançáveis

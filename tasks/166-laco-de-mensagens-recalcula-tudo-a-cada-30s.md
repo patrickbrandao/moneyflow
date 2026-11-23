@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 4c1fd05
 ---
 
 # O laço de mensagens recalcula resumos e views pesadas a cada 30 s só para a dedup descartar

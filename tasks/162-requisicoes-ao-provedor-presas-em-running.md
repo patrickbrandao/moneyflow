@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 0d8d59c
 ---
 
 # Requisição ao provedor interrompida por queda do processo fica "em andamento" até a purga

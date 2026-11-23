@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 49c2aa2
 ---
 
 # E2E: arquivos rodam em paralelo na mesma pilha e o agente ativo de um spec muda o resultado dos outros

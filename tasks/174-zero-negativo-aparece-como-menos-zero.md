@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: ecb16b1
 ---
 
 # Zero negativo aparece como "-R$ 0,00" no formato contábil

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 734b618
 ---
 
 # Conta arquivada: o saldo some da caixa e ela ainda aceita movimentos e extratos

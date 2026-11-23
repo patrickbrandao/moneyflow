@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 7d62132
 ---
 
 # Regravar o token do mesmo bot com a entrada ligada apaga o webhook recém-criado

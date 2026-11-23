@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: ecb16b1
 ---
 
 # Relatório consolidado de uma caixa soma as compras de cartão feitas por outra pagadora

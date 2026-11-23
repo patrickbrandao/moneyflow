@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: aafeffc
 ---
 
 # A materialização da série corre sem trava contra "excluir este e os próximos" e "esta e as próximas" do título

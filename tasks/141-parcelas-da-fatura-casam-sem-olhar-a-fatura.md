@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 9b41c2e
 ---
 
 # Linha da fatura casa com qualquer parcela da compra, sem olhar a fatura do lote

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: b492cc7
 ---
 
 # Falhas engolidas sem log no worker de faturas, de contratos, das séries e na baixa automática

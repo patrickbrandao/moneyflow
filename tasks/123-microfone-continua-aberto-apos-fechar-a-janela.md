@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: f7a4441
 ---
 
 # Microfone fica gravando até 10 minutos se a janela fecha enquanto o navegador pede a permissão

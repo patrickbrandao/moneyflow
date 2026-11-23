@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: c75cafa
 ---
 
 # O vencimento do título de fatura de cartão muda pelo calendário e pelo PATCH, descolando da fatura

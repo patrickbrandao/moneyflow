@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # Auxiliares das prévias duplicados entre os handlers: dinheiro em dois formatos e o filtro de zeros do settle_title que nunca casa

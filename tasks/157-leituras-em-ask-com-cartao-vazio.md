@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # Leitura (e o notify_user) em ask mostra cartão vazio, e leituras com efeito externo vão ao /mcp como inofensivas

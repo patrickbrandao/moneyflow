@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 83af4a3
 ---
 
 # CI sem `permissions`, sem `timeout-minutes`, actions e imagens por tag flutuante e o CI do `main` cancelável

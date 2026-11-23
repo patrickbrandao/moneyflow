@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: alta
 criada: 2026-11-21
-commit:
+commit: ef69b1a
 ---
 
 # Dependências com alertas de segurança (`pnpm audit`: 7 altos) e sem checagem no CI

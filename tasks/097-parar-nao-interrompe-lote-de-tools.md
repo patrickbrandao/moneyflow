@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d0514fa
 ---
 
 # "Parar" e "Finalizar sessão" não interrompem um lote de tools em andamento

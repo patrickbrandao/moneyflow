@@ -6,7 +6,7 @@ autor: principal
 responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 2d09f90
 ---
 
 # Auditoria: a remoção dos segredos e das colunas ruidosas vive só no `audit_row()`, e 11 triggers próprios a contornam

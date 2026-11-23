@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 3e2a06f
 ---
 
 # O saldo projetado por conta no calendário é só o realizado: ignora os previstos da conta

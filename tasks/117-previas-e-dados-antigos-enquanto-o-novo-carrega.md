@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d6f991c
 ---
 
 # Telas mostram e aplicam a prévia ou os dados do filtro anterior enquanto o novo carrega

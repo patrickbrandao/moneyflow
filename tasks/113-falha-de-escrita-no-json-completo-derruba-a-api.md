@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 84876e4
 ---
 
 # Falha de escrita do zip do JSON completo vira rejeição sem tratamento e derruba a API

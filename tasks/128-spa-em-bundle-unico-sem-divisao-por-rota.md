@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 95d50a4
 ---
 
 # O SPA carrega as 26 telas num arquivo só (1,79 MB, 518 KB gzip) antes do login

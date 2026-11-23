@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # "Excluir preço" promete que o uso passa ao preço anterior, mas o custo é congelado na gravação e o preço usado não sai

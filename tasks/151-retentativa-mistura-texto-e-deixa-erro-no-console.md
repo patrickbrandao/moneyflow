@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: d0514fa
 ---
 
 # Na volta à fila por erro do provedor, o console junta o texto parcial ao novo e deixa o erro na tela

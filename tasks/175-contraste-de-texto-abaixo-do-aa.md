@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: bf88a24
 ---
 
 # Texto secundário e valores verdes/vermelhos abaixo do AA (4,5:1), sobretudo no tema escuro padrão

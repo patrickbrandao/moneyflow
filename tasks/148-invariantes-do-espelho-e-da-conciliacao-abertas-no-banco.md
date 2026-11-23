@@ -6,7 +6,7 @@ autor: principal
 responsavel: dba
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 289f9f7
 ---
 
 # Regras do espelho e da conciliação que a docs/016 atribui ao banco, mas só a aplicação garante

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 520d60e
 ---
 
 # Listas que só abrem com o mouse, chat sem anúncios ao leitor de tela, e as regras do Biome que pegariam isso desligadas

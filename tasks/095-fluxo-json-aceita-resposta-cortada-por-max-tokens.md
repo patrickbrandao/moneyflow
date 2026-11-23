@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: d0514fa
 ---
 
 # Os fluxos de documento aceitam como completa a resposta cortada por `max_tokens`

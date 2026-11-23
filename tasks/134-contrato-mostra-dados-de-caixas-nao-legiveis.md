@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: d658050
 ---
 
 # Contrato mostra dados de caixas que o usuário não lê (próxima ocorrência e cobranças no cartão)

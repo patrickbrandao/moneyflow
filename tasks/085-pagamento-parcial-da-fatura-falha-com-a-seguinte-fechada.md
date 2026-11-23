@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: b492cc7
 ---
 
 # Pagamento parcial da fatura (e o crédito do fechamento) falha quando a fatura seguinte já fechou

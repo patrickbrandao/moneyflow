@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: d658050
 ---
 
 # Rescisão com data em mês fechado falha inteira (última ocorrência proporcional e multa)

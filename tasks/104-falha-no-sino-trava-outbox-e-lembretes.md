@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 4c1fd05
 ---
 
 # Uma falha ao gerar as notificações do sino para o Telegram e os alarmes dos lembretes

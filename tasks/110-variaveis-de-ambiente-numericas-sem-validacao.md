@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 13140c3
 ---
 
 # Variáveis de ambiente numéricas vazias ou inválidas viram 0 ou NaN em silêncio

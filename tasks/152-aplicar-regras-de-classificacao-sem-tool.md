@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # A tool de copiar regras manda "aplicar as regras", mas não existe tool para aplicar

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: a0f89b2
 ---
 
 # `pnpm lint` falha quando há uma pasta solta com `biome.json` (hoje, `tmp/`)

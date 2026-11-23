@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: 520d60e
 ---
 
 # Cortar `ObligationFormModal.tsx` (898 linhas) e `ContractPage.tsx` (831) e unificar o diff de versões

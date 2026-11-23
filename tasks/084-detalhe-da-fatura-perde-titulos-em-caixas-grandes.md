@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: b492cc7
 ---
 
 # Detalhe da fatura carrega até 1.000 títulos por caixa e perde os da fatura em caixas grandes

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: fc16066
 ---
 
 # SSE e hub de eventos consultam o banco a cada delta de texto (e o aviso do banco não diz o tipo do evento)

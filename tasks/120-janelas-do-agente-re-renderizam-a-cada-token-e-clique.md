@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: e035b34
 ---
 
 # Janelas do agente re-renderizam a conversa inteira a cada token e a página aberta a cada clique na janela

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 5d66b57
 ---
 
 # Resultados das tools cortados no meio do JSON em 60 mil caracteres, em listas sem paginação (inclusive o extrato sem período)

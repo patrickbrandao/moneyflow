@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: baixa
 criada: 2026-11-21
-commit:
+commit: b492cc7
 ---
 
 # Cartão: encargo aceita pagadora sem Access, e o detalhe da fatura abre com uma pagadora que não é dela

@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: e035b34
 ---
 
 # SSE do chat fica aberto enquanto a execução espera aprovação, uma conexão por janela e por aba

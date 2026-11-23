@@ -6,7 +6,7 @@ autor: principal
 responsavel: app
 prioridade: media
 criada: 2026-11-21
-commit:
+commit: 701195e
 ---
 
 # Parada do processo sem prazo nem ordem, e healthcheck do worker que não diz nada
