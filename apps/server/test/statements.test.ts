@@ -1,13 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENT_TOOLS, statementImportNotices } from '@moneyflow/shared';
+import { createPool, dbSchema } from '@moneyflow/db';
+import { AGENT_TOOLS, addDays, statementImportNotices, statementImportQuery } from '@moneyflow/shared';
 import { sql } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { TOOL_HANDLERS } from '../src/agents/tool-handlers';
 import { loadAccess } from '../src/authz/access';
 import type { ServiceContext } from '../src/context';
 import { storeAttachment } from '../src/services/attachments';
-import { previewStatementImport } from '../src/services/statements';
+import { applyRulesToImport } from '../src/services/reconciliation';
+import { importStatement, previewStatementImport } from '../src/services/statements';
 import { withTx } from '../src/services/tx';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
@@ -1062,5 +1065,229 @@ describe('leitura do arquivo na importação (tarefas 088, 089, 090 e 140)', () 
     );
     expect(keys.rows.map((r) => r.dedup_hash).filter((k) => k === `fitid:${same}`)).toHaveLength(1);
     expect(keys.rows.every((r) => r.dedup_hash.length <= 200)).toBe(true);
+  });
+});
+
+/* ---------------- lote grande (tarefa 139) e parcelas da fatura (tarefa 141) ---------------- */
+
+/** Contexto de serviço de um admin cujo banco conta as consultas (drizzle logger), num pool próprio. */
+async function countingCtx(session: Awaited<ReturnType<typeof userSession>>) {
+  const pool = createPool(inject('databaseUrl'), 2);
+  const counter = { queries: 0 };
+  const db = drizzle(pool, {
+    schema: dbSchema,
+    logger: {
+      logQuery: () => {
+        counter.queries += 1;
+      },
+    },
+  });
+  const actor = {
+    id: session.id,
+    username: session.username,
+    email: `${session.username}@teste.local`,
+    role: 'admin' as const,
+    isActive: true,
+  };
+  const ctx: ServiceContext = { db, access: await loadAccess(db, actor), config: h.config };
+  /** Quantas consultas `run` fez. */
+  const measure = async <T>(run: () => Promise<T>) => {
+    const before = counter.queries;
+    const value = await run();
+    return { value, queries: counter.queries - before };
+  };
+  return { ctx, measure, close: () => pool.end() };
+}
+
+describe('lote grande na importação e no "Aplicar regras" (tarefa 139)', () => {
+  it('2.000 linhas: casamento e regras como antes, e o número de consultas não cresce com as linhas', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const counting = await countingCtx(session);
+    try {
+      const rule = await admin.post('/api/classification-rules', {
+        accountId: s.accountA.id,
+        pattern: 'mercado',
+        direction: 'out',
+        entityId: s.supplier.id,
+        categoryId: s.expense.id,
+      });
+      // Em cada lote: um movimento já lançado (conciliado) e um título em aberto (sugerido).
+      const planted = async (month: string, cents: number) => {
+        const movement = await admin.post(`/api/accounts/${s.accountA.id}/adjustments`, {
+          occurredOn: `${month}-03`,
+          amountCents: -cents,
+          description: 'Assinatura streaming',
+          categoryId: s.expense.id,
+        });
+        const title = await admin.post('/api/titles', {
+          caixaId: s.caixaA.id,
+          direction: 'payable',
+          entityId: s.supplier.id,
+          categoryId: s.expense.id,
+          description: 'Conta de luz',
+          competenceDate: `${month}-01`,
+          dueDate: `${month}-07`,
+          amountCents: cents + 1,
+        });
+        return {
+          movement,
+          title,
+          lines: [
+            { date: `${month}-03`, cents: -cents, memo: 'ASSINATURA STREAMING' },
+            { date: `${month}-07`, cents: -(cents + 1), memo: 'CONTA DE LUZ' },
+          ],
+        };
+      };
+      const generated = (n: number, start: string) =>
+        Array.from({ length: n }, (_, i) => ({
+          date: addDays(start, i % 180),
+          cents: -(10_000 + i),
+          memo: i % 10 === 0 ? `COMPRA MERCADO ${i}` : `PIX ENVIADO ${i}`,
+        }));
+      const importLines = (lines: { date: string; cents: number; memo: string }[]) =>
+        counting.measure(() =>
+          importStatement(counting.ctx, statementImportQuery.parse({ accountId: s.accountA.id, fileName: 'extrato.ofx' }), {
+            mime: 'application/x-ofx',
+            content: ofxOf(lines),
+          }),
+        );
+
+      const smallPlanted = await planted('2026-01', 5_990);
+      const small = await importLines([...smallPlanted.lines, ...generated(8, '2026-01-10')]);
+      const bigPlanted = await planted('2026-08', 6_990);
+      const started = performance.now();
+      const big = await importLines([...bigPlanted.lines, ...generated(1_998, '2026-02-01')]);
+      const elapsed = performance.now() - started;
+
+      // O resultado do casamento e das regras é o de sempre.
+      const summary = async (importId: string) => {
+        const r = await h.db.execute<{ ruled: number; matched: number; suggested: number }>(sql`
+          SELECT count(*) FILTER (WHERE classification_source = 'rule' AND entity_id = ${s.supplier.id})::int AS ruled,
+                 count(*) FILTER (WHERE status = 'matched')::int AS matched,
+                 count(*) FILTER (WHERE status = 'suggested')::int AS suggested
+            FROM statement_lines WHERE statement_import_id = ${importId}`);
+        return r.rows[0];
+      };
+      expect(await summary(small.value.id)).toEqual({ ruled: 1, matched: 1, suggested: 1 });
+      expect(await summary(big.value.id)).toEqual({ ruled: 200, matched: 1, suggested: 1 });
+      const links = await h.db.execute<{ movement_id: string | null; title_id: string | null }>(sql`
+        SELECT movement_id, title_id FROM statement_lines
+         WHERE statement_import_id = ${big.value.id} AND status IN ('matched', 'suggested') ORDER BY posted_on`);
+      expect(links.rows).toEqual([
+        { movement_id: bigPlanted.movement.id, title_id: null },
+        { movement_id: null, title_id: bigPlanted.title.id },
+      ]);
+      expect((await admin.get(`/api/classification-rules?accountId=${s.accountA.id}`)).find((r: any) => r.id === rule.id)).toMatchObject({
+        usageCount: 201,
+      });
+
+      // Fora os blocos de 500 do INSERT, o lote de 2.000 faz as mesmas consultas que o de 10.
+      expect(big.queries).toBe(small.queries + Math.ceil(2_000 / 500) - 1);
+      expect(elapsed).toBeLessThan(30_000);
+
+      // "Aplicar regras": a regra nova pega os PIX das linhas novas, com as mesmas consultas nos dois lotes.
+      await admin.post('/api/classification-rules', { accountId: s.accountA.id, pattern: 'pix enviado', entityId: s.holderB.id });
+      const smallApply = await counting.measure(() => applyRulesToImport(counting.ctx, small.value.id));
+      const bigApply = await counting.measure(() => applyRulesToImport(counting.ctx, big.value.id));
+      expect(smallApply.value).toEqual({ updated: 7 });
+      expect(bigApply.value).toEqual({ updated: 1_798 });
+      expect(bigApply.queries).toBe(smallApply.queries);
+      const pix = await h.db.execute<{ n: number }>(sql`
+        SELECT count(*)::int AS n FROM statement_lines
+         WHERE statement_import_id = ${big.value.id} AND entity_id = ${s.holderB.id} AND classification_source = 'rule'`);
+      expect(pix.rows[0]!.n).toBe(1_798);
+    } finally {
+      await counting.close();
+    }
+  });
+});
+
+function cardOfxOf(lines: { date: string; cents: number; memo: string }[]) {
+  const key = Math.random().toString(36).slice(2, 10);
+  const trn = lines
+    .map(
+      (l, i) =>
+        `<STMTTRN><TRNTYPE>DEBIT</TRNTYPE><DTPOSTED>${l.date.replaceAll('-', '')}120000</DTPOSTED>` +
+        `<TRNAMT>${(l.cents / 100).toFixed(2)}</TRNAMT><FITID>${key}-${i}</FITID><NAME>${l.memo}</NAME></STMTTRN>`,
+    )
+    .join('\n');
+  const dates = lines.map((l) => l.date.replaceAll('-', '')).sort();
+  return Buffer.from(`OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+
+<OFX><CREDITCARDMSGSRSV1><CCSTMTTRNRS><CCSTMTRS><CURDEF>BRL</CURDEF>
+<CCACCTFROM><ACCTID>4111********1111</ACCTID></CCACCTFROM>
+<BANKTRANLIST><DTSTART>${dates[0]}</DTSTART><DTEND>${dates.at(-1)}</DTEND>
+${trn}
+</BANKTRANLIST></CCSTMTRS></CCSTMTTRNRS></CREDITCARDMSGSRSV1></OFX>`);
+}
+
+describe('parcelas da fatura do cartão (tarefa 141)', () => {
+  it('a linha casa com a parcela da fatura do lote, mesmo fora de ordem; sem fatura, a de menor número em aberto', async () => {
+    const session = await userSession(h, 'admin');
+    const admin = client(h, session.cookie);
+    const s = await scenario(h, admin);
+    const issuer = await admin.post('/api/entities', { kind: 'company', name: `Emissor ${s.tag}` });
+    const card = await admin.post('/api/caixas', {
+      name: `Cartão ${s.tag}`,
+      kind: 'credit_card',
+      holderEntityId: issuer.id,
+      defaultPayerCaixaId: s.caixaA.id,
+      creditLimitCents: 500_000,
+      closingDay: 25,
+      dueDay: 5,
+      cardLast4: '1111',
+    });
+    const purchase = (description: string, purchasedOn: string, amountCents: number, installmentsTotal = 1) =>
+      admin.post(`/api/cards/${card.id}/purchases`, {
+        entityId: s.supplier.id,
+        categoryId: s.expense.id,
+        purchasedOn,
+        description,
+        amountCents,
+        installmentsTotal,
+      });
+    const itemsOf = async (purchaseId: string) =>
+      (
+        await h.db.execute<{ id: string; card_invoice_id: string }>(sql`
+          SELECT id, card_invoice_id FROM card_invoice_items WHERE card_purchase_id = ${purchaseId} ORDER BY installment_number`)
+      ).rows;
+    const shop = await purchase('Loja X', '2026-10-02', 30_000, 3);
+    const parcels = await itemsOf(shop.id);
+    expect(new Set(parcels.map((p) => p.card_invoice_id)).size).toBe(3);
+    const cash = await purchase('Posto Estrela', '2026-10-04', 8_000);
+    const [cashItem] = await itemsOf(cash.id);
+    expect(cashItem!.card_invoice_id).toBe(parcels[0]!.card_invoice_id);
+
+    const importInvoice = async (invoiceId: string | null, lines: { date: string; cents: number; memo: string }[]) => {
+      const query = invoiceId ? `&cardInvoiceId=${invoiceId}` : '';
+      const res = await upload(
+        session.cookie,
+        `/api/statement-imports?cardCaixaId=${card.id}&fileName=fatura.ofx${query}`,
+        cardOfxOf(lines),
+      );
+      expect(res.statusCode, res.body).toBe(200);
+      return res.json().lines as any[];
+    };
+    // A fatura do mês 2 antes da do mês 1: a parcela 2, conciliada direto (sobra uma parcela só dessa fatura).
+    // A compra à vista, que está na fatura do mês 1, entra pelos candidatos das outras faturas.
+    const second = await importInvoice(parcels[1]!.card_invoice_id, [
+      { date: '2026-10-02', cents: -10_000, memo: 'LOJA X 02/03' },
+      { date: '2026-10-04', cents: -8_000, memo: 'POSTO ESTRELA' },
+    ]);
+    expect(second.find((l) => l.amountCents === -10_000)).toMatchObject({ status: 'matched', cardInvoiceItemId: parcels[1]!.id });
+    expect(second.find((l) => l.amountCents === -8_000)).toMatchObject({ status: 'matched', cardInvoiceItemId: cashItem!.id });
+    // Depois a do mês 1: a parcela 1, não a 3.
+    const first = await importInvoice(parcels[0]!.card_invoice_id, [{ date: '2026-10-02', cents: -10_000, memo: 'LOJA X 01/03' }]);
+    expect(first[0]).toMatchObject({ status: 'matched', cardInvoiceItemId: parcels[0]!.id });
+
+    // Sem a fatura no lote: as parcelas empatam e a sugerida é a de menor número em aberto.
+    const other = await purchase('Loja Y', '2026-10-06', 15_000, 3);
+    const otherParcels = await itemsOf(other.id);
+    const loose = await importInvoice(null, [{ date: '2026-10-06', cents: -5_000, memo: 'LOJA Y 02/03' }]);
+    expect(loose[0]).toMatchObject({ status: 'suggested', cardInvoiceItemId: otherParcels[0]!.id });
   });
 });

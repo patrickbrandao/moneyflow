@@ -6,7 +6,7 @@
 - No **fechamento**, gera-se uma fatura-título por caixa pagadora (soma das compras dela): "a receber" na caixa do cartão, espelhada como "a pagar" na pagadora ([006](006-espelhamento-entre-caixas.md)). A pagadora navega da fatura para o detalhe das compras (só as dela; sem leitura do cartão, uma caixa que não paga a fatura não a abre, tarefa 133).
 - Pagamento parcial ou antecipado abate a fatura; o restante rola para a próxima, com juros/IOF/multa lançados como encargos do emissor. A fatura pode ser reaberta enquanto não houver pagamento.
 - A aba **Compras** filtra pela data da compra com o mesmo período do extrato: padrão dos últimos 60 dias e próximos 30, atalhos Mês anterior, Mês atual, Próximo mês e Hoje, e a última escolha lembrada por cartão ([004](004-caixas-e-contas.md)).
-- Import de fatura OFX/CSV ([009](009-extratos-e-conciliacao.md)): as linhas casam com as parcelas lançadas (valor oposto, data da compra ±3 dias) ou viram compras.
+- Import de fatura OFX/CSV ([009](009-extratos-e-conciliacao.md)): as linhas casam com as parcelas lançadas (valor oposto, data da compra ±3 dias) ou viram compras. As parcelas da mesma compra têm a mesma data e o mesmo valor: com a fatura escolhida no lote, a linha procura só as parcelas dessa fatura (as das outras faturas só quando ela não tem nenhuma), e a parcela que sobra sozinha concilia direto; sem a fatura no lote, as parcelas empatadas sugerem a de menor número em aberto.
 
 ## Regras de operação (F2)
 

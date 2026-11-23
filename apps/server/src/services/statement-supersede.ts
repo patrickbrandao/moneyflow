@@ -235,48 +235,72 @@ export async function supersedeInTx(
   const result = planResult(plan, substituteId, provisionalIds, Boolean(opts.dryRun));
   if (opts.dryRun) return result;
 
+  // Um UPDATE por grupo, qualquer que seja o tamanho dos lotes (tarefa 139), na ordem: o lote, as linhas do
+  // provisório (soltam os movimentos) e as do consolidado.
   await tx.execute(sql`
     UPDATE statement_imports SET superseded_by_import_id = ${substituteId}, superseded_at = now()
      WHERE id = ANY (${uuidArray(provisionalIds)})`);
-  for (const outcome of ['transferred', 'paired', 'dropped'] as const) {
-    for (const item of plan.items.filter((i) => i.outcome === outcome)) {
-      await tx.execute(sql`
-        UPDATE statement_lines
-           SET status = 'superseded', matched_at = NULL, movement_id = NULL, title_id = NULL, card_invoice_item_id = NULL,
-               created_entry = NULL, auto_settled = false, supersede_outcome = ${outcome}, superseded_by_line_id = ${item.c?.id ?? null}
-         WHERE id = ${item.p.id}`);
-    }
+  const released = plan.items
+    .filter((i) => i.outcome !== 'pending')
+    .map((i) => ({ id: i.p.id, outcome: i.outcome, by_line: i.c?.id ?? null }));
+  if (released.length > 0) {
+    await tx.execute(sql`
+      UPDATE statement_lines l
+         SET status = 'superseded', matched_at = NULL, movement_id = NULL, title_id = NULL, card_invoice_item_id = NULL,
+             created_entry = NULL, auto_settled = false, supersede_outcome = x.outcome, superseded_by_line_id = x.by_line
+        FROM json_to_recordset(${JSON.stringify(released)}::json) AS x(id uuid, outcome text, by_line uuid)
+       WHERE l.id = x.id`);
   }
   const pending = plan.items.filter((i) => i.outcome === 'pending').map((i) => i.p.id);
   if (pending.length > 0) {
     await tx.execute(sql`UPDATE statement_lines SET supersede_outcome = 'pending' WHERE id = ANY (${uuidArray(pending)})`);
   }
+  const transfers: { c: string; p: ProvLine }[] = [];
+  const ignored: string[] = [];
+  const classified: { id: string; entity_id: string | null; category_id: string | null }[] = [];
   for (const { p, c, outcome } of plan.items) {
     if (!c) continue;
-    if (outcome === 'transferred') {
-      await transferTo(tx, c.id, p);
-    } else if (p.status === 'ignored' && c.status === 'new') {
-      await tx.execute(sql`
-        UPDATE statement_lines SET status = 'ignored', movement_id = NULL, title_id = NULL, card_invoice_item_id = NULL
-         WHERE id = ${c.id}`);
-    } else if (p.classification_source === 'user' && c.classification_source !== 'user' && (p.entity_id || p.category_id)) {
-      await tx.execute(sql`
-        UPDATE statement_lines
-           SET entity_id = ${p.entity_id}, category_id = ${p.category_id}, classification_source = 'user', classification_rule_id = NULL
-         WHERE id = ${c.id}`);
-    }
+    if (outcome === 'transferred') transfers.push({ c: c.id, p });
+    else if (p.status === 'ignored' && c.status === 'new') ignored.push(c.id);
+    else if (p.classification_source === 'user' && c.classification_source !== 'user' && (p.entity_id || p.category_id))
+      classified.push({ id: c.id, entity_id: p.entity_id, category_id: p.category_id });
+  }
+  await transferMany(tx, transfers);
+  if (ignored.length > 0) {
+    await tx.execute(sql`
+      UPDATE statement_lines SET status = 'ignored', movement_id = NULL, title_id = NULL, card_invoice_item_id = NULL
+       WHERE id = ANY (${uuidArray(ignored)})`);
+  }
+  if (classified.length > 0) {
+    await tx.execute(sql`
+      UPDATE statement_lines l
+         SET entity_id = x.entity_id, category_id = x.category_id, classification_source = 'user', classification_rule_id = NULL
+        FROM json_to_recordset(${JSON.stringify(classified)}::json) AS x(id uuid, entity_id uuid, category_id uuid)
+       WHERE l.id = x.id`);
   }
   return result;
 }
 
-/** A linha do consolidado passa a conciliada com o movimento da provisória, com a mesma marca created_entry. */
-async function transferTo(tx: Executor, consolidatedLineId: string, p: Pick<ProvLine, 'movement_id' | 'created_entry' | 'auto_settled'>) {
+type Transferred = Pick<ProvLine, 'movement_id' | 'created_entry' | 'auto_settled'>;
+
+/** As linhas do consolidado passam a conciliadas com os movimentos das provisórias, com a mesma marca created_entry. */
+async function transferMany(tx: Executor, items: { c: string; p: Transferred }[]) {
+  if (items.length === 0) return;
+  const rows = items.map(({ c, p }) => ({
+    id: c,
+    movement_id: p.movement_id,
+    created_entry: p.created_entry,
+    auto_settled: Boolean(p.auto_settled && p.created_entry),
+  }));
   await tx.execute(sql`
-    UPDATE statement_lines
-       SET status = 'matched', matched_at = now(), movement_id = ${p.movement_id}, title_id = NULL, card_invoice_item_id = NULL,
-           created_entry = ${p.created_entry}, auto_settled = ${Boolean(p.auto_settled && p.created_entry)}
-     WHERE id = ${consolidatedLineId}`);
+    UPDATE statement_lines l
+       SET status = 'matched', matched_at = now(), movement_id = x.movement_id, title_id = NULL, card_invoice_item_id = NULL,
+           created_entry = x.created_entry, auto_settled = x.auto_settled
+      FROM json_to_recordset(${JSON.stringify(rows)}::json) AS x(id uuid, movement_id uuid, created_entry text, auto_settled boolean)
+     WHERE l.id = x.id`);
 }
+
+const transferTo = (tx: Executor, consolidatedLineId: string, p: Transferred) => transferMany(tx, [{ c: consolidatedLineId, p }]);
 
 /** Toma o lock de cada lote e recusa (409) com conciliação com IA ou receita em andamento em algum deles. */
 export async function lockImports(tx: Executor, ids: string[]) {

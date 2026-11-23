@@ -3,6 +3,7 @@ import { attachments, type Executor, statementCsvMappings, statementImports, sta
 import {
   addDays,
   applyCsvMapping,
+  type CardChargeOccurrence,
   type CardChargeSuggestion,
   type CsvMapping,
   cardChargeMatch,
@@ -29,6 +30,7 @@ import {
   pickOfxStatement,
   pickSeriesOccurrences,
   type SeriesCandidateInfo,
+  type SeriesOccurrenceRow,
   type StatementFitidCollisions,
   type StatementImportDetail,
   type StatementImportSummary,
@@ -303,9 +305,11 @@ export function dedupHashes(lines: DedupLine[], holders: ReadonlyMap<string, Fit
   });
 }
 
-/** A deduplicação não conta as linhas dos lotes provisórios (spec 031): o consolidado traz o mês inteiro. */
-const notProvisional = sql`NOT EXISTS (SELECT 1 FROM statement_imports si
-                                    WHERE si.id = statement_lines.statement_import_id AND si.provisional)`;
+/**
+ * A deduplicação não conta as linhas dos lotes provisórios (spec 031): o consolidado traz o mês inteiro. Pela
+ * cópia na linha, que o banco mantém para o índice parcial statement_lines_account_dedup_key (tarefa 139).
+ */
+const notProvisional = sql`NOT statement_lines.provisional`;
 
 /**
  * As linhas do arquivo contra as da conta (ou do cartão): a chave de cada uma,
@@ -503,12 +507,17 @@ export async function importStatement(
       })
       .returning({ id: statementImports.id });
 
+    // As regras de todas as linhas numa consulta só (tarefa 139).
+    const rules = await rulesFor(
+      tx,
+      ruleTargetOf(target),
+      fresh.map(({ line }) => line),
+    );
     const usage = new Map<string, number>();
-    const values = [];
-    for (const { line, hash } of fresh) {
-      const rule = await ruleFor(tx, ruleTargetOf(target), line.description, line.amountCents);
+    const values = fresh.map(({ line, hash }, i) => {
+      const rule = rules[i];
       if (rule) usage.set(rule.id, (usage.get(rule.id) ?? 0) + 1);
-      values.push({
+      return {
         statementImportId: imp!.id,
         financialAccountId: target.kind === 'account' ? target.accountId : null,
         cardCaixaId: target.kind === 'card' ? target.cardId : null,
@@ -521,16 +530,12 @@ export async function importStatement(
         entityId: rule?.entityId ?? null,
         categoryId: rule?.categoryId ?? null,
         classificationRuleId: rule?.id ?? null,
-        classificationSource: rule ? 'rule' : null,
+        classificationSource: rule ? ('rule' as const) : null,
         raw: line.raw,
-      });
-    }
+      };
+    });
     for (let i = 0; i < values.length; i += 500) await tx.insert(statementLines).values(values.slice(i, i + 500));
-    for (const [ruleId, count] of usage) {
-      await tx.execute(
-        sql`UPDATE classification_rules SET usage_count = usage_count + ${count}, last_used_at = now() WHERE id = ${ruleId}`,
-      );
-    }
+    await bumpRuleUsage(tx, usage);
     // Spec 031: a troca dos provisórios antes do casamento automático (as conciliações passam, nada é lançado de novo).
     // Um provisório novo substitui sempre os provisórios ativos que ele cobre; o consolidado, os escolhidos.
     let superseded: SupersedeResult | undefined;
@@ -571,11 +576,39 @@ export const ruleTargetOf = (target: StatementTarget): RuleTarget =>
 
 /** Regra aplicável (classification_rule_for, só as do alvo da linha) com a entidade/categoria dela. */
 export async function ruleFor(tx: Executor, target: RuleTarget, description: string, amountCents: number): Promise<Rule | null> {
-  const result = await tx.execute<{ id: string; entity_id: string | null; category_id: string | null }>(sql`
-    SELECT r.id, r.entity_id, r.category_id FROM classification_rules r
-     WHERE r.id = classification_rule_for(${target.accountId}::uuid, ${target.cardCaixaId}::uuid, ${description}, ${amountCents}::bigint)`);
-  const row = result.rows[0];
-  return row ? { id: row.id, entityId: row.entity_id, categoryId: row.category_id } : null;
+  return (await rulesFor(tx, target, [{ description, amountCents }]))[0] ?? null;
+}
+
+/**
+ * O ruleFor de várias linhas do mesmo alvo, na ordem delas: uma consulta só
+ * para o lote inteiro, com uma chamada de classification_rule_for por linha
+ * (tarefa 139; a importação e o "Aplicar regras" usam esta).
+ */
+export async function rulesFor(
+  tx: Executor,
+  target: RuleTarget,
+  lines: { description: string; amountCents: number }[],
+): Promise<(Rule | null)[]> {
+  if (lines.length === 0) return [];
+  const items = lines.map((l, i) => ({ i, d: l.description, v: l.amountCents }));
+  const result = await tx.execute<{ i: number; id: string; entity_id: string | null; category_id: string | null }>(sql`
+    WITH x AS MATERIALIZED (
+      SELECT x.i, classification_rule_for(${target.accountId}::uuid, ${target.cardCaixaId}::uuid, x.d, x.v) AS rule_id
+        FROM json_to_recordset(${JSON.stringify(items)}::json) AS x(i int, d text, v bigint))
+    SELECT x.i, r.id, r.entity_id, r.category_id FROM x JOIN classification_rules r ON r.id = x.rule_id`);
+  const out: (Rule | null)[] = lines.map(() => null);
+  for (const row of result.rows) out[Number(row.i)] = { id: row.id, entityId: row.entity_id, categoryId: row.category_id };
+  return out;
+}
+
+/** Soma o uso das regras (importação e "Aplicar regras", spec 009) numa consulta só. */
+export async function bumpRuleUsage(tx: Executor, usage: Map<string, number>) {
+  if (usage.size === 0) return;
+  const rows = [...usage].map(([id, n]) => ({ id, n }));
+  await tx.execute(sql`
+    UPDATE classification_rules r SET usage_count = r.usage_count + x.n, last_used_at = now()
+      FROM json_to_recordset(${JSON.stringify(rows)}::json) AS x(id uuid, n int)
+     WHERE r.id = x.id`);
 }
 
 /* ---------------- casamento assistido ---------------- */
@@ -587,123 +620,194 @@ type LineRow = {
   description: string;
   financial_account_id: string | null;
   card_caixa_id: string | null;
+  /** Na fatura do cartão, a fatura do lote (tarefa 141): as parcelas dela vêm no lugar das de outras faturas. */
+  card_invoice_id?: string | null;
 };
 
+/** Pré-filtro largo das ocorrências de série e das cobranças esperadas: a janela vai a 45 dias e o mesmo mês soma até 31. */
+const SERIES_PREFILTER_DAYS = 76;
+
+const bigintArray = (values: number[]) => sql`${`{${values.join(',')}}`}::bigint[]`;
+
+type SeriesRow = { direction: 'payable' | 'receivable'; occ: SeriesOccurrenceRow };
+type PoolItem = MatchCandidate & { invoiceId: string };
+
 /**
- * Candidatos de uma linha: movimentos da conta, títulos em aberto da caixa
- * (valor exato, ±3 dias), as ocorrências de séries pela regra de
- * reconhecimento da série (specs 033 e 034) e, na fatura do cartão, os itens
- * e as cobranças esperadas das obrigações no cartão.
+ * O que as linhas de um lote (da mesma conta ou do mesmo cartão) podem casar,
+ * lido de uma vez para o intervalo das datas e os valores delas (tarefa 139):
+ * movimentos livres da conta, títulos em aberto da caixa, ocorrências de
+ * série e, na fatura, os itens e as cobranças esperadas. Cada linha filtra o
+ * seu pedaço em memória (candidatesFromPool), com o mesmo resultado da
+ * consulta por linha.
  */
-export async function candidatesFor(tx: Executor, line: LineRow, windowDays = 3): Promise<MatchCandidate[]> {
-  const from = addDays(line.posted_on, -windowDays);
-  const to = addDays(line.posted_on, windowDays);
-  const matchLine = { postedOn: line.posted_on, amountCents: Number(line.amount_cents), description: line.description };
-  if (line.card_caixa_id) {
-    const items = await tx.execute<{ id: string; date: string; amount_cents: number; description: string; entity_name: string | null }>(sql`
-      SELECT i.id, p.purchased_on AS date, -i.amount_cents AS amount_cents, p.description, e.name AS entity_name
+type CandidatePool = {
+  windowDays: number;
+  moves: MatchCandidate[];
+  titles: MatchCandidate[];
+  series: SeriesRow[];
+  items: PoolItem[];
+  charges: CardChargeOccurrence[];
+};
+
+async function loadCandidatePool(tx: Executor, lines: LineRow[], windowDays: number): Promise<CandidatePool> {
+  const pool: CandidatePool = { windowDays, moves: [], titles: [], series: [], items: [], charges: [] };
+  const first = lines[0];
+  if (!first) return pool;
+  const dates = lines.map((l) => l.posted_on).sort();
+  const from = addDays(dates[0]!, -windowDays);
+  const to = addDays(dates.at(-1)!, windowDays);
+  const amounts = [...new Set(lines.map((l) => Number(l.amount_cents)))];
+  if (first.card_caixa_id) {
+    const items = await tx.execute<{
+      id: string;
+      invoice_id: string;
+      date: string;
+      amount_cents: number;
+      description: string;
+      entity_name: string | null;
+    }>(sql`
+      SELECT i.id, i.card_invoice_id AS invoice_id, p.purchased_on AS date, -i.amount_cents AS amount_cents, p.description,
+             e.name AS entity_name
         FROM card_invoice_items i
         JOIN card_invoices v ON v.id = i.card_invoice_id
         JOIN card_purchases p ON p.id = i.card_purchase_id
         JOIN entities e ON e.id = p.entity_id
-       WHERE v.card_caixa_id = ${line.card_caixa_id} AND i.kind = 'installment'
-         AND -i.amount_cents = ${line.amount_cents}
+       WHERE v.card_caixa_id = ${first.card_caixa_id} AND i.kind = 'installment'
+         AND -i.amount_cents = ANY (${bigintArray(amounts)})
          AND p.purchased_on BETWEEN ${from}::date AND ${to}::date
-         AND NOT EXISTS (SELECT 1 FROM statement_lines sl WHERE sl.card_invoice_item_id = i.id AND sl.status = 'matched')`);
-    // Cobranças esperadas (spec 034): pré-filtro largo, a janela vai a 45 dias e o mesmo mês soma até 31.
-    const charges = await expectedCardOccurrences(tx, line.card_caixa_id, addDays(line.posted_on, -76), addDays(line.posted_on, 76));
-    return [
-      ...items.rows.map((r) => ({
-        kind: 'card_item' as const,
-        id: r.id,
-        date: r.date,
-        amountCents: Number(r.amount_cents),
-        description: r.description,
-        entityName: r.entity_name,
-      })),
-      ...charges.map((c) => cardChargeMatch(matchLine, c)).filter((c): c is MatchCandidate => c !== null),
-    ];
-  }
-  const [moves, open] = await Promise.all([
-    tx.execute<{ id: string; date: string; amount_cents: number; description: string | null; entity_name: string | null }>(sql`
-      SELECT m.id, m.occurred_on AS date, m.amount_cents, coalesce(m.description, t.description) AS description, e.name AS entity_name
-        FROM movements m
-        LEFT JOIN settlements s ON s.id = m.settlement_id
-        LEFT JOIN titles t ON t.id = s.title_id
-        LEFT JOIN entities e ON e.id = coalesce(m.entity_id, t.entity_id)
-       WHERE m.financial_account_id = ${line.financial_account_id} AND m.amount_cents = ${line.amount_cents}
-         AND m.occurred_on BETWEEN ${from}::date AND ${to}::date
-         AND NOT EXISTS (SELECT 1 FROM statement_lines sl WHERE sl.movement_id = m.id AND sl.status = 'matched')`),
-    tx.execute<{ id: string; date: string; amount_cents: number; description: string; entity_name: string }>(sql`
-      SELECT t.id, t.due_date AS date,
-             CASE t.direction WHEN 'payable' THEN -b.open_cents ELSE b.open_cents END AS amount_cents,
-             t.description, e.name AS entity_name
-        FROM titles t
-        JOIN title_balances b ON b.title_id = t.id
-        JOIN entities e ON e.id = t.entity_id
-        JOIN financial_accounts a ON a.id = ${line.financial_account_id}::uuid
-       WHERE t.caixa_id = a.caixa_id AND t.status IN ('open', 'partial') AND t.archived_at IS NULL
-         AND b.open_cents = abs(${line.amount_cents}::bigint)
-         AND t.direction = ${line.amount_cents < 0 ? 'payable' : 'receivable'}
-         AND t.due_date BETWEEN ${from}::date AND ${to}::date`),
-  ]);
-  const occurrences = await seriesCandidates(tx, line);
-  return [
-    ...occurrences,
-    ...moves.rows.map((r) => ({
-      kind: 'movement' as const,
+         AND NOT EXISTS (SELECT 1 FROM statement_lines sl WHERE sl.card_invoice_item_id = i.id AND sl.status = 'matched')
+       -- Parcelas iguais da mesma compra (tarefa 141): a de menor número em aberto primeiro.
+       ORDER BY i.installment_number, p.purchased_on, i.id`);
+    pool.items = items.rows.map((r) => ({
+      kind: 'card_item' as const,
       id: r.id,
-      date: r.date,
-      amountCents: Number(r.amount_cents),
-      description: r.description ?? '',
-      entityName: r.entity_name,
-    })),
-    ...open.rows.map((r) => ({
-      kind: 'title' as const,
-      id: r.id,
+      invoiceId: r.invoice_id,
       date: r.date,
       amountCents: Number(r.amount_cents),
       description: r.description,
       entityName: r.entity_name,
-    })),
-  ];
+    }));
+    pool.charges = await expectedCardOccurrences(
+      tx,
+      first.card_caixa_id,
+      addDays(dates[0]!, -SERIES_PREFILTER_DAYS),
+      addDays(dates.at(-1)!, SERIES_PREFILTER_DAYS),
+    );
+    return pool;
+  }
+  const accountId = first.financial_account_id;
+  if (!accountId) return pool;
+  const moves = await tx.execute<{
+    id: string;
+    date: string;
+    amount_cents: number;
+    description: string | null;
+    entity_name: string | null;
+  }>(sql`
+    SELECT m.id, m.occurred_on AS date, m.amount_cents, coalesce(m.description, t.description) AS description, e.name AS entity_name
+      FROM movements m
+      LEFT JOIN settlements s ON s.id = m.settlement_id
+      LEFT JOIN titles t ON t.id = s.title_id
+      LEFT JOIN entities e ON e.id = coalesce(m.entity_id, t.entity_id)
+     WHERE m.financial_account_id = ${accountId} AND m.amount_cents = ANY (${bigintArray(amounts)})
+       AND m.occurred_on BETWEEN ${from}::date AND ${to}::date
+       AND NOT EXISTS (SELECT 1 FROM statement_lines sl WHERE sl.movement_id = m.id AND sl.status = 'matched')
+     ORDER BY m.occurred_on, m.id`);
+  pool.moves = moves.rows.map((r) => ({
+    kind: 'movement' as const,
+    id: r.id,
+    date: r.date,
+    amountCents: Number(r.amount_cents),
+    description: r.description ?? '',
+    entityName: r.entity_name,
+  }));
+  const titles = await tx.execute<{ id: string; date: string; amount_cents: number; description: string; entity_name: string }>(sql`
+    SELECT t.id, t.due_date AS date,
+           CASE t.direction WHEN 'payable' THEN -b.open_cents ELSE b.open_cents END AS amount_cents,
+           t.description, e.name AS entity_name
+      FROM titles t
+      JOIN title_balances b ON b.title_id = t.id
+      JOIN entities e ON e.id = t.entity_id
+      JOIN financial_accounts a ON a.id = ${accountId}::uuid
+     WHERE t.caixa_id = a.caixa_id AND t.status IN ('open', 'partial') AND t.archived_at IS NULL
+       AND b.open_cents = ANY (${bigintArray([...new Set(amounts.map(Math.abs))])})
+       AND t.due_date BETWEEN ${from}::date AND ${to}::date
+     ORDER BY t.due_date, t.id`);
+  pool.titles = titles.rows.map((r) => ({
+    kind: 'title' as const,
+    id: r.id,
+    date: r.date,
+    amountCents: Number(r.amount_cents),
+    description: r.description,
+    entityName: r.entity_name,
+  }));
+  pool.series = await seriesRows(tx, accountId, addDays(dates[0]!, -SERIES_PREFILTER_DAYS), addDays(dates.at(-1)!, SERIES_PREFILTER_DAYS));
+  return pool;
 }
 
 /**
- * Ocorrências em aberto (ou parciais) de séries na direção da linha, da caixa
- * da conta e com a conta prevista igual à da linha (ou sem conta), que batem
- * pela regra da série (seriesMatch: o mesmo mês ou a janela; exato, encargos,
- * desconto, tolerância ou parcial).
+ * Candidatos de uma linha a partir do que o lote leu: movimentos da conta,
+ * títulos em aberto da caixa (valor exato, ±3 dias), as ocorrências de séries
+ * pela regra de reconhecimento da série (specs 033 e 034) e, na fatura do
+ * cartão, os itens e as cobranças esperadas das obrigações no cartão. Com a
+ * fatura no lote, só as parcelas dela (as de outras faturas só se ela não tiver
+ * nenhuma; tarefa 141).
  */
-async function seriesCandidates(tx: Executor, line: LineRow, entityId?: string): Promise<MatchCandidate[]> {
-  if (!line.financial_account_id) return [];
-  // Pré-filtro largo: a janela vai a 45 dias e o mesmo mês soma até 31.
-  const from = addDays(line.posted_on, -76);
-  const to = addDays(line.posted_on, 76);
+function candidatesFromPool(pool: CandidatePool, line: LineRow): MatchCandidate[] {
+  const from = addDays(line.posted_on, -pool.windowDays);
+  const to = addDays(line.posted_on, pool.windowDays);
+  const amount = Number(line.amount_cents);
+  const near = (c: MatchCandidate) => c.amountCents === amount && c.date >= from && c.date <= to;
+  if (line.card_caixa_id) {
+    let items = pool.items.filter(near);
+    if (line.card_invoice_id) {
+      const ofLot = items.filter((i) => i.invoiceId === line.card_invoice_id);
+      if (ofLot.length > 0) items = ofLot;
+    }
+    const wideFrom = addDays(line.posted_on, -SERIES_PREFILTER_DAYS);
+    const wideTo = addDays(line.posted_on, SERIES_PREFILTER_DAYS);
+    const matchLine = { postedOn: line.posted_on, amountCents: amount, description: line.description };
+    return [
+      ...items.map(({ invoiceId: _invoice, ...candidate }) => candidate),
+      ...pool.charges
+        .filter((c) => c.dueDate >= wideFrom && c.dueDate <= wideTo)
+        .map((c) => cardChargeMatch(matchLine, c))
+        .filter((c): c is MatchCandidate => c !== null),
+    ];
+  }
+  return [...seriesFromRows(pool.series, line), ...pool.moves.filter(near), ...pool.titles.filter(near)];
+}
+
+/** Candidatos de uma linha (o casar à mão usa uma janela maior que a do casamento automático). */
+export async function candidatesFor(tx: Executor, line: LineRow, windowDays = 3): Promise<MatchCandidate[]> {
+  return candidatesFromPool(await loadCandidatePool(tx, [line], windowDays), line);
+}
+
+/**
+ * Ocorrências em aberto (ou parciais) de séries da caixa da conta, com a conta
+ * prevista igual à da conta (ou sem conta), com vencimento no intervalo.
+ */
+async function seriesRows(tx: Executor, accountId: string, from: string, to: string, entityId?: string): Promise<SeriesRow[]> {
   const result = await tx.execute(sql`
-    SELECT t.id, t.due_date, t.amount_cents, b.open_cents, t.description, e.name AS entity_name, t.recurrence_rule_id AS rule_id,
-           t.occurrence, r.installments_total, t.contract_id, c.name AS contract_name, t.planned_account_id, ${TERMS_SQL}
+    SELECT t.id, t.direction, t.due_date, t.amount_cents, b.open_cents, t.description, e.name AS entity_name,
+           t.recurrence_rule_id AS rule_id, t.occurrence, r.installments_total, t.contract_id, c.name AS contract_name,
+           t.planned_account_id, ${TERMS_SQL}
       FROM titles t
       JOIN recurrence_rules r ON r.id = t.recurrence_rule_id
       JOIN title_balances b ON b.title_id = t.id
       JOIN entities e ON e.id = t.entity_id
       LEFT JOIN contracts c ON c.id = t.contract_id
-      JOIN financial_accounts a ON a.id = ${line.financial_account_id}::uuid
+      JOIN financial_accounts a ON a.id = ${accountId}::uuid
      WHERE t.caixa_id = a.caixa_id AND (t.planned_account_id IS NULL OR t.planned_account_id = a.id)
        AND t.status IN ('open', 'partial') AND t.archived_at IS NULL AND b.open_cents > 0
-       AND t.direction = ${line.amount_cents < 0 ? 'payable' : 'receivable'}
        AND t.due_date BETWEEN ${from}::date AND ${to}::date
-       ${entityId ? sql`AND t.entity_id = ${entityId}` : sql``}`);
-  const matchLine = {
-    postedOn: line.posted_on,
-    amountCents: Number(line.amount_cents),
-    description: line.description,
-    accountId: line.financial_account_id,
-  };
-  return result.rows
-    .map((raw) => {
-      const r = camel<Record<string, unknown>>(raw);
-      return seriesMatch(matchLine, {
+       ${entityId ? sql`AND t.entity_id = ${entityId}` : sql``}
+     ORDER BY t.due_date, t.id`);
+  return result.rows.map((raw) => {
+    const r = camel<Record<string, unknown>>(raw);
+    return {
+      direction: r.direction as SeriesRow['direction'],
+      occ: {
         titleId: String(r.id),
         ruleId: String(r.ruleId),
         contractId: (r.contractId as string | null) ?? null,
@@ -717,9 +821,38 @@ async function seriesCandidates(tx: Executor, line: LineRow, entityId?: string):
         openCents: Number(r.openCents),
         plannedAccountId: (r.plannedAccountId as string | null) ?? null,
         terms: termsOf(raw as Parameters<typeof termsOf>[0]),
-      });
-    })
+      },
+    };
+  });
+}
+
+/**
+ * As ocorrências de série na direção da linha que batem pela regra da série
+ * (seriesMatch: o mesmo mês ou a janela; exato, encargos, desconto, tolerância
+ * ou parcial).
+ */
+function seriesFromRows(rows: SeriesRow[], line: LineRow): MatchCandidate[] {
+  if (!line.financial_account_id) return [];
+  const from = addDays(line.posted_on, -SERIES_PREFILTER_DAYS);
+  const to = addDays(line.posted_on, SERIES_PREFILTER_DAYS);
+  const direction = Number(line.amount_cents) < 0 ? 'payable' : 'receivable';
+  const matchLine = {
+    postedOn: line.posted_on,
+    amountCents: Number(line.amount_cents),
+    description: line.description,
+    accountId: line.financial_account_id,
+  };
+  return rows
+    .filter((r) => r.direction === direction && r.occ.dueDate >= from && r.occ.dueDate <= to)
+    .map((r) => seriesMatch(matchLine, r.occ))
     .filter((c): c is MatchCandidate => c !== null);
+}
+
+async function seriesCandidates(tx: Executor, line: LineRow, entityId?: string): Promise<MatchCandidate[]> {
+  if (!line.financial_account_id) return [];
+  const from = addDays(line.posted_on, -SERIES_PREFILTER_DAYS);
+  const to = addDays(line.posted_on, SERIES_PREFILTER_DAYS);
+  return seriesFromRows(await seriesRows(tx, line.financial_account_id, from, to, entityId), line);
 }
 
 /**
@@ -765,27 +898,38 @@ export async function obligationMatches(
  * sugerida (confirmação em lote). Ocorrência de série com "baixar sem
  * confirmação" vira conciliada com a baixa já feita (auto_settled); na
  * fatura, a cobrança esperada com valor exato vira a compra ligada. O sino
- * avisa uma vez por lote quantas foram baixadas.
+ * avisa uma vez por lote quantas foram baixadas. Os candidatos vêm de uma
+ * leitura só e os vínculos são gravados num UPDATE só (tarefa 139): fora a
+ * baixa automática, o número de consultas não cresce com as linhas. O
+ * `used` garante, como antes, que um movimento, título ou item vai para uma
+ * linha só.
  */
 export async function autoMatch(ctx: ServiceContext, tx: Tx, importId: string) {
   const lines = await tx.execute<LineRow>(sql`
-    SELECT id, posted_on, amount_cents, description, financial_account_id, card_caixa_id
-      FROM statement_lines WHERE statement_import_id = ${importId} AND status = 'new'
-     ORDER BY posted_on, line_number`);
+    SELECT l.id, l.posted_on, l.amount_cents, l.description, l.financial_account_id, l.card_caixa_id, i.card_invoice_id
+      FROM statement_lines l JOIN statement_imports i ON i.id = l.statement_import_id
+     WHERE l.statement_import_id = ${importId} AND l.status = 'new'
+     ORDER BY l.posted_on, l.line_number`);
+  const first = lines.rows[0];
+  if (!first) return { matched: 0, suggested: 0, autoSettled: 0, autoSettleFailed: 0 };
+  // As sugestões em aberto da mesma conta (ou do mesmo cartão), pela coluna do alvo, que tem índice.
+  const owner = first.card_caixa_id
+    ? sql`card_caixa_id = ${first.card_caixa_id}::uuid`
+    : sql`financial_account_id = ${first.financial_account_id}::uuid`;
   const pending = await tx.execute<{ ref: string }>(sql`
     SELECT coalesce(movement_id, title_id, card_invoice_item_id)::text AS ref FROM statement_lines
-     WHERE status = 'suggested' AND coalesce(financial_account_id, card_caixa_id) =
-           (SELECT coalesce(financial_account_id, card_caixa_id) FROM statement_imports WHERE id = ${importId})`);
+     WHERE ${owner} AND status = 'suggested'`);
   const used = new Set(pending.rows.map((r) => r.ref));
+  const pool = await loadCandidatePool(tx, lines.rows, 3);
+  const links: LineLink[] = [];
   let matched = 0;
   let suggested = 0;
   let autoSettled = 0;
   let autoSettleFailed = 0;
   for (const line of lines.rows) {
-    const candidates = await candidatesFor(tx, line, 3);
     const pick = pickMatch(
       { postedOn: line.posted_on, amountCents: Number(line.amount_cents), description: line.description },
-      candidates,
+      candidatesFromPool(pool, line),
       used,
     );
     if (!pick) continue;
@@ -801,22 +945,29 @@ export async function autoMatch(ctx: ServiceContext, tx: Tx, importId: string) {
     }
     // A cobrança esperada não tem lançamento para sugerir: a tela mostra "Lançar como cobrança de…".
     if (pick.candidate.kind === 'card_charge') continue;
-    const link =
-      pick.candidate.kind === 'movement'
-        ? sql`movement_id = ${pick.candidate.id}::uuid`
-        : pick.candidate.kind === 'title'
-          ? sql`title_id = ${pick.candidate.id}::uuid`
-          : sql`card_invoice_item_id = ${pick.candidate.id}::uuid`;
-    if (pick.status === 'matched') {
-      await tx.execute(sql`UPDATE statement_lines SET status = 'matched', matched_at = now(), ${link} WHERE id = ${line.id}`);
-      matched += 1;
-    } else {
-      await tx.execute(sql`UPDATE statement_lines SET status = 'suggested', ${link} WHERE id = ${line.id}`);
-      suggested += 1;
-    }
+    links.push({ id: line.id, status: pick.status, kind: pick.candidate.kind, ref: pick.candidate.id });
+    if (pick.status === 'matched') matched += 1;
+    else suggested += 1;
   }
+  await linkLines(tx, links);
   if (autoSettled > 0) await notifyAutoSettled(ctx, tx, importId, autoSettled);
   return { matched, suggested, autoSettled, autoSettleFailed };
+}
+
+type LineLink = { id: string; status: 'matched' | 'suggested'; kind: 'movement' | 'title' | 'card_item'; ref: string };
+
+/** Grava os vínculos do casamento automático (linhas novas) num UPDATE só. */
+async function linkLines(tx: Tx, links: LineLink[]) {
+  if (links.length === 0) return;
+  await tx.execute(sql`
+    UPDATE statement_lines l
+       SET status = x.status,
+           matched_at = CASE WHEN x.status = 'matched' THEN now() ELSE l.matched_at END,
+           movement_id = CASE WHEN x.kind = 'movement' THEN x.ref ELSE l.movement_id END,
+           title_id = CASE WHEN x.kind = 'title' THEN x.ref ELSE l.title_id END,
+           card_invoice_item_id = CASE WHEN x.kind = 'card_item' THEN x.ref ELSE l.card_invoice_item_id END
+      FROM json_to_recordset(${JSON.stringify(links)}::json) AS x(id uuid, status text, kind text, ref uuid)
+     WHERE l.id = x.id`);
 }
 
 /**
