@@ -1,6 +1,7 @@
 import { type Database, type Executor, recurrenceRules, titles } from '@moneyflow/db';
 import {
   addMonths,
+  dayOfMonth,
   type Frequency,
   MATERIALIZE_MONTHS,
   occurrenceCompetenceDate,
@@ -10,7 +11,7 @@ import {
   stripInstallmentSuffix,
   todayIso,
 } from '@moneyflow/shared';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import { translateDbError } from '../errors';
 import { insertTitlePair, type MirrorPlan } from './title-pair';
 
@@ -49,6 +50,14 @@ export async function materializeRule(tx: Executor, ruleId: string, horizon = ma
     .limit(1);
   if (!template || template.occurrence === null) return 0;
   const rule = toRule(ruleRow);
+  // Dia da competência da série: o da 1ª ocorrência que ainda existe (tarefa 170).
+  const [first] = await tx
+    .select({ competenceDate: titles.competenceDate })
+    .from(titles)
+    .where(and(eq(titles.recurrenceRuleId, ruleId), isNull(titles.mirrorStatus)))
+    .orderBy(asc(titles.occurrence))
+    .limit(1);
+  const competenceAnchorDay = dayOfMonth(first?.competenceDate ?? template.competenceDate);
   const mirrorTemplate = template.mirrorTitleId
     ? (await tx.select().from(titles).where(eq(titles.id, template.mirrorTitleId)))[0]
     : undefined;
@@ -72,7 +81,12 @@ export async function materializeRule(tx: Executor, ruleId: string, horizon = ma
         entityId: template.entityId,
         categoryId: template.categoryId,
         description: describe(template),
-        competenceDate: occurrenceCompetenceDate(rule, { occurrence: template.occurrence, competenceDate: template.competenceDate }, n),
+        competenceDate: occurrenceCompetenceDate(
+          rule,
+          { occurrence: template.occurrence, competenceDate: template.competenceDate },
+          n,
+          competenceAnchorDay,
+        ),
         dueDate: occurrenceDueDate(rule, n),
         amountCents: template.amountCents,
         notes: template.notes,

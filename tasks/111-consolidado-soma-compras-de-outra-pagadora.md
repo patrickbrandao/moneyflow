@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: media
 criada: 2026-11-21
 commit:
@@ -82,4 +82,13 @@ Não executado. O comportamento do banco foi lido em `schema.sql`. Supus que a i
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: `scopeCaixas` acrescenta o cartão da pagadora padrão, e `report_category_totals`/`report_entity_totals` incluem toda compra do cartão (pagadora OU cartão na lista), inclusive a lançada para outra pagadora, que somava no consolidado e aparecia com o nome dela para quem só lê a pagadora padrão.
+
 ## Resolução (executor)
+
+- `apps/server/src/services/reports.ts`: `purchaseFilter` descarta, em `categoryReport` e `entityReport`, a linha `card_purchase` cuja pagadora não está no escopo, a não ser que o próprio cartão tenha sido pedido em `caixaIds` (aí todas as pagadoras aparecem). Sem mudança no banco; o regime de caixa e a projeção já contavam na pagadora.
+- Decisão (a recomendada): "compra de cartão conta na pagadora; o cartão escolhido sozinho mostra todas", registrada na spec 014.
+- Teste em `apps/server/test/vision.test.ts`, "compra de cartão conta na pagadora…": compra no cartão de A com pagadora B; com só A, nenhuma linha fora de A (categorias e entidades); com A e B, a compra conta na B; com o cartão pedido, as duas pagadoras (categorias e entidades); o leitor só de A não vê a compra nem a caixa B.
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

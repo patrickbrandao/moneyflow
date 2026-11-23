@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -91,4 +91,13 @@ As saídas das funções foram executadas num script descartável no Node 26 des
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: `formatBRL(-0)`, `formatCents(-0)` e `formatAccounting(-0)` mostravam o sinal (`-R$ 0,00`), e `parseBRL('-0')` devolvia `-0`.
+
 ## Resolução (executor)
+
+- `packages/shared/src/money.ts`: `formatBRL` e `formatCents` normalizam o zero (`cents + 0`), o que vale para `formatAccounting`, `formatSignedBRL` e todo chamador (fluxo projetado, `TitleMiniTable`, `PlannedOccurrences`, `MoneyInput`); `parseBRL` não devolve `-0`.
+- Spec 014 (formato contábil: o zero negativo sai como zero).
+- Teste em `packages/shared/test/money-dates.test.ts`, "o zero negativo sai sem sinal": `formatAccounting(-0)`, `formatBRL(-0)`, `formatCents(-0)`, `formatSignedBRL(-0)` e `parseBRL('-0')`/`parseBRL('-0,00')` (`Object.is(…, 0)`).
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

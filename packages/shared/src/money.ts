@@ -6,13 +6,14 @@
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 const plain = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+/** `-0 + 0` é `+0`: o zero negativo (de `-x` com x = 0) sai sem sinal (tarefa 174). */
 export function formatBRL(cents: number): string {
-  return brl.format(cents / 100);
+  return brl.format((cents + 0) / 100);
 }
 
 /** Sem o símbolo: "1.234,56". */
 export function formatCents(cents: number): string {
-  return plain.format(cents / 100);
+  return plain.format((cents + 0) / 100);
 }
 
 /**
@@ -51,5 +52,5 @@ export function parseBRL(input: string): number | null {
   if (!/^\d+(\.\d{0,2})?$/.test(text)) return null;
   const [int, frac = ''] = text.split('.');
   const cents = Number(int) * 100 + Number(frac.padEnd(2, '0'));
-  return negative ? -cents : cents;
+  return negative && cents !== 0 ? -cents : cents;
 }

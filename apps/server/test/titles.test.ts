@@ -1,6 +1,6 @@
-import { addMonths, todayIso } from '@moneyflow/shared';
+import { addMonths, daysInMonth, todayIso } from '@moneyflow/shared';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { materializeAll } from '../src/services/recurrence';
+import { materializeAll, materializeRule } from '../src/services/recurrence';
 import { client, type Harness, scenario, startApp, userSession } from './helpers';
 
 let h: Harness;
@@ -370,6 +370,44 @@ describe('séries (recorrência e parcelamento)', () => {
     );
     expect(left).toHaveLength(2);
     expect((await materializeAll(h.db, addMonths(today, 30))).created).toBe(0);
+  });
+});
+
+describe('competência da série no fim do mês (tarefa 170)', () => {
+  it('a série no dia 31 mantém o último dia do mês nas ocorrências do worker, também depois de fevereiro', async () => {
+    const admin = client(h, (await userSession(h, 'admin')).cookie);
+    const s = await scenario(h, admin);
+    const monthly = await admin.post('/api/titles', {
+      ...base(s),
+      entityId: s.supplier.id,
+      description: 'Condomínio do dia 31',
+      dueDate: '2026-01-31',
+      competenceDate: '2026-01-31',
+      series: { kind: 'recurrence', frequency: 'monthly' },
+    });
+    // O worker avança o horizonte mês a mês: o modelo de cada passada é a ocorrência mais recente.
+    // Até 30 meses, o maior horizonte dos outros testes deste arquivo, para não lhes deixar o que materializar.
+    const today = todayIso();
+    for (let k = 13; k <= 30; k += 1) {
+      await h.db.transaction((tx) => materializeRule(tx, monthly.recurrenceRuleId, addMonths(today, k)));
+    }
+    const rows = (await admin.get(`/api/titles?caixaId=${s.caixaA.id}&limit=1000`)) as {
+      recurrenceRuleId: string;
+      occurrence: number;
+      competenceDate: string;
+      dueDate: string;
+    }[];
+    const series = rows.filter((t) => t.recurrenceRuleId === monthly.recurrenceRuleId).sort((a, b) => a.occurrence - b.occurrence);
+    expect(series.length).toBeGreaterThan(26);
+    const lastDay = (iso: string) => {
+      const [y, m] = iso.split('-').map(Number);
+      return `${iso.slice(0, 8)}${String(daysInMonth(y!, m!)).padStart(2, '0')}`;
+    };
+    for (const t of series) {
+      expect(t.competenceDate).toBe(lastDay(t.competenceDate));
+      expect(t.dueDate).toBe(lastDay(t.dueDate));
+    }
+    expect(series.find((t) => t.competenceDate.startsWith('2028-03'))?.competenceDate).toBe('2028-03-31');
   });
 });
 

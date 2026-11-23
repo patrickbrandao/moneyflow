@@ -1,9 +1,9 @@
 ---
-status: aberta
+status: concluida
 tipo: bug
 origem: agente
 autor: principal
-responsavel:
+responsavel: app
 prioridade: baixa
 criada: 2026-11-21
 commit:
@@ -92,4 +92,14 @@ As funções do shared foram executadas num script descartável. A sequência do
 
 ## Análise (triagem)
 
+Sem triage (revisão de 2026-11-21 verificada; a sessão principal designou o app).
+
+Confirmado: `occurrenceCompetenceDate` somava os meses a partir da competência do modelo (a ocorrência mais recente) sem âncora; com o modelo de fevereiro (dia 28), ou de um mês de 30 dias, as seguintes saíam presas no dia menor. Reproduzido no teste novo antes da correção (`2027-12-30` no lugar de `2027-12-31`).
+
 ## Resolução (executor)
+
+- `packages/shared/src/recurrence.ts`: `occurrenceCompetenceDate(regra, modelo, n, competenceAnchorDay?)`, a âncora do dia na série mensal ou anual.
+- `apps/server/src/services/recurrence.ts`: `materializeRule` lê a competência da 1ª ocorrência que ainda existe na série (lado original) e passa o dia dela como âncora.
+- Spec 005 (materialização das séries).
+- Testes: `packages/shared/test/money-dates.test.ts` (modelo de fevereiro com âncora 31 dá `…-03-31` e `…-04-30`; dias 1 e 15 não mudam; anual no dia 29) e `apps/server/test/titles.test.ts`, "a série no dia 31 mantém o último dia do mês…": série em 31/01/2026 materializada mês a mês pelo horizonte (como o worker) até 30 meses, com todas as competências e vencimentos no último dia do mês.
+- Verificação: `pnpm verify:quick` (banco `moneyflow_it_s1`).

@@ -46,6 +46,18 @@ export async function scopeCaixas(ctx: ServiceContext, requested: string[]): Pro
 const ids = (caixas: ReportCaixa[]) => caixas.map((c) => c.id);
 
 /**
+ * Compra de cartão conta na pagadora (spec 014, tarefa 111): o cartão entra no
+ * escopo pela pagadora padrão, e o banco devolve toda compra dele; a de outra
+ * pagadora fica de fora, a não ser que o próprio cartão tenha sido pedido.
+ */
+function purchaseFilter(caixas: ReportCaixa[], requested: string[]) {
+  const scope = new Set(ids(caixas));
+  const explicit = new Set(requested);
+  return (line: { source: string; caixaId: string; cardCaixaId: string | null }) =>
+    line.source !== 'card_purchase' || scope.has(line.caixaId) || (line.cardCaixaId !== null && explicit.has(line.cardCaixaId));
+}
+
+/**
  * Filtro por entidade (spec 014): resolvido numa lista de entidades e passado
  * como p_entity_ids. NULL = sem filtro; lista vazia = nada casa (relatório vazio).
  */
@@ -74,10 +86,12 @@ export async function categoryReport(
       FROM report_category_totals(${uuidArray(ids(caixas))}, ${q.from}::date, ${q.to}::date, ${q.basis}, ${scope.param}) r
       LEFT JOIN categories g ON g.id = r.group_category_id
       LEFT JOIN categories c ON c.id = r.category_id`);
-  const lines = result.rows.map((row) => {
-    const line = camel<CategoryTotalLine>(row);
-    return { ...line, amountCents: Number(line.amountCents), entries: Number(line.entries) };
-  });
+  const lines = result.rows
+    .map((row) => {
+      const line = camel<CategoryTotalLine>(row);
+      return { ...line, amountCents: Number(line.amountCents), entries: Number(line.entries) };
+    })
+    .filter(purchaseFilter(caixas, q.caixaIds));
   return { ...empty, lines };
 }
 
@@ -97,7 +111,7 @@ export async function entityReport(
       JOIN caixas c ON c.id = r.caixa_id
       LEFT JOIN caixas k ON k.id = r.card_caixa_id
      ORDER BY entity_name, c.name`);
-  return { ...empty, lines: result.rows.map((row) => camel<EntityTotalLine>(row)) };
+  return { ...empty, lines: result.rows.map((row) => camel<EntityTotalLine>(row)).filter(purchaseFilter(caixas, q.caixaIds)) };
 }
 
 export async function projectionReport(
