@@ -164,7 +164,9 @@ export function PurchasesTab({
                           {row.kind === 'charge' && row.chargeKind ? t.card.chargeKinds[row.chargeKind] : t.card.purchaseKinds[row.kind]}
                         </Badge>
                       )}
-                      {row.attachmentCount > 0 && <Paperclip className="ml-2 inline size-3.5 text-faint" aria-label="Anexos" />}
+                      {row.attachmentCount > 0 && (
+                        <Paperclip className="ml-2 inline size-3.5 text-faint" aria-label={t.attachments.title} />
+                      )}
                     </span>
                     <span className="row-sub">
                       {row.description !== row.entityName && row.description}

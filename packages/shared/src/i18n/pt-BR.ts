@@ -378,6 +378,14 @@ export const ptBR = {
     accountNumber: 'Conta',
     holderName: 'Titular da conta',
     primaryPix: 'PIX principal',
+    /** Lista das entidades. */
+    list: {
+      sub: 'Pessoas e empresas, cadastradas uma vez e usadas por todas as caixas.',
+      searchPlaceholder: 'Nome, fantasia ou CPF/CNPJ',
+      searchLabel: 'Buscar entidades',
+      caixasColumn: 'Caixas',
+      empty: 'Nenhuma entidade cadastrada.',
+    },
     /** Tela da entidade. */
     page: {
       editCommand: (name: string) => `Editar ${name}`,

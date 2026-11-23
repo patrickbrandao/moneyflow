@@ -73,7 +73,7 @@ export function EntitiesPage() {
     <div className="page wide">
       <PageHead
         title={t.nav.entities}
-        sub="Pessoas e empresas, cadastradas uma vez e usadas por todas as caixas."
+        sub={t.entity.list.sub}
         actions={
           <>
             <label className="search-bar">
@@ -82,8 +82,8 @@ export function EntitiesPage() {
                 className="field"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
-                placeholder="Nome, fantasia ou CPF/CNPJ"
-                aria-label="Buscar entidades"
+                placeholder={t.entity.list.searchPlaceholder}
+                aria-label={t.entity.list.searchLabel}
               />
             </label>
             <ExportMenu
@@ -147,7 +147,7 @@ export function EntitiesPage() {
                 <th>{t.entityTags.tags}</th>
                 <th>{t.entity.document}</th>
                 <th>{t.entity.primaryPix}</th>
-                <th className="num">Caixas</th>
+                <th className="num">{t.entity.list.caixasColumn}</th>
               </tr>
             </thead>
             <tbody>
@@ -158,7 +158,7 @@ export function EntitiesPage() {
                     ? t.common.noResults
                     : tab === 'favorites'
                       ? t.entityTags.noFavorites
-                      : 'Nenhuma entidade cadastrada.'}
+                      : t.entity.list.empty}
                 </EmptyRow>
               )}
               {data?.map((entity) => (
