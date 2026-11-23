@@ -48,7 +48,7 @@ import type { ServiceContext } from '../context';
 import { AppError, findPgError, forbidden, notFound, unprocessable } from '../errors';
 import { assertCanStartRun, lockRunRate } from './ai-budgets';
 import { chatAttachments, mediaCapabilities, messageAttachmentIds } from './chat-media';
-import { withTx } from './tx';
+import { LONG_STATEMENT_TIMEOUT, longRead, withTx } from './tx';
 import { iso } from './util';
 
 /*
@@ -167,10 +167,14 @@ export async function listConversations(ctx: ServiceContext, q: z.output<typeof 
     userId = q.userId === 'all' ? null : q.userId;
   }
   if (q.q) {
-    const hits = await ctx.db.execute<{ conversation_id: string; snippet: string | null }>(
-      // A busca cobre todas as sessões (ativas e finalizadas, spec 026).
-      sql`SELECT conversation_id, snippet FROM ai_conversation_search(${q.q}, ${userId}::uuid, true, ${q.limit})`,
-    );
+    // A busca cobre todas as sessões (ativas e finalizadas, spec 026).
+    const search = sql`SELECT conversation_id, snippet FROM ai_conversation_search(${q.q}, ${userId}::uuid, true, ${q.limit})`;
+    type Hit = { conversation_id: string; snippet: string | null };
+    // A do admin em todas as conversas tem prazo próprio, maior que o do pool (tarefa 102).
+    const hits =
+      userId === null
+        ? await longRead(ctx.db, LONG_STATEMENT_TIMEOUT.search, (tx) => tx.execute<Hit>(search))
+        : await ctx.db.execute<Hit>(search);
     if (hits.rows.length === 0) return [];
     const ids = hits.rows.map((h) => h.conversation_id);
     const rows = await ctx.db.execute<ConversationRow>(sql`${SELECT} WHERE c.id = ANY (${`{${ids.join(',')}}`}::uuid[]) AND ${NOT_FLOW}`);

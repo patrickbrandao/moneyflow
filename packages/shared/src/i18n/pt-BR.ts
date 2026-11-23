@@ -214,6 +214,8 @@ export const ptBR = {
     readOnly: 'Você só tem leitura nesta caixa.',
     validation: 'Dados inválidos.',
     payloadTooLarge: 'O conteúdo enviado passa do limite desta operação.',
+    /** Nenhuma conexão livre com o banco dentro do prazo (tarefa 102). */
+    databaseBusy: 'O sistema está ocupado no momento. Tente de novo em instantes.',
     invalidDocument: 'CPF ou CNPJ inválido.',
     invalidCpf: 'CPF inválido.',
     invalidCnpj: 'CNPJ inválido.',

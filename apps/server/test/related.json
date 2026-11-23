@@ -94,7 +94,7 @@
     "e2e/fakes/fake-llm.ts": ["test/e2e-fakes.test.ts", "test/agents.test.ts", "test/capabilities.test.ts"],
     "e2e/fakes/fake-telegram.ts": ["test/e2e-fakes.test.ts", "test/autonomous.test.ts", "test/vision.test.ts"],
 
-    "packages/db/src/**": ["test/generated-schema.test.ts"],
+    "packages/db/src/**": ["test/generated-schema.test.ts", "test/db-pool.test.ts"],
     "database/migrations/**": ["test/generated-schema.test.ts"],
     "packages/shared/src/reconcile.ts": ["test/statements.test.ts", "test/contracts.test.ts"],
     "packages/shared/src/supersede.ts": ["test/statement-supersede.test.ts"],

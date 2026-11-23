@@ -492,4 +492,7 @@ export const DB_CODE_MESSAGES: Record<string, string> = {
   // Concorrência (tarefa 188): a transação foi desfeita inteira e pode ser repetida.
   '40P01': 'Outra operação mexia nos mesmos registros ao mesmo tempo. Tente de novo.',
   '40001': 'Outra operação mexia nos mesmos registros ao mesmo tempo. Tente de novo.',
+  // Prazos do pool (tarefa 102): a consulta passou do statement_timeout, ou a espera por um lock do lock_timeout.
+  '57014': 'A operação demorou demais e foi interrompida. Tente de novo; num relatório, um período menor.',
+  '55P03': 'Outra operação está usando os mesmos registros. Tente de novo em instantes.',
 };

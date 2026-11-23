@@ -1,3 +1,4 @@
+import { POOL_CONNECT_TIMEOUT_MESSAGES } from '@moneyflow/db';
 import { DB_CODE_MESSAGES, DB_CONSTRAINT_MESSAGES, DB_NOT_NULL_MESSAGES, t } from '@moneyflow/shared';
 import type { ZodError } from 'zod';
 
@@ -124,10 +125,27 @@ export function errorText(error: unknown, max = 500): string {
   return redactQueryParams(error.message).slice(0, max);
 }
 
+/** Códigos do Postgres que viram 503 (tarefa 102): o prazo da consulta (57014) e o da espera por um lock (55P03). */
+const UNAVAILABLE_CODES = new Set(['57014', '55P03']);
+
+/** A espera por uma conexão do pool passou do `connectionTimeoutMillis` (o pg-pool não dá código). */
+export function isPoolTimeout(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 5; depth += 1) {
+    const message = (current as { message?: unknown }).message;
+    if (typeof message === 'string' && POOL_CONNECT_TIMEOUT_MESSAGES.some((text) => message.includes(text))) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 /** Traduz erros do banco (23514/23505/23503…) para AppError com mensagem pt-BR útil. */
 export function translateDbError(error: unknown): AppError | null {
   const pg = findPgError(error);
-  if (!pg) return null;
+  if (!pg) return isPoolTimeout(error) ? new AppError(503, 'db_busy', t.errors.databaseBusy, undefined, { 'retry-after': '5' }) : null;
+  if (UNAVAILABLE_CODES.has(pg.code)) {
+    return new AppError(503, `pg_${pg.code}`, DB_CODE_MESSAGES[pg.code]!, undefined, { 'retry-after': '5' });
+  }
   // Flag em uso (spec 024): o banco põe os nomes dos agentes no DETAIL.
   if (pg.constraint === 'ai_providers_capability_in_use_check' && pg.detail) {
     return new AppError(422, pg.constraint, t.agents.errors.capabilityInUse(pg.detail));

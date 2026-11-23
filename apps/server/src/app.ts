@@ -120,7 +120,10 @@ export async function buildApp({
     }
     const translated = translateDbError(error);
     if (translated) {
-      request.log.info({ code: translated.code }, 'regra do banco');
+      // O prazo esgotado (503, tarefa 102) é aviso: mostra consulta lenta ou pool esgotado.
+      if (translated.status === 503) request.log.warn({ code: translated.code }, 'banco: prazo esgotado');
+      else request.log.info({ code: translated.code }, 'regra do banco');
+      if (translated.headers) reply.headers(translated.headers);
       return reply.status(translated.status).send({ error: { code: translated.code, message: translated.message } });
     }
     const status = (error as { statusCode?: number }).statusCode;
