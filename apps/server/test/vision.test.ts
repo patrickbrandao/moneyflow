@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { type Database, type Executor, userColumns, users } from '@moneyflow/db';
 import { addDays, isoWeekday, todayIso } from '@moneyflow/shared';
 import { eq, type SQL, sql } from 'drizzle-orm';
@@ -8,6 +11,7 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { TOOL_HANDLERS } from '../src/agents/tool-handlers';
 import { type Actor, loadAccess } from '../src/authz/access';
+import { readHeartbeat } from '../src/health';
 import {
   consumeOutbox,
   emitAgentEvent,
@@ -18,6 +22,7 @@ import {
   produceNotifications,
 } from '../src/services/message-worker';
 import { deliver } from '../src/services/messages';
+import { startMessageLoop } from '../src/worker';
 import { client, type Harness, scenario, startApp, uid, userSession } from './helpers';
 
 /*
@@ -27,7 +32,7 @@ import { client, type Harness, scenario, startApp, uid, userSession } from './he
  */
 
 type TelegramCall = { path: string; body: { chat_id: string; text: string; parse_mode: string } };
-const telegram = { mode: 'ok' as 'ok' | '429' | '400', calls: [] as TelegramCall[], nextId: 100 };
+const telegram = { mode: 'ok' as 'ok' | '429' | '400', calls: [] as TelegramCall[], nextId: 100, delayMs: 0 };
 let mock: Server;
 let h: Harness;
 
@@ -40,7 +45,8 @@ beforeAll(async () => {
     req.on('data', (chunk) => {
       raw += chunk;
     });
-    req.on('end', () => {
+    req.on('end', async () => {
+      if (telegram.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, telegram.delayMs));
       telegram.calls.push({ path: req.url ?? '', body: JSON.parse(raw || '{}') });
       res.setHeader('content-type', 'application/json');
       if (telegram.mode === '429') {
@@ -68,6 +74,7 @@ afterAll(async () => {
 beforeEach(() => {
   telegram.mode = 'ok';
   telegram.calls = [];
+  telegram.delayMs = 0;
 });
 
 /**
@@ -663,6 +670,41 @@ describe('mensagens (spec 013)', () => {
     const warned: { obj: any; msg: string }[] = [];
     logMessageTick({ info: () => {}, warn: (obj, msg) => warned.push({ obj, msg }) }, result);
     expect(warned.map((w) => w.obj.stage)).toEqual(expect.arrayContaining(['messages', 'notifications.mirror_pending']));
+    await admin.patch(`/api/message-destinations/${dest.id}`, { isActive: false });
+  });
+
+  it('parada do laço de mensagens: espera o envio em andamento terminar marcado; batimento a cada passada (tarefa 107)', async () => {
+    const adminSession = await userSession(h, 'admin');
+    const admin = client(h, adminSession.cookie);
+    const dest = await admin.post('/api/message-destinations', { name: `Parada ${uid()}`, botToken: TOKEN, chatId: '107' });
+    await admin.put(`/api/message-destinations/${dest.id}/subscriptions`, { eventKind: 'agent_completed', params: {} });
+    const runId = randomUUID();
+    await emitAgentEvent(h.db, {
+      kind: 'agent_completed',
+      userId: adminSession.id,
+      agentRunId: runId,
+      eventKey: `run:${runId}:seq:1`,
+      text: 'Pronto',
+      config: h.config,
+    });
+    const status = async () =>
+      (
+        await h.db.execute<{ status: string }>(
+          sql`SELECT status FROM message_outbox WHERE destination_id = ${dest.id} AND agent_run_id = ${runId}`,
+        )
+      ).rows[0]!.status;
+    const beatDir = mkdtempSync(join(tmpdir(), 'mf-beat-'));
+    const heartbeat = join(beatDir, 'beat');
+    // O Telegram demora 1 s: a parada chega no meio do envio.
+    telegram.delayMs = 1000;
+    const quiet = { info: () => {}, warn: () => {}, error: () => {} };
+    const stop = startMessageLoop(h.db, h.config, quiet as never, { heartbeat });
+    for (let i = 0; i < 100 && (await status()) !== 'sending'; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await status()).toBe('sending');
+    await stop(5000);
+    expect(await status()).toBe('sent');
+    expect(readHeartbeat(heartbeat)).toBeGreaterThan(Date.now() - 10_000);
+    rmSync(beatDir, { recursive: true, force: true });
     await admin.patch(`/api/message-destinations/${dest.id}`, { isActive: false });
   });
 

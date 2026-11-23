@@ -69,6 +69,12 @@ export type Config = {
   pgBinDir: string | null;
   /** Tamanho máximo do arquivo enviado na importação/restauração, em bytes. */
   backupMaxUploadBytes: number;
+  /**
+   * Prazo da parada (SIGTERM/SIGINT), em ms (tarefa 107): o worker devolve à fila as execuções de agente
+   * no meio da chamada ao modelo e espera as passadas em andamento até ele; passado o prazo (mais uma
+   * folga), o processo sai mesmo assim. Padrão 8 s, abaixo dos 10 s do `docker stop`.
+   */
+  shutdownGraceMs: number;
 };
 
 /**
@@ -155,6 +161,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ownerDatabaseUrl: env.DATABASE_OWNER_URL?.trim() || null,
     pgBinDir: env.PG_BIN_DIR?.trim() || null,
     backupMaxUploadBytes: intEnv(env, 'BACKUP_MAX_UPLOAD_MB', 512, 1, 4096) * 1024 * 1024,
+    shutdownGraceMs: intEnv(env, 'SHUTDOWN_GRACE_MS', 8000, 1000, 600_000),
   };
 }
 
